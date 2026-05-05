@@ -23,8 +23,6 @@ interface MoRecord {
 }
 
 const STORAGE_KEY = 'argoerp_mo_summary'
-const MACHINES_KEY = 'mo_machines_list'
-const MACHINES_MAP_KEY = 'mo_machines_map'
 
 const DISPLAY_COLS: { key: keyof MoRecord; label: string }[] = [
   { key: 'mo_number', label: '製令單號' },
@@ -56,6 +54,8 @@ export default function MoSummaryPage() {
   const [editFields, setEditFields] = useState<Partial<MoRecord>>({})
   const [editSaving, setEditSaving] = useState(false)
   const [editError, setEditError] = useState('')
+  const [moPrintRecords, setMoPrintRecords] = useState<Record<string, string[]>>({})
+  const [printLogModal, setPrintLogModal] = useState<{ moNumber: string; times: string[] } | null>(null)
 
   // 主來源：Supabase。localStorage 只當離線備援。
   const reload = useCallback(async () => {
@@ -67,6 +67,10 @@ export default function MoSummaryPage() {
       if (!res.ok || !json?.success) throw new Error(json?.error || `HTTP ${res.status}`)
       const list: MoRecord[] = (json.records ?? []) as MoRecord[]
       setRecords(list)
+      // 初始化 moMachines from DB records
+      const machineMap: Record<string, string> = {}
+      list.forEach(r => { if (r.machine) machineMap[r.mo_number] = r.machine })
+      setMoMachines(machineMap)
       // 同步一份到 localStorage 當備援（供 order-batch-export 頁離線時用）
       try { localStorage.setItem(STORAGE_KEY, JSON.stringify(list)) } catch {}
     } catch (e) {
@@ -83,41 +87,77 @@ export default function MoSummaryPage() {
 
   useEffect(() => { reload() }, [reload])
 
-  // 機台選單初始化
+  // 機台清單從 Supabase 載入
   useEffect(() => {
-    try {
-      const m = localStorage.getItem(MACHINES_KEY)
-      if (m) setMachines(JSON.parse(m))
-      const mm = localStorage.getItem(MACHINES_MAP_KEY)
-      if (mm) setMoMachines(JSON.parse(mm))
-    } catch {}
+    fetch('/api/argoerp/machines')
+      .then(r => r.json())
+      .then(j => { if (j.success) setMachines((j.machines as { name: string }[]).map(m => m.name)) })
+      .catch(() => {})
   }, [])
 
-  // 機台選單管理
-  const saveMachineList = (list: string[]) => {
-    setMachines(list)
-    try { localStorage.setItem(MACHINES_KEY, JSON.stringify(list)) } catch {}
-  }
-  const addMachine = () => {
+  // 列印紀錄從 Supabase 載入
+  useEffect(() => {
+    fetch('/api/argoerp/print-log')
+      .then(r => r.json())
+      .then(j => {
+        if (j.success) {
+          const map: Record<string, string[]> = {}
+          ;(j.logs as { mo_number: string; printed_at: string }[]).forEach(log => {
+            if (!map[log.mo_number]) map[log.mo_number] = []
+            map[log.mo_number].push(log.printed_at)
+          })
+          setMoPrintRecords(map)
+        }
+      })
+      .catch(() => {})
+  }, [])
+
+  // 機台選單管理（Supabase）
+  const saveMachineList = (list: string[]) => setMachines(list)
+  const addMachine = async () => {
     const name = newMachineName.trim()
     if (!name || machines.includes(name)) return
-    saveMachineList([...machines, name])
-    setNewMachineName('')
-  }
-  const deleteMachine = (idx: number) => saveMachineList(machines.filter((_, i) => i !== idx))
-  const startEditMachine = (idx: number) => { setEditingMachineIdx(idx); setEditingMachineName(machines[idx]) }
-  const saveEditMachine = () => {
-    const name = editingMachineName.trim()
-    if (!name || editingMachineIdx === null) return
-    saveMachineList(machines.map((m, i) => i === editingMachineIdx ? name : m))
-    setEditingMachineIdx(null)
-  }
-  const setMoMachine = (moNumber: string, machine: string) => {
-    setMoMachines(prev => {
-      const next = { ...prev, [moNumber]: machine }
-      try { localStorage.setItem(MACHINES_MAP_KEY, JSON.stringify(next)) } catch {}
-      return next
+    const res = await fetch('/api/argoerp/machines', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }),
     })
+    const json = await res.json()
+    if (json.success) { saveMachineList([...machines, name]); setNewMachineName('') }
+    else alert(`新增失敗：${json.error}`)
+  }
+  const deleteMachine = async (idx: number) => {
+    const name = machines[idx]
+    const res = await fetch('/api/argoerp/machines', {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }),
+    })
+    const json = await res.json()
+    if (json.success) saveMachineList(machines.filter((_, i) => i !== idx))
+    else alert(`刪除失敗：${json.error}`)
+  }
+  const startEditMachine = (idx: number) => { setEditingMachineIdx(idx); setEditingMachineName(machines[idx]) }
+  const saveEditMachine = async () => {
+    const newName = editingMachineName.trim()
+    if (!newName || editingMachineIdx === null) return
+    const oldName = machines[editingMachineIdx]
+    const res = await fetch('/api/argoerp/machines', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ old_name: oldName, new_name: newName }),
+    })
+    const json = await res.json()
+    if (json.success) { saveMachineList(machines.map((m, i) => i === editingMachineIdx ? newName : m)); setEditingMachineIdx(null) }
+    else alert(`更新失敗：${json.error}`)
+  }
+  const setMoMachine = async (moNumber: string, machine: string) => {
+    setMoMachines(prev => ({ ...prev, [moNumber]: machine }))
+    await fetch('/api/argoerp/mo-summary', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mo_number: moNumber, fields: { machine } }),
+    }).catch(() => {})
   }
 
   // 編輯單筆
@@ -181,6 +221,22 @@ export default function MoSummaryPage() {
     if (selected.length === 0) return
     const withMachine = selected.map(r => ({ ...r, machine: moMachines[r.mo_number] || '' }))
     sessionStorage.setItem('mo_print_selection', JSON.stringify(withMachine))
+    // 記錄列印時間（寫入 Supabase）
+    const now = new Date().toISOString()
+    const moNumbers = selected.map(r => r.mo_number)
+    fetch('/api/argoerp/print-log', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mo_numbers: moNumbers }),
+    }).then(r => r.json()).then(j => {
+      if (j.success) {
+        setMoPrintRecords(prev => {
+          const next = { ...prev }
+          moNumbers.forEach(mo => { next[mo] = [...(next[mo] ?? []), now] })
+          return next
+        })
+      }
+    }).catch(() => {})
     window.open('/admin/argoerp/mo-summary/print', '_blank')
   }, [selectedRows, filtered, moMachines])
 
@@ -375,6 +431,7 @@ export default function MoSummaryPage() {
                     <th className="px-3 py-3 text-left text-slate-300 font-medium whitespace-nowrap text-xs">開立 / 儲存時間</th>
                     <th className="px-3 py-3 text-left text-slate-300 font-medium whitespace-nowrap text-xs">盤數</th>
                     <th className="px-3 py-3 text-left text-slate-300 font-medium whitespace-nowrap text-xs">機台</th>
+                    <th className="px-3 py-3 text-center text-slate-300 font-medium whitespace-nowrap text-xs">列印紀錄</th>
                     <th className="px-3 py-3 text-center text-slate-300 font-medium whitespace-nowrap text-xs">編輯</th>
                   </tr>
                 </thead>
@@ -422,6 +479,23 @@ export default function MoSummaryPage() {
                           <option value="">— 未選 —</option>
                           {machines.map(m => <option key={m} value={m}>{m}</option>)}
                         </select>
+                      </td>
+                      <td className="px-2 py-2 text-center">
+                        {(() => {
+                          const times = moPrintRecords[row.mo_number] ?? []
+                          return (
+                            <button
+                              onClick={() => setPrintLogModal({ moNumber: row.mo_number, times })}
+                              className={`px-2 py-1 rounded text-xs transition-colors ${
+                                times.length > 0
+                                  ? 'bg-indigo-800/60 hover:bg-indigo-700 text-indigo-300 hover:text-white border border-indigo-600/40'
+                                  : 'bg-slate-800 hover:bg-slate-700 text-slate-500 hover:text-slate-300'
+                              }`}
+                            >
+                              {times.length > 0 ? `🖨 ${times.length}次` : '—'}
+                            </button>
+                          )
+                        })()}
                       </td>
                       <td className="px-2 py-2 text-center">
                         <button
@@ -558,6 +632,59 @@ export default function MoSummaryPage() {
                   </li>
                 ))}
               </ul>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ── 列印紀錄 Modal ── */}
+      {printLogModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={() => setPrintLogModal(null)}>
+          <div className="bg-slate-900 border border-slate-700 rounded-xl shadow-2xl w-full max-w-sm p-6" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-4">
+              <div>
+                <h2 className="text-lg font-bold text-white">列印紀錄</h2>
+                <p className="text-xs text-slate-500 font-mono mt-0.5">{printLogModal.moNumber}</p>
+              </div>
+              <button onClick={() => setPrintLogModal(null)} className="text-slate-500 hover:text-white text-xl leading-none">×</button>
+            </div>
+
+            {printLogModal.times.length === 0 ? (
+              <p className="text-slate-500 text-sm text-center py-4">尚無列印紀錄</p>
+            ) : (
+              <>
+                <p className="text-xs text-slate-400 mb-3">共列印 <span className="text-indigo-300 font-bold">{printLogModal.times.length}</span> 次</p>
+                <ul className="space-y-1 max-h-64 overflow-y-auto">
+                  {printLogModal.times.map((iso, i) => (
+                    <li key={i} className="flex items-center gap-3 px-3 py-2 bg-slate-800/60 rounded-lg border border-slate-700/50">
+                      <span className="text-slate-500 text-xs w-6 text-right">{i + 1}</span>
+                      <span className="text-slate-200 text-sm font-mono">
+                        {new Date(iso).toLocaleString('zh-TW', { hour12: false })}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+                <div className="mt-4 flex justify-end">
+                  <button
+                    onClick={async () => {
+                      await fetch('/api/argoerp/print-log', {
+                        method: 'DELETE',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ mo_number: printLogModal.moNumber }),
+                      }).catch(() => {})
+                      setMoPrintRecords(prev => {
+                        const next = { ...prev }
+                        delete next[printLogModal.moNumber]
+                        return next
+                      })
+                      setPrintLogModal(null)
+                    }}
+                    className="px-3 py-1.5 rounded-lg bg-red-900/50 hover:bg-red-800 text-red-300 hover:text-white text-xs transition-colors border border-red-700/40"
+                  >
+                    清除此筆紀錄
+                  </button>
+                </div>
+              </>
             )}
           </div>
         </div>

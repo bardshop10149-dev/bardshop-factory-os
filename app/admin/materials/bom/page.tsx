@@ -532,10 +532,10 @@ export default function MaterialsBomPage() {
         </div>
         <div className="flex gap-2">
           <Link
-            href="/admin/materials"
+            href="/admin/argoerp/erp-db/inventory"
             className="px-4 py-2 rounded border border-slate-700 text-slate-300 hover:bg-slate-800 text-sm"
           >
-            返回物料清單
+            返回倉庫庫存表
           </Link>
           <button
             type="button"

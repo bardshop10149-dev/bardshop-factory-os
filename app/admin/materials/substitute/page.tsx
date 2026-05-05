@@ -409,10 +409,10 @@ export default function MaterialsSubstitutePage() {
           <p className="text-orange-500 mt-1 font-mono text-sm uppercase">MATERIAL MANAGEMENT // SUBSTITUTE ITEM</p>
         </div>
         <Link
-          href="/admin/materials"
+          href="/admin/argoerp/erp-db/inventory"
           className="px-4 py-2 rounded border border-slate-700 text-slate-300 hover:bg-slate-800 text-sm"
         >
-          返回物料清單
+          返回倉庫庫存表
         </Link>
       </div>
 

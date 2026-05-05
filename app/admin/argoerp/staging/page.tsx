@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useCallback, useEffect } from 'react'
+import { useState, useCallback, useEffect, useRef } from 'react'
 
 // ==================== 型別 ====================
 interface SourceRow {
@@ -27,24 +27,12 @@ interface SourceRow {
 }
 
 interface StagingRow extends SourceRow {
+  id: number
   hold_reason: string
   staged_at: string // ISO datetime
 }
 
-const STAGING_KEY = 'argoerp_staging_v1'
 const EXPORT_KEY = 'argoerp_order_batch_export_v2'
-
-function loadStaging(): StagingRow[] {
-  if (typeof window === 'undefined') return []
-  try {
-    const raw = localStorage.getItem(STAGING_KEY)
-    return raw ? JSON.parse(raw) : []
-  } catch { return [] }
-}
-
-function saveStaging(rows: StagingRow[]) {
-  try { localStorage.setItem(STAGING_KEY, JSON.stringify(rows)) } catch {}
-}
 
 function formatStagedAt(iso: string): string {
   if (!iso) return ''
@@ -58,19 +46,27 @@ function formatStagedAt(iso: string): string {
 export default function StagingPage() {
   const [rows, setRows] = useState<StagingRow[]>([])
   const [selectedRows, setSelectedRows] = useState<Set<number>>(new Set())
-  const [loaded, setLoaded] = useState(false)
+  const [loading, setLoading] = useState(true)
+  const [errorMsg, setErrorMsg] = useState('')
+  const reasonTimers = useRef<Record<number, ReturnType<typeof setTimeout>>>({})
 
-  // 載入
-  useEffect(() => {
-    setRows(loadStaging())
-    setLoaded(true)
+  // 從 Supabase 載入
+  const reload = useCallback(async () => {
+    setLoading(true)
+    setErrorMsg('')
+    try {
+      const res = await fetch('/api/argoerp/staging', { cache: 'no-store' })
+      const json = await res.json()
+      if (!res.ok || !json.success) throw new Error(json.error || `HTTP ${res.status}`)
+      setRows(json.rows ?? [])
+    } catch (e) {
+      setErrorMsg(e instanceof Error ? e.message : String(e))
+    } finally {
+      setLoading(false)
+    }
   }, [])
 
-  // 自動儲存（必須在載入完成後才寫，避免初始空陣列覆蓋已存在的資料）
-  useEffect(() => {
-    if (!loaded) return
-    saveStaging(rows)
-  }, [rows, loaded])
+  useEffect(() => { reload() }, [reload])
 
   const toggleSelectAll = useCallback(() => {
     if (selectedRows.size === rows.length) setSelectedRows(new Set())
@@ -86,41 +82,84 @@ export default function StagingPage() {
   }, [])
 
   const handleUpdateReason = useCallback((idx: number, value: string) => {
-    setRows(prev => prev.map((r, i) => i === idx ? { ...r, hold_reason: value } : r))
+    setRows(prev => {
+      const updated = prev.map((r, i) => i === idx ? { ...r, hold_reason: value } : r)
+      const row = updated[idx]
+      if (row) {
+        clearTimeout(reasonTimers.current[row.id])
+        reasonTimers.current[row.id] = setTimeout(() => {
+          fetch('/api/argoerp/staging', {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id: row.id, hold_reason: value }),
+          }).catch(() => {})
+        }, 800)
+      }
+      return updated
+    })
   }, [])
 
-  const handleDeleteSelected = useCallback(() => {
+  const handleDeleteSelected = useCallback(async () => {
     if (selectedRows.size === 0) return
     if (!confirm(`確定要刪除選取的 ${selectedRows.size} 筆暫緩訂單？此動作無法復原。`)) return
-    setRows(prev => prev.filter((_, i) => !selectedRows.has(i)))
-    setSelectedRows(new Set())
-  }, [selectedRows])
+    const ids = [...selectedRows].map(i => rows[i]?.id).filter(Boolean) as number[]
+    const res = await fetch('/api/argoerp/staging', {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids }),
+    })
+    if (res.ok) {
+      setRows(prev => prev.filter((_, i) => !selectedRows.has(i)))
+      setSelectedRows(new Set())
+    } else {
+      const j = await res.json()
+      alert(`刪除失敗：${j.error}`)
+    }
+  }, [selectedRows, rows])
 
-  const handleClearAll = useCallback(() => {
+  const handleClearAll = useCallback(async () => {
     if (rows.length === 0) return
     if (!confirm(`確定要清空全部 ${rows.length} 筆暫緩訂單？此動作無法復原。`)) return
-    setRows([])
-    setSelectedRows(new Set())
+    const ids = rows.map(r => r.id)
+    const res = await fetch('/api/argoerp/staging', {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids }),
+    })
+    if (res.ok) {
+      setRows([])
+      setSelectedRows(new Set())
+    } else {
+      const j = await res.json()
+      alert(`清空失敗：${j.error}`)
+    }
   }, [rows])
 
-  // 退回到匯出區
-  const handleReturnToExport = useCallback(() => {
+  // 退回到匯出區（刪除 Supabase 紀錄 + 寫回 order-batch-export localStorage）
+  const handleReturnToExport = useCallback(async () => {
     if (selectedRows.size === 0) return
     const returning = rows.filter((_, i) => selectedRows.has(i))
     try {
       const raw = localStorage.getItem(EXPORT_KEY)
       const existing: SourceRow[] = raw ? JSON.parse(raw) : []
-      // 從 StagingRow 取出原 SourceRow 欄位（去除 hold_reason / staged_at）
-      const sourceOnly: SourceRow[] = returning.map(({ hold_reason, staged_at, ...rest }) => rest)
+      // 從 StagingRow 取出原 SourceRow 欄位（去除 id / hold_reason / staged_at）
+      const sourceOnly: SourceRow[] = returning.map(({ id, hold_reason, staged_at, ...rest }) => rest)
       const merged = [...existing, ...sourceOnly]
       localStorage.setItem(EXPORT_KEY, JSON.stringify(merged))
-    } catch (e) {
-      console.error('退回失敗', e)
-      alert('退回失敗，請查看主控台')
+    } catch {
+      alert('退回失敗：無法寫入匯出區')
       return
     }
-    setRows(prev => prev.filter((_, i) => !selectedRows.has(i)))
-    setSelectedRows(new Set())
+    const ids = returning.map(r => r.id)
+    const res = await fetch('/api/argoerp/staging', {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids }),
+    })
+    if (res.ok) {
+      setRows(prev => prev.filter((_, i) => !selectedRows.has(i)))
+      setSelectedRows(new Set())
+    }
   }, [selectedRows, rows])
 
   // 顯示欄位
@@ -149,7 +188,14 @@ export default function StagingPage() {
               從「訂單批量轉製令匯出」移過來的訂單，可填寫暫緩原因等候下一步指令
             </p>
           </div>
-          <div className="flex gap-2 flex-wrap">
+          <div className="flex gap-2 flex-wrap items-center">
+            <button
+              onClick={reload}
+              disabled={loading}
+              className="px-3 py-2 rounded-lg bg-slate-800 border border-slate-700 text-slate-300 hover:text-white hover:bg-slate-700 disabled:opacity-50 transition-colors text-sm"
+            >
+              {loading ? '讀取中…' : '🔄 重新整理'}
+            </button>
             {rows.length > 0 && (
               <>
                 {selectedRows.size > 0 && (
@@ -179,6 +225,12 @@ export default function StagingPage() {
           </div>
         </div>
 
+        {errorMsg && (
+          <div className="mb-4 px-3 py-2 rounded-lg bg-red-950/40 border border-red-700/50 text-red-300 text-sm">
+            ⚠ {errorMsg}
+          </div>
+        )}
+
         {/* 統計 */}
         {rows.length > 0 && (
           <div className="mb-4 flex items-center gap-4 text-sm">
@@ -195,7 +247,11 @@ export default function StagingPage() {
         )}
 
         {/* 表格 */}
-        {rows.length > 0 ? (
+        {loading ? (
+          <div className="bg-slate-900 border border-slate-800 rounded-lg p-12 text-center">
+            <p className="text-slate-500">讀取中…</p>
+          </div>
+        ) : rows.length > 0 ? (
           <div className="bg-slate-900 border border-slate-800 rounded-lg overflow-hidden">
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
@@ -225,7 +281,7 @@ export default function StagingPage() {
                 <tbody>
                   {rows.map((row, idx) => (
                     <tr
-                      key={idx}
+                      key={row.id}
                       className={`border-b border-slate-800/50 transition-colors ${
                         selectedRows.has(idx)
                           ? 'bg-amber-950/30'

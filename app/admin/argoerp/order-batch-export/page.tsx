@@ -1029,24 +1029,22 @@ export default function OrderBatchExportPage() {
     }
   }, [])
   // ---- 移至暫緩區 / 清空 ----
-  const handleMoveToStaging = useCallback(() => {
+  const handleMoveToStaging = useCallback(async () => {
     if (selectedRows.size === 0) return
-    const STAGING_KEY = 'argoerp_staging_v1'
-    const now = new Date().toISOString()
     const moving = sourceRows.filter((_, i) => selectedRows.has(i))
-      .map(row => ({ ...row, hold_reason: '', staged_at: now }))
     try {
-      const raw = localStorage.getItem(STAGING_KEY)
-      const existing = raw ? JSON.parse(raw) : []
-      const merged = [...existing, ...moving]
-      localStorage.setItem(STAGING_KEY, JSON.stringify(merged))
+      const res = await fetch('/api/argoerp/staging', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ rows: moving }),
+      })
+      const json = await res.json()
+      if (!res.ok || !json.success) throw new Error(json.error || `HTTP ${res.status}`)
+      setSourceRows(prev => prev.filter((_, i) => !selectedRows.has(i)))
+      setSelectedRows(new Set())
     } catch (e) {
-      console.error('移至暫緩區失敗', e)
-      alert('移至暫緩區失敗，請查看主控台')
-      return
+      alert(`移至暫緩區失敗：${e instanceof Error ? e.message : String(e)}`)
     }
-    setSourceRows(prev => prev.filter((_, i) => !selectedRows.has(i)))
-    setSelectedRows(new Set())
   }, [selectedRows, sourceRows])
 
   const handleClearAll = useCallback(() => {
