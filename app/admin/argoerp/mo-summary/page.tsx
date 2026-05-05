@@ -30,9 +30,7 @@ const DISPLAY_COLS: { key: keyof MoRecord; label: string }[] = [
   { key: 'mo_number', label: '製令單號' },
   { key: 'factory', label: '廠別' },
   { key: 'product_code', label: '生產貨號' },
-  { key: 'lot_number', label: '批號' },
   { key: 'planned_qty', label: '預訂產出量' },
-  { key: 'planned_start_date', label: '預定投產日' },
   { key: 'planned_end_date', label: '預定結案日' },
   { key: 'source_order', label: '來源訂單' },
   { key: 'mo_note', label: '製令說明' },
@@ -230,8 +228,8 @@ export default function MoSummaryPage() {
     if (exportFormat === 'xlsx') {
       const ws = XLSX.utils.aoa_to_sheet([headers, ...dataRows])
       const wb = XLSX.utils.book_new()
-      XLSX.utils.book_append_sheet(wb, ws, '製令總表')
-      XLSX.writeFile(wb, `製令總表_${ts}.xlsx`)
+      XLSX.utils.book_append_sheet(wb, ws, '機台分配')
+      XLSX.writeFile(wb, `機台分配_${ts}.xlsx`)
     } else {
       const csvLines = [headers.join(',')]
       dataRows.forEach(cells => {
@@ -244,7 +242,7 @@ export default function MoSummaryPage() {
       const url = URL.createObjectURL(blob)
       const a = document.createElement('a')
       a.href = url
-      a.download = `製令總表_${ts}.csv`
+      a.download = `機台分配_${ts}.csv`
       a.click()
       URL.revokeObjectURL(url)
     }
@@ -262,7 +260,7 @@ export default function MoSummaryPage() {
         {/* Header */}
         <div className="mb-6 border-b border-slate-800 pb-4 flex flex-col lg:flex-row lg:items-end justify-between gap-4">
           <div>
-            <h1 className="text-3xl font-bold tracking-tight">製令總表</h1>
+            <h1 className="text-3xl font-bold tracking-tight">生產機台分配/列印</h1>
             <p className="text-slate-400 mt-1 text-sm">已確認轉出的製令記錄（資料儲存於 Supabase）</p>
           </div>
           <div className="flex gap-2 flex-wrap items-center">
@@ -369,11 +367,13 @@ export default function MoSummaryPage() {
                         className="rounded border-slate-600 bg-slate-700 text-cyan-500 focus:ring-cyan-500/30" />
                     </th>
                     <th className="px-2 py-3 text-center text-slate-500 font-mono text-xs w-10">#</th>
-                    {DISPLAY_COLS.map(col => (
-                      <th key={col.key} className="px-3 py-3 text-left text-slate-300 font-medium whitespace-nowrap text-xs">
-                        {col.label}
-                      </th>
-                    ))}
+                    <th className="px-3 py-3 text-left text-slate-300 font-medium whitespace-nowrap text-xs">製令單號 / 廠別</th>
+                    <th className="px-3 py-3 text-left text-slate-300 font-medium whitespace-nowrap text-xs">生產貨號 / 產出量</th>
+                    <th className="px-3 py-3 text-left text-slate-300 font-medium whitespace-nowrap text-xs">製令說明</th>
+                    <th className="px-3 py-3 text-left text-slate-300 font-medium whitespace-nowrap text-xs">預定結案日</th>
+                    <th className="px-3 py-3 text-left text-slate-300 font-medium whitespace-nowrap text-xs">來源訂單</th>
+                    <th className="px-3 py-3 text-left text-slate-300 font-medium whitespace-nowrap text-xs">開立 / 儲存時間</th>
+                    <th className="px-3 py-3 text-left text-slate-300 font-medium whitespace-nowrap text-xs">盤數</th>
                     <th className="px-3 py-3 text-left text-slate-300 font-medium whitespace-nowrap text-xs">機台</th>
                     <th className="px-3 py-3 text-center text-slate-300 font-medium whitespace-nowrap text-xs">編輯</th>
                   </tr>
@@ -386,18 +386,33 @@ export default function MoSummaryPage() {
                           className="rounded border-slate-600 bg-slate-700 text-cyan-500 focus:ring-cyan-500/30" />
                       </td>
                       <td className="px-2 py-2 text-center text-slate-500 font-mono text-xs">{idx + 1}</td>
-                      {DISPLAY_COLS.map(col => (
-                        <td key={col.key} className={`px-3 py-2 whitespace-nowrap max-w-[300px] truncate text-xs ${
-                          col.key === 'factory'
-                            ? row.factory === 'C' ? 'text-orange-300 font-bold' : row.factory === 'O' ? 'text-purple-300 font-bold' : 'text-blue-300 font-bold'
-                            : 'text-slate-300'
-                        }`} title={row[col.key] || ''}>
-                          {col.key === 'factory'
-                            ? (row.factory === 'C' ? 'C 常平' : row.factory === 'O' ? 'O 委外' : 'T 台北')
-                            : (row[col.key] || <span className="text-slate-700">—</span>)
-                          }
-                        </td>
-                      ))}
+                      {/* 製令單號 / 廠別 */}
+                      <td className="px-3 py-2 text-xs">
+                        <div className="font-mono text-slate-200 whitespace-nowrap">{row.mo_number || <span className="text-slate-700">—</span>}</div>
+                        <div className={`font-bold whitespace-nowrap ${row.factory === 'C' ? 'text-orange-300' : row.factory === 'O' ? 'text-purple-300' : 'text-blue-300'}`}>
+                          {row.factory === 'C' ? 'C 常平' : row.factory === 'O' ? 'O 委外' : 'T 台北'}
+                        </div>
+                      </td>
+                      {/* 生產貨號 / 產出量 */}
+                      <td className="px-3 py-2 text-xs">
+                        <div className="text-slate-200 whitespace-nowrap">{row.product_code || <span className="text-slate-700">—</span>}</div>
+                        <div className="text-slate-400 whitespace-nowrap">{row.planned_qty || <span className="text-slate-700">—</span>}</div>
+                      </td>
+                      {/* 製令說明（最多兩行） */}
+                      <td className="px-3 py-2 text-xs text-slate-300 max-w-[220px]">
+                        <div className="line-clamp-2 leading-relaxed" title={row.mo_note || ''}>{row.mo_note || <span className="text-slate-700">—</span>}</div>
+                      </td>
+                      {/* 預定結案日 */}
+                      <td className="px-3 py-2 text-xs text-slate-300 whitespace-nowrap">{row.planned_end_date || <span className="text-slate-700">—</span>}</td>
+                      {/* 來源訂單 */}
+                      <td className="px-3 py-2 text-xs text-slate-300 whitespace-nowrap">{row.source_order || <span className="text-slate-700">—</span>}</td>
+                      {/* 開立日期 / 儲存時間 */}
+                      <td className="px-3 py-2 text-xs">
+                        <div className="text-slate-300 whitespace-nowrap">{row.create_date || <span className="text-slate-700">—</span>}</div>
+                        <div className="text-slate-500 whitespace-nowrap">{row.saved_at || <span className="text-slate-700">—</span>}</div>
+                      </td>
+                      {/* 盤數 */}
+                      <td className="px-3 py-2 text-xs text-slate-300 whitespace-nowrap">{row.plate_count || <span className="text-slate-700">—</span>}</td>
                       <td className="px-2 py-2">
                         <select
                           value={moMachines[row.mo_number] || ''}
@@ -423,7 +438,7 @@ export default function MoSummaryPage() {
         ) : (
           <div className="bg-slate-900 border border-slate-800 rounded-lg p-12 text-center">
             <p className="text-slate-500">
-              {searchText ? '無符合搜尋條件的記錄' : '尚無製令記錄，請從「訂單批量轉製令匯出」儲存至總表'}
+              {searchText ? '無符合搜尋條件的記錄' : '尚無製令記錄，請從「訂單批量轉製令匯出」儲存至此頁'}
             </p>
           </div>
         )}

@@ -59,6 +59,9 @@ interface MaterialPrepRow {
   selected_material_name: string
   selected_material_stock_qty: number
   planned_qty: number
+  plate_count: string
+  factory: string
+  std_qty: number
   status: '可直接備料' | '建議替代' | '缺料' | '無BOM'
   note: string
 }
@@ -72,6 +75,19 @@ function formatQty(value: number): string {
 }
 
 const PREP_INTERFACE_KEY = 'argoerp_material_prep_interface_id'
+const PREP_QTY_OVERRIDES_KEY = 'argoerp_material_prep_qty_overrides'
+const PREP_MATERIAL_OVERRIDES_KEY = 'argoerp_material_prep_material_overrides'
+const PREP_CUSTOM_CODE_INPUTS_KEY = 'argoerp_material_prep_custom_code_inputs'
+
+function loadFromLocalStorage<T>(key: string, fallback: T): T {
+  if (typeof window === 'undefined') return fallback
+  try {
+    const raw = localStorage.getItem(key)
+    return raw ? (JSON.parse(raw) as T) : fallback
+  } catch {
+    return fallback
+  }
+}
 
 // ============================================================
 // 元件
@@ -88,14 +104,20 @@ export default function MaterialPrepPage() {
   const [substituteMap, setSubstituteMap] = useState<Record<string, SubstituteRuleRow[]>>({})
   const [bomLoading, setBomLoading] = useState(false)
   const [bomError, setBomError] = useState('')
-  const [materialOverrides, setMaterialOverrides] = useState<Record<string, string>>({})
+  const [materialOverrides, setMaterialOverrides] = useState<Record<string, string>>(
+    () => loadFromLocalStorage<Record<string, string>>(PREP_MATERIAL_OVERRIDES_KEY, {})
+  )
 
   // ---- 來源訂單→客戶 map（從 erp_pj_sync 查詢）----
   const [sourceOrderCustomerMap, setSourceOrderCustomerMap] = useState<Record<string, string>>({})
 
   // ---- 需求量覆寫 / 自訂料號 ----
-  const [qtyOverrides, setQtyOverrides] = useState<Record<string, string>>({})
-  const [customCodeInputs, setCustomCodeInputs] = useState<Record<string, string>>({})
+  const [qtyOverrides, setQtyOverrides] = useState<Record<string, string>>(
+    () => loadFromLocalStorage<Record<string, string>>(PREP_QTY_OVERRIDES_KEY, {})
+  )
+  const [customCodeInputs, setCustomCodeInputs] = useState<Record<string, string>>(
+    () => loadFromLocalStorage<Record<string, string>>(PREP_CUSTOM_CODE_INPUTS_KEY, {})
+  )
   const [customCodeStocks, setCustomCodeStocks] = useState<Record<string, number | null>>({})
 
   // ---- 選取 / 操作 ----
@@ -125,6 +147,21 @@ export default function MaterialPrepPage() {
       else localStorage.removeItem(PREP_INTERFACE_KEY)
     } catch {}
   }, [materialPrepInterfaceId])
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    try { localStorage.setItem(PREP_QTY_OVERRIDES_KEY, JSON.stringify(qtyOverrides)) } catch {}
+  }, [qtyOverrides])
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    try { localStorage.setItem(PREP_MATERIAL_OVERRIDES_KEY, JSON.stringify(materialOverrides)) } catch {}
+  }, [materialOverrides])
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    try { localStorage.setItem(PREP_CUSTOM_CODE_INPUTS_KEY, JSON.stringify(customCodeInputs)) } catch {}
+  }, [customCodeInputs])
 
   // ---- 載入未備料製令 ----
   const loadMoRecords = useCallback(async () => {
@@ -265,6 +302,9 @@ export default function MaterialPrepPage() {
             source_order: mo.source_order || '-',
             product_code: productCode || '-',
             planned_qty: Number(mo.planned_qty ?? 0),
+            plate_count: mo.plate_count || '-',
+            factory: mo.factory || '-',
+            std_qty: 0,
             source_material_code: '-',
             source_material_name: '自訂原料',
             required_qty: displayQty,
@@ -285,6 +325,9 @@ export default function MaterialPrepPage() {
           source_order: mo.source_order || '-',
           product_code: productCode || '-',
           planned_qty: Number(mo.planned_qty ?? 0),
+          plate_count: mo.plate_count || '-',
+          factory: mo.factory || '-',
+          std_qty: 0,
           source_material_code: '-',
           source_material_name: '查無 BOM',
           required_qty: 0,
@@ -301,7 +344,9 @@ export default function MaterialPrepPage() {
 
       return matchedBom.map((bom): MaterialPrepRow => {
         const rowKey = `${mo.mo_number}::${productCode}::${bom.material_code}`
-        const planQty = Number(mo.planned_qty ?? 0)
+        const plateCountRaw = mo.plate_count ? mo.plate_count.trim() : ''
+        const plateCountNum = plateCountRaw && plateCountRaw !== '-' ? Number(plateCountRaw) : NaN
+        const planQty = !isNaN(plateCountNum) && plateCountNum > 0 ? plateCountNum : Number(mo.planned_qty ?? 0)
         const productionQty = bom.production_quantity ?? 0
         const bomBaseQty = bom.quantity ?? 0
         const computedQty = productionQty > 0 ? (planQty * bomBaseQty) / productionQty : planQty * bomBaseQty
@@ -362,6 +407,9 @@ export default function MaterialPrepPage() {
           source_order: mo.source_order || '-',
           product_code: productCode,
           planned_qty: planQty,
+          plate_count: mo.plate_count || '-',
+          factory: mo.factory || '-',
+          std_qty: productionQty > 0 ? bomBaseQty / productionQty : bomBaseQty,
           source_material_code: bom.material_code,
           source_material_name: bom.material_name || '-',
           required_qty: requiredQty,
@@ -400,6 +448,7 @@ export default function MaterialPrepPage() {
       .map(row => ({
         mo_number: row.mo_number,
         product_code: row.product_code,
+        planned_qty: row.planned_qty,
         source_order: row.source_order,
         material_code: row.selected_material_code,
         required_qty: formatQty(row.required_qty),
@@ -497,6 +546,37 @@ export default function MaterialPrepPage() {
     setMaterialPrepImporting(true)
     setMaterialPrepMessage('')
 
+    // 組 ARGO IV_NOTICE_PREPARE_INTERFACE 格式
+    const today = new Date()
+    const slipDate = `${today.getFullYear()}/${String(today.getMonth() + 1).padStart(2, '0')}/${String(today.getDate()).padStart(2, '0')}`
+    const moGroups = new Map<string, typeof selectedImportRows>()
+    for (const row of selectedImportRows) {
+      if (!moGroups.has(row.mo_number)) moGroups.set(row.mo_number, [])
+      moGroups.get(row.mo_number)!.push(row)
+    }
+    const argoData: Record<string, string | number>[] = []
+    for (const [moNumber, rows] of moGroups) {
+      rows.forEach((row, lineIndex) => {
+        argoData.push({
+          SLIP_NO: moNumber,
+          SLIP_DATE: slipDate,
+          PJT_PROJECT_ID: moNumber,
+          SEG_SEGMENT_NO_DEPARTMENT: 'M1100',
+          MO_MBP_PART: row.product_code,
+          MO_MBP_VER: 1,
+          MO_QTY: Number(row.planned_qty),
+          LINE_NO: lineIndex + 1,
+          MBP_PART: row.material_code,
+          MBP_VER: 1,
+          NOTICE_QTY: Number(row.required_qty),
+          UNIT_OF_MEASURE: 'PCS',
+          QTY_PACK: '',
+          UNIT_OF_MEASURE_PACK: '',
+          STD_QTY: 1,
+        })
+      })
+    }
+
     try {
       const response = await fetch('/api/argoerp', {
         method: 'POST',
@@ -504,7 +584,7 @@ export default function MaterialPrepPage() {
         body: JSON.stringify({
           action: 'import',
           interfaceId: materialPrepInterfaceId.trim(),
-          data: selectedImportRows,
+          data: argoData,
         }),
       })
 
@@ -694,6 +774,7 @@ export default function MaterialPrepPage() {
                     </th>
                     <th className="px-3 py-3 text-left text-slate-300 text-xs whitespace-nowrap">製令單號 / 客戶</th>
                     <th className="px-3 py-3 text-left text-slate-300 text-xs whitespace-nowrap">生產貨號 / 預定產出量</th>
+                    <th className="px-3 py-3 text-right text-slate-300 text-xs whitespace-nowrap">映射盤數</th>
                     <th className="px-3 py-3 text-left text-slate-300 text-xs whitespace-nowrap">原料料號 / 原料名稱</th>
                     <th className="px-3 py-3 text-right text-slate-300 text-xs whitespace-nowrap">需求量</th>
                     <th className="px-3 py-3 text-right text-slate-300 text-xs whitespace-nowrap">現有庫存</th>
@@ -725,6 +806,9 @@ export default function MaterialPrepPage() {
                         <td className="px-3 py-2 text-xs whitespace-nowrap">
                           <div className="text-slate-300">{row.product_code}</div>
                           <div className="text-slate-400 font-mono">{formatQty(row.planned_qty)}</div>
+                        </td>
+                        <td className="px-3 py-2 text-right text-xs whitespace-nowrap">
+                          <span className="text-slate-300 font-mono">{row.plate_count}</span>
                         </td>
                         <td className="px-3 py-2 text-xs">
                           <div className="text-slate-300 whitespace-nowrap">{row.source_material_code}</div>
