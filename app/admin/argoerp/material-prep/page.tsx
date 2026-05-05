@@ -517,6 +517,24 @@ export default function MaterialPrepPage() {
       const json = await res.json()
       if (!res.ok || !json?.success) throw new Error(json?.error || `HTTP ${res.status}`)
       setActionMessage(`✅ 已將 ${json.updated ?? moNumbers.length} 筆標記為「無需備料」`)
+
+      // 寫入批備料紀錄（fire-and-forget）
+      fetch('/api/argoerp/material-prep-log', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          rows: moNumbers.map(mo => ({
+            mo_number:    mo,
+            factory:      moRecords.find(r => r.mo_number === mo)?.factory      ?? '',
+            product_code: moRecords.find(r => r.mo_number === mo)?.product_code ?? '',
+            planned_qty:  moRecords.find(r => r.mo_number === mo)?.planned_qty  ?? '',
+            status:       '無需備料',
+            lines_count:  0,
+            interface_id: '',
+          })),
+        }),
+      }).catch(err => console.warn('[批備料紀錄] 寫入失敗', err))
+
       await loadMoRecords()
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
@@ -610,6 +628,24 @@ export default function MaterialPrepPage() {
       }
 
       setMaterialPrepMessage(`✅ 已送出 ${selectedImportRows.length} 筆到 ARGO，並將 ${importMos.length} 筆製令標記為「已備料」`)
+
+      // 寫入批備料紀錄（fire-and-forget）
+      fetch('/api/argoerp/material-prep-log', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          rows: importMos.map(mo => ({
+            mo_number:    mo,
+            factory:      moRecords.find(r => r.mo_number === mo)?.factory      ?? '',
+            product_code: moRecords.find(r => r.mo_number === mo)?.product_code ?? '',
+            planned_qty:  moRecords.find(r => r.mo_number === mo)?.planned_qty  ?? '',
+            status:       '已備料',
+            lines_count:  selectedImportRows.filter(r => r.mo_number === mo).length,
+            interface_id: materialPrepInterfaceId.trim(),
+          })),
+        }),
+      }).catch(err => console.warn('[批備料紀錄] 寫入失敗', err))
+
       await loadMoRecords()
     } catch (error) {
       const message = error instanceof Error ? error.message : '生產批備料匯入失敗'

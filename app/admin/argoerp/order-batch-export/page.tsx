@@ -888,6 +888,27 @@ export default function OrderBatchExportPage() {
         console.error('[ArgoERP 匯入] DB 儲存總表失敗', saveErr)
         alert(`⚠️ ERP 已匯入成功，但製令總表（Supabase）儲存失敗：${sm}\n\n請記下以下製令號並手動補登：\n${records.map(r => r.mo_number).join(', ')}`)
       }
+
+      // 寫入製令上傳紀錄（fire-and-forget，不阻塞主流程）
+      fetch('/api/argoerp/mo-upload-log', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          rows: records.map(r => ({
+            mo_number:          r.mo_number,
+            factory:            r.factory,
+            product_code:       r.product_code,
+            planned_qty:        r.planned_qty,
+            source_order:       r.source_order,
+            lot_number:         r.lot_number,
+            mo_note:            r.mo_note,
+            planned_start_date: r.planned_start_date,
+            planned_end_date:   r.planned_end_date,
+            create_date:        r.create_date,
+            interface_id:       interfaceId,
+          })),
+        }),
+      }).catch(err => console.warn('[製令上傳紀錄] 寫入失敗（不影響主流程）', err))
       setFailedImports(prev => removeFailedImportsByRows(prev, filteredRows))
 
       // 從主清單移除已成功匯入的訂單，避免重複匯入
