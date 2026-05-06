@@ -209,6 +209,29 @@ export default function MaterialPrepPage() {
     try { localStorage.setItem(PREP_MATERIAL_OVERRIDES_KEY, JSON.stringify(materialOverrides)) } catch {}
   }, [materialOverrides])
 
+  // 手動選取/輸入的料號不在 loadBomContext 的 allInventoryCodes 內，需額外補查單位
+  useEffect(() => {
+    const overrideCodes = [...new Set(Object.values(materialOverrides).filter(Boolean))]
+    if (overrideCodes.length === 0) return
+    supabase
+      .from('mm_bom_part_units')
+      .select('part_code, unit_of_measure')
+      .in('part_code', overrideCodes)
+      .then(({ data }) => {
+        if (!data || data.length === 0) return
+        const additions: Record<string, string> = {}
+        for (const item of data as Array<{ part_code: string; unit_of_measure: string | null }>) {
+          if (item.unit_of_measure) additions[item.part_code] = item.unit_of_measure
+        }
+        if (Object.keys(additions).length > 0) {
+          setUnitMap(prev => {
+            const changed = Object.entries(additions).some(([k, v]) => prev[k] !== v)
+            return changed ? { ...prev, ...additions } : prev
+          })
+        }
+      })
+  }, [materialOverrides])
+
   useEffect(() => {
     if (typeof window === 'undefined') return
     try { localStorage.setItem(PREP_CUSTOM_CODE_INPUTS_KEY, JSON.stringify(customCodeInputs)) } catch {}
