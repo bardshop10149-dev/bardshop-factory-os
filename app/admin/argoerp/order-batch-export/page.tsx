@@ -1060,11 +1060,13 @@ export default function OrderBatchExportPage() {
         body: JSON.stringify({ rows: moving }),
       })
       const json = await res.json()
-      if (!res.ok || !json.success) throw new Error(json.error || `HTTP ${res.status}`)
+      const errText = typeof json.error === 'string' ? json.error : (json.error ? JSON.stringify(json.error) : `HTTP ${res.status}`)
+      if (!res.ok || !json.success) throw new Error(errText)
       setSourceRows(prev => prev.filter((_, i) => !selectedRows.has(i)))
       setSelectedRows(new Set())
     } catch (e) {
-      alert(`移至暫緩區失敗：${e instanceof Error ? e.message : String(e)}`)
+      const msg = e instanceof Error ? e.message : (typeof e === 'object' ? JSON.stringify(e) : String(e))
+      alert(`移至暫緩區失敗：${msg}`)
     }
   }, [selectedRows, sourceRows])
 

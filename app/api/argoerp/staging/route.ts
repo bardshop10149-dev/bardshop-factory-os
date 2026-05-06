@@ -45,7 +45,7 @@ export async function POST(request: NextRequest) {
     })
     const supabase = getSupabaseAdminClient()
     const { data, error } = await supabase.from(TABLE).insert(cleaned).select('id')
-    if (error) throw error
+    if (error) throw new Error(error.message)
     return NextResponse.json({ success: true, inserted: data?.length ?? 0 })
   } catch (e) {
     const msg = e instanceof Error ? formatSupabaseAdminError(e.message) : String(e)
@@ -62,7 +62,7 @@ export async function DELETE(request: NextRequest) {
     }
     const supabase = getSupabaseAdminClient()
     const { error } = await supabase.from(TABLE).delete().in('id', ids)
-    if (error) throw error
+    if (error) throw new Error(error.message)
     return NextResponse.json({ success: true })
   } catch (e) {
     const msg = e instanceof Error ? formatSupabaseAdminError(e.message) : String(e)
