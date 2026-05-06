@@ -876,7 +876,9 @@ export default function OrderBatchExportPage() {
       const isSuccess = response.ok && result?.success === true
 
       if (!isSuccess) {
-        throw new Error(errorMessage || `ArgoERP 匯入失敗 (HTTP ${response.status})`)
+        const raw = typeof result?.rawText === 'string' ? result.rawText.slice(0, 600) : JSON.stringify(result?.apiResult ?? '').slice(0, 600)
+        const fullMsg = `${errorMessage || `ArgoERP 匯入失敗 (HTTP ${response.status})`}\n\n【ARGO 原始回應】\n${raw}`
+        throw new Error(fullMsg)
       }
 
       const nowStr = new Date().toLocaleString('zh-TW')
