@@ -293,9 +293,10 @@ export default function MaterialPrepPage() {
             .eq('doc_type', '倉庫庫存')
             .in('doc_no', allInventoryCodes),
           supabase
-            .from('material_inventory_list')
-            .select('item_code, unit_of_measure')
-            .in('item_code', allInventoryCodes),
+            .from('erp_pj_sync')
+            .select('doc_no, unit')
+            .eq('doc_type', '倉庫庫存')
+            .in('doc_no', allInventoryCodes),
         ])
 
         if (inventoryRes.error) throw inventoryRes.error
@@ -305,8 +306,8 @@ export default function MaterialPrepPage() {
           return acc
         }, {})
 
-        nextUnitMap = ((unitRes.data as Array<{ item_code: string; unit_of_measure: string | null }> | null) || []).reduce<Record<string, string>>((acc, item) => {
-          if (item.unit_of_measure) acc[item.item_code] = item.unit_of_measure
+        nextUnitMap = ((unitRes.data as Array<{ doc_no: string; unit: string | null }> | null) || []).reduce<Record<string, string>>((acc, item) => {
+          if (item.unit) acc[item.doc_no] = item.unit
           return acc
         }, {})
       }
