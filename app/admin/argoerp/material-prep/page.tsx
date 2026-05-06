@@ -667,13 +667,6 @@ export default function MaterialPrepPage() {
           QTY_PACK: '',
           UNIT_OF_MEASURE_PACK: '',
           STD_QTY: 1,
-          PROCESS_TYPE: '',
-          GRADE: '',
-          SLIP_ENDDATE: '',
-          REMARK: '',
-          ACTUAL_QTY: '',
-          BATCH_NO: '',
-          WC_ID: '',
         })
       })
     }
