@@ -25,21 +25,21 @@ COMMENT ON COLUMN public.argoerp_mo_summary.plate_count
   IS '盤數，來自工單批量上傳原始資料，供批備料計算需求量使用';
 
 -- ── 3. 機台選單表 ────────────────────────────────────────────
-CREATE TABLE IF NOT EXISTS public.mo_machines (
+CREATE TABLE IF NOT EXISTS public.argoerp_machines (
   id          serial      PRIMARY KEY,
   name        text        NOT NULL UNIQUE,
   sort_order  int         NOT NULL DEFAULT 0,
   created_at  timestamptz NOT NULL DEFAULT now()
 );
 
-COMMENT ON TABLE  public.mo_machines       IS '製令印刷機台選單';
-COMMENT ON COLUMN public.mo_machines.name  IS '機台名稱，顯示於製令總表下拉選單及工單右上角';
+COMMENT ON TABLE  public.argoerp_machines       IS '製令印刷機台選單';
+COMMENT ON COLUMN public.argoerp_machines.name  IS '機台名稱，顯示於製令總表下拉選單及工單右上角';
 
-ALTER TABLE public.mo_machines ENABLE ROW LEVEL SECURITY;
-DROP POLICY IF EXISTS allow_read  ON public.mo_machines;
-DROP POLICY IF EXISTS allow_write ON public.mo_machines;
-CREATE POLICY allow_read  ON public.mo_machines FOR SELECT USING (true);
-CREATE POLICY allow_write ON public.mo_machines FOR ALL    USING (true) WITH CHECK (true);
+ALTER TABLE public.argoerp_machines ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS allow_read  ON public.argoerp_machines;
+DROP POLICY IF EXISTS allow_write ON public.argoerp_machines;
+CREATE POLICY allow_read  ON public.argoerp_machines FOR SELECT USING (true);
+CREATE POLICY allow_write ON public.argoerp_machines FOR ALL    USING (true) WITH CHECK (true);
 
 -- ── 4. 製令列印紀錄 ──────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS public.argoerp_mo_print_log (

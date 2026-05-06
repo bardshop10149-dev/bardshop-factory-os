@@ -66,6 +66,18 @@ interface MaterialPrepRow {
   note: string
 }
 
+interface PrepLog {
+  id: number
+  mo_number: string
+  factory: string | null
+  product_code: string | null
+  planned_qty: string | null
+  status: '已備料' | '無需備料'
+  lines_count: number
+  interface_id: string | null
+  logged_at: string
+}
+
 // ============================================================
 // 工具
 // ============================================================
@@ -125,6 +137,17 @@ export default function MaterialPrepPage() {
   const [actionMessage, setActionMessage] = useState('')
   const [actionBusy, setActionBusy] = useState(false)
   const [statusFilter, setStatusFilter] = useState<MaterialPrepRow['status'] | null>(null)
+
+  // ---- 檢視模式 ----
+  const [viewMode, setViewMode] = useState<'pending' | 'history'>('pending')
+
+  // ---- 上傳紀錄 ----
+  const [prepLogs, setPrepLogs] = useState<PrepLog[]>([])
+  const [prepLogLoading, setPrepLogLoading] = useState(false)
+  const [prepLogError, setPrepLogError] = useState('')
+  const [selectedLogIds, setSelectedLogIds] = useState<Set<number>>(new Set())
+  const [historyMessage, setHistoryMessage] = useState('')
+  const [historyBusy, setHistoryBusy] = useState(false)
 
   // ---- 批備料介面 ----
   const [materialPrepInterfaceId, setMaterialPrepInterfaceId] = useState('')
@@ -191,6 +214,27 @@ export default function MaterialPrepPage() {
   useEffect(() => {
     void loadMoRecords()
   }, [loadMoRecords])
+
+  // ---- 載入上傳紀錄 ----
+  const loadPrepLogs = useCallback(async () => {
+    setPrepLogLoading(true)
+    setPrepLogError('')
+    try {
+      const res = await fetch('/api/argoerp/material-prep-log', { cache: 'no-store' })
+      const json = await res.json()
+      if (!res.ok || !json?.success) throw new Error(json?.error || `HTTP ${res.status}`)
+      setPrepLogs(json.rows ?? [])
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      setPrepLogError(msg)
+    } finally {
+      setPrepLogLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (viewMode === 'history') void loadPrepLogs()
+  }, [viewMode, loadPrepLogs])
 
   // ---- 載入 BOM / 庫存 / 替代料 ----
   const loadBomContext = useCallback(async () => {
@@ -545,6 +589,37 @@ export default function MaterialPrepPage() {
     }
   }, [selectedRowKeys, materialPrepRows, loadMoRecords])
 
+  // ---- 操作：從紀錄重設為未備料（可再次上傳）----
+  const handleResetToPending = useCallback(async () => {
+    if (selectedLogIds.size === 0) return
+    const moNumbers = [...new Set(
+      [...selectedLogIds]
+        .map(id => prepLogs.find(l => l.id === id)?.mo_number)
+        .filter((v): v is string => Boolean(v))
+    )]
+    if (!window.confirm(`確定將 ${moNumbers.length} 筆製令重設為「未備料」，讓其重新出現在備料清單可再次上傳？`)) return
+    setHistoryBusy(true)
+    setHistoryMessage('')
+    try {
+      const res = await fetch('/api/argoerp/mo-summary', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mo_numbers: moNumbers, prep_status: '未備料' }),
+      })
+      const json = await res.json()
+      if (!res.ok || !json?.success) throw new Error(json?.error || `HTTP ${res.status}`)
+      setHistoryMessage(`✅ 已重設 ${json.updated ?? moNumbers.length} 筆為「未備料」，切換至備料清單即可重新上傳`)
+      setSelectedLogIds(new Set())
+      void loadPrepLogs()
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      setHistoryMessage(`❌ 失敗：${msg}`)
+    } finally {
+      setHistoryBusy(false)
+      setTimeout(() => setHistoryMessage(''), 8000)
+    }
+  }, [selectedLogIds, prepLogs, loadPrepLogs])
+
   // ---- 操作：送 ARGO 批備料 + 標記為「已備料」----
   const handleImportAndMarkDone = useCallback(async () => {
     if (selectedRowKeys.size === 0) return
@@ -661,7 +736,7 @@ export default function MaterialPrepPage() {
   return (
     <div className="min-h-screen bg-slate-950 text-white p-4 md:p-6">
       <div className="max-w-[1800px] mx-auto">
-        <div className="mb-6 border-b border-slate-800 pb-4 flex flex-col lg:flex-row lg:items-end justify-between gap-4">
+        <div className="mb-4 border-b border-slate-800 pb-4 flex flex-col lg:flex-row lg:items-end justify-between gap-4">
           <div>
             <h1 className="text-3xl font-bold tracking-tight">生產批備料</h1>
             <p className="text-slate-400 mt-1 text-sm">
@@ -670,15 +745,42 @@ export default function MaterialPrepPage() {
           </div>
           <div className="flex gap-2 flex-wrap">
             <button
-              onClick={() => void loadMoRecords()}
-              disabled={moLoading}
+              onClick={() => viewMode === 'pending' ? void loadMoRecords() : void loadPrepLogs()}
+              disabled={viewMode === 'pending' ? moLoading : prepLogLoading}
               className="px-4 py-2 rounded-lg bg-slate-800 border border-slate-700 text-slate-200 hover:bg-slate-700 disabled:opacity-50 transition-colors text-sm"
             >
-              {moLoading ? '讀取中...' : '🔄 重新整理'}
+              {(viewMode === 'pending' ? moLoading : prepLogLoading) ? '讀取中...' : '🔄 重新整理'}
             </button>
           </div>
         </div>
 
+        {/* Tab 切換 */}
+        <div className="mb-6 flex gap-1 border-b border-slate-800">
+          <button
+            onClick={() => setViewMode('pending')}
+            className={`px-5 py-2.5 text-sm font-medium transition-colors border-b-2 -mb-px ${
+              viewMode === 'pending'
+                ? 'border-cyan-400 text-cyan-300'
+                : 'border-transparent text-slate-400 hover:text-slate-200'
+            }`}
+          >
+            📋 未備料清單
+            {moRecords.length > 0 && <span className="ml-2 px-1.5 py-0.5 rounded-full text-xs bg-slate-700 text-slate-300">{moRecords.length}</span>}
+          </button>
+          <button
+            onClick={() => setViewMode('history')}
+            className={`px-5 py-2.5 text-sm font-medium transition-colors border-b-2 -mb-px ${
+              viewMode === 'history'
+                ? 'border-cyan-400 text-cyan-300'
+                : 'border-transparent text-slate-400 hover:text-slate-200'
+            }`}
+          >
+            📜 上傳紀錄
+            {prepLogs.length > 0 && <span className="ml-2 px-1.5 py-0.5 rounded-full text-xs bg-slate-700 text-slate-300">{prepLogs.length}</span>}
+          </button>
+        </div>
+
+        {viewMode === 'pending' && (<>
         {/* 流程狀態 */}
         <div className="mb-6 bg-slate-900 border border-slate-800 rounded-lg p-4">
           <h2 className="text-lg font-semibold text-white mb-3">流程狀態</h2>
@@ -926,6 +1028,111 @@ export default function MaterialPrepPage() {
             </div>
           )}
         </div>
+        </>)}
+
+        {viewMode === 'history' && (
+          <div className="space-y-4">
+            {/* 操作列 */}
+            <div className="bg-slate-900 border border-slate-800 rounded-lg p-4">
+              <div className="flex flex-wrap items-center gap-3">
+                <span className="text-sm text-slate-400">
+                  共 <span className="text-cyan-300 font-semibold">{prepLogs.length}</span> 筆紀錄，已選 <span className="text-orange-300 font-semibold">{selectedLogIds.size}</span> 筆
+                </span>
+                <button
+                  onClick={() => void handleResetToPending()}
+                  disabled={historyBusy || selectedLogIds.size === 0}
+                  className="px-4 py-2 rounded-lg bg-cyan-700 hover:bg-cyan-600 disabled:bg-slate-700 disabled:text-slate-500 text-white font-medium transition-colors text-sm"
+                >
+                  {historyBusy ? '處理中...' : '↩ 重設為未備料（切換至清單可再次上傳）'}
+                </button>
+              </div>
+              {historyMessage && (
+                <p className={`mt-3 text-sm whitespace-pre-line ${historyMessage.startsWith('❌') ? 'text-red-300' : 'text-emerald-300'}`}>
+                  {historyMessage}
+                </p>
+              )}
+            </div>
+
+            {/* 紀錄表格 */}
+            <div className="bg-slate-900 border border-slate-800 rounded-lg overflow-hidden">
+              {prepLogLoading ? (
+                <div className="px-4 py-10 text-center text-slate-400 text-sm">讀取中...</div>
+              ) : prepLogError ? (
+                <div className="px-4 py-10 text-center text-red-300 text-sm">{prepLogError}</div>
+              ) : prepLogs.length === 0 ? (
+                <div className="px-4 py-10 text-center text-slate-500 text-sm">尚無備料上傳紀錄</div>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="bg-slate-800/80 border-b border-slate-700">
+                        <th className="px-2 py-3 text-center w-10">
+                          <input
+                            type="checkbox"
+                            checked={prepLogs.length > 0 && prepLogs.every(l => selectedLogIds.has(l.id))}
+                            onChange={() => {
+                              const allSelected = prepLogs.every(l => selectedLogIds.has(l.id))
+                              setSelectedLogIds(allSelected ? new Set() : new Set(prepLogs.map(l => l.id)))
+                            }}
+                            className="rounded border-slate-600 bg-slate-700 text-cyan-500 focus:ring-cyan-500/30"
+                          />
+                        </th>
+                        <th className="px-3 py-3 text-left text-slate-300 text-xs whitespace-nowrap">上傳時間</th>
+                        <th className="px-3 py-3 text-left text-slate-300 text-xs whitespace-nowrap">製令單號</th>
+                        <th className="px-3 py-3 text-left text-slate-300 text-xs whitespace-nowrap">生產貨號</th>
+                        <th className="px-3 py-3 text-left text-slate-300 text-xs whitespace-nowrap">廠別</th>
+                        <th className="px-3 py-3 text-right text-slate-300 text-xs whitespace-nowrap">預定量</th>
+                        <th className="px-3 py-3 text-right text-slate-300 text-xs whitespace-nowrap">備料筆數</th>
+                        <th className="px-3 py-3 text-left text-slate-300 text-xs whitespace-nowrap">介面</th>
+                        <th className="px-3 py-3 text-left text-slate-300 text-xs whitespace-nowrap">狀態</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {prepLogs.map((log, index) => {
+                        const checked = selectedLogIds.has(log.id)
+                        return (
+                          <tr key={log.id} className={`border-b border-slate-800/50 ${checked ? 'bg-cyan-950/30' : index % 2 === 0 ? 'bg-slate-900/40' : 'bg-slate-900/20'} hover:bg-slate-800/40`}>
+                            <td className="px-2 py-2 text-center">
+                              <input
+                                type="checkbox"
+                                checked={checked}
+                                onChange={() => setSelectedLogIds(prev => {
+                                  const next = new Set(prev)
+                                  if (next.has(log.id)) next.delete(log.id)
+                                  else next.add(log.id)
+                                  return next
+                                })}
+                                className="rounded border-slate-600 bg-slate-700 text-cyan-500 focus:ring-cyan-500/30"
+                              />
+                            </td>
+                            <td className="px-3 py-2 text-xs text-slate-400 whitespace-nowrap">
+                              {new Date(log.logged_at).toLocaleString('zh-TW', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })}
+                            </td>
+                            <td className="px-3 py-2 text-xs text-cyan-300 font-mono whitespace-nowrap">{log.mo_number}</td>
+                            <td className="px-3 py-2 text-xs text-slate-300 whitespace-nowrap">{log.product_code || '-'}</td>
+                            <td className="px-3 py-2 text-xs text-slate-300 whitespace-nowrap">{log.factory || '-'}</td>
+                            <td className="px-3 py-2 text-xs text-slate-300 text-right whitespace-nowrap font-mono">{log.planned_qty || '-'}</td>
+                            <td className="px-3 py-2 text-xs text-slate-300 text-right whitespace-nowrap font-mono">{log.lines_count}</td>
+                            <td className="px-3 py-2 text-xs text-slate-500 whitespace-nowrap">{log.interface_id || '-'}</td>
+                            <td className="px-3 py-2 text-xs whitespace-nowrap">
+                              <span className={`px-2 py-0.5 rounded-full border text-xs ${
+                                log.status === '已備料'
+                                  ? 'bg-emerald-950/50 text-emerald-300 border-emerald-800/40'
+                                  : 'bg-amber-950/50 text-amber-300 border-amber-800/40'
+                              }`}>
+                                {log.status}
+                              </span>
+                            </td>
+                          </tr>
+                        )
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
       </div>
     </div>
   )
