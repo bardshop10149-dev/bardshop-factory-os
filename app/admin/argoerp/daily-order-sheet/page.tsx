@@ -348,37 +348,63 @@ export default function DailyOrderSheetPage() {
     }
   }, [sheetRows, selectedDate, currentRawText])
 
-  // ---- 同步製令狀態：查 argoerp_mo_upload_log（source_order+product_code）+ argoerp_material_prep_log（mo_number）----
+  // ---- 同步製令狀態：
+  //   1. argoerp_mo_upload_log（本系統建立的製令，source_order+product_code 比對）
+  //   2. erp_mo_lines（ARGO 同步區的製令，source_order+mbp_part 比對 → 可抓到 ARGO 直接建立的製令）
+  //   3. argoerp_material_prep_log（批備料狀態，mo_number 比對）
   const runMoSync = useCallback(async () => {
     if (sheetRows.length === 0) return
     setSyncingMo(true)
     setSaveMsg('')
     try {
       const orderNumbers = [...new Set(sheetRows.map(r => r.order_number).filter(Boolean))]
-      // 1. 查所有此頁工單編號的製令上傳紀錄
+      const noNone = orderNumbers.length > 0 ? orderNumbers : ['__none__']
+
+      // 1. 查本系統製令上傳紀錄
       const { data: moLogs, error: moErr } = await supabase
         .from('argoerp_mo_upload_log')
         .select('mo_number, source_order, product_code, planned_qty, uploaded_at')
-        .in('source_order', orderNumbers.length > 0 ? orderNumbers : ['__none__'])
+        .in('source_order', noNone)
         .order('uploaded_at', { ascending: false })
       if (moErr) throw moErr
-      // 以 source_order|product_code|planned_qty 為 key，取最新一筆
       const moMap = new Map<string, { mo_number: string }>()
       for (const log of (moLogs ?? [])) {
         const qty = String(log.planned_qty ?? '').trim()
         const k1 = `${log.source_order}|${log.product_code}|${qty}`
-        const k2 = `${log.source_order}|${log.product_code}` // fallback (數量未必字串相等)
+        const k2 = `${log.source_order}|${log.product_code}`
         if (!moMap.has(k1)) moMap.set(k1, { mo_number: log.mo_number })
         if (!moMap.has(k2)) moMap.set(k2, { mo_number: log.mo_number })
       }
 
-      // 2. 對每列嘗試找出 mo_number
+      // 2. 查 erp_mo_lines（ARGO 同步區），source_order = 工單編號，mbp_part = 品項編碼
+      const { data: erp_mo, error: erpErr } = await supabase
+        .from('erp_mo_lines')
+        .select('project_id, source_order, mbp_part, order_qty, line_no')
+        .in('source_order', noNone)
+      if (erpErr) throw erpErr
+      // erp_mo_lines.project_id 就是製令單號 (e.g. MOT260506...)
+      // 以 source_order|mbp_part 為 key，多筆取 project_id 最新（依 project_id 字母排序倒序取最後）
+      const erpMoMap = new Map<string, string>()  // key → mo_number (project_id)
+      for (const mo of (erp_mo ?? [])) {
+        if (!mo.source_order || !mo.mbp_part || !mo.project_id) continue
+        const k = `${mo.source_order}|${mo.mbp_part}`
+        // 若已有值且 project_id 更新（字典序更大）就取代
+        if (!erpMoMap.has(k) || (mo.project_id > (erpMoMap.get(k) ?? ''))) {
+          erpMoMap.set(k, mo.project_id)
+        }
+      }
+
+      // 3. 對每列嘗試找出 mo_number（不覆蓋已有值）
       const next: SheetRow[] = sheetRows.map(r => {
-        if (r.mo_number) return r // 已有就不覆蓋
+        if (r.mo_number) return r
         const qty = String(r.quantity).trim()
+        // 優先查上傳 log
         const k1 = `${r.order_number}|${r.item_code}|${qty}`
-        const hit = moMap.get(k1) ?? moMap.get(`${r.order_number}|${r.item_code}`)
-        if (hit) return { ...r, mo_number: hit.mo_number, mo_status: '已匯入製令' as const }
+        const logHit = moMap.get(k1) ?? moMap.get(`${r.order_number}|${r.item_code}`)
+        if (logHit) return { ...r, mo_number: logHit.mo_number, mo_status: '已匯入製令' as const }
+        // fallback: 查 erp_mo_lines
+        const erpHit = erpMoMap.get(`${r.order_number}|${r.item_code}`)
+        if (erpHit) return { ...r, mo_number: erpHit, mo_status: '已匯入製令' as const }
         return r
       })
 
