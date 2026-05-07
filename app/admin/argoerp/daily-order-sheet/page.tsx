@@ -396,9 +396,9 @@ export default function DailyOrderSheetPage() {
         }
       }
 
-      // 3. 對每列嘗試找出 mo_number（不覆蓋已有值）
+      // 3. 對每列嘗試找出 mo_number（不覆蓋已有值；但若現有值非 MO 開頭則視為無效重新比對）
       const next: SheetRow[] = sheetRows.map(r => {
-        if (r.mo_number) return r
+        if (r.mo_number?.startsWith('MO')) return r
         const qty = String(r.quantity).trim()
         // 優先查上傳 log
         const k1 = `${r.order_number}|${r.item_code}|${qty}`
@@ -407,6 +407,10 @@ export default function DailyOrderSheetPage() {
         // fallback: 查 erp_mo_lines
         const erpHit = erpMoMap.get(`${r.order_number}|${r.item_code}`)
         if (erpHit) return { ...r, mo_number: erpHit, mo_status: '已匯入製令' as const }
+        // 若原本有非 MO 開頭的無效值，清除它
+        if (r.mo_number && !r.mo_number.startsWith('MO')) {
+          return { ...r, mo_number: undefined, mo_status: null, material_prep_status: null }
+        }
         return r
       })
 
