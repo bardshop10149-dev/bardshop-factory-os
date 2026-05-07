@@ -3,79 +3,119 @@
 import { useCallback, useEffect, useState } from 'react'
 import { supabase } from '../../../../lib/supabaseClient'
 
-interface ErpPjSyncRow {
-  id: number
-  doc_type: string
-  doc_no: string
-  sub_no: string
-  item_code: string | null
-  description: string | null
-  qty: number
-  unit: string | null
-  status: string | null
-  start_date: string | null
-  end_date: string | null
-  customer_vendor: string | null
-  remark: string | null
-  synced_at: string
-}
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type AnyRow = Record<string, any> & { id: number }
 
 interface ColDef {
-  key: keyof ErpPjSyncRow
+  key: string
   label: string
   align?: 'left' | 'right'
   mono?: boolean
-  className?: string
+  date?: boolean
 }
 
 const PAGE_SIZE = 50
 
-// 每種 doc_type 顯示的欄位
+// ─── 每種 docType 的欄位定義 ─────────────────────────────
 const COL_MAP: Record<string, ColDef[]> = {
   銷售訂單: [
-    { key: 'doc_no', label: '訂單號', mono: true },
-    { key: 'start_date', label: '建單日期' },
-    { key: 'customer_vendor', label: '客戶代號' },
-    { key: 'remark', label: '業務' },
-    { key: 'synced_at', label: '同步時間' },
+    { key: 'project_id',       label: '訂單號',   mono: true },
+    { key: 'line_no',          label: '行號',     mono: true },
+    { key: 'partner_name',     label: '客戶名稱' },
+    { key: 'sales_name',       label: '業務' },
+    { key: 'mbp_part',         label: '料號',     mono: true },
+    { key: 'duedate',          label: '交期',     date: true },
+    { key: 'order_qty_oru',    label: '數量',     align: 'right', mono: true },
+    { key: 'unit_of_measure_oru', label: '單位' },
+    { key: 'synced_at',        label: '同步時間', date: true },
   ],
   製令單號: [
-    { key: 'doc_no', label: '製令單號', mono: true },
-    { key: 'description', label: '名稱' },
-    { key: 'status', label: '狀態' },
-    { key: 'start_date', label: '開始日' },
-    { key: 'end_date', label: '結束日' },
-    { key: 'customer_vendor', label: '負責人' },
-    { key: 'synced_at', label: '同步時間' },
+    { key: 'project_id',  label: '製令號',  mono: true },
+    { key: 'line_no',     label: '行號',    mono: true },
+    { key: 'mbp_part',    label: '料號',    mono: true },
+    { key: 'mbp_lot_no',  label: '批號',    mono: true },
+    { key: 'order_qty',   label: '數量',    align: 'right', mono: true },
+    { key: 'source_order',label: '來源訂單',mono: true },
+    { key: 'begin_date',  label: '開始日',  date: true },
+    { key: 'end_date',    label: '結束日',  date: true },
+    { key: 'hold_status', label: '狀態' },
+    { key: 'synced_at',   label: '同步時間',date: true },
   ],
   採購單號: [
-    { key: 'doc_no', label: '採購單號', mono: true },
-    { key: 'description', label: '名稱' },
-    { key: 'status', label: '狀態' },
-    { key: 'start_date', label: '開始日' },
-    { key: 'end_date', label: '結束日' },
+    { key: 'doc_no',          label: '採購單號', mono: true },
+    { key: 'description',     label: '名稱' },
+    { key: 'status',          label: '狀態' },
+    { key: 'start_date',      label: '開始日',   date: true },
+    { key: 'end_date',        label: '結束日',   date: true },
     { key: 'customer_vendor', label: '供應商' },
-    { key: 'synced_at', label: '同步時間' },
+    { key: 'synced_at',       label: '同步時間', date: true },
   ],
   委外製令: [
-    { key: 'doc_no', label: '委外製令號', mono: true },
-    { key: 'description', label: '名稱' },
-    { key: 'status', label: '狀態' },
-    { key: 'start_date', label: '開始日' },
-    { key: 'end_date', label: '結束日' },
+    { key: 'doc_no',          label: '委外製令號', mono: true },
+    { key: 'description',     label: '名稱' },
+    { key: 'status',          label: '狀態' },
+    { key: 'start_date',      label: '開始日',   date: true },
+    { key: 'end_date',        label: '結束日',   date: true },
     { key: 'customer_vendor', label: '廠商' },
-    { key: 'synced_at', label: '同步時間' },
+    { key: 'synced_at',       label: '同步時間', date: true },
   ],
   倉庫庫存: [
-    { key: 'doc_no', label: '料號', mono: true },
-    { key: 'description', label: '品名/規格' },
-    { key: 'qty', label: '庫存數量', align: 'right', mono: true },
-    { key: 'customer_vendor', label: '在途數量', align: 'right', mono: true },
-    { key: 'synced_at', label: '同步時間' },
+    { key: 'item_code',   label: '料號',     mono: true },
+    { key: 'item_name',   label: '品名' },
+    { key: 'spec',        label: '規格' },
+    { key: 'book_count',  label: '帳面庫存', align: 'right', mono: true },
+    { key: 'physical_count', label: '實際庫存', align: 'right', mono: true },
+    { key: 'unit_of_measure', label: '單位' },
+    { key: 'updated_at',  label: '更新時間', date: true },
   ],
 }
 
-function formatSyncedAt(ts: string): string {
+// ─── 每種 docType 的 Supabase 資料來源 ─────────────────────
+type SourceConfig =
+  | { from: 'erp_so_lines' }
+  | { from: 'erp_mo_lines' }
+  | { from: 'erp_pj_sync'; docType: string }
+  | { from: 'material_inventory_list' }
+
+const SOURCE_MAP: Record<string, SourceConfig> = {
+  銷售訂單: { from: 'erp_so_lines' },
+  製令單號: { from: 'erp_mo_lines' },
+  採購單號: { from: 'erp_pj_sync', docType: '採購單號' },
+  委外製令: { from: 'erp_pj_sync', docType: '委外製令' },
+  倉庫庫存: { from: 'material_inventory_list' },
+}
+
+// ─── 同步動作設定 ────────────────────────────────────────────
+type SyncAction =
+  | { action: 'sync_so' }
+  | { action: 'sync_mo' }
+  | { action: 'sync_pj'; table: string; customColumn?: string; filters?: Record<string, string>; mapping: Record<string, string> }
+  | { action: 'sync_inventory'; table: string; customColumn?: string; filters?: Record<string, string>; mapping: Record<string, string> }
+
+const SYNC_ACTION_MAP: Record<string, SyncAction> = {
+  銷售訂單: { action: 'sync_so' },
+  製令單號: { action: 'sync_mo' },
+  採購單號: {
+    action: 'sync_pj',
+    table: 'PJ_PROJECT',
+    filters: { PJT_TYPE: "= 'PO'" },
+    mapping: { docNoField: 'PROJECT_ID', startDateField: 'BEGIN_DATE', endDateField: 'END_DATE', statusField: 'HOLD_STATUS', customerVendorField: 'IN_CHARGE' },
+  },
+  委外製令: {
+    action: 'sync_pj',
+    table: 'PJ_PROJECT',
+    filters: { PJT_TYPE: "= 'OO'" },
+    mapping: { docNoField: 'PROJECT_ID', startDateField: 'BEGIN_DATE', endDateField: 'END_DATE', statusField: 'HOLD_STATUS', customerVendorField: 'IN_CHARGE' },
+  },
+  倉庫庫存: {
+    action: 'sync_inventory',
+    table: 'MM_BOM_BOH_V',
+    filters: { ROWNUM: '<= 10000' },
+    mapping: { itemCodeField: 'PART', descriptionField: 'PART_DESC', bookCountField: 'BOH', transitCountField: 'PO_ON_ROAD' },
+  },
+}
+
+function formatDate(ts: string): string {
   try {
     return new Date(ts).toLocaleString('zh-TW', { hour12: false })
   } catch {
@@ -83,10 +123,10 @@ function formatSyncedAt(ts: string): string {
   }
 }
 
-function renderCell(row: ErpPjSyncRow, col: ColDef): string {
+function renderCell(row: AnyRow, col: ColDef): string {
   const val = row[col.key]
   if (val === null || val === undefined || val === '') return '-'
-  if (col.key === 'synced_at') return formatSyncedAt(String(val))
+  if (col.date) return formatDate(String(val))
   if (typeof val === 'number') return String(val)
   return String(val)
 }
@@ -96,33 +136,8 @@ interface Props {
   title: string
 }
 
-// 每種 doc_type 對應的 sync_pj 參數（與 erp-sync/page.tsx 設定一致）
-const SYNC_CONFIG: Record<string, {
-  table: string
-  customColumn?: string
-  filters?: Record<string, string>
-  mapping: { docNoField: string; startDateField?: string; customerVendorField?: string; remarkField?: string }
-}> = {
-  銷售訂單: {
-    table: 'PJ_PROJECT',
-    customColumn: 'PROJECT_ID,BEGIN_DATE,SALES_NAME,TPN_PARTNER_ID',
-    filters: { PJT_TYPE: "= 'SO'" },
-    mapping: { docNoField: 'PROJECT_ID', startDateField: 'BEGIN_DATE', customerVendorField: 'TPN_PARTNER_ID', remarkField: 'SALES_NAME' },
-  },
-  製令單號: {
-    table: 'PJ_PROJECT',
-    filters: { PJT_TYPE: "= 'MO'" },
-    mapping: { docNoField: 'PROJECT_ID', startDateField: 'BEGIN_DATE', remarkField: 'IN_CHARGE' },
-  },
-  採購單號: {
-    table: 'PJ_PROJECT',
-    filters: { PJT_TYPE: "= 'PO'" },
-    mapping: { docNoField: 'PROJECT_ID', startDateField: 'BEGIN_DATE', customerVendorField: 'TPN_PARTNER_ID' },
-  },
-}
-
 export default function ErpDbTable({ docType, title }: Props) {
-  const [rows, setRows] = useState<ErpPjSyncRow[]>([])
+  const [rows, setRows] = useState<AnyRow[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [search, setSearch] = useState('')
@@ -132,29 +147,40 @@ export default function ErpDbTable({ docType, title }: Props) {
   const [syncMsg, setSyncMsg] = useState<string | null>(null)
 
   const cols = COL_MAP[docType] ?? []
+  const sourceCfg = SOURCE_MAP[docType]
+  const syncCfg = SYNC_ACTION_MAP[docType]
 
   const load = useCallback(async () => {
+    if (!sourceCfg) return
     setLoading(true)
     setError('')
     try {
-      const { data, error: err } = await supabase
-        .from('erp_pj_sync')
-        .select('*')
-        .eq('doc_type', docType)
-        .order('synced_at', { ascending: false })
+      let query
+      if (sourceCfg.from === 'erp_pj_sync') {
+        query = supabase.from('erp_pj_sync').select('*').eq('doc_type', sourceCfg.docType).order('synced_at', { ascending: false })
+      } else if (sourceCfg.from === 'erp_so_lines') {
+        query = supabase.from('erp_so_lines').select('*').order('project_id', { ascending: true }).order('line_no', { ascending: true })
+      } else if (sourceCfg.from === 'erp_mo_lines') {
+        query = supabase.from('erp_mo_lines').select('*').order('project_id', { ascending: true }).order('line_no', { ascending: true })
+      } else {
+        query = supabase.from('material_inventory_list').select('id,item_code,item_name,spec,book_count,physical_count,unit_of_measure,updated_at').order('item_code', { ascending: true })
+      }
+      const { data, error: err } = await query
       if (err) throw err
-      setRows((data as ErpPjSyncRow[]) ?? [])
-      if (data && data.length > 0) setSyncedAt((data[0] as ErpPjSyncRow).synced_at)
+      setRows((data as AnyRow[]) ?? [])
+      if (data && data.length > 0) {
+        const first = data[0] as AnyRow
+        setSyncedAt(String(first.synced_at ?? first.updated_at ?? ''))
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : '讀取失敗')
     } finally {
       setLoading(false)
     }
-  }, [docType])
+  }, [docType, sourceCfg])
 
   useEffect(() => { void load() }, [load])
 
-  // 切回分頁時自動重整（同步完後換頁 or 切 tab 回來）
   useEffect(() => {
     const onVisible = () => { if (document.visibilityState === 'visible') void load() }
     document.addEventListener('visibilitychange', onVisible)
@@ -162,22 +188,34 @@ export default function ErpDbTable({ docType, title }: Props) {
   }, [load])
 
   const handleSync = useCallback(async () => {
-    const cfg = SYNC_CONFIG[docType]
-    if (!cfg) return
+    if (!syncCfg) return
     setSyncing(true)
     setSyncMsg(null)
     try {
+      let body: Record<string, unknown>
+      if (syncCfg.action === 'sync_so' || syncCfg.action === 'sync_mo') {
+        body = { action: syncCfg.action }
+      } else if (syncCfg.action === 'sync_inventory') {
+        body = {
+          action: 'sync_inventory',
+          table: syncCfg.table,
+          ...(syncCfg.customColumn ? { customColumn: syncCfg.customColumn } : {}),
+          ...(syncCfg.filters ? { filters: syncCfg.filters } : {}),
+          mapping: syncCfg.mapping,
+        }
+      } else {
+        body = {
+          action: 'sync_pj',
+          table: syncCfg.table,
+          ...(syncCfg.filters ? { filters: syncCfg.filters } : {}),
+          docType,
+          mapping: syncCfg.mapping,
+        }
+      }
       const res = await fetch('/api/argoerp', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          action: 'sync_pj',
-          table: cfg.table,
-          ...(cfg.customColumn ? { customColumn: cfg.customColumn } : {}),
-          ...(cfg.filters ? { filters: cfg.filters } : {}),
-          docType,
-          mapping: cfg.mapping,
-        }),
+        body: JSON.stringify(body),
       })
       const json = await res.json() as { status: string; syncedCount?: number; error?: string }
       if (json.status === 'ok') {
@@ -191,17 +229,13 @@ export default function ErpDbTable({ docType, title }: Props) {
     } finally {
       setSyncing(false)
     }
-  }, [docType, load])
+  }, [docType, syncCfg, load])
 
   const filtered = rows.filter(r => {
     if (!search.trim()) return true
     const q = search.toLowerCase()
-    return (
-      r.doc_no.toLowerCase().includes(q) ||
-      (r.description ?? '').toLowerCase().includes(q) ||
-      (r.item_code ?? '').toLowerCase().includes(q) ||
-      (r.customer_vendor ?? '').toLowerCase().includes(q) ||
-      (r.remark ?? '').toLowerCase().includes(q)
+    return Object.values(r).some(v =>
+      typeof v === 'string' && v.toLowerCase().includes(q)
     )
   })
 
@@ -217,7 +251,7 @@ export default function ErpDbTable({ docType, title }: Props) {
             <h1 className="text-2xl font-bold text-white">{title}</h1>
             {syncedAt && (
               <p className="mt-1 text-xs text-slate-400">
-                最後同步：{formatSyncedAt(syncedAt)}
+                最後同步：{formatDate(syncedAt)}
               </p>
             )}
           </div>
@@ -236,7 +270,7 @@ export default function ErpDbTable({ docType, title }: Props) {
             >
               {loading ? '讀取中...' : '🔄 重新整理'}
             </button>
-            {SYNC_CONFIG[docType] && (
+            {syncCfg && (
               <button
                 onClick={() => void handleSync()}
                 disabled={syncing || loading}
