@@ -71,6 +71,21 @@ export default function MoSummaryPage() {
       // 初始化 moMachines from DB records
       const machineMap: Record<string, string> = {}
       list.forEach(r => { if (r.machine) machineMap[r.mo_number] = r.machine })
+      // 用新機台分配表覆蓋（新表為正式來源）
+      const moNums = list.map(r => r.mo_number).filter(Boolean)
+      if (moNums.length > 0) {
+        fetch(`/api/argoerp/mo-machine-assign?mo_numbers=${moNums.join(',')}`)
+          .then(r => r.json())
+          .then(j => {
+            if (j.success) {
+              ;(j.assignments as { mo_number: string; machine: string }[]).forEach(a => {
+                if (a.machine) machineMap[a.mo_number] = a.machine
+              })
+              setMoMachines({ ...machineMap })
+            }
+          })
+          .catch(() => {})
+      }
       setMoMachines(machineMap)
       // 同步一份到 localStorage 當備援（供 order-batch-export 頁離線時用）
       try { localStorage.setItem(STORAGE_KEY, JSON.stringify(list)) } catch {}
@@ -154,10 +169,11 @@ export default function MoSummaryPage() {
   }
   const setMoMachine = async (moNumber: string, machine: string) => {
     setMoMachines(prev => ({ ...prev, [moNumber]: machine }))
-    await fetch('/api/argoerp/mo-summary', {
-      method: 'PUT',
+    // 寫入新機台分配表（正式來源）
+    await fetch('/api/argoerp/mo-machine-assign', {
+      method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ mo_number: moNumber, fields: { machine } }),
+      body: JSON.stringify({ assignments: [{ mo_number: moNumber, machine }] }),
     }).catch(() => {})
   }
 

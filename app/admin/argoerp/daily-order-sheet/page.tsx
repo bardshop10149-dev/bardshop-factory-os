@@ -40,6 +40,8 @@ export interface SheetRow extends SourceRow {
   match_reason?: string | null
   // 批備料狀態（對應 argoerp_material_prep_log 最近一筆）
   material_prep_status?: '已備料' | '無需備料' | null
+  // 機台分配（對應 argoerp_mo_machine_assign）
+  machine?: string
 }
 
 interface SheetMeta {
@@ -174,6 +176,8 @@ export default function DailyOrderSheetPage() {
   const [editFactoryIdx, setEditFactoryIdx] = useState<number | null>(null)
   const [matching, setMatching] = useState(false)
   const [syncingMo, setSyncingMo] = useState(false)
+  const [machines, setMachines] = useState<string[]>([])
+  const [moMachines, setMoMachines] = useState<Record<string, string>>({})
 
   // ---- 讀取所有日期清單 ----
   const loadSheetList = useCallback(async () => {
@@ -211,6 +215,41 @@ export default function DailyOrderSheetPage() {
 
   useEffect(() => { loadSheetList() }, [loadSheetList])
   useEffect(() => { loadSheet(selectedDate) }, [selectedDate, loadSheet])
+
+  // 載入機台清單
+  useEffect(() => {
+    fetch('/api/argoerp/machines')
+      .then(r => r.json())
+      .then(j => { if (j.success) setMachines((j.machines as { name: string }[]).map(m => m.name)) })
+      .catch(() => {})
+  }, [])
+
+  // 當出單表載入後，載入對應製令的機台分配
+  useEffect(() => {
+    const moNums = [...new Set(sheetRows.map(r => r.mo_number).filter((v): v is string => !!v && v.startsWith('MO')))]
+    if (moNums.length === 0) return
+    fetch('/api/argoerp/mo-machine-assign')
+      .then(r => r.json())
+      .then(j => {
+        if (j.success) {
+          const map: Record<string, string> = {}
+          ;(j.assignments as { mo_number: string; machine: string }[]).forEach(a => {
+            if (a.machine) map[a.mo_number] = a.machine
+          })
+          setMoMachines(map)
+        }
+      })
+      .catch(() => {})
+  }, [sheetRows])
+
+  const setMoMachine = useCallback(async (moNumber: string, machine: string) => {
+    setMoMachines(prev => ({ ...prev, [moNumber]: machine }))
+    await fetch('/api/argoerp/mo-machine-assign', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ assignments: [{ mo_number: moNumber, machine }] }),
+    }).catch(() => {})
+  }, [])
 
   // ---- 解析貼上資料 ----
   const handleParse = useCallback(() => {
@@ -691,6 +730,7 @@ export default function DailyOrderSheetPage() {
                         <th className="px-3 py-2 border-b border-slate-800">序號</th>
                         <th className="px-3 py-2 border-b border-slate-800">製令單號</th>
                         <th className="px-3 py-2 border-b border-slate-800">批備料</th>
+                        <th className="px-3 py-2 border-b border-slate-800">機台</th>
                         <th className="px-3 py-2 border-b border-slate-800">狀態</th>
                         <th className="px-3 py-2 border-b border-slate-800">操作</th>
                       </tr>
@@ -756,6 +796,20 @@ export default function DailyOrderSheetPage() {
                                 <span className="px-2 py-0.5 rounded border text-xs bg-emerald-900/40 text-emerald-300 border-emerald-700/50">已備料</span>
                               ) : row.material_prep_status === '無需備料' ? (
                                 <span className="px-2 py-0.5 rounded border text-xs bg-slate-800 text-slate-400 border-slate-700">無需備料</span>
+                              ) : (
+                                <span className="text-slate-600 text-xs">—</span>
+                              )}
+                            </td>
+                            <td className="px-2 py-2">
+                              {row.mo_number ? (
+                                <select
+                                  value={moMachines[row.mo_number] || ''}
+                                  onChange={e => setMoMachine(row.mo_number!, e.target.value)}
+                                  className="bg-slate-800 border border-slate-600 text-slate-200 text-xs rounded px-2 py-1 focus:outline-none focus:border-cyan-500 min-w-[90px]"
+                                >
+                                  <option value="">— —</option>
+                                  {machines.map(m => <option key={m} value={m}>{m}</option>)}
+                                </select>
                               ) : (
                                 <span className="text-slate-600 text-xs">—</span>
                               )}
