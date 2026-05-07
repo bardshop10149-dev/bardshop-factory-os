@@ -799,6 +799,18 @@ function SyncCard({ docKey }: SyncCardProps) {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ action: 'sync_mo' }),
         })
+      } else if (isInventoryTab) {
+        res = await fetch('/api/argoerp', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            action: 'sync_inventory',
+            table: 'MM_BOM_BOH_V',
+            customColumn: 'PART,PART_DESC,BOH,PO_ON_ROAD',
+            filters: { ROWNUM: '<= 10000' },
+            mapping: { itemCodeField: 'PART', descriptionField: 'PART_DESC', bookCountField: 'BOH', transitCountField: 'PO_ON_ROAD' },
+          }),
+        })
       } else {
         const filtersObj: Record<string, string> = {}
         for (const { key, value } of cfg.filters) {
