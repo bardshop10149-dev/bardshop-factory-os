@@ -73,13 +73,22 @@ export async function POST(request: NextRequest) {
   }
 }
 
-// PATCH: 更新特定列的 mo_status（由訂單批量轉製令頁面呼叫）
-// Body: { sheet_date: 'YYYY-MM-DD', updates: { row_key: string, mo_status: string }[] }
+// PATCH: 更新特定列的狀態（mo_status / mo_number / 序號比對 / 批備料）
+// Body: { sheet_date: 'YYYY-MM-DD', updates: [{ row_key, mo_status?, mo_number?, match_status?, match_line_no?, match_pdl_seq?, match_reason?, material_prep_status? }] }
 export async function PATCH(request: NextRequest) {
   try {
     const body = await request.json() as {
       sheet_date?: string
-      updates?: { row_key: string; mo_status: string; mo_number?: string }[]
+      updates?: Array<{
+        row_key: string
+        mo_status?: string
+        mo_number?: string
+        match_status?: string | null
+        match_line_no?: string | null
+        match_pdl_seq?: number | null
+        match_reason?: string | null
+        material_prep_status?: string | null
+      }>
     }
     const { sheet_date, updates } = body
     if (!sheet_date || !Array.isArray(updates) || updates.length === 0) {
@@ -104,7 +113,16 @@ export async function PATCH(request: NextRequest) {
     const updatedRows = currentRows.map(row => {
       const upd = updateMap.get(row.row_key as string)
       if (!upd) return row
-      return { ...row, mo_status: upd.mo_status, ...(upd.mo_number ? { mo_number: upd.mo_number } : {}) }
+      const merged = { ...row }
+      // 只覆寫 updates 裡明確帶入的欄位
+      if (upd.mo_status !== undefined) merged.mo_status = upd.mo_status
+      if (upd.mo_number !== undefined) merged.mo_number = upd.mo_number
+      if (upd.match_status !== undefined) merged.match_status = upd.match_status
+      if (upd.match_line_no !== undefined) merged.match_line_no = upd.match_line_no
+      if (upd.match_pdl_seq !== undefined) merged.match_pdl_seq = upd.match_pdl_seq
+      if (upd.match_reason !== undefined) merged.match_reason = upd.match_reason
+      if (upd.material_prep_status !== undefined) merged.material_prep_status = upd.material_prep_status
+      return merged
     })
 
     const { error: updateError } = await supabase

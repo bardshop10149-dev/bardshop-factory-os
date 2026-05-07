@@ -716,7 +716,7 @@ export default function OrderBatchExportPage() {
         alert(`找不到 ${date} 的出單表，請先到「每日出單表」頁面儲存資料。`)
         return
       }
-      const sheetRows = (json.sheet.rows ?? []) as Array<SourceRow & { mo_status?: string }>
+      const sheetRows = (json.sheet.rows ?? []) as Array<SourceRow & { mo_status?: string; match_status?: string; match_line_no?: string | null; match_pdl_seq?: number | null; match_reason?: string | null }>
       const rows: SourceRow[] = sheetRows.map(r => ({
         order_number: r.order_number, doc_type: r.doc_type, factory: r.factory,
         receiver: r.receiver, is_sample: r.is_sample, has_material: r.has_material,
@@ -729,7 +729,23 @@ export default function OrderBatchExportPage() {
       setSourceRows(rows)
       setSelectedRows(new Set())
       setLoadedFromSheetDate(date)
-      buildSoMatches(rows)
+
+      // 若每日出單表已有預先比對結果，直接套用，不必重跑
+      const hasPrematched = sheetRows.some(r => r.match_status)
+      if (hasPrematched) {
+        const presetMatches: SoMatchResult[] = sheetRows.map(r => {
+          const status = (r.match_status as SoMatchResult['status']) || 'no_order'
+          return {
+            line_no: r.match_line_no ?? null,
+            pdl_seq: r.match_pdl_seq ?? null,
+            status,
+            reason: r.match_reason ?? '',
+          }
+        })
+        setSoMatchResults(presetMatches)
+      } else {
+        buildSoMatches(rows)
+      }
     } catch (e) {
       alert(`載入出單表失敗：${e}`)
     }

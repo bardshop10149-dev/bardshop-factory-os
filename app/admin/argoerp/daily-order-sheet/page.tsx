@@ -1,6 +1,7 @@
 'use client'
 
 import { useState, useEffect, useCallback } from 'react'
+import { supabase } from '../../../../lib/supabaseClient'
 
 // ===== 型別定義（與 order-batch-export 一致）=====
 interface SourceRow {
@@ -26,10 +27,19 @@ interface SourceRow {
   pm_note: string
 }
 
+export type MatchStatus = 'matched' | 'no_order' | 'no_qty_match'
+
 export interface SheetRow extends SourceRow {
   row_key: string
   mo_status: '已匯入製令' | '暫緩區' | null
   mo_number?: string
+  // 序號比對結果（對應 erp_so_lines）
+  match_status?: MatchStatus | null
+  match_line_no?: string | null
+  match_pdl_seq?: number | null
+  match_reason?: string | null
+  // 批備料狀態（對應 argoerp_material_prep_log 最近一筆）
+  material_prep_status?: '已備料' | '無需備料' | null
 }
 
 interface SheetMeta {
@@ -162,6 +172,8 @@ export default function DailyOrderSheetPage() {
   const [saving, setSaving] = useState(false)
   const [saveMsg, setSaveMsg] = useState('')
   const [editFactoryIdx, setEditFactoryIdx] = useState<number | null>(null)
+  const [matching, setMatching] = useState(false)
+  const [syncingMo, setSyncingMo] = useState(false)
 
   // ---- 讀取所有日期清單 ----
   const loadSheetList = useCallback(async () => {
@@ -276,6 +288,141 @@ export default function DailyOrderSheetPage() {
     setSheetRows(prev => prev.filter((_, i) => i !== idx))
   }, [])
 
+  // ---- 序號比對：對 erp_so_lines 比對品項+數量 → 寫回 match_* 欄位後立即儲存 ----
+  const runSerialMatch = useCallback(async () => {
+    if (sheetRows.length === 0) return
+    setMatching(true)
+    setSaveMsg('')
+    try {
+      const orderNumbers = [...new Set(sheetRows.map(r => r.order_number).filter(Boolean))]
+      const { data: soLines, error } = await supabase
+        .from('erp_so_lines')
+        .select('project_id, line_no, mbp_part, order_qty_oru, pdl_seq')
+        .in('project_id', orderNumbers.length > 0 ? orderNumbers : ['__none__'])
+      if (error) throw error
+      const lines = soLines ?? []
+      const soProjectIds = new Set(lines.map(l => l.project_id))
+      const candidateMap = new Map<string, Array<{ line_no: string; pdl_seq: number | null }>>()
+      for (const line of lines) {
+        const qty = Number(line.order_qty_oru ?? 0)
+        const key = `${line.project_id}|${line.mbp_part ?? ''}|${qty}`
+        if (!candidateMap.has(key)) candidateMap.set(key, [])
+        candidateMap.get(key)!.push({ line_no: String(line.line_no ?? ''), pdl_seq: line.pdl_seq != null ? Number(line.pdl_seq) : null })
+      }
+      for (const arr of candidateMap.values()) arr.sort((a, b) => (Number(a.line_no) || 0) - (Number(b.line_no) || 0))
+      const usageCounter = new Map<string, number>()
+
+      const next: SheetRow[] = sheetRows.map(src => {
+        if (!src.order_number || !soProjectIds.has(src.order_number)) {
+          return { ...src, match_status: 'no_order', match_line_no: null, match_pdl_seq: null, match_reason: '無對應來源單號' }
+        }
+        const qty = parseFloat(String(src.quantity).replace(/,/g, '')) || 0
+        const key = `${src.order_number}|${src.item_code}|${qty}`
+        const candidates = candidateMap.get(key) ?? []
+        if (candidates.length === 0) {
+          return { ...src, match_status: 'no_qty_match', match_line_no: null, match_pdl_seq: null, match_reason: '有來源單號但無對應數量' }
+        }
+        const used = usageCounter.get(key) ?? 0
+        const candidate = candidates[Math.min(used, candidates.length - 1)]
+        usageCounter.set(key, used + 1)
+        return { ...src, match_status: 'matched', match_line_no: candidate.line_no, match_pdl_seq: candidate.pdl_seq, match_reason: '' }
+      })
+      setSheetRows(next)
+
+      // 立即儲存
+      const res = await fetch('/api/argoerp/daily-order-sheet', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sheet_date: selectedDate, raw_text: currentRawText, rows: next }),
+      })
+      const json = await res.json()
+      if (!res.ok || !json.success) throw new Error(json.error || `HTTP ${res.status}`)
+      const matched = next.filter(r => r.match_status === 'matched').length
+      setSaveMsg(`✅ 序號比對完成並儲存：成功 ${matched} / ${next.length}`)
+      setTimeout(() => setSaveMsg(''), 5000)
+    } catch (e) {
+      setSaveMsg(`❌ 比對失敗：${e instanceof Error ? e.message : String(e)}`)
+      setTimeout(() => setSaveMsg(''), 6000)
+    } finally {
+      setMatching(false)
+    }
+  }, [sheetRows, selectedDate, currentRawText])
+
+  // ---- 同步製令狀態：查 argoerp_mo_upload_log（source_order+product_code）+ argoerp_material_prep_log（mo_number）----
+  const runMoSync = useCallback(async () => {
+    if (sheetRows.length === 0) return
+    setSyncingMo(true)
+    setSaveMsg('')
+    try {
+      const orderNumbers = [...new Set(sheetRows.map(r => r.order_number).filter(Boolean))]
+      // 1. 查所有此頁工單編號的製令上傳紀錄
+      const { data: moLogs, error: moErr } = await supabase
+        .from('argoerp_mo_upload_log')
+        .select('mo_number, source_order, product_code, planned_qty, uploaded_at')
+        .in('source_order', orderNumbers.length > 0 ? orderNumbers : ['__none__'])
+        .order('uploaded_at', { ascending: false })
+      if (moErr) throw moErr
+      // 以 source_order|product_code|planned_qty 為 key，取最新一筆
+      const moMap = new Map<string, { mo_number: string }>()
+      for (const log of (moLogs ?? [])) {
+        const qty = String(log.planned_qty ?? '').trim()
+        const k1 = `${log.source_order}|${log.product_code}|${qty}`
+        const k2 = `${log.source_order}|${log.product_code}` // fallback (數量未必字串相等)
+        if (!moMap.has(k1)) moMap.set(k1, { mo_number: log.mo_number })
+        if (!moMap.has(k2)) moMap.set(k2, { mo_number: log.mo_number })
+      }
+
+      // 2. 對每列嘗試找出 mo_number
+      const next: SheetRow[] = sheetRows.map(r => {
+        if (r.mo_number) return r // 已有就不覆蓋
+        const qty = String(r.quantity).trim()
+        const k1 = `${r.order_number}|${r.item_code}|${qty}`
+        const hit = moMap.get(k1) ?? moMap.get(`${r.order_number}|${r.item_code}`)
+        if (hit) return { ...r, mo_number: hit.mo_number, mo_status: '已匯入製令' as const }
+        return r
+      })
+
+      // 3. 對所有有 mo_number 的列查批備料狀態
+      const moNumbers = [...new Set(next.map(r => r.mo_number).filter((v): v is string => !!v))]
+      if (moNumbers.length > 0) {
+        const { data: prepLogs, error: prepErr } = await supabase
+          .from('argoerp_material_prep_log')
+          .select('mo_number, status, logged_at')
+          .in('mo_number', moNumbers)
+          .order('logged_at', { ascending: false })
+        if (prepErr) throw prepErr
+        const prepMap = new Map<string, '已備料' | '無需備料'>()
+        for (const log of (prepLogs ?? [])) {
+          if (!prepMap.has(log.mo_number)) prepMap.set(log.mo_number, log.status as '已備料' | '無需備料')
+        }
+        for (let i = 0; i < next.length; i++) {
+          const moNo = next[i].mo_number
+          if (moNo && prepMap.has(moNo)) next[i] = { ...next[i], material_prep_status: prepMap.get(moNo)! }
+        }
+      }
+
+      setSheetRows(next)
+
+      // 立即儲存
+      const res = await fetch('/api/argoerp/daily-order-sheet', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sheet_date: selectedDate, raw_text: currentRawText, rows: next }),
+      })
+      const json = await res.json()
+      if (!res.ok || !json.success) throw new Error(json.error || `HTTP ${res.status}`)
+      const newMo = next.filter((r, i) => r.mo_number && !sheetRows[i]?.mo_number).length
+      const prepCount = next.filter(r => r.material_prep_status).length
+      setSaveMsg(`✅ 製令狀態同步完成：新增 ${newMo} 筆製令連結，批備料狀態 ${prepCount} 筆`)
+      setTimeout(() => setSaveMsg(''), 5000)
+    } catch (e) {
+      setSaveMsg(`❌ 同步失敗：${e instanceof Error ? e.message : String(e)}`)
+      setTimeout(() => setSaveMsg(''), 6000)
+    } finally {
+      setSyncingMo(false)
+    }
+  }, [sheetRows, selectedDate, currentRawText])
+
   // ---- 切換廠別 ----
   const handleChangeFactory = useCallback((idx: number, factory: 'T' | 'C' | 'O') => {
     setSheetRows(prev => prev.map((r, i) => {
@@ -317,6 +464,22 @@ export default function DailyOrderSheetPage() {
             </div>
             {hasData && (
               <>
+                <button
+                  onClick={runSerialMatch}
+                  disabled={matching || syncingMo || saving}
+                  className="px-4 py-2 rounded-lg bg-indigo-700 hover:bg-indigo-600 disabled:bg-slate-700 text-white text-sm font-medium transition-colors"
+                  title="比對 erp_so_lines（品項+數量）寫回序號 LINE_NO，立即儲存"
+                >
+                  {matching ? '比對中…' : '🔍 序號比對'}
+                </button>
+                <button
+                  onClick={runMoSync}
+                  disabled={matching || syncingMo || saving}
+                  className="px-4 py-2 rounded-lg bg-violet-700 hover:bg-violet-600 disabled:bg-slate-700 text-white text-sm font-medium transition-colors"
+                  title="從製令上傳紀錄＋批備料紀錄回填本表，立即儲存"
+                >
+                  {syncingMo ? '同步中…' : '🔄 同步製令/批備料'}
+                </button>
                 <button
                   onClick={() => { setShowPasteArea(v => !v); setRawText('') }}
                   className="px-4 py-2 rounded-lg bg-cyan-700 hover:bg-cyan-600 text-white text-sm font-medium transition-colors"
@@ -481,6 +644,9 @@ export default function DailyOrderSheetPage() {
                         <th className="px-3 py-2 border-b border-slate-800">數量</th>
                         <th className="px-3 py-2 border-b border-slate-800">交付日期</th>
                         <th className="px-3 py-2 border-b border-slate-800">客戶</th>
+                        <th className="px-3 py-2 border-b border-slate-800">序號</th>
+                        <th className="px-3 py-2 border-b border-slate-800">製令單號</th>
+                        <th className="px-3 py-2 border-b border-slate-800">批備料</th>
                         <th className="px-3 py-2 border-b border-slate-800">狀態</th>
                         <th className="px-3 py-2 border-b border-slate-800">操作</th>
                       </tr>
@@ -524,10 +690,36 @@ export default function DailyOrderSheetPage() {
                             <td className="px-3 py-2 text-slate-300 whitespace-nowrap">{row.delivery_date}</td>
                             <td className="px-3 py-2 text-slate-400 max-w-[120px] truncate" title={row.customer}>{row.customer}</td>
                             <td className="px-3 py-2">
+                              {row.match_status === 'matched' && row.match_line_no ? (
+                                <span className="px-2 py-0.5 rounded border text-xs font-mono bg-emerald-900/40 text-emerald-300 border-emerald-700/50">{row.match_line_no}</span>
+                              ) : row.match_status === 'no_order' ? (
+                                <span className="px-2 py-0.5 rounded border text-xs bg-red-900/30 text-red-300 border-red-800/50" title={row.match_reason ?? ''}>無單號</span>
+                              ) : row.match_status === 'no_qty_match' ? (
+                                <span className="px-2 py-0.5 rounded border text-xs bg-amber-900/30 text-amber-300 border-amber-700/50" title={row.match_reason ?? ''}>數量不符</span>
+                              ) : (
+                                <span className="text-slate-600 text-xs">—</span>
+                              )}
+                            </td>
+                            <td className="px-3 py-2 font-mono text-xs">
+                              {row.mo_number ? (
+                                <span className="text-violet-300">{row.mo_number}</span>
+                              ) : (
+                                <span className="text-slate-600">—</span>
+                              )}
+                            </td>
+                            <td className="px-3 py-2">
+                              {row.material_prep_status === '已備料' ? (
+                                <span className="px-2 py-0.5 rounded border text-xs bg-emerald-900/40 text-emerald-300 border-emerald-700/50">已備料</span>
+                              ) : row.material_prep_status === '無需備料' ? (
+                                <span className="px-2 py-0.5 rounded border text-xs bg-slate-800 text-slate-400 border-slate-700">無需備料</span>
+                              ) : (
+                                <span className="text-slate-600 text-xs">—</span>
+                              )}
+                            </td>
+                            <td className="px-3 py-2">
                               {statusInfo ? (
                                 <span className={`px-2 py-0.5 rounded border text-xs font-medium ${statusInfo.cls}`}>
                                   {statusInfo.label}
-                                  {row.mo_number && <span className="ml-1 opacity-70">{row.mo_number}</span>}
                                 </span>
                               ) : (
                                 <span className="px-2 py-0.5 rounded border border-slate-700 text-slate-500 text-xs">尚未轉單</span>
