@@ -1647,6 +1647,7 @@ export default function ErpSyncPage() {
             body: JSON.stringify({
               action: 'sync_inventory',
               table: 'MM_BOM_BOH_V',
+              customColumn: 'PART,PART_DESC,BOH,PO_ON_ROAD',
               filters: { ROWNUM: '<= 10000' },
               mapping: { itemCodeField: 'PART', descriptionField: 'PART_DESC', bookCountField: 'BOH', transitCountField: 'PO_ON_ROAD' },
             }) })

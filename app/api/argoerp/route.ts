@@ -581,7 +581,7 @@ export async function POST(request: NextRequest) {
         APIKEY3: keys.APIKEY3,
         SEGMENT,
         TABLE: 'PJ_PROJECT,PJ_PROJECTDETAIL',
-        SHOWNULLCOLUMN: 'N',
+        SHOWNULLCOLUMN: 'Y',  // JOIN 查詢不可用 'N'，否則 null 欄被剔除後 SELECT 變空 → ORA-00923 FROM keyword not found
         CUSTOMCOLUMN: [
           'PJ_PROJECT.PROJECT_ID',
           'PJ_PROJECT.BEGIN_DATE',
