@@ -369,6 +369,7 @@ export default function DailyOrderSheetPage() {
       if (moErr) throw moErr
       const moMap = new Map<string, { mo_number: string }>()
       for (const log of (moLogs ?? [])) {
+        if (!log.mo_number?.startsWith('MO')) continue  // 排除非製令單號的資料
         const qty = String(log.planned_qty ?? '').trim()
         const k1 = `${log.source_order}|${log.product_code}|${qty}`
         const k2 = `${log.source_order}|${log.product_code}`
@@ -387,6 +388,7 @@ export default function DailyOrderSheetPage() {
       const erpMoMap = new Map<string, string>()  // key → mo_number (project_id)
       for (const mo of (erp_mo ?? [])) {
         if (!mo.source_order || !mo.mbp_part || !mo.project_id) continue
+        if (!mo.project_id.startsWith('MO')) continue  // 排除非製令單號的資料
         const k = `${mo.source_order}|${mo.mbp_part}`
         // 若已有值且 project_id 更新（字典序更大）就取代
         if (!erpMoMap.has(k) || (mo.project_id > (erpMoMap.get(k) ?? ''))) {
