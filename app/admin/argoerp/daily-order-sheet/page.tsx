@@ -383,17 +383,21 @@ export default function DailyOrderSheetPage() {
         .select('project_id, source_order, mbp_part, order_qty, line_no')
         .in('source_order', noNone)
       if (erpErr) throw erpErr
-      // erp_mo_lines.project_id 就是製令單號 (e.g. MOT260506...)
-      // 以 source_order|mbp_part 為 key，多筆取 project_id 最新（依 project_id 字母排序倒序取最後）
-      const erpMoMap = new Map<string, string>()  // key → mo_number (project_id)
+      // erp_mo_lines.project_id 就是製令單號 (e.g. MOT260507004 02)
+      // 製令單號末 2 碼即為對應序號（e.g. 01=序號1, 02=序號2）
+      // key = source_order|mbp_part|末2碼  →  精準對應序號
+      // 同時維護 baseMap（唯一製令時才允許無序號 fallback）
+      const erpMoMap = new Map<string, string>()       // source_order|mbp_part|seq → mo_number
+      const erpMoBaseMap = new Map<string, string[]>() // source_order|mbp_part → [mo_numbers]
       for (const mo of (erp_mo ?? [])) {
         if (!mo.source_order || !mo.mbp_part || !mo.project_id) continue
         if (!mo.project_id.startsWith('MO')) continue  // 排除非製令單號的資料
-        const k = `${mo.source_order}|${mo.mbp_part}`
-        // 若已有值且 project_id 更新（字典序更大）就取代
-        if (!erpMoMap.has(k) || (mo.project_id > (erpMoMap.get(k) ?? ''))) {
-          erpMoMap.set(k, mo.project_id)
-        }
+        const seq = mo.project_id.slice(-2)             // 末 2 碼 = 序號 (e.g. "01", "02")
+        const seqKey = `${mo.source_order}|${mo.mbp_part}|${seq}`
+        if (!erpMoMap.has(seqKey)) erpMoMap.set(seqKey, mo.project_id)
+        const baseKey = `${mo.source_order}|${mo.mbp_part}`
+        const arr = erpMoBaseMap.get(baseKey) ?? []
+        if (!arr.includes(mo.project_id)) erpMoBaseMap.set(baseKey, [...arr, mo.project_id])
       }
 
       // 3. 對每列嘗試找出 mo_number（不覆蓋已有值；但若現有值非 MO 開頭則視為無效重新比對）
@@ -404,9 +408,17 @@ export default function DailyOrderSheetPage() {
         const k1 = `${r.order_number}|${r.item_code}|${qty}`
         const logHit = moMap.get(k1) ?? moMap.get(`${r.order_number}|${r.item_code}`)
         if (logHit) return { ...r, mo_number: logHit.mo_number, mo_status: '已匯入製令' as const }
-        // fallback: 查 erp_mo_lines
-        const erpHit = erpMoMap.get(`${r.order_number}|${r.item_code}`)
-        if (erpHit) return { ...r, mo_number: erpHit, mo_status: '已匯入製令' as const }
+        // fallback: 查 erp_mo_lines，優先以序號（match_line_no 末2碼）精準比對
+        const matchSeq = r.match_line_no
+          ? String(parseInt(r.match_line_no, 10)).padStart(2, '0')
+          : null
+        const erpHitBySeq = matchSeq
+          ? erpMoMap.get(`${r.order_number}|${r.item_code}|${matchSeq}`)
+          : undefined
+        if (erpHitBySeq) return { ...r, mo_number: erpHitBySeq, mo_status: '已匯入製令' as const }
+        // 若該 SO+品項只有唯一一筆製令（不需序號也能確定），允許 fallback
+        const baseHits = erpMoBaseMap.get(`${r.order_number}|${r.item_code}`) ?? []
+        if (baseHits.length === 1) return { ...r, mo_number: baseHits[0], mo_status: '已匯入製令' as const }
         // 若原本有非 MO 開頭的無效值，清除它
         if (r.mo_number && !r.mo_number.startsWith('MO')) {
           return { ...r, mo_number: undefined, mo_status: null, material_prep_status: null }
