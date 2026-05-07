@@ -571,12 +571,14 @@ function factoryLabel(factory: 'T' | 'C' | 'O'): string {
 
 // ==================== 元件 ====================
 export default function OrderBatchExportPage() {
-  const [pasteText, setPasteText] = useState('')
   const [sourceRows, setSourceRows] = useState<SourceRow[]>([])
-  const [parseError, setParseError] = useState('')
   const [selectedRows, setSelectedRows] = useState<Set<number>>(new Set())
-  const [showPasteArea, setShowPasteArea] = useState(true)
   const [viewMode, setViewMode] = useState<'source' | 'export'>('source')
+  // ---- 每日出單表載入 ----
+  const [availableSheetDates, setAvailableSheetDates] = useState<{ sheet_date: string; row_count: number }[]>([])
+  const [sheetDatesLoading, setSheetDatesLoading] = useState(false)
+  const [loadedFromSheetDate, setLoadedFromSheetDate] = useState<string | null>(null)
+  const [sheetPickerDate, setSheetPickerDate] = useState<string>('')
   const [exportFormat, setExportFormat] = useState<'csv' | 'xlsx'>('csv')
   const [saveMsg, setSaveMsg] = useState('')
   const [importingFactory, setImportingFactory] = useState<'T' | 'C' | 'O' | null>(null)
@@ -671,11 +673,28 @@ export default function OrderBatchExportPage() {
     const failed = loadFailedImports()
     if (saved.length > 0) {
       setSourceRows(saved)
-      setShowPasteArea(false)
     }
     if (failed.length > 0) {
       setFailedImports(failed)
     }
+  }, [])
+
+  // 載入每日出單表日期清單
+  useEffect(() => {
+    setSheetDatesLoading(true)
+    fetch('/api/argoerp/daily-order-sheet')
+      .then(r => r.json())
+      .then(json => {
+        if (json.success) {
+          setAvailableSheetDates(json.sheets ?? [])
+          if (!sheetPickerDate && json.sheets?.length > 0) {
+            setSheetPickerDate(json.sheets[0].sheet_date)
+          }
+        }
+      })
+      .catch(() => {})
+      .finally(() => setSheetDatesLoading(false))
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   // 自動暫存
@@ -687,82 +706,57 @@ export default function OrderBatchExportPage() {
     saveFailedImports(failedImports)
   }, [failedImports])
 
-  // ---- 解析來源資料 ----
-  const handleParse = useCallback(() => {
-    setParseError('')
-    const text = pasteText.trim()
-    if (!text) { setParseError('請先貼上資料'); return }
-
-    // 使用支援引號欄位的 TSV 解析器（處理含 Tab/換行的儲存格）
-    const allRows = parseTSV(text)
-    if (allRows.length === 0) { setParseError('未偵測到有效資料行'); return }
-
-    // 偵測 header 行（包含任一關鍵欄位名稱就跳過）
-    // 跳過標題列：檢查每一行開頭，若不像工單編號就當 header 跳過
-    let startIdx = 0
-    const headerKeywords = [
-      '工單編號', '品項編碼', '單據種類', '品名/規格', '交付日期', '訂單狀態',
-      '生產廠別', '承辦人', '開單人員', '客戶', '美編', '序號', '備註',
-    ]
-    for (let h = 0; h < Math.min(allRows.length, 3); h++) {
-      const rowCells = allRows[h]
-      const lineText = rowCells.join('\t')
-      const firstCell = rowCells[0]?.trim() ?? ''
-      // 判斷是否為標題行：含關鍵字 或 第一格不像工單編號（RO/SO 開頭＋數字）
-      const looksLikeOrderNo = /^[A-Za-z]{1,4}\d/.test(firstCell)
-      if (headerKeywords.some(kw => lineText.includes(kw)) || (!looksLikeOrderNo && h === startIdx)) {
-        startIdx = h + 1
-      } else {
-        break
+  // ---- 從每日出單表載入資料 ----
+  const handleLoadFromSheet = useCallback(async (date: string) => {
+    if (!date) return
+    try {
+      const res = await fetch(`/api/argoerp/daily-order-sheet?date=${date}`)
+      const json = await res.json()
+      if (!json.success || !json.sheet) {
+        alert(`找不到 ${date} 的出單表，請先到「每日出單表」頁面儲存資料。`)
+        return
       }
+      const sheetRows = (json.sheet.rows ?? []) as Array<SourceRow & { mo_status?: string }>
+      const rows: SourceRow[] = sheetRows.map(r => ({
+        order_number: r.order_number, doc_type: r.doc_type, factory: r.factory,
+        receiver: r.receiver, is_sample: r.is_sample, has_material: r.has_material,
+        designer: r.designer, customer: r.customer, line_nickname: r.line_nickname,
+        handler: r.handler, issuer: r.issuer, item_code: r.item_code,
+        item_name: r.item_name, note: r.note, quantity: r.quantity,
+        delivery_date: r.delivery_date, plate_count: r.plate_count,
+        upload_ro: r.upload_ro, order_status: r.order_status, pm_note: r.pm_note,
+      }))
+      setSourceRows(rows)
+      setSelectedRows(new Set())
+      setLoadedFromSheetDate(date)
+      buildSoMatches(rows)
+    } catch (e) {
+      alert(`載入出單表失敗：${e}`)
     }
+  }, [buildSoMatches])
 
-    const parsed: SourceRow[] = []
-    for (let i = startIdx; i < allRows.length; i++) {
-      const cells = allRows[i]
-      const docType = (cells[2] ?? '').trim()
-      const row: SourceRow = {
-        order_number: (cells[0] ?? '').trim(),
-        // cells[1] 是空欄，跳過
-        doc_type: docType,
-        factory: detectFactory(docType),
-        receiver: (cells[3] ?? '').trim(),
-        is_sample: (cells[4] ?? '').trim(),
-        has_material: (cells[5] ?? '').trim(),
-        designer: (cells[6] ?? '').trim(),
-        customer: (cells[7] ?? '').trim(),
-        line_nickname: (cells[8] ?? '').trim(),
-        handler: (cells[9] ?? '').trim(),
-        issuer: (cells[10] ?? '').trim(),
-        item_code: (cells[11] ?? '').trim(),
-        item_name: (cells[12] ?? '').trim(),
-        note: (cells[13] ?? '').trim(),
-        quantity: (cells[14] ?? '').trim(),
-        delivery_date: (cells[15] ?? '').trim(),
-        plate_count: (cells[16] ?? '').trim(),
-        upload_ro: (cells[17] ?? '').trim(),
-        order_status: (cells[18] ?? '').trim(),
-        pm_note: (cells[19] ?? '').trim(),
-      }
-      // 至少要有工單編號或品項編碼才算有效
-      if (row.order_number || row.item_code) {
-        parsed.push(row)
-      }
+  // 更新每日出單表列狀態
+  const updateSheetRowStatuses = useCallback(async (
+    sheetDate: string,
+    rows: SourceRow[],
+    status: '已匯入製令' | '暫緩區',
+    moNumbers?: string[]
+  ) => {
+    try {
+      const updates = rows.map((r, i) => ({
+        row_key: createSourceRowKey(r),
+        mo_status: status,
+        ...(moNumbers?.[i] ? { mo_number: moNumbers[i] } : {}),
+      }))
+      await fetch('/api/argoerp/daily-order-sheet', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sheet_date: sheetDate, updates }),
+      })
+    } catch (e) {
+      console.warn('[出單表狀態更新] 失敗（不影響主流程）', e)
     }
-
-    if (parsed.length === 0) {
-      setParseError('未解析到有效資料，請確認資料是從 Excel 以 Tab 分隔複製')
-      return
-    }
-
-    setSourceRows(prev => {
-      const nextRows = [...prev, ...parsed]
-      buildSoMatches(nextRows)
-      return nextRows
-    })
-    setPasteText('')
-    setShowPasteArea(false)
-  }, [pasteText, buildSoMatches])
+  }, [])
 
   // ---- 切換選取列的廠別 ----
   const handleToggleFactory = useCallback((target: 'T' | 'C' | 'O') => {
@@ -921,6 +915,10 @@ export default function OrderBatchExportPage() {
             const importedKeys = new Set(filteredRows.map(createSourceRowKey))
             setSourceRows(prev => prev.filter(r => !importedKeys.has(createSourceRowKey(r))))
             setSelectedRows(new Set())
+            if (loadedFromSheetDate) {
+              updateSheetRowStatuses(loadedFromSheetDate, filteredRows, '已匯入製令',
+                records.map(r => r.mo_number))
+            }
             const warningMsg = `⚠️ ${factoryLabel(factory)} ${records.length} 筆製令已存在於 ERP（跳過重複上傳），已補存至製令總表`
             setSaveMsg(warningMsg)
             alert(warningMsg)
@@ -970,6 +968,12 @@ export default function OrderBatchExportPage() {
         }),
       }).catch(err => console.warn('[製令上傳紀錄] 寫入失敗（不影響主流程）', err))
       setFailedImports(prev => removeFailedImportsByRows(prev, filteredRows))
+
+      // 更新每日出單表列狀態
+      if (loadedFromSheetDate) {
+        updateSheetRowStatuses(loadedFromSheetDate, filteredRows, '已匯入製令',
+          records.map(r => r.mo_number))
+      }
 
       // 從主清單移除已成功匯入的訂單，避免重複匯入
       const importedKeys = new Set(filteredRows.map(createSourceRowKey))
@@ -1064,19 +1068,8 @@ export default function OrderBatchExportPage() {
     const failedRows = failedImports.map(item => item.row)
     setSourceRows(prev => mode === 'replace' ? failedRows : mergeSourceRows(prev, failedRows))
     setSelectedRows(new Set())
-    setShowPasteArea(false)
     setViewMode('source')
     setSaveMsg(mode === 'replace' ? `✅ 已載入 ${failedRows.length} 筆失敗資料到主清單` : `✅ 已將 ${failedRows.length} 筆失敗資料加入主清單`)
-    setTimeout(() => setSaveMsg(''), 4000)
-  }, [failedImports])
-
-  const handleSendFailedToPasteArea = useCallback(() => {
-    if (failedImports.length === 0) return
-
-    setPasteText(sourceRowsToTsv(failedImports.map(item => item.row)))
-    setShowPasteArea(true)
-    setViewMode('source')
-    setSaveMsg(`✅ 已將 ${failedImports.length} 筆失敗資料送回貼上區，可直接修改後重新解析`)
     setTimeout(() => setSaveMsg(''), 4000)
   }, [failedImports])
 
@@ -1246,6 +1239,9 @@ export default function OrderBatchExportPage() {
       const json = await res.json()
       const errText = typeof json.error === 'string' ? json.error : (json.error ? JSON.stringify(json.error) : `HTTP ${res.status}`)
       if (!res.ok || !json.success) throw new Error(errText)
+      if (loadedFromSheetDate) {
+        updateSheetRowStatuses(loadedFromSheetDate, moving, '暫緩區')
+      }
       setSourceRows(prev => prev.filter((_, i) => !selectedRows.has(i)))
       setSelectedRows(new Set())
     } catch (e) {
@@ -1264,8 +1260,8 @@ export default function OrderBatchExportPage() {
   const handleClearAll = useCallback(() => {
     setSourceRows([])
     setSelectedRows(new Set())
+    setLoadedFromSheetDate(null)
     localStorage.removeItem(STORAGE_KEY)
-    setShowPasteArea(true)
   }, [])
 
   const toggleSelectAll = useCallback(() => {
@@ -1323,12 +1319,37 @@ export default function OrderBatchExportPage() {
             {manualMoMsg && (
               <span className={`px-3 py-2 text-sm ${manualMoMsg.startsWith('❌') ? 'text-red-400' : 'text-emerald-400'}`}>{manualMoMsg}</span>
             )}
-            <button
-              onClick={() => setShowPasteArea(v => !v)}
-              className="px-4 py-2 rounded-lg bg-slate-800 border border-slate-700 text-slate-300 hover:bg-slate-700 hover:text-white transition-colors text-sm"
-            >
-              {showPasteArea ? '收合貼上區' : '📋 貼上資料'}
-            </button>
+            {/* 每日出單表選擇器 */}
+            {sheetDatesLoading ? (
+              <span className="text-slate-500 text-sm px-2">讀取出單表…</span>
+            ) : (
+              <>
+                <select
+                  value={sheetPickerDate}
+                  onChange={e => setSheetPickerDate(e.target.value)}
+                  className="px-3 py-2 rounded-lg bg-slate-800 border border-slate-700 text-slate-300 text-sm focus:outline-none focus:border-cyan-500"
+                >
+                  <option value="">選擇出單日期…</option>
+                  {availableSheetDates.map(s => (
+                    <option key={s.sheet_date} value={s.sheet_date}>
+                      {s.sheet_date}（{s.row_count} 筆）
+                    </option>
+                  ))}
+                </select>
+                <button
+                  onClick={() => handleLoadFromSheet(sheetPickerDate)}
+                  disabled={!sheetPickerDate}
+                  className="px-4 py-2 rounded-lg bg-cyan-700 hover:bg-cyan-600 disabled:bg-slate-700 disabled:text-slate-500 text-white font-medium transition-colors text-sm"
+                >
+                  📋 載入出單表
+                </button>
+                {loadedFromSheetDate && (
+                  <span className="text-cyan-400 text-xs px-2 py-1 bg-cyan-900/30 rounded border border-cyan-700/40">
+                    已載入 {loadedFromSheetDate}
+                  </span>
+                )}
+              </>
+            )}
             {sourceRows.length > 0 && (
               <>
                 {/* 匯出格式選擇 */}
@@ -1411,45 +1432,7 @@ export default function OrderBatchExportPage() {
           </div>
         </div>
 
-        {/* 貼上區域 */}
-        {showPasteArea && (
-          <div className="mb-6 bg-slate-900 border border-slate-800 rounded-lg p-4">
-            <div className="flex items-center gap-2 mb-3">
-              <svg className="w-5 h-5 text-cyan-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" /></svg>
-              <h2 className="text-lg font-semibold text-white">貼上工單資料</h2>
-            </div>
-            <p className="text-xs text-slate-500 mb-2">
-              這是備用入口。若來源單尚未進系統主檔，可從 Excel / Google Sheet 複製工單資料直接貼上，後續仍可走同一套 ARGO 轉換與 BOM 比對流程。
-            </p>
-            <textarea
-              value={pasteText}
-              onChange={e => setPasteText(e.target.value)}
-              placeholder={"從 Excel 複製工單表格後貼上此處（Tab 分隔）...\n\n欄位順序：工單編號、單據種類、簽收人員、打樣、附素材、美編、客戶/供應商名、LINE暱稱、承辦人、開單人員、品項編碼、品名/規格、備註、數量、交付日期、盤數、上傳RO、訂單狀態、生管/物管備註"}
-              className="w-full h-44 bg-slate-950 border border-slate-700 rounded-lg p-3 text-sm text-slate-200 font-mono resize-y focus:outline-none focus:border-cyan-500/50 focus:ring-1 focus:ring-cyan-500/30 placeholder:text-slate-600"
-            />
-            {parseError && (
-              <p className="mt-2 text-red-400 text-sm flex items-center gap-1.5">
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
-                {parseError}
-              </p>
-            )}
-            <div className="mt-3 flex gap-2">
-              <button
-                onClick={handleParse}
-                disabled={!pasteText.trim()}
-                className="px-5 py-2 rounded-lg bg-cyan-600 hover:bg-cyan-500 disabled:bg-slate-700 disabled:text-slate-500 text-white font-medium transition-colors text-sm"
-              >
-                解析並加入
-              </button>
-              <button
-                onClick={() => setPasteText('')}
-                className="px-4 py-2 rounded-lg bg-slate-800 border border-slate-700 text-slate-400 hover:text-white transition-colors text-sm"
-              >
-                清除文字
-              </button>
-            </div>
-          </div>
-        )}
+
 
         {/* 統計 + 視圖切換 */}
         {sourceRows.length > 0 && (
@@ -1647,11 +1630,9 @@ export default function OrderBatchExportPage() {
             </div>
           </div>
         ) : (
-          !showPasteArea && (
-            <div className="bg-slate-900 border border-slate-800 rounded-lg p-12 text-center">
-              <p className="text-slate-500">尚無資料，請點擊「📋 貼上資料」開始</p>
-            </div>
-          )
+          <div className="bg-slate-900 border border-slate-800 rounded-lg p-12 text-center">
+            <p className="text-slate-500">尚無資料，請從上方選擇出單日期並載入</p>
+          </div>
         )}
 
         {failedImports.length > 0 && (
@@ -1673,12 +1654,6 @@ export default function OrderBatchExportPage() {
                   className="px-3 py-2 rounded-lg bg-amber-800/70 border border-amber-700/50 text-amber-100 hover:bg-amber-700 transition-colors text-sm"
                 >
                   只保留失敗資料
-                </button>
-                <button
-                  onClick={handleSendFailedToPasteArea}
-                  className="px-3 py-2 rounded-lg bg-cyan-800/70 border border-cyan-700/50 text-cyan-100 hover:bg-cyan-700 transition-colors text-sm"
-                >
-                  送回貼上區修改
                 </button>
                 <button
                   onClick={handleDirectTransferFailedToSummary}
