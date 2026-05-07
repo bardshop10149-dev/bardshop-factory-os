@@ -1639,16 +1639,12 @@ export default function ErpSyncPage() {
             body: JSON.stringify({ action: 'sync_pj', table: 'PJ_PROJECT', filters: { PJT_TYPE: "= 'OO'" }, docType: '委外製令',
               mapping: { docNoField: 'PROJECT_ID', subNoField: '', itemCodeField: '', descriptionField: 'PROJECT_NAME', qtyField: '', unitField: '', statusField: 'HOLD_STATUS', startDateField: 'BEGIN_DATE', endDateField: 'END_DATE', customerVendorField: 'IN_CHARGE', remarkField: '' } }) })
         } else if (tab.key === 'inventory') {
-          const invCfg = loadConfig('inventory')
-          const invFiltersObj: Record<string, string> = {}
-          for (const { key, value } of invCfg.filters) { if (key.trim()) invFiltersObj[key.trim()] = value }
           res = await fetch('/api/argoerp', { method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               action: 'sync_inventory',
-              table: invCfg.table.trim() || 'MM_BOM_BOH_V',
-              customColumn: invCfg.customColumn.trim() || undefined,
-              filters: Object.keys(invFiltersObj).length > 0 ? invFiltersObj : undefined,
-              mapping: invCfg.mapping,
+              table: 'MM_BOM_BOH_V',
+              filters: { ROWNUM: '<= 10000' },
+              mapping: { itemCodeField: 'PART', descriptionField: 'PART_DESC', bookCountField: 'BOH', transitCountField: 'PO_ON_ROAD' },
             }) })
         } else {
           // fallback for unknown tab keys

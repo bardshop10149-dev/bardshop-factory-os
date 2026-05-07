@@ -592,8 +592,8 @@ export async function POST(request: NextRequest) {
           'PJ_PROJECT.SALES_CATEGORY',
           'PJ_PROJECT.BEGIN_DATE',
           'PJ_PROJECT.HOLD_STATUS',
-          'PJ_PROJECT.SALES_NAME',
-          // PARTNER_NAME excluded: not a direct PJ_PROJECT column in this ARGO instance → ORA-00923
+          // SALES_NAME excluded: computed/virtual column, causes ORA-00923 in JOIN
+          // PARTNER_NAME excluded: not a direct PJ_PROJECT column → ORA-00923
           'PJ_PROJECTDETAIL.PDL_SEQ',
           'PJ_PROJECTDETAIL.LINE_NO',
           'PJ_PROJECTDETAIL.MBP_PART',
@@ -659,7 +659,7 @@ export async function POST(request: NextRequest) {
         mbp_ver:            getRecordValue(row, 'MBP_VER') != null ? Number(getRecordValue(row, 'MBP_VER')) : null,
         duedate:            String(getRecordValue(row, 'DUEDATE') ?? '').trim() || null,
         description:        String(getRecordValue(row, 'DESCRIPTION') ?? '').trim() || null,
-        sales_name:         String(getRecordValue(row, 'SALES_NAME') ?? '').trim() || null,
+        sales_name:         null,  // excluded: SALES_NAME computed/virtual → ORA-00923 in JOIN
         partner_name:       null,  // excluded: PARTNER_NAME not a direct PJ_PROJECT column → ORA-00923
         remark:             null,  // excluded: ORA-64451
         packing:            null,  // excluded: confirmed \t → ORA-64451
