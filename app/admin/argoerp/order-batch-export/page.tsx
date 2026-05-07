@@ -698,7 +698,7 @@ export default function OrderBatchExportPage() {
     if (allRows.length === 0) { setParseError('未偵測到有效資料行'); return }
 
     // 偵測 header 行（包含任一關鍵欄位名稱就跳過）
-    // 跳過標題列：檢查每一行開頭，若不像工單編號（RO 開頭）就當 header 跳過
+    // 跳過標題列：檢查每一行開頭，若不像工單編號就當 header 跳過
     let startIdx = 0
     const headerKeywords = [
       '工單編號', '品項編碼', '單據種類', '品名/規格', '交付日期', '訂單狀態',
@@ -708,8 +708,9 @@ export default function OrderBatchExportPage() {
       const rowCells = allRows[h]
       const lineText = rowCells.join('\t')
       const firstCell = rowCells[0]?.trim() ?? ''
-      // 如果該行包含任一標題關鍵字，或第一格不是 RO 開頭的工單編號，就跳過
-      if (headerKeywords.some(kw => lineText.includes(kw)) || (!firstCell.match(/^RO\d/) && h === startIdx)) {
+      // 判斷是否為標題行：含關鍵字 或 第一格不像工單編號（RO/SO 開頭＋數字）
+      const looksLikeOrderNo = /^[A-Za-z]{1,4}\d/.test(firstCell)
+      if (headerKeywords.some(kw => lineText.includes(kw)) || (!looksLikeOrderNo && h === startIdx)) {
         startIdx = h + 1
       } else {
         break
@@ -1253,6 +1254,13 @@ export default function OrderBatchExportPage() {
     }
   }, [selectedRows, sourceRows])
 
+  const handleDeleteSelected = useCallback(() => {
+    if (selectedRows.size === 0) return
+    if (!confirm(`確定要刪除選取的 ${selectedRows.size} 筆資料？此操作不可復原。`)) return
+    setSourceRows(prev => prev.filter((_, i) => !selectedRows.has(i)))
+    setSelectedRows(new Set())
+  }, [selectedRows])
+
   const handleClearAll = useCallback(() => {
     setSourceRows([])
     setSelectedRows(new Set())
@@ -1345,23 +1353,7 @@ export default function OrderBatchExportPage() {
                 >
                   {poLinksLoading ? '查詢中…' : '🔗 比對採購單'}
                 </button>
-                <div className="flex bg-slate-800 rounded-lg p-0.5 border border-slate-700">
-                  <button
-                    onClick={() => setExportFormat('csv')}
-                    className={`px-2.5 py-1.5 rounded-md text-xs font-medium transition-colors ${exportFormat === 'csv' ? 'bg-cyan-600 text-white' : 'text-slate-400 hover:text-white'}`}
-                  >CSV</button>
-                  <button
-                    onClick={() => setExportFormat('xlsx')}
-                    className={`px-2.5 py-1.5 rounded-md text-xs font-medium transition-colors ${exportFormat === 'xlsx' ? 'bg-cyan-600 text-white' : 'text-slate-400 hover:text-white'}`}
-                  >XLSX</button>
-                </div>
-                <button
-                  onClick={handleExport}
-                  className="px-4 py-2 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white font-medium transition-colors text-sm flex items-center gap-1.5"
-                >
-                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" /></svg>
-                  匯出 {exportFormat.toUpperCase()} ({sourceRows.length} 筆)
-                </button>
+
                 <button
                   onClick={handleSaveToSummary}
                   className="px-4 py-2 rounded-lg bg-emerald-700 hover:bg-emerald-600 text-white font-medium transition-colors text-sm flex items-center gap-1.5"
@@ -1374,18 +1366,26 @@ export default function OrderBatchExportPage() {
                 )}
                 {selectedRows.size > 0 && (
                   <>
-                    {/* 廠別切換按鈕 */}
-                    <button onClick={() => handleToggleFactory('T')} className="px-3 py-2 rounded-lg bg-blue-900/50 border border-blue-700/50 text-blue-300 hover:bg-blue-800 hover:text-white transition-colors text-sm">
-                      選取 → 台北(T)
-                    </button>
-                    <button onClick={() => handleToggleFactory('C')} className="px-3 py-2 rounded-lg bg-orange-900/50 border border-orange-700/50 text-orange-300 hover:bg-orange-800 hover:text-white transition-colors text-sm">
-                      選取 → 常平(C)
-                    </button>
-                    <button onClick={() => handleToggleFactory('O')} className="px-3 py-2 rounded-lg bg-purple-900/50 border border-purple-700/50 text-purple-300 hover:bg-purple-800 hover:text-white transition-colors text-sm">
-                      選取 → 委外(O)
-                    </button>
+                    {/* 廠別切換下拉 */}
+                    <select
+                      defaultValue=""
+                      onChange={e => {
+                        const v = e.target.value as 'T' | 'C' | 'O'
+                        if (v) handleToggleFactory(v)
+                        e.target.value = ''
+                      }}
+                      className="px-3 py-2 rounded-lg bg-slate-800 border border-slate-600 text-slate-200 hover:border-slate-400 transition-colors text-sm cursor-pointer"
+                    >
+                      <option value="" disabled>設定廠別…</option>
+                      <option value="T">選取 → 台北 (T)</option>
+                      <option value="C">選取 → 常平 (C)</option>
+                      <option value="O">選取 → 委外 (O)</option>
+                    </select>
                     <button onClick={handleMoveToStaging} className="px-4 py-2 rounded-lg bg-amber-900/60 border border-amber-700/50 text-amber-300 hover:bg-amber-800 hover:text-white transition-colors text-sm">
                       移至暫緩區 ({selectedRows.size})
+                    </button>
+                    <button onClick={handleDeleteSelected} className="px-4 py-2 rounded-lg bg-red-900/60 border border-red-700/50 text-red-300 hover:bg-red-800 hover:text-white transition-colors text-sm">
+                      🗑 刪除選取 ({selectedRows.size})
                     </button>
                   </>
                 )}

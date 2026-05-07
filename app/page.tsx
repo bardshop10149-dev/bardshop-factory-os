@@ -15,6 +15,18 @@ interface Announcement {
   is_active: boolean
   created_at: string
 }
+
+interface PrepLog {
+  id: number
+  mo_number: string
+  factory: string | null
+  product_code: string | null
+  planned_qty: string | null
+  status: '已備料' | '無需備料'
+  lines_count: number
+  interface_id: string | null
+  logged_at: string
+}
 type MemberDataType = {
   real_name: string | null;
   department: string | null;
@@ -41,7 +53,11 @@ export default function HomePage() {
   const [showModal, setShowModal] = useState(false);
   const [showQaModal, setShowQaModal] = useState(false);
   const [showInfoModal, setShowInfoModal] = useState(false);
-  const [isHovered, setIsHovered] = useState<'none' | 'production' | 'estimation' | 'qa' | 'admin' | 'settings' | 'notice' | 'finance' | 'product_dev' | 'design'>('none');
+  const [isHovered, setIsHovered] = useState<'none' | 'production' | 'estimation' | 'qa' | 'admin' | 'settings' | 'notice' | 'finance' | 'product_dev' | 'design' | 'dispensing'>('none');
+  const [showDispensingModal, setShowDispensingModal] = useState(false)
+  const [dispensingLogs, setDispensingLogs] = useState<PrepLog[]>([])
+  const [dispensingLoading, setDispensingLoading] = useState(false)
+  const [dispensingSearch, setDispensingSearch] = useState('')
   const [showProductDevModal, setShowProductDevModal] = useState(false);
   const [downloadingBom, setDownloadingBom] = useState(false);
   const [downloadingProducts, setDownloadingProducts] = useState(false);
@@ -260,6 +276,20 @@ export default function HomePage() {
       setDownloadingProducts(false);
     }
   };
+
+  const loadDispensingLogs = async () => {
+    setDispensingLoading(true)
+    setDispensingSearch('')
+    try {
+      const res = await fetch('/api/argoerp/material-prep-log', { cache: 'no-store' })
+      const json = await res.json() as { rows?: PrepLog[] }
+      setDispensingLogs(json.rows ?? [])
+    } catch {
+      setDispensingLogs([])
+    } finally {
+      setDispensingLoading(false)
+    }
+  }
 
   const guardFeatureAccess = (permissionKey: string, featureName: string) => {
     if (hasFeaturePermission(permissionKey)) return undefined;
@@ -720,6 +750,36 @@ export default function HomePage() {
             </span>
           </div>
 
+          {/* 11. 發料/領料專區 (Yellow) */}
+          <div
+            onClick={() => { setShowDispensingModal(true); void loadDispensingLogs() }}
+            onMouseEnter={() => setIsHovered('dispensing')}
+            onMouseLeave={() => setIsHovered('none')}
+            className={`
+              group relative order-11 h-40 md:h-60 lg:h-64 rounded-2xl border border-slate-700 bg-slate-900/40 backdrop-blur-sm 
+              flex flex-col items-center justify-center text-center p-3 md:p-6 transition-all duration-500 cursor-pointer
+              hover:border-yellow-500 hover:bg-slate-800/60 hover:shadow-[0_0_30px_rgba(234,179,8,0.15)]
+              ${isHovered !== 'none' && isHovered !== 'dispensing' ? 'opacity-50 scale-95 blur-[2px]' : 'opacity-100'}
+            `}
+          >
+            <div className="absolute top-4 right-4 flex items-center gap-1.5 px-2 py-1 bg-yellow-500/10 rounded border border-yellow-500/20">
+              <span className="text-[10px] text-yellow-400 font-bold uppercase tracking-wider">Material</span>
+            </div>
+
+            <div className="mb-3 md:mb-6 p-3 md:p-4 rounded-full bg-slate-800 group-hover:bg-yellow-900/50 text-slate-400 group-hover:text-yellow-400 transition-colors">
+              <svg className="w-7 h-7 md:w-10 md:h-10" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4" />
+              </svg>
+            </div>
+            <h2 className="text-base md:text-xl font-bold text-white mb-1 md:mb-2 group-hover:text-yellow-400 transition-colors">發料 / 領料</h2>
+            <p className="text-slate-500 text-[10px] md:text-xs mb-3 md:mb-6 group-hover:text-slate-300 px-1 md:px-2 hidden md:block">
+              批備料上傳紀錄查詢。<br/>(Material Dispatch)
+            </p>
+            <span className="hidden md:inline-block px-4 py-2 rounded border border-slate-600 text-slate-300 text-xs font-mono group-hover:bg-yellow-600 group-hover:border-yellow-600 group-hover:text-white transition-all">
+              VIEW RECORDS &rarr;
+            </span>
+          </div>
+
         </div>
         
         <div className="mt-4 md:mt-8 text-center opacity-40 hover:opacity-100 transition-opacity pb-4 md:pb-0">
@@ -893,6 +953,88 @@ export default function HomePage() {
                   <span className="px-3 py-1 rounded border border-teal-600 text-teal-300 text-xs font-mono bg-teal-900/30">前往處理</span>
                 </div>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* --- 發料/領料 Modal --- */}
+      {showDispensingModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-fade-in">
+          <div className="bg-slate-900 border border-yellow-700 rounded-2xl w-full max-w-3xl shadow-2xl overflow-hidden relative flex flex-col max-h-[90vh]">
+            <div className="bg-yellow-900/50 p-4 flex justify-between items-center border-b border-yellow-700 shrink-0">
+              <h3 className="text-white font-bold flex items-center gap-2">
+                <span className="w-2 h-6 bg-yellow-400 rounded-full"></span>
+                發料 / 領料 — 批備料上傳紀錄
+              </h3>
+              <button onClick={() => setShowDispensingModal(false)} className="text-yellow-400 hover:text-white transition-colors">
+                <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+              </button>
+            </div>
+
+            {/* Search bar */}
+            <div className="px-4 pt-3 pb-2 shrink-0">
+              <input
+                type="text"
+                placeholder="搜尋製令單號 / 品項代碼…"
+                className="w-full rounded-lg bg-slate-800 border border-slate-600 px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-yellow-500"
+                value={dispensingSearch}
+                onChange={e => setDispensingSearch(e.target.value)}
+              />
+            </div>
+
+            {/* Table */}
+            <div className="flex-1 overflow-y-auto px-4 pb-4">
+              {dispensingLoading ? (
+                <div className="py-12 text-center text-slate-400 text-sm">載入中…</div>
+              ) : dispensingLogs.length === 0 ? (
+                <div className="py-12 text-center text-slate-500 text-sm">尚無備料上傳紀錄</div>
+              ) : (
+                <table className="w-full text-sm border-collapse">
+                  <thead className="sticky top-0 bg-slate-900 z-10">
+                    <tr className="border-b border-slate-700">
+                      <th className="px-3 py-2 text-left text-slate-400 font-medium text-xs">製令單號</th>
+                      <th className="px-3 py-2 text-center text-slate-400 font-medium text-xs">廠別</th>
+                      <th className="px-3 py-2 text-left text-slate-400 font-medium text-xs">品項代碼</th>
+                      <th className="px-3 py-2 text-right text-slate-400 font-medium text-xs">計畫量</th>
+                      <th className="px-3 py-2 text-center text-slate-400 font-medium text-xs">明細筆數</th>
+                      <th className="px-3 py-2 text-center text-slate-400 font-medium text-xs">狀態</th>
+                      <th className="px-3 py-2 text-left text-slate-400 font-medium text-xs">上傳時間</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {dispensingLogs
+                      .filter(r => {
+                        if (!dispensingSearch.trim()) return true
+                        const kw = dispensingSearch.toLowerCase()
+                        return (r.mo_number?.toLowerCase().includes(kw)) || (r.product_code?.toLowerCase().includes(kw))
+                      })
+                      .map(r => (
+                        <tr key={r.id} className="border-b border-slate-800/50 hover:bg-slate-800/40">
+                          <td className="px-3 py-2 font-mono text-cyan-300 text-xs">{r.mo_number}</td>
+                          <td className="px-3 py-2 text-center text-slate-300 text-xs">{r.factory ?? '—'}</td>
+                          <td className="px-3 py-2 font-mono text-slate-200 text-xs">{r.product_code ?? '—'}</td>
+                          <td className="px-3 py-2 text-right text-slate-200 text-xs">{r.planned_qty ?? '—'}</td>
+                          <td className="px-3 py-2 text-center text-slate-300 text-xs">{r.lines_count}</td>
+                          <td className="px-3 py-2 text-center text-xs">
+                            <span className={`rounded px-1.5 py-0.5 text-xs font-medium ${
+                              r.status === '已備料' ? 'bg-green-900/50 text-green-300' : 'bg-slate-700 text-slate-400'
+                            }`}>{r.status}</span>
+                          </td>
+                          <td className="px-3 py-2 text-slate-400 text-xs font-mono">
+                            {new Date(r.logged_at).toLocaleString('zh-TW', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })}
+                          </td>
+                        </tr>
+                      ))
+                    }
+                  </tbody>
+                </table>
+              )}
+            </div>
+
+            <div className="shrink-0 px-4 py-3 border-t border-slate-700 flex items-center justify-between text-xs text-slate-500">
+              <span>共 {dispensingLogs.length} 筆紀錄</span>
+              <button onClick={() => void loadDispensingLogs()} className="text-yellow-400 hover:text-yellow-300 transition-colors">↻ 重新整理</button>
             </div>
           </div>
         </div>

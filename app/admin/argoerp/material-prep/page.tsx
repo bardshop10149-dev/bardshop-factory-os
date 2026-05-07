@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { supabase } from '../../../../lib/supabaseClient'
 
 // ============================================================
@@ -154,6 +154,8 @@ export default function MaterialPrepPage() {
   const [materialPrepInterfaceId, setMaterialPrepInterfaceId] = useState('')
   const [materialPrepImporting, setMaterialPrepImporting] = useState(false)
   const [materialPrepMessage, setMaterialPrepMessage] = useState('')
+  // 防止雙擊重複送出：useRef 在 React 畫面更新前就能同步擋住第二次點擊
+  const importInFlightRef = useRef(false)
 
   // ---- 同步料件單位 ----
   const [syncingUnits, setSyncingUnits] = useState(false)
@@ -689,18 +691,53 @@ export default function MaterialPrepPage() {
   // ---- 操作：送 ARGO 批備料 + 標記為「已備料」----
   const handleImportAndMarkDone = useCallback(async () => {
     if (selectedRowKeys.size === 0) return
+    // ── 防止雙擊：同步 ref 在 React re-render 之前就能攔截第二次點擊 ──
+    if (importInFlightRef.current) return
+    importInFlightRef.current = true
 
     if (!materialPrepInterfaceId.trim()) {
       setMaterialPrepMessage('❌ 請先輸入批備料匯入的 ARGO 介面編號')
+      importInFlightRef.current = false
       return
     }
     if (selectedImportRows.length === 0) {
       setMaterialPrepMessage('❌ 選取的製令中沒有可匯入的批備料資料（請檢查缺料或無 BOM 狀態）')
+      importInFlightRef.current = false
       return
     }
 
     const importMos = Array.from(new Set(selectedImportRows.map(r => r.mo_number)))
-    if (!window.confirm(`將送出 ${selectedImportRows.length} 筆批備料資料到 ARGO（涵蓋 ${importMos.length} 筆製令），完成後將這些製令標記為「已備料」。確定？`)) return
+
+    // ── 預飛檢查：確認選取的製令在 mo-summary 中確實仍是未備料狀態 ──
+    try {
+      const { data: summaryRows, error: checkErr } = await supabase
+        .from('argoerp_mo_summary')
+        .select('mo_number, prep_status')
+        .in('mo_number', importMos)
+      if (checkErr) throw checkErr
+
+      const alreadyDone = (summaryRows ?? [])
+        .filter(r => r.prep_status === '已備料' || r.prep_status === '無需備料')
+        .map(r => r.mo_number as string)
+
+      if (alreadyDone.length > 0) {
+        const doAnyway = window.confirm(
+          `⚠️ 以下 ${alreadyDone.length} 筆製令已標記為「已備料 / 無需備料」，\n若繼續送出將造成 ARGO 重複備料（數量加倍）：\n\n${alreadyDone.join('\n')}\n\n確定要繼續送出嗎？（建議點「取消」）`
+        )
+        if (!doAnyway) {
+          importInFlightRef.current = false
+          return
+        }
+      }
+    } catch {
+      // 查詢失敗不阻斷主流程，但記錄警告
+      console.warn('[批備料] 預飛狀態檢查失敗，繼續執行')
+    }
+
+    if (!window.confirm(`將送出 ${selectedImportRows.length} 筆批備料資料到 ARGO（涵蓋 ${importMos.length} 筆製令），完成後將這些製令標記為「已備料」。確定？`)) {
+      importInFlightRef.current = false
+      return
+    }
 
     setMaterialPrepImporting(true)
     setMaterialPrepMessage('')
@@ -794,6 +831,7 @@ export default function MaterialPrepPage() {
       setMaterialPrepMessage(`❌ ${message}`)
     } finally {
       setMaterialPrepImporting(false)
+      importInFlightRef.current = false
     }
   }, [selectedRowKeys, selectedImportRows, materialPrepRows, materialPrepInterfaceId, loadMoRecords])
 

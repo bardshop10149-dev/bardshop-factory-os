@@ -235,6 +235,130 @@ const MAPPING_LABELS: { key: keyof PjSyncMapping; label: string; required?: bool
   { key: 'remarkField',       label: '業務員 SALES_NAME' },
 ]
 
+// ─── 新增製令 helper（與 order-batch-export 共用邏輯）───
+const MO_ERP_FIELD_MAP: Record<string, string> = {
+  mo_number:          'PROJECT_ID',
+  planned_start_date: 'BEGIN_DATE',
+  planned_end_date:   'END_DATE',
+  mo_status:          'HOLD_STATUS',
+  department:         'SEG_SEGMENT_NO_DEPARTMENT',
+  cost_department:    'PJT_SEG_SEGMENT_NO',
+  seq_number:         'LINE_NO',
+  product_code:       'MBP_PART',
+  version:            'MBP_VER',
+  lot_number:         'MBP_LOT_NO',
+  planned_qty:        'ORDER_QTY',
+  bom_level:          'BOM_LEVELS',
+  product_cost_ratio: 'EQUIVALENT_RATIO',
+  material_cost_ratio:'EQUIVALENT_RATIO_M',
+  source_order:       'PJT_PROJECT_ID_MO_SO',
+  source_order_line:  'LINE_NO_MO_SO',
+  mo_note:            'REMARK_LINE',
+  create_date:        'MO_BEGIN_DATE',
+  auto_material:      'AUTO_PREPARE',
+}
+
+function moToErpPayload(row: Record<string, string>): Record<string, string> {
+  const erp: Record<string, string> = {}
+  for (const [k, v] of Object.entries(row)) {
+    const code = MO_ERP_FIELD_MAP[k]
+    if (!code) continue
+    const val = (v ?? '').trim()
+    if (!val) continue
+    erp[code] = val
+  }
+  return erp
+}
+
+function parseSoDate(orderNumber: string): string {
+  const today = new Date()
+  const fallback = `${today.getFullYear()}${String(today.getMonth() + 1).padStart(2,'0')}${String(today.getDate()).padStart(2,'0')}`
+  const m = orderNumber.match(/^[A-Za-z]+(\d+)/)
+  return m ? m[1] : fallback
+}
+
+function moFormatDate(d: Date): string {
+  return `${d.getFullYear()}/${String(d.getMonth()+1).padStart(2,'0')}/${String(d.getDate()).padStart(2,'0')}`
+}
+
+function moNextBizDay(from: Date): Date {
+  const d = new Date(from)
+  d.setDate(d.getDate() + 1)
+  while (d.getDay() === 0 || d.getDay() === 6) d.setDate(d.getDate() + 1)
+  return d
+}
+
+function buildMoRecord(
+  orderNumber: string, lineNo: string, itemCode: string, itemName: string,
+  qty: string, deliveryDate: string, factory: 'T' | 'C' | 'O', customer: string, note: string,
+): {
+  exportRow: Record<string, string>
+  summaryRecord: Record<string, string>
+  moNumber: string
+  interfaceId: string
+} {
+  const today = new Date()
+  const prefix = factory === 'O' ? 'MOO' : `MO${factory}`
+  const soDate = parseSoDate(orderNumber)
+  const seqStr = String(Number(lineNo)).padStart(2, '0')
+  const moNumber = `${prefix}${soDate}${seqStr}`
+  const interfaceId = factory === 'T' ? 'IFAF028' : 'IFAF044'
+
+  const exportRow: Record<string, string> = {
+    mo_number:          moNumber,
+    planned_start_date: moFormatDate(moNextBizDay(today)),
+    planned_end_date:   deliveryDate.replace(/-/g, '/'),
+    mo_status:          'OPEN',
+    department:         'M1100',
+    cost_department:    'M1000',
+    seq_number:         String(Number(lineNo)),
+    product_code:       itemCode,
+    version:            '1',
+    lot_number:         orderNumber.slice(0, 30),
+    planned_qty:        qty,
+    bom_level:          '99',
+    product_cost_ratio: '1',
+    material_cost_ratio:'1',
+    source_order:       orderNumber,
+    source_order_line:  String(Number(lineNo)),
+    mo_note:            [itemName, note].filter(Boolean).join(' '),
+    create_date:        moFormatDate(today),
+    auto_material:      'N',
+  }
+
+  const summaryRecord: Record<string, string> = {
+    mo_number:          moNumber,
+    planned_start_date: exportRow.planned_start_date,
+    planned_end_date:   exportRow.planned_end_date,
+    mo_status:          'OPEN',
+    department:         'M1100',
+    product_code:       itemCode,
+    lot_number:         exportRow.lot_number,
+    planned_qty:        qty,
+    source_order:       orderNumber,
+    mo_note:            exportRow.mo_note,
+    create_date:        exportRow.create_date,
+    factory,
+    saved_at:           new Date().toLocaleString('zh-TW'),
+    plate_count:        '',
+    customer,
+  }
+
+  return { exportRow, summaryRecord, moNumber, interfaceId }
+}
+
+interface MoModalForm {
+  order_number: string
+  line_no: string
+  item_code: string
+  item_name: string
+  quantity: string
+  delivery_date: string
+  factory: 'T' | 'C' | 'O'
+  customer: string
+  note: string
+}
+
 // ─── 工具 ─────────────────────────────────────────────
 function loadConfig(key: DocTypeKey): SyncConfig {
   if (typeof window === 'undefined') return DOC_TYPES[key].defaultConfig
@@ -280,6 +404,10 @@ function SyncCard({ docKey }: SyncCardProps) {
   const [soRecords, setSoRecords] = useState<SoLine[]>([])
   const [moRecords, setMoRecords] = useState<MoLine[]>([])
   const [moStatusFilter, setMoStatusFilter] = useState<'OPEN' | 'HOLD' | 'CLOSE' | null>('OPEN')
+
+  // 手動新增製令 modal state
+  const defaultMoForm: MoModalForm = { order_number: '', line_no: '', item_code: '', item_name: '', quantity: '', delivery_date: '', factory: 'T', customer: '', note: '' }
+  const [soMoModal, setSoMoModal] = useState<{ show: boolean; importing: boolean; msg: string; form: MoModalForm; errors: Record<string, string> }>({ show: false, importing: false, msg: '', form: defaultMoForm, errors: {} })
   const [moPage, setMoPage] = useState(1)
   const [soStatusFilter, setSoStatusFilter] = useState<'OPEN' | 'HOLD' | 'CLOSE' | null>('OPEN')
   const [soPage, setSoPage] = useState(1)
@@ -288,6 +416,82 @@ function SyncCard({ docKey }: SyncCardProps) {
   const [search, setSearch] = useState('')
   const configRef = useRef(config)
   configRef.current = config
+
+  // ─── 手動新增製令 handler ─────────────────────────────
+  function openMoModalFromSo(r: SoLine) {
+    const deliveryDate = r.duedate ? r.duedate.slice(0, 10) : ''
+    setSoMoModal({
+      show: true, importing: false, msg: '',
+      form: {
+        order_number: r.project_id ?? '',
+        line_no: r.line_no != null ? String(r.line_no) : '',
+        item_code: r.mbp_part ?? '',
+        item_name: r.description ?? '',
+        quantity: r.order_qty_oru != null ? String(r.order_qty_oru) : '',
+        delivery_date: deliveryDate,
+        factory: 'T',
+        customer: r.partner_name ?? '',
+        note: '',
+      },
+      errors: {},
+    })
+  }
+
+  async function handleSubmitSoMo() {
+    const f = soMoModal.form
+    const errs: Record<string, string> = {}
+    if (!f.order_number.trim()) errs.order_number = '必填'
+    if (!f.line_no.trim() || isNaN(Number(f.line_no))) errs.line_no = '必填(數字)'
+    if (!f.item_code.trim()) errs.item_code = '必填'
+    if (!f.quantity.trim() || isNaN(Number(f.quantity))) errs.quantity = '必填(數字)'
+    if (!f.delivery_date.trim()) errs.delivery_date = '必填'
+    if (Object.keys(errs).length > 0) { setSoMoModal(p => ({ ...p, errors: errs })); return }
+
+    setSoMoModal(p => ({ ...p, importing: true, msg: '' }))
+
+    try {
+      const { exportRow, summaryRecord, moNumber, interfaceId } = buildMoRecord(
+        f.order_number.trim(), f.line_no.trim(), f.item_code.trim(), f.item_name.trim(),
+        f.quantity.trim(), f.delivery_date.trim(), f.factory, f.customer.trim(), f.note.trim(),
+      )
+      const payload = moToErpPayload(exportRow)
+
+      // 上傳至 ARGO
+      const argoRes = await fetch('/api/argoerp', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'import', interfaceId, data: [payload] }),
+      })
+      const argoJson = await argoRes.json().catch(() => ({}))
+
+      // 如果製令單號已存在，改用 upsert 再傳一次
+      const isDup = argoJson?.errors?.some?.((e: { message?: string }) =>
+        typeof e?.message === 'string' && e.message.includes('製令單號已存在'))
+      if (!argoRes.ok && !isDup) {
+        const msg = argoJson?.errors?.[0]?.message ?? argoJson?.error ?? `HTTP ${argoRes.status}`
+        setSoMoModal(p => ({ ...p, importing: false, msg: `❌ ARGO 錯誤：${msg}` }))
+        return
+      }
+
+      // 寫入 mo-summary
+      const summaryMode = isDup ? '?mode=upsert' : ''
+      const sumRes = await fetch(`/api/argoerp/mo-summary${summaryMode}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ records: [summaryRecord] }),
+      })
+      const sumJson = await sumRes.json().catch(() => ({}))
+      if (!sumRes.ok && !(sumJson?.duplicate)) {
+        setSoMoModal(p => ({ ...p, importing: false, msg: `⚠️ ARGO 已上傳，但紀錄寫入失敗：${sumJson?.error ?? '未知'}` }))
+        return
+      }
+
+      setSoMoModal(p => ({ ...p, importing: false, msg: `✅ ${isDup ? '（已存在，更新）' : ''}製令 ${moNumber} 新增完成！` }))
+    } catch (e) {
+      const err = e as Error
+      setSoMoModal(p => ({ ...p, importing: false, msg: `❌ ${err.message}` }))
+    }
+  }
 
   // 讀取 Supabase 資料
   const fetchRecords = useCallback(async (keyword = '', page = 1) => {
@@ -1000,6 +1204,7 @@ function SyncCard({ docKey }: SyncCardProps) {
                   <th className="px-3 py-2 text-left text-slate-400 font-medium">客戶名稱</th>
                   <th className="px-3 py-2 text-left text-slate-400 font-medium">業務員</th>
                   <th className="px-3 py-2 text-left text-slate-400 font-medium">備註</th>
+                  <th className="px-3 py-2 text-center text-slate-400 font-medium">操作</th>
                 </tr>
               </thead>
               <tbody>
@@ -1024,6 +1229,12 @@ function SyncCard({ docKey }: SyncCardProps) {
                     <td className="px-3 py-2 text-slate-300 max-w-[160px] truncate" title={r.partner_name ?? ''}>{r.partner_name ?? '—'}</td>
                     <td className="px-3 py-2 text-slate-300">{r.sales_name ?? '—'}</td>
                     <td className="px-3 py-2 text-slate-400 max-w-[160px] truncate" title={r.remark ?? ''}>{r.remark ?? '—'}</td>
+                    <td className="px-3 py-2 text-center">
+                      <button
+                        onClick={() => openMoModalFromSo(r)}
+                        className="rounded bg-green-700/80 px-2 py-1 text-xs text-white hover:bg-green-600 transition-colors"
+                      >新增製令</button>
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -1253,6 +1464,130 @@ function SyncCard({ docKey }: SyncCardProps) {
           </div>
         )}
       </div>
+
+      {/* ─── 手動新增製令 modal ──────────────────────── */}
+      {soMoModal.show && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
+          <div className="w-full max-w-lg rounded-xl bg-slate-800 border border-slate-700 shadow-2xl">
+            <div className="flex items-center justify-between border-b border-slate-700 px-5 py-4">
+              <h2 className="text-base font-semibold text-white">✏️ 新增製令</h2>
+              <button onClick={() => setSoMoModal(p => ({ ...p, show: false }))} className="text-slate-400 hover:text-white text-lg leading-none">✕</button>
+            </div>
+            <div className="p-5 space-y-3">
+              {/* MO number preview */}
+              {soMoModal.form.order_number && soMoModal.form.line_no && (
+                <p className="text-xs text-cyan-400">
+                  製令單號預覽：
+                  <span className="font-mono font-bold">
+                    {`MO${soMoModal.form.factory === 'O' ? 'O' : soMoModal.form.factory}${parseSoDate(soMoModal.form.order_number)}${String(Number(soMoModal.form.line_no) || 0).padStart(2,'0')}`}
+                  </span>
+                </p>
+              )}
+              {/* Factory */}
+              <div>
+                <label className="mb-1 block text-xs text-slate-400">工廠別</label>
+                <div className="flex gap-3">
+                  {(['T','C','O'] as const).map(f => (
+                    <label key={f} className="flex items-center gap-1 text-sm text-slate-200 cursor-pointer">
+                      <input type="radio" name="moFactory" value={f}
+                        checked={soMoModal.form.factory === f}
+                        onChange={() => setSoMoModal(p => ({ ...p, form: { ...p.form, factory: f } }))}
+                      />
+                      {f === 'T' ? '台廠(T)' : f === 'C' ? '中廠(C)' : '其他(O)'}
+                    </label>
+                  ))}
+                </div>
+              </div>
+              {/* Row 1: order_number + line_no */}
+              <div className="grid grid-cols-3 gap-3">
+                <div className="col-span-2">
+                  <label className="mb-1 block text-xs text-slate-400">來源訂單號 *</label>
+                  <input className="w-full rounded bg-slate-900 border border-slate-600 px-2 py-1.5 text-sm text-white focus:outline-none focus:border-cyan-500"
+                    value={soMoModal.form.order_number}
+                    onChange={e => setSoMoModal(p => ({ ...p, form: { ...p.form, order_number: e.target.value }, errors: { ...p.errors, order_number: '' } }))}
+                  />
+                  {soMoModal.errors.order_number && <p className="text-xs text-red-400 mt-0.5">{soMoModal.errors.order_number}</p>}
+                </div>
+                <div>
+                  <label className="mb-1 block text-xs text-slate-400">項號 *</label>
+                  <input type="number" min={1} className="w-full rounded bg-slate-900 border border-slate-600 px-2 py-1.5 text-sm text-white focus:outline-none focus:border-cyan-500"
+                    value={soMoModal.form.line_no}
+                    onChange={e => setSoMoModal(p => ({ ...p, form: { ...p.form, line_no: e.target.value }, errors: { ...p.errors, line_no: '' } }))}
+                  />
+                  {soMoModal.errors.line_no && <p className="text-xs text-red-400 mt-0.5">{soMoModal.errors.line_no}</p>}
+                </div>
+              </div>
+              {/* Row 2: item_code + quantity */}
+              <div className="grid grid-cols-3 gap-3">
+                <div className="col-span-2">
+                  <label className="mb-1 block text-xs text-slate-400">品項料號 *</label>
+                  <input className="w-full rounded bg-slate-900 border border-slate-600 px-2 py-1.5 text-sm font-mono text-white focus:outline-none focus:border-cyan-500"
+                    value={soMoModal.form.item_code}
+                    onChange={e => setSoMoModal(p => ({ ...p, form: { ...p.form, item_code: e.target.value }, errors: { ...p.errors, item_code: '' } }))}
+                  />
+                  {soMoModal.errors.item_code && <p className="text-xs text-red-400 mt-0.5">{soMoModal.errors.item_code}</p>}
+                </div>
+                <div>
+                  <label className="mb-1 block text-xs text-slate-400">數量 *</label>
+                  <input type="number" min={0} step="any" className="w-full rounded bg-slate-900 border border-slate-600 px-2 py-1.5 text-sm text-white focus:outline-none focus:border-cyan-500"
+                    value={soMoModal.form.quantity}
+                    onChange={e => setSoMoModal(p => ({ ...p, form: { ...p.form, quantity: e.target.value }, errors: { ...p.errors, quantity: '' } }))}
+                  />
+                  {soMoModal.errors.quantity && <p className="text-xs text-red-400 mt-0.5">{soMoModal.errors.quantity}</p>}
+                </div>
+              </div>
+              {/* item_name */}
+              <div>
+                <label className="mb-1 block text-xs text-slate-400">品名/規格說明</label>
+                <input className="w-full rounded bg-slate-900 border border-slate-600 px-2 py-1.5 text-sm text-white focus:outline-none focus:border-cyan-500"
+                  value={soMoModal.form.item_name}
+                  onChange={e => setSoMoModal(p => ({ ...p, form: { ...p.form, item_name: e.target.value } }))}
+                />
+              </div>
+              {/* delivery_date + customer */}
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="mb-1 block text-xs text-slate-400">交貨期限 *</label>
+                  <input type="date" className="w-full rounded bg-slate-900 border border-slate-600 px-2 py-1.5 text-sm text-white focus:outline-none focus:border-cyan-500"
+                    value={soMoModal.form.delivery_date}
+                    onChange={e => setSoMoModal(p => ({ ...p, form: { ...p.form, delivery_date: e.target.value }, errors: { ...p.errors, delivery_date: '' } }))}
+                  />
+                  {soMoModal.errors.delivery_date && <p className="text-xs text-red-400 mt-0.5">{soMoModal.errors.delivery_date}</p>}
+                </div>
+                <div>
+                  <label className="mb-1 block text-xs text-slate-400">客戶名稱</label>
+                  <input className="w-full rounded bg-slate-900 border border-slate-600 px-2 py-1.5 text-sm text-white focus:outline-none focus:border-cyan-500"
+                    value={soMoModal.form.customer}
+                    onChange={e => setSoMoModal(p => ({ ...p, form: { ...p.form, customer: e.target.value } }))}
+                  />
+                </div>
+              </div>
+              {/* note */}
+              <div>
+                <label className="mb-1 block text-xs text-slate-400">備註</label>
+                <input className="w-full rounded bg-slate-900 border border-slate-600 px-2 py-1.5 text-sm text-white focus:outline-none focus:border-cyan-500"
+                  value={soMoModal.form.note}
+                  onChange={e => setSoMoModal(p => ({ ...p, form: { ...p.form, note: e.target.value } }))}
+                />
+              </div>
+              {/* status message */}
+              {soMoModal.msg && (
+                <p className={`text-sm rounded px-3 py-2 ${soMoModal.msg.startsWith('✅') ? 'bg-green-900/40 text-green-300' : 'bg-red-900/40 text-red-300'}`}>
+                  {soMoModal.msg}
+                </p>
+              )}
+            </div>
+            <div className="flex justify-end gap-3 border-t border-slate-700 px-5 py-3">
+              <button onClick={() => setSoMoModal(p => ({ ...p, show: false }))}
+                className="rounded bg-slate-700 px-4 py-2 text-sm text-slate-200 hover:bg-slate-600">取消</button>
+              <button onClick={handleSubmitSoMo} disabled={soMoModal.importing}
+                className="rounded bg-indigo-600 px-4 py-2 text-sm text-white hover:bg-indigo-500 disabled:opacity-50">
+                {soMoModal.importing ? '送出中…' : '送出製令'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
