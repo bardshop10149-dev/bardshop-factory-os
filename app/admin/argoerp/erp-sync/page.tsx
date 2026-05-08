@@ -579,6 +579,12 @@ function SyncCard({ docKey }: SyncCardProps) {
         setMaterialPrepRecords((data ?? []) as MaterialPrepLine[])
         setTotalCount(count ?? 0)
       } else {
+        const offset = (page - 1) * SO_PAGE_SIZE
+        let query = supabase
+          .from(meta.label)
+          .select('*', { count: 'exact' })
+          .order('project_id', { ascending: true })
+          .range(offset, offset + SO_PAGE_SIZE - 1)
         if (keyword.trim()) {
           const kw = keyword.trim()
           query = query.or(
