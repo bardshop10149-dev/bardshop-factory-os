@@ -57,7 +57,7 @@ export default function RemarksTestPage() {
     const id = projectId.trim()
     if (!id) return
     setRunning(true)
-    setResult({ status: 'idle', rows: [], rawSnippet: '', error: '', parseMode: 'direct' })
+    setResult({ status: 'idle', rows: [], rawSnippet: '', error: '', parseMode: 'direct', headerRawSample: null, detailRawSample: null })
     try {
       const res = await fetch('/api/argoerp', {
         method: 'POST',
