@@ -178,6 +178,7 @@ export default function DailyOrderSheetPage() {
   const [syncingMo, setSyncingMo] = useState(false)
   const [machines, setMachines] = useState<string[]>([])
   const [moMachines, setMoMachines] = useState<Record<string, string>>({})
+  const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set())
 
   // ---- 讀取所有日期清單 ----
   const loadSheetList = useCallback(async () => {
@@ -192,6 +193,7 @@ export default function DailyOrderSheetPage() {
   const loadSheet = useCallback(async (date: string) => {
     setLoading(true)
     setSheetRows([])
+    setSelectedKeys(new Set())
     setCurrentRawText('')
     setShowPasteArea(false)
     setParseError('')
@@ -300,6 +302,33 @@ export default function DailyOrderSheetPage() {
       setSaving(false)
     }
   }, [sheetRows, selectedDate, rawText, currentRawText, loadSheetList])
+
+  // ---- 列印（使用製令工單 A4 格式）----
+  const handlePrint = () => {
+    const printRows = sheetRows.filter((r, i) => selectedKeys.has(r.row_key || String(i)))
+    if (printRows.length === 0) return
+
+    const moRecords = printRows.map(r => ({
+      mo_number: r.mo_number || r.order_number,
+      planned_start_date: '',
+      planned_end_date: r.delivery_date,
+      mo_status: r.mo_status || '',
+      department: '',
+      product_code: r.item_code,
+      lot_number: r.customer,
+      planned_qty: String(r.quantity),
+      source_order: r.order_number,
+      mo_note: [r.item_name, r.plate_count ? `盤數：${r.plate_count}` : ''].filter(Boolean).join(' | '),
+      create_date: selectedDate,
+      factory: r.factory,
+      prep_status: r.material_prep_status || '',
+      machine: r.mo_number ? (moMachines[r.mo_number] || '') : '',
+      line_no_override: r.match_line_no || undefined,
+    }))
+
+    sessionStorage.setItem('mo_print_selection', JSON.stringify(moRecords))
+    window.open('/admin/argoerp/mo-summary/print', '_blank')
+  }
 
   // ---- 刪除整張出單表 ----
   const handleDelete = useCallback(async () => {
@@ -523,6 +552,11 @@ export default function DailyOrderSheetPage() {
 
   const hasUnsaved = sheetRows.length > 0 && (rawText.trim() ? true : false)
   const hasData = sheetRows.length > 0
+  const allSelected = sheetRows.length > 0 && sheetRows.every((r, i) => selectedKeys.has(r.row_key || String(i)))
+  const toggleAll = () => {
+    if (allSelected) setSelectedKeys(new Set())
+    else setSelectedKeys(new Set(sheetRows.map((r, i) => r.row_key || String(i))))
+  }
 
   return (
     <div className="min-h-screen bg-slate-950 text-white p-4 md:p-6">
@@ -575,6 +609,14 @@ export default function DailyOrderSheetPage() {
                   className="px-4 py-2 rounded-lg bg-emerald-700 hover:bg-emerald-600 disabled:bg-slate-700 text-white text-sm font-medium transition-colors"
                 >
                   {saving ? '儲存中…' : `💾 更新儲存 (${sheetRows.length} 筆)`}
+                </button>
+                <button
+                  onClick={handlePrint}
+                  disabled={selectedKeys.size === 0}
+                  className="px-4 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 disabled:bg-slate-800 disabled:text-slate-600 text-white text-sm font-medium transition-colors flex items-center gap-1.5"
+                >
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2zm8-12V5a2 2 0 00-2-2H9a2 2 0 00-2 2v4h10z" /></svg>
+                  列印{selectedKeys.size > 0 ? ` (${selectedKeys.size})` : ''}
                 </button>
                 <button
                   onClick={handleDelete}
@@ -710,15 +752,17 @@ export default function DailyOrderSheetPage() {
                   <table className="w-full text-xs text-left border-collapse">
                     <thead>
                       <tr className="bg-slate-900 text-slate-400 uppercase text-[11px]">
+                        <th className="px-2 py-2 border-b border-slate-800 w-8 text-center">
+                          <input type="checkbox" checked={allSelected} onChange={toggleAll} className="accent-cyan-500 cursor-pointer" />
+                        </th>
                         <th className="px-3 py-2 border-b border-slate-800 w-8">#</th>
-                        <th className="px-3 py-2 border-b border-slate-800">工單編號</th>
-                        <th className="px-3 py-2 border-b border-slate-800">廠別</th>
-                        <th className="px-3 py-2 border-b border-slate-800">品項編碼</th>
-                        <th className="px-3 py-2 border-b border-slate-800">品名/規格</th>
-                        <th className="px-3 py-2 border-b border-slate-800">數量</th>
-                        <th className="px-3 py-2 border-b border-slate-800">交付日期</th>
-                        <th className="px-3 py-2 border-b border-slate-800">客戶</th>
+                        <th className="px-3 py-2 border-b border-slate-800 text-cyan-400">工單 / 廠別</th>
                         <th className="px-3 py-2 border-b border-slate-800">序號</th>
+                        <th className="px-3 py-2 border-b border-slate-800 text-purple-300 min-w-[280px]">品項編碼 / 品名規格</th>
+                        <th className="px-3 py-2 border-b border-slate-800">數量</th>
+                        <th className="px-3 py-2 border-b border-slate-800 text-yellow-400">盤數</th>
+                        <th className="px-3 py-2 border-b border-slate-800">客戶</th>
+                        <th className="px-3 py-2 border-b border-slate-800">交付日</th>
                         <th className="px-3 py-2 border-b border-slate-800">製令單號</th>
                         <th className="px-3 py-2 border-b border-slate-800">批備料</th>
                         <th className="px-3 py-2 border-b border-slate-800">機台</th>
@@ -729,6 +773,7 @@ export default function DailyOrderSheetPage() {
                     <tbody>
                       {sheetRows.map((row, idx) => {
                         const statusInfo = row.mo_status ? STATUS_LABELS[row.mo_status] : null
+                        const sk = row.row_key || String(idx)
                         return (
                           <tr
                             key={row.row_key || idx}
@@ -740,30 +785,40 @@ export default function DailyOrderSheetPage() {
                                 : 'hover:bg-slate-900/50'
                             }`}
                           >
-                            <td className="px-3 py-2 text-slate-600">{idx + 1}</td>
-                            <td className="px-3 py-2 font-mono text-cyan-300 whitespace-nowrap">{row.order_number}</td>
-                            <td className="px-3 py-2">
-                              {editFactoryIdx === idx ? (
-                                <div className="flex gap-1">
-                                  {(['T', 'C', 'O'] as const).map(f => (
-                                    <button key={f} onClick={() => handleChangeFactory(idx, f)}
-                                      className={`px-2 py-0.5 rounded text-xs border ${row.factory === f ? 'bg-cyan-700 text-white border-cyan-600' : 'bg-slate-800 text-slate-300 border-slate-700 hover:bg-slate-700'}`}>
-                                      {f === 'T' ? '台北' : f === 'C' ? '常平' : '委外'}
-                                    </button>
-                                  ))}
-                                  <button onClick={() => setEditFactoryIdx(null)} className="px-2 py-0.5 rounded text-xs bg-slate-800 text-slate-400 border border-slate-700">✕</button>
-                                </div>
-                              ) : (
-                                <button onClick={() => setEditFactoryIdx(idx)}>
-                                  {factoryBadge(row.factory)}
-                                </button>
-                              )}
+                            <td className="px-2 py-2 text-center">
+                              <input
+                                type="checkbox"
+                                checked={selectedKeys.has(sk)}
+                                onChange={() => setSelectedKeys(prev => {
+                                  const next = new Set(prev)
+                                  next.has(sk) ? next.delete(sk) : next.add(sk)
+                                  return next
+                                })}
+                                className="accent-cyan-500 cursor-pointer"
+                              />
                             </td>
-                            <td className="px-3 py-2 text-slate-300 font-mono">{row.item_code}</td>
-                            <td className="px-3 py-2 text-slate-200 max-w-[200px] truncate" title={row.item_name}>{row.item_name}</td>
-                            <td className="px-3 py-2 text-slate-300 text-right">{row.quantity}</td>
-                            <td className="px-3 py-2 text-slate-300 whitespace-nowrap">{row.delivery_date}</td>
-                            <td className="px-3 py-2 text-slate-400 max-w-[120px] truncate" title={row.customer}>{row.customer}</td>
+                            <td className="px-3 py-2 text-slate-600">{idx + 1}</td>
+                            <td className="px-3 py-2">
+                              <div className="font-mono text-cyan-300 whitespace-nowrap">{row.order_number}</div>
+                              <div className="mt-0.5">
+                                {editFactoryIdx === idx ? (
+                                  <div className="flex gap-1">
+                                    {(['T', 'C', 'O'] as const).map(f => (
+                                      <button key={f} onClick={() => handleChangeFactory(idx, f)}
+                                        className={`px-2 py-0.5 rounded text-xs border ${row.factory === f ? 'bg-cyan-700 text-white border-cyan-600' : 'bg-slate-800 text-slate-300 border-slate-700 hover:bg-slate-700'}`}>
+                                        {f === 'T' ? '台北' : f === 'C' ? '常平' : '委外'}
+                                      </button>
+                                    ))}
+                                    <button onClick={() => setEditFactoryIdx(null)} className="px-2 py-0.5 rounded text-xs bg-slate-800 text-slate-400 border border-slate-700">✕</button>
+                                  </div>
+                                ) : (
+                                  <button onClick={() => setEditFactoryIdx(idx)}>
+                                    {factoryBadge(row.factory)}
+                                  </button>
+                                )}
+                              </div>
+                              <div className="text-slate-500 text-[10px] mt-0.5">{row.doc_type}</div>
+                            </td>
                             <td className="px-3 py-2">
                               {row.match_status === 'matched' && row.match_line_no ? (
                                 <span className="px-2 py-0.5 rounded border text-xs font-mono bg-emerald-900/40 text-emerald-300 border-emerald-700/50">{row.match_line_no}</span>
@@ -775,6 +830,14 @@ export default function DailyOrderSheetPage() {
                                 <span className="text-slate-600 text-xs">—</span>
                               )}
                             </td>
+                            <td className="px-3 py-2">
+                              <div className="font-mono text-purple-300">{row.item_code}</div>
+                              <div className="text-slate-200 text-[10px] mt-0.5 max-w-[320px] truncate" title={row.item_name}>{row.item_name}</div>
+                            </td>
+                            <td className="px-3 py-2 text-slate-300 text-right">{row.quantity}</td>
+                            <td className="px-3 py-2 text-yellow-400 text-center font-mono font-semibold">{row.plate_count || '—'}</td>
+                            <td className="px-3 py-2 text-slate-400 max-w-[120px] truncate" title={row.customer}>{row.customer}</td>
+                            <td className="px-3 py-2 text-slate-500 whitespace-nowrap">{row.delivery_date}</td>
                             <td className="px-3 py-2 font-mono text-xs">
                               {row.mo_number ? (
                                 <span className="text-violet-300">{row.mo_number}</span>

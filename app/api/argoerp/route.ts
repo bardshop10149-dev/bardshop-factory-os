@@ -48,8 +48,16 @@ function getRecordValue(record: Record<string, unknown> | undefined | null, fiel
   if (fieldName in record) return record[fieldName]
 
   const normalizedField = fieldName.trim().toLowerCase()
+  // 先嘗試精確比對（含表格前綴，如 "IV_NOTICE.SLIP_NO"）
   const matchedKey = Object.keys(record).find((key) => key.trim().toLowerCase() === normalizedField)
-  return matchedKey ? record[matchedKey] : undefined
+  if (matchedKey) return record[matchedKey]
+
+  // JOIN 查詢時欄位可能帶表格前綴（如 "IV_NOTICE.SLIP_NO"），嘗試比對後綴
+  const suffixKey = Object.keys(record).find((key) => {
+    const lower = key.trim().toLowerCase()
+    return lower === normalizedField || lower.endsWith('.' + normalizedField)
+  })
+  return suffixKey ? record[suffixKey] : undefined
 }
 
 function toNumber(value: unknown): number {
@@ -1155,6 +1163,100 @@ export async function POST(request: NextRequest) {
         status: 'ok',
         totalFromArgo: bomRows.length,
         upsertedCount,
+      })
+    }
+
+    if (action === 'sync_material_prep') {
+      // ── 批備料單同步（單一 JOIN 查詢：IV_NOTICE,IV_NOTICEDETAIL，與驗證範本相同）──
+
+      const sparam = JSON.stringify({
+        APIKEY1: keys.APIKEY1,
+        APIKEY2: keys.APIKEY2,
+        APIKEY3: keys.APIKEY3,
+        SEGMENT,
+        TABLE: 'IV_NOTICE,IV_NOTICEDETAIL',
+        SHOWCOLUMNTIME: 'Y',
+        SHOWNULLCOLUMN: 'Y',
+        CUSTOMCOLUMN: 'IV_NOTICE.SLIP_NO,IV_NOTICE.SLIP_DATE,IV_NOTICE.PJT_PROJECT_ID,IV_NOTICE.MO_MBP_PART,IV_NOTICE.MO_QTY,IV_NOTICEDETAIL.LINE_NO,IV_NOTICEDETAIL.MBP_PART,IV_NOTICEDETAIL.NOTICE_QTY',
+        'IV_NOTICEDETAIL.SLIP_NO': '=IV_NOTICE.SLIP_NO',
+      })
+
+      const res = await fetch(`${API_BASE}/S_QUERY`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sparam }),
+      })
+      const { parsed, rawText } = await readApiResponse(res)
+      if (!res.ok || !isArgoSuccess(parsed)) {
+        return NextResponse.json({
+          status: 'error',
+          error: extractApiError(parsed) || 'ARGO IV_NOTICE/IV_NOTICEDETAIL query failed',
+          rawText,
+        }, { status: 502 })
+      }
+
+      const rows = findObjectRows(parsed)
+      if (rows.length === 0) {
+        return NextResponse.json({ status: 'error', error: 'IV_NOTICE/IV_NOTICEDETAIL 查無備料單資料' }, { status: 422 })
+      }
+
+      // 組合 prepLines（每列已是 JOIN 後的完整資料）
+      const syncedAt = new Date().toISOString()
+      const slipNos = new Set<string>()
+      const prepLines: {
+        slip_no: string
+        slip_date: string | null
+        mo_number: string | null
+        fg_part: string | null
+        mo_qty: number
+        line_no: number | null
+        mbp_part: string | null
+        notice_qty: number
+        synced_at: string
+      }[] = []
+
+      for (const row of rows) {
+        const slipNo = String(getRecordValue(row, 'SLIP_NO') ?? '').trim()
+        if (!slipNo) continue
+        slipNos.add(slipNo)
+        prepLines.push({
+          slip_no:    slipNo,
+          slip_date:  String(getRecordValue(row, 'SLIP_DATE') ?? '').trim() || null,
+          mo_number:  String(getRecordValue(row, 'PJT_PROJECT_ID') ?? '').trim() || null,
+          fg_part:    String(getRecordValue(row, 'MO_MBP_PART') ?? '').trim() || null,
+          mo_qty:     Number(getRecordValue(row, 'MO_QTY') ?? 0) || 0,
+          line_no:    getRecordValue(row, 'LINE_NO') != null ? Number(getRecordValue(row, 'LINE_NO')) : null,
+          mbp_part:   String(getRecordValue(row, 'MBP_PART') ?? '').trim() || null,
+          notice_qty: Number(getRecordValue(row, 'NOTICE_QTY') ?? 0) || 0,
+          synced_at,
+        })
+      }
+
+      // 全量刪除後重寫
+      try {
+        const supabaseAdmin = getSupabaseAdminClient()
+        const { error: clearError } = await supabaseAdmin.from('erp_material_prep_lines').delete().neq('id', 0)
+        if (clearError) throw clearError
+
+        const batchSize = 500
+        for (let i = 0; i < prepLines.length; i += batchSize) {
+          const chunk = prepLines.slice(i, i + batchSize)
+          const { error: insertError } = await supabaseAdmin.from('erp_material_prep_lines').insert(chunk)
+          if (insertError) throw insertError
+        }
+      } catch (err) {
+        const pgError = err as { message?: string; code?: string; details?: string }
+        const message = pgError?.message
+          ? `寫入 erp_material_prep_lines 失敗：${pgError.message}${pgError.code ? ` (code: ${pgError.code})` : ''}${pgError.details ? ` — ${pgError.details}` : ''}`
+          : String(err)
+        return NextResponse.json({ status: 'error', error: message }, { status: 500 })
+      }
+
+      return NextResponse.json({
+        status: 'ok',
+        syncedCount: prepLines.length,
+        headerCount: slipNos.size,
+        detailTotal: prepLines.length,
       })
     }
 

@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { supabase } from '../../../../lib/supabaseClient'
 
 // ─── 型別 ─────────────────────────────────────────────
-type DocTypeKey = 'sales' | 'mo' | 'po' | 'subcontract' | 'inventory'
+type DocTypeKey = 'sales' | 'mo' | 'po' | 'subcontract' | 'inventory' | 'material_prep'
 
 interface PjSyncMapping {
   docNoField: string
@@ -55,8 +55,7 @@ interface SoLine {
   synced_at: string
 }
 
-interface MoLine {
-  id: number
+interface MoLine {  id: number
   project_id: string
   begin_date: string | null
   end_date: string | null
@@ -67,6 +66,19 @@ interface MoLine {
   mbp_lot_no: string | null
   order_qty: number
   source_order: string | null
+  synced_at: string
+}
+
+interface MaterialPrepLine {
+  id: number
+  slip_no: string
+  slip_date: string | null
+  mo_number: string | null
+  fg_part: string | null
+  mo_qty: number
+  line_no: number | null
+  mbp_part: string | null
+  notice_qty: number
   synced_at: string
 }
 
@@ -217,6 +229,17 @@ const DOC_TYPES: Record<DocTypeKey, {
         qtyField: 'BOH',
         customerVendorField: 'PO_ON_ROAD',
       },
+    },
+  },
+  material_prep: {
+    label: '批備料單',
+    description: '批備料單，查詢 ARGO IV_NOTICE（表頭）+ IV_NOTICEDETAIL（明細），依備料單號 JOIN 組合後同步至 erp_material_prep_lines。',
+    locked: { table: true, filters: true },
+    defaultConfig: {
+      table: 'IV_NOTICE / IV_NOTICEDETAIL',
+      customColumn: '',
+      filters: [],
+      mapping: { ...EMPTY_MAPPING },
     },
   },
 }
@@ -392,6 +415,7 @@ function SyncCard({ docKey }: SyncCardProps) {
   const isSoTab = docKey === 'sales'
   const isMoTab = docKey === 'mo'
   const isInventoryTab = docKey === 'inventory'
+  const isMaterialPrepTab = docKey === 'material_prep'
   const activeMappingLabels = meta.mappingLabels ?? MAPPING_LABELS
   const [config, setConfig] = useState<SyncConfig>(() => loadConfig(docKey))
   const [showConfig, setShowConfig] = useState(false)
@@ -403,6 +427,8 @@ function SyncCard({ docKey }: SyncCardProps) {
   const [records, setRecords] = useState<PjRecord[]>([])
   const [soRecords, setSoRecords] = useState<SoLine[]>([])
   const [moRecords, setMoRecords] = useState<MoLine[]>([])
+  const [materialPrepRecords, setMaterialPrepRecords] = useState<MaterialPrepLine[]>([])
+  const [materialPrepPage, setMaterialPrepPage] = useState(1)
   const [moStatusFilter, setMoStatusFilter] = useState<'OPEN' | 'HOLD' | 'CLOSE' | null>('OPEN')
 
   // 手動新增製令 modal state
@@ -535,13 +561,24 @@ function SyncCard({ docKey }: SyncCardProps) {
         const { data, count } = await query
         setMoRecords((data ?? []) as MoLine[])
         setTotalCount(count ?? 0)
-      } else {
+      } else if (isMaterialPrepTab) {
+        const MP_PAGE_SIZE = 20
+        const offset = (page - 1) * MP_PAGE_SIZE
         let query = supabase
-          .from('erp_pj_sync')
+          .from('erp_material_prep_lines')
           .select('*', { count: 'exact' })
-          .eq('doc_type', meta.label)
-          .order('doc_no', { ascending: true })
-          .limit(200)
+          .order('slip_no', { ascending: true })
+          .range(offset, offset + MP_PAGE_SIZE - 1)
+        if (keyword.trim()) {
+          const kw = keyword.trim()
+          query = query.or(
+            `slip_no.ilike.%${kw}%,mo_number.ilike.%${kw}%,fg_part.ilike.%${kw}%,mbp_part.ilike.%${kw}%`
+          )
+        }
+        const { data, count } = await query
+        setMaterialPrepRecords((data ?? []) as MaterialPrepLine[])
+        setTotalCount(count ?? 0)
+      } else {
         if (keyword.trim()) {
           const kw = keyword.trim()
           query = query.or(
@@ -557,7 +594,7 @@ function SyncCard({ docKey }: SyncCardProps) {
     } finally {
       setLoadingRecords(false)
     }
-  }, [isSoTab, isMoTab, meta.label, moStatusFilter, soStatusFilter])
+  }, [isSoTab, isMoTab, isMaterialPrepTab, meta.label, moStatusFilter, soStatusFilter])
 
   useEffect(() => { void fetchRecords() }, [fetchRecords])
 
@@ -582,6 +619,12 @@ function SyncCard({ docKey }: SyncCardProps) {
   // SO 換頁
   const handleSoPageChange = (page: number) => {
     setSoPage(page)
+    void fetchRecords(search, page)
+  }
+
+  // 批備料單 換頁
+  const handleMaterialPrepPageChange = (page: number) => {
+    setMaterialPrepPage(page)
     void fetchRecords(search, page)
   }
 
@@ -767,13 +810,13 @@ function SyncCard({ docKey }: SyncCardProps) {
 
   const handleSync = async () => {
     const cfg = configRef.current
-    if (!cfg.table.trim()) {
+    if (!isMaterialPrepTab && !cfg.table.trim()) {
       setMessage('請先填入 ARGO TABLE 名稱')
       setMessageOk(false)
       setShowConfig(true)
       return
     }
-    if (!cfg.mapping.docNoField.trim()) {
+    if (!isMaterialPrepTab && !cfg.mapping.docNoField.trim()) {
       setMessage('主單號欄位不能為空')
       setMessageOk(false)
       setShowConfig(true)
@@ -810,6 +853,12 @@ function SyncCard({ docKey }: SyncCardProps) {
             filters: { ROWNUM: '<= 10000' },
             mapping: { itemCodeField: 'PART', descriptionField: 'PART_DESC', bookCountField: 'BOH', transitCountField: 'PO_ON_ROAD' },
           }),
+        })
+      } else if (isMaterialPrepTab) {
+        res = await fetch('/api/argoerp', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'sync_material_prep' }),
         })
       } else {
         const filtersObj: Record<string, string> = {}
@@ -865,6 +914,8 @@ function SyncCard({ docKey }: SyncCardProps) {
           : `明細未授權（${result.detailError ?? '未知錯誤'}）`
         setMessage(`✅ 已同步 ${result.syncedCount ?? 0} 筆製令（表頭 ${result.headerCount ?? 0} 筆，${detailNote}）`)
         if (!result.detailAuthorized) setMessageOk(false)
+      } else if (isMaterialPrepTab) {
+        setMessage(`✅ 已同步 ${result.syncedCount ?? 0} 筆批備料單明細（共 ${result.headerCount ?? 0} 張備料單）`)
       } else {
         setMessage(`✅ 已同步 ${result.syncedCount ?? 0} 筆 ${meta.label}`)
       }
@@ -878,7 +929,7 @@ function SyncCard({ docKey }: SyncCardProps) {
     }
   }
 
-  const lastSynced = (isSoTab ? soRecords[0]?.synced_at : isMoTab ? moRecords[0]?.synced_at : records[0]?.synced_at)
+  const lastSynced = (isSoTab ? soRecords[0]?.synced_at : isMoTab ? moRecords[0]?.synced_at : isMaterialPrepTab ? materialPrepRecords[0]?.synced_at : records[0]?.synced_at)
     ? new Date((isSoTab ? soRecords[0]?.synced_at : isMoTab ? moRecords[0]?.synced_at : records[0]?.synced_at) as string).toLocaleString('zh-TW')
     : null
 
@@ -1089,6 +1140,7 @@ function SyncCard({ docKey }: SyncCardProps) {
             onKeyDown={(e) => {
               if (e.key === 'Enter') {
                 if (isSoTab) { setSoPage(1); void fetchRecords(search, 1) }
+                else if (isMaterialPrepTab) { setMaterialPrepPage(1); void fetchRecords(search, 1) }
                 else { setMoPage(1); void fetchRecords(search, 1) }
               }
             }}
@@ -1099,6 +1151,7 @@ function SyncCard({ docKey }: SyncCardProps) {
             type="button"
             onClick={() => {
               if (isSoTab) { setSoPage(1); void fetchRecords(search, 1) }
+              else if (isMaterialPrepTab) { setMaterialPrepPage(1); void fetchRecords(search, 1) }
               else { setMoPage(1); void fetchRecords(search, 1) }
             }}
             disabled={loadingRecords}
@@ -1148,7 +1201,7 @@ function SyncCard({ docKey }: SyncCardProps) {
               ))}
             </div>
           )}
-          {(isSoTab || isMoTab) && totalCount !== null && (
+          {(isSoTab || isMoTab || isMaterialPrepTab) && totalCount !== null && (
             <span className="text-xs text-slate-500 ml-auto">
               共 {totalCount.toLocaleString()} 筆
             </span>
@@ -1198,8 +1251,67 @@ function SyncCard({ docKey }: SyncCardProps) {
           )}
         </div>
 
-        {(isSoTab ? soRecords.length === 0 : isMoTab ? moRecords.length === 0 : records.length === 0) && !loadingRecords ? (
-          <p className="px-4 pb-4 text-xs text-slate-600">尚無資料，請先執行同步。{isSoTab ? '（需先在 Supabase 建立 erp_so_lines 表）' : isMoTab ? '（需先在 Supabase 建立 erp_mo_lines 表）' : ''}</p>
+        {(isSoTab ? soRecords.length === 0 : isMoTab ? moRecords.length === 0 : isMaterialPrepTab ? materialPrepRecords.length === 0 : records.length === 0) && !loadingRecords ? (
+          <p className="px-4 pb-4 text-xs text-slate-600">尚無資料，請先執行同步。{isSoTab ? '（需先在 Supabase 建立 erp_so_lines 表）' : isMoTab ? '（需先在 Supabase 建立 erp_mo_lines 表）' : isMaterialPrepTab ? '（需先在 Supabase 建立 erp_material_prep_lines 表）' : ''}</p>
+        ) : isMaterialPrepTab ? (
+          <>
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="border-b border-slate-800 bg-slate-900/50">
+                  <th className="px-3 py-2 text-left text-slate-400 font-medium">備料單號</th>
+                  <th className="px-3 py-2 text-left text-slate-400 font-medium">備料單日期</th>
+                  <th className="px-3 py-2 text-left text-slate-400 font-medium">製令單號</th>
+                  <th className="px-3 py-2 text-left text-slate-400 font-medium">製品貨號</th>
+                  <th className="px-3 py-2 text-right text-slate-400 font-medium">生產數量</th>
+                  <th className="px-3 py-2 text-center text-slate-400 font-medium">序號</th>
+                  <th className="px-3 py-2 text-left text-slate-400 font-medium">料號</th>
+                  <th className="px-3 py-2 text-right text-slate-400 font-medium">應發數量</th>
+                </tr>
+              </thead>
+              <tbody>
+                {materialPrepRecords.map((r) => (
+                  <tr key={r.id} className="border-b border-slate-800/50 hover:bg-slate-900/40">
+                    <td className="px-3 py-2 font-mono text-cyan-300">{r.slip_no}</td>
+                    <td className="px-3 py-2 text-slate-400">{r.slip_date ?? '—'}</td>
+                    <td className="px-3 py-2 font-mono text-slate-300">{r.mo_number ?? '—'}</td>
+                    <td className="px-3 py-2 font-mono text-slate-200">{r.fg_part ?? '—'}</td>
+                    <td className="px-3 py-2 text-right text-slate-200">{r.mo_qty > 0 ? r.mo_qty.toLocaleString() : '—'}</td>
+                    <td className="px-3 py-2 text-center text-slate-400">{r.line_no ?? '—'}</td>
+                    <td className="px-3 py-2 font-mono text-slate-200">{r.mbp_part ?? '—'}</td>
+                    <td className="px-3 py-2 text-right text-emerald-300">{r.notice_qty > 0 ? r.notice_qty.toLocaleString() : '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          {/* 批備料單 分頁列 */}
+          {totalCount !== null && totalCount > 20 && (
+            <div className="flex items-center justify-between border-t border-slate-800 px-4 py-2.5">
+              <span className="text-xs text-slate-500">
+                第 {materialPrepPage} 頁 / 共 {Math.ceil(totalCount / 20)} 頁（{totalCount.toLocaleString()} 筆）
+              </span>
+              <div className="flex items-center gap-1">
+                <button
+                  type="button"
+                  onClick={() => handleMaterialPrepPageChange(materialPrepPage - 1)}
+                  disabled={materialPrepPage <= 1}
+                  className="rounded border border-slate-700 bg-slate-900 px-2.5 py-1 text-xs text-slate-300 hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  上一頁
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleMaterialPrepPageChange(materialPrepPage + 1)}
+                  disabled={materialPrepPage * 20 >= totalCount}
+                  className="rounded border border-slate-700 bg-slate-900 px-2.5 py-1 text-xs text-slate-300 hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  下一頁
+                </button>
+              </div>
+            </div>
+          )}
+          </>
         ) : isSoTab ? (
           <>
           <div className="overflow-x-auto">
@@ -1611,6 +1723,7 @@ const TABS: { key: DocTypeKey; label: string }[] = [
   { key: 'po', label: '採購單號' },
   { key: 'subcontract', label: '委外製令' },
   { key: 'inventory', label: '倉庫庫存' },
+  { key: 'material_prep', label: '批備料單' },
 ]
 
 export default function ErpSyncPage() {
@@ -1663,6 +1776,9 @@ export default function ErpSyncPage() {
               filters: { ROWNUM: '<= 10000' },
               mapping: { itemCodeField: 'PART', descriptionField: 'PART_DESC', bookCountField: 'BOH', transitCountField: 'PO_ON_ROAD' },
             }) })
+        } else if (tab.key === 'material_prep') {
+          res = await fetch('/api/argoerp', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: 'sync_material_prep' }) })
         } else {
           // fallback for unknown tab keys
           continue
@@ -1677,6 +1793,7 @@ export default function ErpSyncPage() {
           let msg = ''
           if (tab.key === 'sales') msg = `已同步 ${result.syncedCount ?? 0} 筆（ARGO ${result.totalRows ?? 0} 筆）`
           else if (tab.key === 'mo') msg = `已同步 ${result.syncedCount ?? 0} 筆（表頭 ${result.headerCount ?? 0}，明細 ${result.detailTotal ?? 0}）`
+          else if (tab.key === 'material_prep') msg = `已同步 ${result.syncedCount ?? 0} 筆（表頭 ${result.headerCount ?? 0} 張，明細 ${result.detailTotal ?? 0} 筆）`
           else msg = `已同步 ${result.syncedCount ?? 0} 筆`
           updateStep(i, { status: 'done', message: msg })
         }

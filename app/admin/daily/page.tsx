@@ -506,7 +506,7 @@ export default function DailyOperationsPage() {
                 <th className="p-2 w-14 border-b border-slate-700">種類</th>
                 <th className="p-2 w-20 border-b border-slate-700 text-purple-300">品項編碼</th>
                 <th className="p-2 w-32 border-b border-slate-700">品名/規格</th>
-                <th className="p-2 w-12 text-right border-b border-slate-700">數量</th>
+                <th className="p-2 w-12 text-right border-b border-slate-700"> 數量</th>
                 <th className="p-2 w-20 border-b border-slate-700">交付日</th>
                 <th className="p-2 w-12 border-b border-slate-700">美編</th>
                 <th className="p-2 w-16 border-b border-slate-700">客戶</th>

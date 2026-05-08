@@ -81,6 +81,7 @@ interface MoRecord {
   factory?: string
   prep_status?: string
   machine?: string
+  line_no_override?: string  // 直接指定行號（供每日出單表列印使用）
 }
 
 interface SoLine {
@@ -117,10 +118,14 @@ const FACTORY_COLOR: Record<string, string> = {
   O: '#7c3aed',
 }
 
-function getLineNo(moNumber: string): string {
+function getLineNo(mo: MoRecord): string {
+  if (mo.line_no_override !== undefined && mo.line_no_override !== null && mo.line_no_override !== '') {
+    const n = parseInt(mo.line_no_override, 10)
+    return isNaN(n) ? mo.line_no_override : String(n)
+  }
   // 製令號格式：MO{廠別}{soDateDigits}{seqStr(2碼)}
   // 末 2 碼為來源訂單項號（LINE_NO padStart 2）
-  const last2 = moNumber.slice(-2)
+  const last2 = mo.mo_number.slice(-2)
   const n = parseInt(last2, 10)
   return isNaN(n) ? '0' : String(n)
 }
@@ -326,7 +331,7 @@ function MoPrintContent() {
       {/* ── 頁面容器 ───────────────────────────────────────── */}
       <div className="mo-pages-wrapper" style={{ background: '#64748b', padding: '24px 16px', minHeight: '100vh' }}>
         {records.map((mo, idx) => {
-          const lineNo = getLineNo(mo.mo_number)
+          const lineNo = getLineNo(mo)
           const so = soMap.get(`${mo.source_order ?? ''}|${lineNo}`)
 
           const part   = so?.mbp_part || so?.part || null
