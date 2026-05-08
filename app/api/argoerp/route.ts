@@ -1228,7 +1228,7 @@ export async function POST(request: NextRequest) {
           line_no:    getRecordValue(row, 'LINE_NO') != null ? Number(getRecordValue(row, 'LINE_NO')) : null,
           mbp_part:   String(getRecordValue(row, 'MBP_PART') ?? '').trim() || null,
           notice_qty: Number(getRecordValue(row, 'NOTICE_QTY') ?? 0) || 0,
-          synced_at,
+          synced_at: syncedAt,
         })
       }
 
