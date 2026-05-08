@@ -434,7 +434,7 @@ function MoPrintContent() {
                     <tbody>
                       {([
                         ['生產貨號', mo.product_code],
-                        ['批號', mo.lot_number],
+                        ['客戶名稱', mo.lot_number],
                         ['預訂產出量', mo.planned_qty ?? null],
                         ['廠別', FACTORY_LABEL[mo.factory ?? ''] ?? mo.factory ?? '—'],
                         ['開立日', mo.create_date ?? null],

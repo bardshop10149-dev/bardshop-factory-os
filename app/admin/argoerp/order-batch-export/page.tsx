@@ -3,6 +3,7 @@
 import { useState, useCallback, useEffect, useMemo } from 'react'
 import * as XLSX from 'xlsx'
 import { supabase } from '../../../../lib/supabaseClient'
+import SoOrderModal from '../../../../components/SoOrderModal'
 
 // ==================== 來源欄位（貼上的格式） ====================
 const INPUT_COLUMNS = [
@@ -574,6 +575,7 @@ export default function OrderBatchExportPage() {
   const [sourceRows, setSourceRows] = useState<SourceRow[]>([])
   const [selectedRows, setSelectedRows] = useState<Set<number>>(new Set())
   const [viewMode, setViewMode] = useState<'source' | 'export'>('source')
+  const [soModalId, setSoModalId] = useState<string | null>(null)
   // ---- 每日出單表載入 ----
   const [availableSheetDates, setAvailableSheetDates] = useState<{ sheet_date: string; row_count: number }[]>([])
   const [sheetDatesLoading, setSheetDatesLoading] = useState(false)
@@ -1530,8 +1532,11 @@ export default function OrderBatchExportPage() {
                             className="rounded border-slate-600 bg-slate-700 text-cyan-500 focus:ring-cyan-500/30" />
                         </td>
                         <td className="px-2 py-2 text-center text-slate-500 font-mono text-xs">{idx + 1}</td>
-                        <td className="px-3 py-2 text-slate-300 whitespace-nowrap max-w-[250px] truncate text-xs" title={row.order_number || ''}>
-                          {row.order_number || <span className="text-slate-700">—</span>}
+                        <td className="px-3 py-2 whitespace-nowrap max-w-[250px] truncate text-xs" title={row.order_number || ''}>
+                          {row.order_number
+                            ? <button onClick={() => setSoModalId(row.order_number)} className="font-mono text-slate-300 hover:text-cyan-300 hover:underline underline-offset-2 text-left">{row.order_number}</button>
+                            : <span className="text-slate-700">—</span>
+                          }
                         </td>
                         <td className="px-3 py-2 text-center whitespace-nowrap">
                           {soMatchLoading ? (
@@ -1718,7 +1723,11 @@ export default function OrderBatchExportPage() {
                 <tbody>
                   {failedImports.map(item => (
                     <tr key={item.key} className="border-b border-red-900/20 bg-slate-950/30 hover:bg-slate-900/50">
-                      <td className="px-3 py-2 text-slate-200 text-xs whitespace-nowrap max-w-[160px] truncate" title={item.row.order_number}>{item.row.order_number || '—'}</td>
+                      <td className="px-3 py-2 text-xs whitespace-nowrap max-w-[160px] truncate" title={item.row.order_number}>
+                        <button onClick={() => setSoModalId(item.row.order_number)} className="font-mono text-slate-200 hover:text-cyan-300 hover:underline underline-offset-2 text-left">
+                          {item.row.order_number || '—'}
+                        </button>
+                      </td>
                       <td className="px-3 py-2 text-slate-300 text-xs whitespace-nowrap">{factoryLabel(item.factory)}</td>
                       <td className="px-3 py-2 text-slate-300 text-xs whitespace-nowrap max-w-[140px] truncate" title={item.row.item_code}>{item.row.item_code || '—'}</td>
                       <td className="px-3 py-2 text-slate-300 text-xs whitespace-nowrap max-w-[220px] truncate" title={item.row.item_name}>{item.row.item_name || '—'}</td>
@@ -1783,7 +1792,11 @@ export default function OrderBatchExportPage() {
                         {matchedOrders.flatMap(src =>
                           (soToPo.get(src.order_number) ?? []).map((link, i) => (
                             <tr key={`${src.order_number}-${i}`} className="border-b border-slate-800/40">
-                              <td className="px-3 py-1.5 font-mono text-amber-300 whitespace-nowrap">{src.order_number}</td>
+                              <td className="px-3 py-1.5 font-mono whitespace-nowrap">
+                                <button onClick={() => setSoModalId(src.order_number)} className="text-amber-300 hover:text-amber-100 hover:underline underline-offset-2 text-left">
+                                  {src.order_number}
+                                </button>
+                              </td>
                               <td className="px-3 py-1.5 text-slate-300 max-w-[120px] truncate" title={src.customer}>{src.customer}</td>
                               <td className="px-3 py-1.5 text-slate-400 max-w-[150px] truncate" title={src.item_name}>{src.item_name}</td>
                               <td className="px-3 py-1.5 font-mono text-violet-300 whitespace-nowrap">{link.po_project_id}</td>
@@ -2134,6 +2147,7 @@ export default function OrderBatchExportPage() {
           </div>
         </div>
       )}
+      <SoOrderModal projectId={soModalId} onClose={() => setSoModalId(null)} />
     </div>
   )
 }

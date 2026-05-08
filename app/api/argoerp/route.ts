@@ -173,7 +173,22 @@ function tryParseJson(text: string): unknown {
   try {
     return JSON.parse(text)
   } catch {
-    return text
+    // 第一次失敗：ARGO REMARK 等欄位可能含有未 escape 的控制字元（換行、Tab 等），
+    // 違反 JSON 規格 → 先將控制字元轉成合法 escape 序列後再試一次
+    try {
+      const fixed = text.replace(
+        /[\u0000-\u001F\u007F\u0085\u2028\u2029]/g,
+        ch => {
+          if (ch === '\n') return '\\n'
+          if (ch === '\r') return '\\r'
+          if (ch === '\t') return '\\t'
+          return `\\u${ch.charCodeAt(0).toString(16).padStart(4, '0')}`
+        }
+      )
+      return JSON.parse(fixed)
+    } catch {
+      return text
+    }
   }
 }
 
@@ -630,7 +645,7 @@ export async function POST(request: NextRequest) {
         SEGMENT,
         TABLE: 'PJ_PROJECTDETAIL',
         SHOWNULLCOLUMN: 'N',
-        CUSTOMCOLUMN: 'PJT_PROJECT_ID,LINE_NO,MBP_PART,MBP_VER,DUEDATE,ORDER_QTY_ORU,UNIT_OF_MEASURE_ORU',
+        CUSTOMCOLUMN: 'PJT_PROJECT_ID,LINE_NO,MBP_PART,MBP_VER,DUEDATE,ORDER_QTY_ORU,UNIT_OF_MEASURE_ORU,REMARK,PACKING,REMARK2',
         LINE_NO: '>= 0',
       })
       const soDetailRes = await fetch(`${API_BASE}/S_QUERY`, {
@@ -683,12 +698,12 @@ export async function POST(request: NextRequest) {
           mbp_part:           String(getRecordValue(row, 'MBP_PART') ?? '').trim() || null,
           mbp_ver:            getRecordValue(row, 'MBP_VER') != null ? Number(getRecordValue(row, 'MBP_VER')) : null,
           duedate:            String(getRecordValue(row, 'DUEDATE') ?? '').trim() || null,
-          description:        null,
+          description:        String(getRecordValue(row, 'REMARK') ?? '').trim() || null,
           sales_name:         null,
           partner_name:       null,
-          remark:             null,
-          packing:            null,
-          remark2:            null,
+          remark:             String(getRecordValue(row, 'REMARK') ?? '').trim() || null,
+          packing:            String(getRecordValue(row, 'PACKING') ?? '').trim() || null,
+          remark2:            String(getRecordValue(row, 'REMARK2') ?? '').trim() || null,
           order_qty_oru:      toNumber(getRecordValue(row, 'ORDER_QTY_ORU')),
           unit_of_measure_oru: String(getRecordValue(row, 'UNIT_OF_MEASURE_ORU') ?? '').trim() || null,
           unit_price_oru:     null,
@@ -725,6 +740,129 @@ export async function POST(request: NextRequest) {
         totalRows: soDetailRows.length,
         headerCount: soHeaderRows.length,
       })
+    }
+
+    if (action === 'test_remarks') {
+      // ── 備註欄單筆測試（驗證 REMARK/PACKING/REMARK2 解析是否正常）──────────
+      const { projectId } = body as { projectId?: string }
+      if (!projectId || !/^[A-Za-z0-9_\-]{1,40}$/.test(projectId)) {
+        return NextResponse.json({ status: 'error', error: '請提供合法的訂單號碼 (project_id)' }, { status: 400 })
+      }
+      const sanitize = (v: unknown): string | null =>
+        String(v ?? '').replace(/[\n\r\t\u0085\u2028\u2029]/g, ch => {
+          if (ch === '\n') return '\n'   // 保留原始換行（讓 UI 顯示 [含換行]）
+          if (ch === '\r') return ''
+          if (ch === '\t') return '\t'
+          return ' '
+        }).trim() || null
+      // ── 1. PJ_PROJECTDETAIL：明細備註欄 ──────────────────────
+      const sparam = JSON.stringify({
+        APIKEY1: keys.APIKEY1, APIKEY2: keys.APIKEY2, APIKEY3: keys.APIKEY3,
+        SEGMENT,
+        TABLE: 'PJ_PROJECTDETAIL',
+        SHOWNULLCOLUMN: 'N',
+        CUSTOMCOLUMN: 'PDL_SEQ,LINE_NO,REMARK,PACKING,REMARK2',
+        PJT_PROJECT_ID: `= '${projectId}'`,
+      })
+      const res = await fetch(`${API_BASE}/S_QUERY`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sparam }),
+      })
+      const rawText = await res.text()
+      // 判斷解析模式
+      let parsed: unknown = null
+      let parseMode: 'direct' | 'sanitized' | 'failed' = 'direct'
+      try {
+        parsed = JSON.parse(rawText)
+      } catch {
+        try {
+          const fixed = rawText.replace(
+            /[\u0000-\u001F\u007F\u0085\u2028\u2029]/g,
+            ch => {
+              if (ch === '\n') return '\\n'
+              if (ch === '\r') return '\\r'
+              if (ch === '\t') return '\\t'
+              return `\\u${ch.charCodeAt(0).toString(16).padStart(4, '0')}`
+            }
+          )
+          parsed = JSON.parse(fixed)
+          parseMode = 'sanitized'
+        } catch {
+          parseMode = 'failed'
+        }
+      }
+      if (parseMode === 'failed' || !isArgoSuccess(parsed)) {
+        return NextResponse.json({
+          status: 'error',
+          error: parseMode === 'failed' ? '無法解析 ARGO 回應 JSON（即使修復後仍失敗）' : extractApiError(parsed) ?? 'ARGO 回傳非成功狀態',
+          rawSnippet: rawText.slice(0, 1000),
+          parseMode,
+        })
+      }
+
+      // ── 2. PJ_PROJECT：表頭所有欄位（SHOWNULLCOLUMN:Y，方便確認 REMARK 欄位名稱）──
+      let customerRemark: string | null = null
+      let headerRawSample: Record<string, unknown> | null = null
+      try {
+        const hSparam = JSON.stringify({
+          APIKEY1: keys.APIKEY1, APIKEY2: keys.APIKEY2, APIKEY3: keys.APIKEY3,
+          SEGMENT,
+          TABLE: 'PJ_PROJECT',
+          SHOWNULLCOLUMN: 'Y',
+          PJT_PROJECT_ID: `= '${projectId}'`,
+        })
+        const hRes = await fetch(`${API_BASE}/S_QUERY`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sparam: hSparam }),
+        })
+        const hRaw = await hRes.text()
+        const hParsed = tryParseJson(hRaw)
+        if (isArgoSuccess(hParsed)) {
+          const hRows = findObjectRows(hParsed)
+          if (hRows.length > 0) {
+            headerRawSample = hRows[0] as Record<string, unknown>
+            // 嘗試幾個可能的欄位名稱
+            customerRemark =
+              sanitize(getRecordValue(hRows[0], 'CUSTOMER_REMARK')) ??
+              sanitize(getRecordValue(hRows[0], 'REMARK')) ??
+              null
+          }
+        }
+      } catch { /* 表頭查詢失敗不影響明細結果 */ }
+
+      // ── 3. PJ_PROJECTDETAIL：全欄位掃描（SHOWNULLCOLUMN:Y，方便確認明細備註欄名稱）──
+      let detailRawSample: Record<string, unknown> | null = null
+      try {
+        const dSparam = JSON.stringify({
+          APIKEY1: keys.APIKEY1, APIKEY2: keys.APIKEY2, APIKEY3: keys.APIKEY3,
+          SEGMENT,
+          TABLE: 'PJ_PROJECTDETAIL',
+          SHOWNULLCOLUMN: 'Y',
+          PJT_PROJECT_ID: `= '${projectId}'`,
+        })
+        const dRes = await fetch(`${API_BASE}/S_QUERY`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sparam: dSparam }),
+        })
+        const dRaw = await dRes.text()
+        const dParsed = tryParseJson(dRaw)
+        if (isArgoSuccess(dParsed)) {
+          const dRows = findObjectRows(dParsed)
+          if (dRows.length > 0) detailRawSample = dRows[0] as Record<string, unknown>
+        }
+      } catch { /* 掃描失敗不影響結果 */ }
+
+      const rows = findObjectRows(parsed).map(row => ({
+        pdl_seq:         String(getRecordValue(row, 'PDL_SEQ') ?? ''),
+        remark:          sanitize(getRecordValue(row, 'REMARK')),
+        packing:         sanitize(getRecordValue(row, 'PACKING')),
+        remark2:         sanitize(getRecordValue(row, 'REMARK2')),
+        customer_remark: customerRemark,
+      }))
+      return NextResponse.json({ status: 'ok', rows, rawSnippet: rawText.slice(0, 500), parseMode, headerRawSample, detailRawSample })
     }
 
     if (action === 'sync_so_remarks') {
@@ -1178,7 +1316,7 @@ export async function POST(request: NextRequest) {
         SHOWCOLUMNTIME: 'Y',
         SHOWNULLCOLUMN: 'Y',
         CUSTOMCOLUMN: 'IV_NOTICE.SLIP_NO,IV_NOTICE.SLIP_DATE,IV_NOTICE.PJT_PROJECT_ID,IV_NOTICE.MO_MBP_PART,IV_NOTICE.MO_QTY,IV_NOTICEDETAIL.LINE_NO,IV_NOTICEDETAIL.MBP_PART,IV_NOTICEDETAIL.NOTICE_QTY',
-        'IV_NOTICEDETAIL.SLIP_NO': '=IV_NOTICE.SLIP_NO',
+        'IV_NOTICEDETAIL.NTC_SLIP_NO': '=IV_NOTICE.SLIP_NO',
       })
 
       const res = await fetch(`${API_BASE}/S_QUERY`, {

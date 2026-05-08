@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { supabase } from '../../../../lib/supabaseClient'
+import SoOrderModal from '../../../../components/SoOrderModal'
 
 // ─── 型別 ─────────────────────────────────────────────
 type DocTypeKey = 'sales' | 'mo' | 'po' | 'subcontract' | 'inventory' | 'material_prep'
@@ -440,6 +441,7 @@ function SyncCard({ docKey }: SyncCardProps) {
   const [loadingRecords, setLoadingRecords] = useState(false)
   const [totalCount, setTotalCount] = useState<number | null>(null)
   const [search, setSearch] = useState('')
+  const [soModalId, setSoModalId] = useState<string | null>(null)
   const configRef = useRef(config)
   configRef.current = config
 
@@ -575,7 +577,8 @@ function SyncCard({ docKey }: SyncCardProps) {
             `slip_no.ilike.%${kw}%,mo_number.ilike.%${kw}%,fg_part.ilike.%${kw}%,mbp_part.ilike.%${kw}%`
           )
         }
-        const { data, count } = await query
+        const { data, count, error: mpError } = await query
+        if (mpError) console.error('erp_material_prep_lines fetch error:', mpError)
         setMaterialPrepRecords((data ?? []) as MaterialPrepLine[])
         setTotalCount(count ?? 0)
       } else {
@@ -1350,7 +1353,9 @@ function SyncCard({ docKey }: SyncCardProps) {
                         }`}>{r.hold_status}</span>
                       ) : '—'}
                     </td>
-                    <td className="px-3 py-2 font-mono text-cyan-300">{r.project_id}</td>
+                    <td className="px-3 py-2 font-mono">
+                      <button onClick={() => setSoModalId(r.project_id)} className="text-cyan-300 hover:text-cyan-100 hover:underline underline-offset-2 text-left">{r.project_id}</button>
+                    </td>
                     <td className="px-3 py-2 text-center text-slate-400">{r.line_no || '—'}</td>
                     <td className="px-3 py-2 font-mono text-slate-200">{r.mbp_part ?? '—'}</td>
                     <td className="px-3 py-2 text-slate-200 max-w-[200px] truncate" title={r.description ?? ''}>{r.description ?? '—'}</td>
@@ -1461,7 +1466,12 @@ function SyncCard({ docKey }: SyncCardProps) {
                       ) : '—'}
                     </td>
                     <td className="px-3 py-2 font-mono text-cyan-300">{r.project_id}</td>
-                    <td className="px-3 py-2 font-mono text-slate-300">{r.source_order ?? '—'}</td>
+                    <td className="px-3 py-2 font-mono">
+                      {r.source_order
+                        ? <button onClick={() => setSoModalId(r.source_order!)} className="text-amber-300/80 hover:text-amber-200 hover:underline underline-offset-2 text-left">{r.source_order}</button>
+                        : '—'
+                      }
+                    </td>
                     <td className="px-3 py-2 text-center text-slate-400">{r.line_no || '—'}</td>
                     <td className="px-3 py-2 font-mono text-slate-200">{r.mbp_part ?? '—'}</td>
                     <td className="px-3 py-2 text-right text-slate-200">{r.order_qty > 0 ? r.order_qty.toLocaleString() : '—'}</td>
@@ -1718,7 +1728,163 @@ function SyncCard({ docKey }: SyncCardProps) {
           </div>
         </div>
       )}
+      <SoOrderModal projectId={soModalId} onClose={() => setSoModalId(null)} />
     </div>
+  )
+}
+
+// ─── 備註欄同步測試區 ─────────────────────────────────
+function RemarkTestPanel() {
+  const [projectId, setProjectId] = useState('')
+  const [running, setRunning] = useState(false)
+  const [result, setResult] = useState<{
+    status: 'idle' | 'ok' | 'error'
+    rows: Array<{ pdl_seq: string; remark: string | null; packing: string | null; remark2: string | null; customer_remark: string | null }>
+    rawSnippet: string
+    error: string
+    parseMode: 'direct' | 'sanitized' | 'failed'
+  }>({ status: 'idle', rows: [], rawSnippet: '', error: '', parseMode: 'direct' })
+
+  const run = async () => {
+    const id = projectId.trim()
+    if (!id) return
+    setRunning(true)
+    setResult({ status: 'idle', rows: [], rawSnippet: '', error: '', parseMode: 'direct' })
+    try {
+      const res = await fetch('/api/argoerp', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'test_remarks', projectId: id }),
+      })
+      const json = await res.json() as {
+        status: string
+        rows?: Array<{ pdl_seq: string; remark: string | null; packing: string | null; remark2: string | null; customer_remark: string | null }>
+        rawSnippet?: string
+        parseMode?: 'direct' | 'sanitized' | 'failed'
+        error?: string
+      }
+      if (json.status === 'ok') {
+        setResult({ status: 'ok', rows: json.rows ?? [], rawSnippet: json.rawSnippet ?? '', error: '', parseMode: json.parseMode ?? 'direct' })
+      } else {
+        setResult({ status: 'error', rows: [], rawSnippet: json.rawSnippet ?? '', error: json.error ?? '未知錯誤', parseMode: 'failed' })
+      }
+    } catch (e) {
+      setResult({ status: 'error', rows: [], rawSnippet: '', error: e instanceof Error ? e.message : String(e), parseMode: 'failed' })
+    } finally {
+      setRunning(false)
+    }
+  }
+
+  return (
+    <div className="mt-10 rounded-2xl border border-amber-700/40 bg-slate-900/60 p-6">
+      <h2 className="text-lg font-bold text-amber-300 mb-1">🧪 備註欄同步測試區</h2>
+      <p className="text-xs text-slate-400 mb-4">
+        針對 REMARK / PACKING / REMARK2 欄位的單筆解析測試（驗證控制字元修復邏輯）
+      </p>
+
+      <div className="flex gap-3 items-end flex-wrap mb-5">
+        <div className="flex flex-col gap-1">
+          <label className="text-xs text-slate-400">訂單號碼 (project_id)</label>
+          <input
+            value={projectId}
+            onChange={e => setProjectId(e.target.value)}
+            onKeyDown={e => e.key === 'Enter' && void run()}
+            placeholder="例：SO260505001"
+            className="px-3 py-2 rounded-lg bg-slate-800 border border-slate-600 text-white text-sm w-56 focus:outline-none focus:border-amber-500"
+          />
+        </div>
+        <button
+          onClick={() => void run()}
+          disabled={running || !projectId.trim()}
+          className="px-5 py-2 rounded-lg bg-amber-600 hover:bg-amber-500 disabled:bg-slate-700 text-white text-sm font-medium transition-colors"
+        >
+          {running ? '查詢中…' : '🔍 查詢'}
+        </button>
+      </div>
+
+      {result.status === 'error' && (
+        <div className="rounded-lg bg-red-900/30 border border-red-700/50 p-3 text-red-300 text-sm mb-4">
+          ❌ {result.error}
+          {result.rawSnippet && (
+            <pre className="mt-2 text-xs text-red-200/70 whitespace-pre-wrap break-all max-h-40 overflow-y-auto">
+              {result.rawSnippet}
+            </pre>
+          )}
+        </div>
+      )}
+
+      {result.status === 'ok' && (
+        <div className="space-y-4">
+          <div className="flex items-center gap-3">
+            <span className="text-sm text-emerald-400">✓ 解析成功 — {result.rows.length} 筆明細</span>
+            <span className={`text-xs px-2 py-0.5 rounded border ${
+              result.parseMode === 'direct'
+                ? 'bg-emerald-900/30 text-emerald-300 border-emerald-700/50'
+                : 'bg-amber-900/30 text-amber-300 border-amber-700/50'
+            }`}>
+              {result.parseMode === 'direct' ? '直接解析' : '修復後解析（含控制字元）'}
+            </span>
+          </div>
+
+          <div className="overflow-x-auto rounded-lg border border-slate-700">
+            <table className="min-w-full text-sm">
+              <thead className="bg-slate-800 text-slate-300">
+                <tr>
+                  <th className="px-3 py-2 text-left text-xs font-medium w-16">PDL_SEQ</th>
+                  <th className="px-3 py-2 text-left text-xs font-medium">REMARK</th>
+                  <th className="px-3 py-2 text-left text-xs font-medium">PACKING</th>
+                  <th className="px-3 py-2 text-left text-xs font-medium">REMARK2</th>
+                  <th className="px-3 py-2 text-left text-xs font-medium">客戶備註</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-800">
+                {result.rows.map((row, i) => (
+                  <tr key={i} className="hover:bg-slate-800/50">
+                    <td className="px-3 py-2 text-slate-400 font-mono text-xs">{row.pdl_seq}</td>
+                    <td className="px-3 py-2 text-slate-200 text-xs max-w-xs">
+                      <CellValue value={row.remark} />
+                    </td>
+                    <td className="px-3 py-2 text-slate-200 text-xs max-w-xs">
+                      <CellValue value={row.packing} />
+                    </td>
+                    <td className="px-3 py-2 text-slate-200 text-xs max-w-xs">
+                      <CellValue value={row.remark2} />
+                    </td>
+                    <td className="px-3 py-2 text-slate-200 text-xs max-w-xs">
+                      <CellValue value={row.customer_remark} />
+                    </td>
+                  </tr>
+                ))}
+                {result.rows.length === 0 && (
+                  <tr><td colSpan={5} className="px-3 py-4 text-center text-slate-500 text-xs">無明細資料</td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+
+          {result.rawSnippet && (
+            <details className="text-xs">
+              <summary className="cursor-pointer text-slate-500 hover:text-slate-300">展開 Raw 回應片段</summary>
+              <pre className="mt-2 rounded bg-slate-950 border border-slate-800 p-3 text-slate-400 whitespace-pre-wrap break-all max-h-60 overflow-y-auto">
+                {result.rawSnippet}
+              </pre>
+            </details>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function CellValue({ value }: { value: string | null }) {
+  if (value === null || value === '') return <span className="text-slate-600">—</span>
+  const hasSpecial = /[\n\r\t]/.test(value)
+  const display = value.replace(/\n/g, '↵ ').replace(/\r/g, '').replace(/\t/g, '→ ')
+  return (
+    <span title={value} className={hasSpecial ? 'text-amber-300' : ''}>
+      {display}
+      {hasSpecial && <span className="ml-1 text-amber-500/60 text-[10px]">[含換行]</span>}
+    </span>
   )
 }
 
@@ -1914,6 +2080,9 @@ export default function ErpSyncPage() {
 
       {/* Content */}
       <SyncCard key={activeTab} docKey={activeTab} />
+
+      {/* 備註欄同步測試區 */}
+      <RemarkTestPanel />
     </div>
   )
 }

@@ -16,25 +16,30 @@ interface SoLine {
   duedate: string | null
   order_qty: number
   unit_of_measure: string | null
+  remark: string | null
+  packing: string | null
+  remark2: string | null
   synced_at: string
 }
 
 type SortCol = 'project_id' | 'begin_date' | 'tpn_partner_id' | 'duedate' | 'synced_at'
 type SortDir = 'asc' | 'desc'
 
-// ─── 欄位標頭 ──────────────────────────────────────────
-const COLUMNS: { key: keyof SoLine; label: string; tw: string }[] = [
-  { key: 'project_id',      label: '訂單編號',    tw: 'min-w-[140px]' },
-  { key: 'begin_date',      label: '開立日期',    tw: 'min-w-[110px]' },
-  { key: 'sales_name',      label: '業務員',      tw: 'min-w-[90px]'  },
-  { key: 'tpn_partner_id',  label: '客戶代號',    tw: 'min-w-[100px]' },
-  { key: 'line_no',         label: '序號',        tw: 'w-16 text-center' },
-  { key: 'description',     label: '產品名稱',    tw: 'min-w-[160px]' },
-  { key: 'part',            label: '規格',        tw: 'min-w-[120px]' },
-  { key: 'duedate',         label: '交貨日(預)',   tw: 'min-w-[110px]' },
-  { key: 'order_qty',       label: '數量',        tw: 'w-20 text-right' },
-  { key: 'unit_of_measure', label: '單位',        tw: 'w-16 text-center' },
-]
+// ─── 搜尋篩選 ─────────────────────────────────────────
+function filterRows(rows: SoLine[], search: string) {
+  if (!search) return rows
+  const q = search.toLowerCase()
+  return rows.filter(r =>
+    r.project_id.toLowerCase().includes(q) ||
+    (r.description ?? '').toLowerCase().includes(q) ||
+    (r.tpn_partner_id ?? '').toLowerCase().includes(q) ||
+    (r.sales_name ?? '').toLowerCase().includes(q) ||
+    (r.part ?? '').toLowerCase().includes(q) ||
+    (r.remark ?? '').toLowerCase().includes(q) ||
+    (r.remark2 ?? '').toLowerCase().includes(q) ||
+    (r.packing ?? '').toLowerCase().includes(q)
+  )
+}
 
 // ─── 頁面 ─────────────────────────────────────────────
 export default function SoSyncPage() {
@@ -147,17 +152,7 @@ export default function SoSyncPage() {
 
   const sortableKeys: SortCol[] = ['project_id', 'begin_date', 'tpn_partner_id', 'duedate', 'synced_at']
 
-  const filtered = rows.filter(r => {
-    if (!search) return true
-    const q = search.toLowerCase()
-    return (
-      r.project_id.toLowerCase().includes(q) ||
-      (r.description ?? '').toLowerCase().includes(q) ||
-      (r.tpn_partner_id ?? '').toLowerCase().includes(q) ||
-      (r.sales_name ?? '').toLowerCase().includes(q) ||
-      (r.part ?? '').toLowerCase().includes(q)
-    )
-  })
+  const filtered = filterRows(rows, search)
 
   return (
     <div className="min-h-screen bg-gray-950 text-gray-100 p-6">
@@ -233,29 +228,26 @@ export default function SoSyncPage() {
       <div className="overflow-x-auto rounded-xl border border-gray-800">
         <table className="w-full text-sm">
           <thead>
-            <tr className="bg-gray-800/80">
-              {COLUMNS.map(col => {
-                const isSortable = sortableKeys.includes(col.key as SortCol)
-                const isActive = sortCol === col.key
-                return (
-                  <th
-                    key={col.key}
-                    onClick={isSortable ? () => toggleSort(col.key as SortCol) : undefined}
-                    className={`px-3 py-2.5 text-left font-medium text-gray-300 whitespace-nowrap select-none ${col.tw} ${isSortable ? 'cursor-pointer hover:text-white' : ''}`}
-                  >
-                    {col.label}
-                    {isActive && (
-                      <span className="ml-1 text-teal-400">{sortDir === 'asc' ? '↑' : '↓'}</span>
-                    )}
-                  </th>
-                )
-              })}
+            <tr className="bg-gray-800/80 text-gray-300 text-xs">
+              <th className="px-3 py-2.5 text-left font-medium min-w-[150px] cursor-pointer hover:text-white select-none" onClick={() => toggleSort('project_id')}>
+                訂單編號 / 開立日期{sortCol === 'project_id' && <span className="ml-1 text-teal-400">{sortDir === 'asc' ? '↑' : '↓'}</span>}
+              </th>
+              <th className="px-3 py-2.5 text-left font-medium min-w-[100px] cursor-pointer hover:text-white select-none" onClick={() => toggleSort('tpn_partner_id')}>
+                客戶 / 業務{sortCol === 'tpn_partner_id' && <span className="ml-1 text-teal-400">{sortDir === 'asc' ? '↑' : '↓'}</span>}
+              </th>
+              <th className="px-3 py-2.5 text-center font-medium w-12">序</th>
+              <th className="px-3 py-2.5 text-left font-medium min-w-[200px]">品項名稱 / 規格料號</th>
+              <th className="px-3 py-2.5 text-left font-medium min-w-[160px]">商品備註 / 包裝方式</th>
+              <th className="px-3 py-2.5 text-left font-medium min-w-[100px] cursor-pointer hover:text-white select-none" onClick={() => toggleSort('duedate')}>
+                交貨日(預){sortCol === 'duedate' && <span className="ml-1 text-teal-400">{sortDir === 'asc' ? '↑' : '↓'}</span>}
+              </th>
+              <th className="px-3 py-2.5 text-right font-medium w-24">數量 / 單位</th>
             </tr>
           </thead>
           <tbody>
             {filtered.length === 0 && !loading && (
               <tr>
-                <td colSpan={COLUMNS.length} className="px-4 py-8 text-center text-gray-500">
+                <td colSpan={7} className="px-4 py-8 text-center text-gray-500">
                   {rows.length === 0 ? '尚未同步，請點「立即同步」' : '無符合搜尋條件的資料'}
                 </td>
               </tr>
@@ -265,16 +257,52 @@ export default function SoSyncPage() {
                 key={row.id}
                 className={`border-t border-gray-800/60 hover:bg-gray-800/40 transition-colors ${i % 2 === 0 ? '' : 'bg-gray-900/30'}`}
               >
-                <td className="px-3 py-2 font-mono text-teal-400">{row.project_id}</td>
-                <td className="px-3 py-2 text-gray-300">{row.begin_date ?? '—'}</td>
-                <td className="px-3 py-2 text-gray-300">{row.sales_name ?? '—'}</td>
-                <td className="px-3 py-2 text-gray-300">{row.tpn_partner_id ?? '—'}</td>
-                <td className="px-3 py-2 text-center text-gray-400">{row.line_no || '—'}</td>
-                <td className="px-3 py-2 text-gray-200">{row.description ?? '—'}</td>
-                <td className="px-3 py-2 text-gray-400 text-xs">{row.part ?? '—'}</td>
-                <td className="px-3 py-2 text-yellow-400/80">{row.duedate ?? '—'}</td>
-                <td className="px-3 py-2 text-right text-gray-200">{row.order_qty}</td>
-                <td className="px-3 py-2 text-center text-gray-400">{row.unit_of_measure ?? '—'}</td>
+                {/* 訂單編號 / 開立日期 */}
+                <td className="px-3 py-2">
+                  <div className="font-mono text-teal-400 text-sm">{row.project_id}</div>
+                  <div className="text-xs text-gray-500 mt-0.5">{row.begin_date ?? '—'}</div>
+                </td>
+
+                {/* 客戶 / 業務 */}
+                <td className="px-3 py-2">
+                  <div className="text-gray-200 text-sm">{row.tpn_partner_id ?? '—'}</div>
+                  <div className="text-xs text-gray-500 mt-0.5">{row.sales_name ?? '—'}</div>
+                </td>
+
+                {/* 序號 */}
+                <td className="px-3 py-2 text-center text-gray-400 text-xs">{row.line_no || '—'}</td>
+
+                {/* 品項名稱 / 規格料號 */}
+                <td className="px-3 py-2">
+                  <div className="text-gray-200 text-sm leading-snug whitespace-pre-wrap break-words max-w-xs">
+                    {row.description ?? '—'}
+                  </div>
+                  {row.part && (
+                    <div className="text-xs text-gray-500 mt-0.5 font-mono">{row.part}</div>
+                  )}
+                </td>
+
+                {/* 商品備註 / 包裝方式 */}
+                <td className="px-3 py-2">
+                  {row.remark2
+                    ? <div className="text-gray-300 text-xs leading-snug whitespace-pre-wrap break-words max-w-[180px]">{row.remark2}</div>
+                    : <div className="text-gray-600 text-xs">—</div>
+                  }
+                  {row.packing && (
+                    <div className="text-xs text-amber-400/80 mt-0.5">📦 {row.packing}</div>
+                  )}
+                </td>
+
+                {/* 交貨日 */}
+                <td className="px-3 py-2 text-yellow-400/80 text-sm">{row.duedate ?? '—'}</td>
+
+                {/* 數量 / 單位 */}
+                <td className="px-3 py-2 text-right">
+                  <span className="text-gray-200 text-sm">{row.order_qty}</span>
+                  {row.unit_of_measure && (
+                    <span className="text-gray-500 text-xs ml-1">{row.unit_of_measure}</span>
+                  )}
+                </td>
               </tr>
             ))}
           </tbody>

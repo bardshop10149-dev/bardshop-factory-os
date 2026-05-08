@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { supabase } from '../../../../lib/supabaseClient'
+import SoOrderModal from '../../../../components/SoOrderModal'
 
 // ============================================================
 // 型別
@@ -109,6 +110,7 @@ export default function MaterialPrepPage() {
   const [moRecords, setMoRecords] = useState<MoRecord[]>([])
   const [moLoading, setMoLoading] = useState(false)
   const [moError, setMoError] = useState('')
+  const [soModalId, setSoModalId] = useState<string | null>(null)
 
   // ---- BOM / 庫存 / 替代料 ----
   const [bomRows, setBomRows] = useState<BomRow[]>([])
@@ -1022,6 +1024,14 @@ export default function MaterialPrepPage() {
                         </td>
                         <td className="px-3 py-2 text-xs whitespace-nowrap">
                           <div className="text-cyan-300 font-mono">{row.mo_number}</div>
+                          {row.source_order && row.source_order !== '-' && (
+                            <button
+                              onClick={() => setSoModalId(row.source_order)}
+                              className="text-amber-300/80 font-mono text-[10px] hover:text-amber-200 hover:underline underline-offset-2 text-left mt-0.5"
+                            >
+                              {row.source_order}
+                            </button>
+                          )}
                           <div className="text-slate-400 truncate max-w-[180px]" title={row.customer}>
                             {row.customer !== '-' ? row.customer : <span className="text-slate-600 italic">查無客戶</span>}
                           </div>
@@ -1228,6 +1238,7 @@ export default function MaterialPrepPage() {
           </div>
         )}
       </div>
+      <SoOrderModal projectId={soModalId} onClose={() => setSoModalId(null)} />
     </div>
   )
 }

@@ -1,6 +1,7 @@
 'use client'
 
 import { useState, useCallback, useEffect, useRef } from 'react'
+import SoOrderModal from '../../../../components/SoOrderModal'
 
 // ==================== 型別 ====================
 interface SourceRow {
@@ -48,6 +49,7 @@ export default function StagingPage() {
   const [selectedRows, setSelectedRows] = useState<Set<number>>(new Set())
   const [loading, setLoading] = useState(true)
   const [errorMsg, setErrorMsg] = useState('')
+  const [soModalId, setSoModalId] = useState<string | null>(null)
   const reasonTimers = useRef<Record<number, ReturnType<typeof setTimeout>>>({})
 
   // 從 Supabase 載入
@@ -314,7 +316,17 @@ export default function StagingPage() {
                           className="px-3 py-2 text-slate-300 whitespace-nowrap max-w-[250px] truncate text-xs"
                           title={row[col.key] || ''}
                         >
-                          {row[col.key] || <span className="text-slate-700">—</span>}
+                          {col.key === 'order_number' && row[col.key]
+                            ? (
+                              <button
+                                onClick={() => setSoModalId(row.order_number)}
+                                className="font-mono text-cyan-300 hover:text-cyan-100 hover:underline underline-offset-2 text-left"
+                              >
+                                {row[col.key]}
+                              </button>
+                            )
+                            : row[col.key] || <span className="text-slate-700">—</span>
+                          }
                         </td>
                       ))}
                       <td className="px-3 py-2">
@@ -343,6 +355,7 @@ export default function StagingPage() {
           </div>
         )}
       </div>
+      <SoOrderModal projectId={soModalId} onClose={() => setSoModalId(null)} />
     </div>
   )
 }

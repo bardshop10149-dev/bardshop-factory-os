@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback } from 'react'
 import { supabase } from '../../../../lib/supabaseClient'
+import SoOrderModal from '../../../../components/SoOrderModal'
 
 // ===== 型別定義（與 order-batch-export 一致）=====
 interface SourceRow {
@@ -38,8 +39,8 @@ export interface SheetRow extends SourceRow {
   match_line_no?: string | null
   match_pdl_seq?: number | null
   match_reason?: string | null
-  // 批備料狀態（對應 argoerp_material_prep_log 最近一筆）
-  material_prep_status?: '已備料' | '無需備料' | null
+  // 批備料狀態（對應 argoerp_material_prep_log 最近一筆 或 erp_material_prep_lines ARGO 批備料單）
+  material_prep_status?: '已備料' | '無需備料' | '已批備料' | null
   // 機台分配（對應 argoerp_mo_machine_assign）
   machine?: string
 }
@@ -179,6 +180,7 @@ export default function DailyOrderSheetPage() {
   const [machines, setMachines] = useState<string[]>([])
   const [moMachines, setMoMachines] = useState<Record<string, string>>({})
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set())
+  const [soModalId, setSoModalId] = useState<string | null>(null)
 
   // ---- 讀取所有日期清單 ----
   const loadSheetList = useCallback(async () => {
@@ -451,43 +453,63 @@ export default function DailyOrderSheetPage() {
         .select('project_id, source_order, mbp_part, order_qty, line_no')
         .in('source_order', noNone)
       if (erpErr) throw erpErr
-      // erp_mo_lines.project_id 就是製令單號 (e.g. MOT260507004 02)
-      // 製令單號末 2 碼即為對應序號（e.g. 01=序號1, 02=序號2）
-      // key = source_order|mbp_part|末2碼  →  精準對應序號
-      // 同時維護 baseMap（唯一製令時才允許無序號 fallback）
-      const erpMoMap = new Map<string, string>()       // source_order|mbp_part|seq → mo_number
+      // erp_mo_lines 是 ARGO 直接建立的製令，末碼跟你的 SO 序號無關
+      // 必須用 erp_mo_lines.line_no（ARGO 的 SO 序號欄）作為比對依據
+      const erpMoMap = new Map<string, string>()       // source_order|mbp_part|line_no(padded) → mo_number
       const erpMoBaseMap = new Map<string, string[]>() // source_order|mbp_part → [mo_numbers]
       for (const mo of (erp_mo ?? [])) {
         if (!mo.source_order || !mo.mbp_part || !mo.project_id) continue
-        if (!mo.project_id.startsWith('MO')) continue  // 排除非製令單號的資料
-        const seq = mo.project_id.slice(-2)             // 末 2 碼 = 序號 (e.g. "01", "02")
-        const seqKey = `${mo.source_order}|${mo.mbp_part}|${seq}`
-        if (!erpMoMap.has(seqKey)) erpMoMap.set(seqKey, mo.project_id)
+        if (!mo.project_id.startsWith('MO')) continue
+        // 用 line_no 作為 SO 序號 key（ARGO 中的欄位，不用末碼）
+        if (mo.line_no != null) {
+          const lineNoStr = String(parseInt(String(mo.line_no), 10)).padStart(2, '0')
+          const seqKey = `${mo.source_order}|${mo.mbp_part}|${lineNoStr}`
+          if (!erpMoMap.has(seqKey)) erpMoMap.set(seqKey, mo.project_id)
+        }
         const baseKey = `${mo.source_order}|${mo.mbp_part}`
         const arr = erpMoBaseMap.get(baseKey) ?? []
         if (!arr.includes(mo.project_id)) erpMoBaseMap.set(baseKey, [...arr, mo.project_id])
       }
 
-      // 3. 對每列嘗試找出 mo_number（不覆蓋已有值；但若現有值非 MO 開頭則視為無效重新比對）
+      // 3. 對每列嘗試找出 mo_number
+      //    ① erp_mo_lines：用 line_no 精準比對（ARGO 直接建立的 MO）
+      //    ② argoerp_mo_upload_log：末碼=序號（你們系統建立的 MO）
+      //    ③ erpMoBaseMap 唯一製令 fallback
       const next: SheetRow[] = sheetRows.map(r => {
-        if (r.mo_number?.startsWith('MO')) return r
-        const qty = String(r.quantity).trim()
-        // 優先查上傳 log
-        const k1 = `${r.order_number}|${r.item_code}|${qty}`
-        const logHit = moMap.get(k1) ?? moMap.get(`${r.order_number}|${r.item_code}`)
-        if (logHit) return { ...r, mo_number: logHit.mo_number, mo_status: '已匯入製令' as const }
-        // fallback: 查 erp_mo_lines，優先以序號（match_line_no 末2碼）精準比對
-        const matchSeq = r.match_line_no
+        const matchSeq = r.match_line_no != null
           ? String(parseInt(r.match_line_no, 10)).padStart(2, '0')
           : null
-        const erpHitBySeq = matchSeq
-          ? erpMoMap.get(`${r.order_number}|${r.item_code}|${matchSeq}`)
-          : undefined
-        if (erpHitBySeq) return { ...r, mo_number: erpHitBySeq, mo_status: '已匯入製令' as const }
-        // 若該 SO+品項只有唯一一筆製令（不需序號也能確定），允許 fallback
+
+        // 若已有 MO：用 erp_mo_lines line_no 驗證，能改就改
+        if (r.mo_number?.startsWith('MO')) {
+          if (!matchSeq) return r
+          const erpConfirm = erpMoMap.get(`${r.order_number}|${r.item_code}|${matchSeq}`)
+          if (!erpConfirm) return r              // ARGO 尚無資料，保留上傳 log 結果
+          if (erpConfirm === r.mo_number) return r  // 已確認正確
+          return { ...r, mo_number: erpConfirm, mo_status: '已匯入製令' as const }  // 更正
+        }
+
+        const qty = String(r.quantity).trim()
+
+        // ① erp_mo_lines：用 line_no 精準比對
+        if (matchSeq) {
+          const erpHit = erpMoMap.get(`${r.order_number}|${r.item_code}|${matchSeq}`)
+          if (erpHit) return { ...r, mo_number: erpHit, mo_status: '已匯入製令' as const }
+        }
+
+        // ② 上傳 log：你們系統建立的 MO，末碼=序號
+        const k1 = `${r.order_number}|${r.item_code}|${qty}`
+        const logHit = moMap.get(k1) ?? moMap.get(`${r.order_number}|${r.item_code}`)
+        if (logHit) {
+          if (!matchSeq || logHit.mo_number.slice(-2) === matchSeq) {
+            return { ...r, mo_number: logHit.mo_number, mo_status: '已匯入製令' as const }
+          }
+        }
+
+        // ③ 唯一製令 fallback
         const baseHits = erpMoBaseMap.get(`${r.order_number}|${r.item_code}`) ?? []
         if (baseHits.length === 1) return { ...r, mo_number: baseHits[0], mo_status: '已匯入製令' as const }
-        // 若原本有非 MO 開頭的無效值，清除它
+
         if (r.mo_number && !r.mo_number.startsWith('MO')) {
           return { ...r, mo_number: undefined, mo_status: null, material_prep_status: null }
         }
@@ -507,9 +529,24 @@ export default function DailyOrderSheetPage() {
         for (const log of (prepLogs ?? [])) {
           if (!prepMap.has(log.mo_number)) prepMap.set(log.mo_number, log.status as '已備料' | '無需備料')
         }
+
+        // 查 ARGO 批備料單（erp_material_prep_lines），製令單號完整相符才視為已批備料
+        const { data: erpPrepLines } = await supabase
+          .from('erp_material_prep_lines')
+          .select('mo_number')
+          .in('mo_number', moNumbers)
+        const erpPrepSet = new Set<string>(
+          (erpPrepLines ?? []).map((l: { mo_number: string }) => l.mo_number).filter(Boolean)
+        )
+
         for (let i = 0; i < next.length; i++) {
           const moNo = next[i].mo_number
-          if (moNo && prepMap.has(moNo)) next[i] = { ...next[i], material_prep_status: prepMap.get(moNo)! }
+          if (!moNo) continue
+          if (erpPrepSet.has(moNo)) {
+            next[i] = { ...next[i], material_prep_status: '已批備料' }
+          } else if (prepMap.has(moNo)) {
+            next[i] = { ...next[i], material_prep_status: prepMap.get(moNo)! }
+          }
         }
       }
 
@@ -524,8 +561,10 @@ export default function DailyOrderSheetPage() {
       const json = await res.json()
       if (!res.ok || !json.success) throw new Error(json.error || `HTTP ${res.status}`)
       const newMo = next.filter((r, i) => r.mo_number && !sheetRows[i]?.mo_number).length
-      const prepCount = next.filter(r => r.material_prep_status).length
-      setSaveMsg(`✅ 製令狀態同步完成：新增 ${newMo} 筆製令連結，批備料狀態 ${prepCount} 筆`)
+      const batchPrepCount = next.filter(r => r.material_prep_status === '已批備料').length
+      const prepCount = next.filter(r => r.material_prep_status && r.material_prep_status !== '已批備料').length
+      const prepMsg = batchPrepCount > 0 ? `已批備料 ${batchPrepCount} 筆${prepCount > 0 ? `、其他狀態 ${prepCount} 筆` : ''}` : prepCount > 0 ? `批備料狀態 ${prepCount} 筆` : '無批備料紀錄'
+      setSaveMsg(`✅ 製令狀態同步完成：新增 ${newMo} 筆製令連結，${prepMsg}`)
       setTimeout(() => setSaveMsg(''), 5000)
     } catch (e) {
       setSaveMsg(`❌ 同步失敗：${e instanceof Error ? e.message : String(e)}`)
@@ -536,6 +575,55 @@ export default function DailyOrderSheetPage() {
   }, [sheetRows, selectedDate, currentRawText])
 
   // ---- 切換廠別 ----
+  // ---- 送批備料區：有製令單號 + 未批備料（排除無需備料）的列 ----
+  const [sendingPrep, setSendingPrep] = useState(false)
+
+  const handleSendToMaterialPrep = useCallback(async () => {
+    // 篩選：有 MO 開頭製令單號，且批備料狀態為空（null/undefined）或 '未批備料'
+    // 排除：已備料、已批備料、無需備料
+    const excluded = new Set<string | undefined>(['已備料', '已批備料', '無需備料'])
+    const toSend = sheetRows.filter(r =>
+      r.mo_number?.startsWith('MO') &&
+      !excluded.has(r.material_prep_status ?? undefined)
+    )
+    if (toSend.length === 0) {
+      setSaveMsg('ℹ️ 無符合條件的製令（有製令單號且未批備料）')
+      setTimeout(() => setSaveMsg(''), 4000)
+      return
+    }
+    if (!confirm(`將 ${toSend.length} 筆未備料製令送入批備料區（已備料/無需備料不在內）？`)) return
+    setSendingPrep(true)
+    setSaveMsg('')
+    try {
+      const records = toSend.map(r => ({
+        mo_number: r.mo_number!,
+        factory: r.factory,
+        product_code: r.item_code,
+        lot_number: r.customer,
+        planned_qty: String(r.quantity),
+        source_order: r.order_number,
+        mo_note: [r.item_name, r.plate_count ? `盤數：${r.plate_count}` : ''].filter(Boolean).join(' | '),
+        create_date: selectedDate,
+        planned_end_date: r.delivery_date,
+        prep_status: '未備料' as const,
+      }))
+      const res = await fetch('/api/argoerp/mo-summary?mode=upsert', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ records }),
+      })
+      const json = await res.json()
+      if (!res.ok || !json.success) throw new Error(json.error || `HTTP ${res.status}`)
+      setSaveMsg(`✅ 已送入批備料區：${json.upserted ?? toSend.length} 筆`)
+      setTimeout(() => setSaveMsg(''), 5000)
+    } catch (e) {
+      setSaveMsg(`❌ 送出失敗：${e instanceof Error ? e.message : String(e)}`)
+      setTimeout(() => setSaveMsg(''), 6000)
+    } finally {
+      setSendingPrep(false)
+    }
+  }, [sheetRows, selectedDate])
+
   const handleChangeFactory = useCallback((idx: number, factory: 'T' | 'C' | 'O') => {
     setSheetRows(prev => prev.map((r, i) => {
       if (i !== idx) return r
@@ -596,6 +684,14 @@ export default function DailyOrderSheetPage() {
                   title="從製令上傳紀錄＋批備料紀錄回填本表，立即儲存"
                 >
                   {syncingMo ? '同步中…' : '🔄 同步製令/批備料'}
+                </button>
+                <button
+                  onClick={() => void handleSendToMaterialPrep()}
+                  disabled={matching || syncingMo || saving || sendingPrep}
+                  className="px-4 py-2 rounded-lg bg-amber-700 hover:bg-amber-600 disabled:bg-slate-700 text-white text-sm font-medium transition-colors"
+                  title="將有製令單號但尚未批備料的列送入生產批備料區（排除無需備料）"
+                >
+                  {sendingPrep ? '送出中…' : '📦 送批備料區'}
                 </button>
                 <button
                   onClick={() => { setShowPasteArea(v => !v); setRawText('') }}
@@ -799,7 +895,12 @@ export default function DailyOrderSheetPage() {
                             </td>
                             <td className="px-3 py-2 text-slate-600">{idx + 1}</td>
                             <td className="px-3 py-2">
-                              <div className="font-mono text-cyan-300 whitespace-nowrap">{row.order_number}</div>
+                              <button
+                                onClick={() => setSoModalId(row.order_number)}
+                                className="font-mono text-cyan-300 whitespace-nowrap hover:text-cyan-100 hover:underline underline-offset-2 text-left"
+                              >
+                                {row.order_number}
+                              </button>
                               <div className="mt-0.5">
                                 {editFactoryIdx === idx ? (
                                   <div className="flex gap-1">
@@ -846,7 +947,9 @@ export default function DailyOrderSheetPage() {
                               )}
                             </td>
                             <td className="px-3 py-2">
-                              {row.material_prep_status === '已備料' ? (
+                              {row.material_prep_status === '已批備料' ? (
+                                <span className="px-2 py-0.5 rounded border text-xs bg-teal-900/40 text-teal-300 border-teal-700/50">已批備料</span>
+                              ) : row.material_prep_status === '已備料' ? (
                                 <span className="px-2 py-0.5 rounded border text-xs bg-emerald-900/40 text-emerald-300 border-emerald-700/50">已備料</span>
                               ) : row.material_prep_status === '無需備料' ? (
                                 <span className="px-2 py-0.5 rounded border text-xs bg-slate-800 text-slate-400 border-slate-700">無需備料</span>
@@ -911,6 +1014,7 @@ export default function DailyOrderSheetPage() {
           </div>
         </div>
       </div>
+      <SoOrderModal projectId={soModalId} onClose={() => setSoModalId(null)} />
     </div>
   )
 }
