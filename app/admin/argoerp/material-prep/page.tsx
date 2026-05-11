@@ -19,6 +19,7 @@ interface MoRecord {
   saved_at?: string
   prep_status?: '未備料' | '已備料' | '無需備料'
   plate_count?: string
+  machine?: string
 }
 
 interface BomRow {
@@ -62,6 +63,7 @@ interface MaterialPrepRow {
   planned_qty: number
   plate_count: string
   factory: string
+  machine: string
   std_qty: number
   status: '可直接備料' | '建議替代' | '缺料' | '無BOM'
   note: string
@@ -135,11 +137,24 @@ export default function MaterialPrepPage() {
   )
   const [customCodeStocks, setCustomCodeStocks] = useState<Record<string, number | null>>({})
 
+  // ---- 換料 panel 開關（每行獨立）----
+  const [swapOpenKeys, setSwapOpenKeys] = useState<Set<string>>(new Set())
+  const toggleSwapOpen = useCallback((rowKey: string) => {
+    setSwapOpenKeys(prev => {
+      const next = new Set(prev)
+      if (next.has(rowKey)) next.delete(rowKey)
+      else next.add(rowKey)
+      return next
+    })
+  }, [])
+
   // ---- 選取 / 操作 ----
   const [selectedRowKeys, setSelectedRowKeys] = useState<Set<string>>(new Set())
   const [actionMessage, setActionMessage] = useState('')
   const [actionBusy, setActionBusy] = useState(false)
   const [statusFilter, setStatusFilter] = useState<MaterialPrepRow['status'] | null>(null)
+  const [moSearchQuery, setMoSearchQuery] = useState('')
+  const [remarkOverrides, setRemarkOverrides] = useState<Record<string, string>>({})
 
   // ---- 檢視模式 ----
   const [viewMode, setViewMode] = useState<'pending' | 'history'>('pending')
@@ -156,6 +171,7 @@ export default function MaterialPrepPage() {
   const materialPrepInterfaceId = 'IFAF078'
   const [materialPrepImporting, setMaterialPrepImporting] = useState(false)
   const [materialPrepMessage, setMaterialPrepMessage] = useState('')
+  const [materialPrepMsgExpanded, setMaterialPrepMsgExpanded] = useState(false)
   // 防止雙擊重複送出：useRef 在 React 畫面更新前就能同步擋住第二次點擊
   const importInFlightRef = useRef(false)
 
@@ -404,6 +420,7 @@ export default function MaterialPrepPage() {
             planned_qty: Number(mo.planned_qty ?? 0),
             plate_count: mo.plate_count || '-',
             factory: mo.factory || '-',
+            machine: mo.machine || '',
             std_qty: 0,
             source_material_code: '-',
             source_material_name: '自訂原料',
@@ -427,6 +444,7 @@ export default function MaterialPrepPage() {
           planned_qty: Number(mo.planned_qty ?? 0),
           plate_count: mo.plate_count || '-',
           factory: mo.factory || '-',
+          machine: mo.machine || '',
           std_qty: 0,
           source_material_code: '-',
           source_material_name: '查無 BOM',
@@ -509,6 +527,7 @@ export default function MaterialPrepPage() {
           planned_qty: planQty,
           plate_count: mo.plate_count || '-',
           factory: mo.factory || '-',
+          machine: mo.machine || '',
           std_qty: productionQty > 0 ? bomBaseQty / productionQty : bomBaseQty,
           source_material_code: bom.material_code,
           source_material_name: bom.material_name || '-',
@@ -535,9 +554,14 @@ export default function MaterialPrepPage() {
 
   // 篩選後的表格資料
   const filteredPrepRows = useMemo(() => {
-    if (!statusFilter) return materialPrepRows
-    return materialPrepRows.filter(row => row.status === statusFilter)
-  }, [materialPrepRows, statusFilter])
+    let rows = materialPrepRows
+    if (statusFilter) rows = rows.filter(row => row.status === statusFilter)
+    if (moSearchQuery.trim()) {
+      const q = moSearchQuery.trim().toLowerCase()
+      rows = rows.filter(row => row.mo_number?.toLowerCase().includes(q))
+    }
+    return rows
+  }, [materialPrepRows, statusFilter, moSearchQuery])
 
   // 將「選取的料號行」轉為可送 ARGO 的批備料行
   const selectedImportRows = useMemo(() => {
@@ -685,11 +709,13 @@ export default function MaterialPrepPage() {
 
     if (!materialPrepInterfaceId.trim()) {
       setMaterialPrepMessage('❌ 請先輸入批備料匯入的 ARGO 介面編號')
+      setMaterialPrepMsgExpanded(false)
       importInFlightRef.current = false
       return
     }
     if (selectedImportRows.length === 0) {
       setMaterialPrepMessage('❌ 選取的製令中沒有可匯入的批備料資料（請檢查缺料或無 BOM 狀態）')
+      setMaterialPrepMsgExpanded(false)
       importInFlightRef.current = false
       return
     }
@@ -757,6 +783,7 @@ export default function MaterialPrepPage() {
           QTY_PACK: '',
           UNIT_OF_MEASURE_PACK: '',
           STD_QTY: 1,
+          REMARK: remarkOverrides[moNumber] !== undefined ? remarkOverrides[moNumber] : (materialPrepRows.find(r => r.mo_number === moNumber)?.machine || ''),
         })
       })
     }
@@ -795,6 +822,7 @@ export default function MaterialPrepPage() {
 
       const argoRaw = result?.rawText ? `\nARGO 回應：${result.rawText}` : ''
       setMaterialPrepMessage(`✅ 已送出 ${selectedImportRows.length} 筆到 ARGO，並將 ${importMos.length} 筆製令標記為「已備料」${argoRaw}`)
+      setMaterialPrepMsgExpanded(false)
 
       // 寫入批備料紀錄（fire-and-forget）
       fetch('/api/argoerp/material-prep-log', {
@@ -817,6 +845,7 @@ export default function MaterialPrepPage() {
     } catch (error) {
       const message = error instanceof Error ? error.message : '生產批備料匯入失敗'
       setMaterialPrepMessage(`❌ ${message}`)
+      setMaterialPrepMsgExpanded(false)
     } finally {
       setMaterialPrepImporting(false)
       importInFlightRef.current = false
@@ -945,11 +974,26 @@ export default function MaterialPrepPage() {
               {actionBusy ? '處理中...' : '標記為「無需備料」'}
             </button>
           </div>
-          {materialPrepMessage && (
-            <p className={`text-sm whitespace-pre-line ${materialPrepMessage.startsWith('❌') ? 'text-red-300' : 'text-emerald-300'}`}>
-              {materialPrepMessage}
-            </p>
-          )}
+          {materialPrepMessage && (() => {
+            const isErr = materialPrepMessage.startsWith('❌')
+            const lines = materialPrepMessage.split('\n')
+            const hasMore = lines.length > 1
+            return (
+              <div className={`text-sm ${isErr ? 'text-red-300' : 'text-emerald-300'}`}>
+                <span className="whitespace-pre-line">
+                  {materialPrepMsgExpanded ? materialPrepMessage : lines[0]}
+                </span>
+                {hasMore && (
+                  <button
+                    onClick={() => setMaterialPrepMsgExpanded(v => !v)}
+                    className={`ml-2 text-xs underline opacity-70 hover:opacity-100 transition-opacity ${isErr ? 'text-red-400' : 'text-emerald-400'}`}
+                  >
+                    {materialPrepMsgExpanded ? '收合' : '展開'}
+                  </button>
+                )}
+              </div>
+            )
+          })()}
           {actionMessage && (
             <p className={`text-sm ${actionMessage.startsWith('❌') ? 'text-red-300' : 'text-emerald-300'}`}>
               {actionMessage}
@@ -970,14 +1014,33 @@ export default function MaterialPrepPage() {
           ) : bomError ? (
             <div className="px-4 py-10 text-center text-red-300 text-sm">{bomError}</div>
           ) : (
-            <div className="overflow-x-auto">              {statusFilter && (
-                <div className="px-4 py-2 bg-slate-800/50 border-b border-slate-700/50 flex items-center gap-2 text-xs text-slate-400">
-                  <span>篩選中：</span>
-                  <span className="px-2 py-0.5 rounded-full bg-slate-700 text-slate-200">{statusFilter === '無BOM' ? '查無 BOM' : statusFilter}</span>
-                  <span>共 {filteredPrepRows.length} 筆</span>
-                  <button onClick={() => setStatusFilter(null)} className="ml-auto text-slate-500 hover:text-white transition-colors">✕ 取消篩選</button>
+            <div className="overflow-x-auto">              <div className="px-4 py-2 bg-slate-800/50 border-b border-slate-700/50 flex items-center gap-2 text-xs text-slate-400 flex-wrap">
+                <div className="relative flex items-center">
+                  <svg className="absolute left-2 text-slate-500 pointer-events-none" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+                  <input
+                    type="text"
+                    value={moSearchQuery}
+                    onChange={e => setMoSearchQuery(e.target.value)}
+                    placeholder="搜尋製令單號…"
+                    className="pl-6 pr-6 py-1 rounded bg-slate-700 text-slate-200 placeholder-slate-500 border border-slate-600 focus:outline-none focus:border-cyan-500 text-xs w-44"
+                  />
+                  {moSearchQuery && (
+                    <button onClick={() => setMoSearchQuery('')} className="absolute right-1.5 text-slate-500 hover:text-white transition-colors">✕</button>
+                  )}
                 </div>
-              )}              <table className="w-full text-sm">
+                {moSearchQuery.trim() && (
+                  <span className="text-slate-400">找到 {filteredPrepRows.length} 筆</span>
+                )}
+                {statusFilter && (
+                  <>
+                    <span className="text-slate-600">|</span>
+                    <span>篩選中：</span>
+                    <span className="px-2 py-0.5 rounded-full bg-slate-700 text-slate-200">{statusFilter === '無BOM' ? '查無 BOM' : statusFilter}</span>
+                    {!moSearchQuery.trim() && <span>共 {filteredPrepRows.length} 筆</span>}
+                    <button onClick={() => setStatusFilter(null)} className="text-slate-500 hover:text-white transition-colors">✕ 取消篩選</button>
+                  </>
+                )}
+              </div>              <table className="w-full text-sm">
                 <thead>
                   <tr className="bg-slate-800/80 border-b border-slate-700">
                     <th className="px-2 py-3 text-center sticky left-0 bg-slate-800/80 z-10 w-10">
@@ -1035,6 +1098,14 @@ export default function MaterialPrepPage() {
                           <div className="text-slate-400 truncate max-w-[180px]" title={row.customer}>
                             {row.customer !== '-' ? row.customer : <span className="text-slate-600 italic">查無客戶</span>}
                           </div>
+                          <input
+                            type="text"
+                            value={remarkOverrides[row.mo_number] !== undefined ? remarkOverrides[row.mo_number] : (row.machine || '')}
+                            onChange={e => setRemarkOverrides(prev => ({ ...prev, [row.mo_number]: e.target.value }))}
+                            placeholder="機台 / 備料備註"
+                            title="將作為 ARGO REMARK 匙入"
+                            className="mt-1 w-full px-1.5 py-0.5 text-[10px] rounded bg-slate-800 border border-slate-700/60 text-slate-300 placeholder-slate-600 focus:outline-none focus:border-cyan-500/50"
+                          />
                         </td>
                         <td className="px-3 py-2 text-xs whitespace-nowrap">
                           <div className="text-slate-300">{row.product_code}</div>
@@ -1062,22 +1133,35 @@ export default function MaterialPrepPage() {
                         </td>
                         <td className="px-3 py-2 text-right text-slate-300 text-xs whitespace-nowrap">{formatQty(row.stock_qty)}</td>
                         <td className="px-3 py-2 text-xs min-w-[260px]">
-                          {row.status !== '無BOM' && (
-                            <select
-                              value={row.selected_material_code}
-                              onChange={e => handleSelectMaterialOverride(row.row_key, e.target.value)}
-                              className="w-full px-2.5 py-1.5 rounded-md bg-slate-950 border border-slate-700 text-slate-200 text-xs focus:outline-none focus:border-cyan-500/50 focus:ring-1 focus:ring-cyan-500/30"
+                          <div className="flex items-center gap-1 mb-1">
+                            {row.status !== '無BOM' && (
+                              <select
+                                value={row.selected_material_code}
+                                onChange={e => handleSelectMaterialOverride(row.row_key, e.target.value)}
+                                className="flex-1 px-2.5 py-1.5 rounded-md bg-slate-950 border border-slate-700 text-slate-200 text-xs focus:outline-none focus:border-cyan-500/50 focus:ring-1 focus:ring-cyan-500/30"
+                              >
+                                {row.substitute_options.map(option => (
+                                  <option key={option.code} value={option.code}>
+                                    {option.label}
+                                  </option>
+                                ))}
+                              </select>
+                            )}
+                            <button
+                              onClick={() => toggleSwapOpen(row.row_key)}
+                              title="特規換料：輸入任意料號覆蓋"
+                              className={`px-2 py-1 text-xs rounded border shrink-0 transition-colors ${
+                                swapOpenKeys.has(row.row_key)
+                                  ? 'bg-amber-600 border-amber-500 text-white'
+                                  : 'bg-slate-700 border-slate-600 text-slate-300 hover:bg-amber-700 hover:border-amber-500 hover:text-white'
+                              }`}
                             >
-                              {row.substitute_options.map(option => (
-                                <option key={option.code} value={option.code}>
-                                  {option.label}
-                                </option>
-                              ))}
-                            </select>
-                          )}
-                          {(row.status === '缺料' || row.status === '無BOM') && (
-                            <div className={`flex items-center gap-1 ${row.status !== '無BOM' ? 'mt-1' : ''}`}>
-                              <span className="text-slate-500 text-[10px] shrink-0">自訂:</span>
+                              換
+                            </button>
+                          </div>
+                          {(swapOpenKeys.has(row.row_key) || row.status === '缺料' || row.status === '無BOM') && (
+                            <div className="flex items-center gap-1">
+                              <span className="text-slate-500 text-[10px] shrink-0">{swapOpenKeys.has(row.row_key) && row.status !== '缺料' && row.status !== '無BOM' ? '特規:' : '自訂:'}</span>
                               <input
                                 value={customCodeInputs[row.row_key] ?? ''}
                                 onChange={e => setCustomCodeInputs(prev => ({ ...prev, [row.row_key]: e.target.value }))}

@@ -582,17 +582,33 @@ function SyncCard({ docKey }: SyncCardProps) {
         setMaterialPrepRecords((data ?? []) as MaterialPrepLine[])
         setTotalCount(count ?? 0)
       } else {
+        // 委外製令 / 採購單號 → erp_pj_sync（依 doc_type 篩選）
+        // 倉庫庫存 → material_inventory_list
+        const isInventory = isInventoryTab
+        const supabaseTable = isInventory ? 'material_inventory_list' : 'erp_pj_sync'
         const offset = (page - 1) * SO_PAGE_SIZE
         let query = supabase
-          .from(meta.label)
+          .from(supabaseTable)
           .select('*', { count: 'exact' })
-          .order('project_id', { ascending: true })
           .range(offset, offset + SO_PAGE_SIZE - 1)
-        if (keyword.trim()) {
-          const kw = keyword.trim()
-          query = query.or(
-            `doc_no.ilike.%${kw}%,item_code.ilike.%${kw}%,description.ilike.%${kw}%,customer_vendor.ilike.%${kw}%`
-          )
+        if (!isInventory) {
+          // erp_pj_sync 依 doc_type 篩選
+          query = query.eq('doc_type', meta.label).order('doc_no', { ascending: true })
+          if (keyword.trim()) {
+            const kw = keyword.trim()
+            query = query.or(
+              `doc_no.ilike.%${kw}%,item_code.ilike.%${kw}%,description.ilike.%${kw}%,customer_vendor.ilike.%${kw}%`
+            )
+          }
+        } else {
+          // material_inventory_list
+          query = query.order('item_code', { ascending: true })
+          if (keyword.trim()) {
+            const kw = keyword.trim()
+            query = query.or(
+              `item_code.ilike.%${kw}%,description.ilike.%${kw}%`
+            )
+          }
         }
         const { data, count } = await query
         setRecords((data ?? []) as PjRecord[])

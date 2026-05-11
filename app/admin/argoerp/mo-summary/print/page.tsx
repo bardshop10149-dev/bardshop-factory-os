@@ -38,31 +38,71 @@ const DEMO_RECORDS: MoRecord[] = [
   },
 ]
 
-const DEMO_SO_MAP = new Map<string, SoLine>([
-  ['RO26050101|15', {
-    project_id: 'RO26050101', line_no: '15',
-    mbp_part: 'LED-BOX-40', mbp_ver: 1,
-    partner_name: '台灣客戶股份有限公司', sales_name: '陳業務',
-    duedate: '2026/05/20',
-    order_qty_oru: 1000, unit_of_measure_oru: '個',
-    description: 'LED 方形燈箱（40mm ABS）',
-    remark: '客製顏色：黑色，需附保固書',
-    packing: 'OPP 袋裝，每盒 50 個，外箱 10 盒',
-    remark2: '出貨前請確認 LED 亮度測試報告',
-    grade: null,
-  }],
-  ['RO26050203|23', {
-    project_id: 'RO26050203', line_no: '23',
-    mbp_part: 'PCB-V2-CP', mbp_ver: 2,
-    partner_name: '常平外銷客戶', sales_name: '李業務',
-    duedate: '2026/05/30',
-    order_qty_oru: 500, unit_of_measure_oru: 'PCS',
-    description: 'PCB 控制板 V2',
-    remark: 'SMT 貼片規格見附件BOM',
-    packing: '防靜電袋，每包 10 片',
-    remark2: null,
-    grade: 'A',
-  }],
+const DEMO_SO_MAP = new Map<string, SoLine[]>([
+  ['RO26050101', [
+    {
+      project_id: 'RO26050101', line_no: '15',
+      mbp_part: 'LED-BOX-40', mbp_ver: 1,
+      partner_name: '台灣客戶股份有限公司', sales_name: '陳業務',
+      duedate: '2026/05/20',
+      order_qty_oru: 1000, unit_of_measure_oru: '個',
+      description: 'LED 方形燈箱（40mm ABS）',
+      remark: '客製顏色：黑色，需附保固書',
+      packing: 'OPP 袋裝，每盒 50 個，外箱 10 盒',
+      remark2: '出貨前請確認 LED 亮度測試報告',
+      grade: null,
+    },
+    {
+      project_id: 'RO26050101', line_no: '16',
+      mbp_part: 'LED-DRIVER-40', mbp_ver: 1,
+      partner_name: '台灣客戶股份有限公司', sales_name: '陳業務',
+      duedate: '2026/05/22',
+      order_qty_oru: 100, unit_of_measure_oru: '個',
+      description: 'LED 驅動器（40W）',
+      remark: null,
+      packing: 'OPP 袋裝',
+      remark2: null,
+      grade: null,
+    },
+    {
+      project_id: 'RO26050101', line_no: '17',
+      mbp_part: 'LED-FRAME-40', mbp_ver: null,
+      partner_name: '台灣客戶股份有限公司', sales_name: '陳業務',
+      duedate: '2026/05/22',
+      order_qty_oru: 1000, unit_of_measure_oru: '個',
+      description: '燈箱邊框（鋁擠型）',
+      remark: '表面處理：陽極黑色',
+      packing: '紙箱裝，每箱 100 個',
+      remark2: null,
+      grade: null,
+    },
+  ]],
+  ['RO26050203', [
+    {
+      project_id: 'RO26050203', line_no: '23',
+      mbp_part: 'PCB-V2-CP', mbp_ver: 2,
+      partner_name: '常平外銷客戶', sales_name: '李業務',
+      duedate: '2026/05/30',
+      order_qty_oru: 500, unit_of_measure_oru: 'PCS',
+      description: 'PCB 控制板 V2',
+      remark: 'SMT 貼片規格見附件BOM',
+      packing: '防靜電袋，每包 10 片',
+      remark2: null,
+      grade: 'A',
+    },
+    {
+      project_id: 'RO26050203', line_no: '24',
+      mbp_part: 'PCB-V2-FULL', mbp_ver: 2,
+      partner_name: '常平外銷客戶', sales_name: '李業務',
+      duedate: '2026/05/30',
+      order_qty_oru: 200, unit_of_measure_oru: 'PCS',
+      description: 'PCB 控制板 V2 完整版',
+      remark: '需全檢',
+      packing: '防靜電袋',
+      remark2: '附測試報告',
+      grade: null,
+    },
+  ]],
 ])
 
 // ── 型別 ────────────────────────────────────────────────────
@@ -106,6 +146,15 @@ interface SoLine {
 }
 
 // ── 工具函式 ─────────────────────────────────────────────────
+const DOW_ZH = ['日', '一', '二', '三', '四', '五', '六'] as const
+function dayOfWeekZh(dateStr: string | null | undefined): string {
+  if (!dateStr) return ''
+  // 支援 YYYY/MM/DD、YYYY-MM-DD 格式
+  const d = new Date(dateStr.replace(/\//g, '-'))
+  if (isNaN(d.getTime())) return ''
+  return `(${DOW_ZH[d.getDay()]})`
+}
+
 const FACTORY_LABEL: Record<string, string> = {
   T: 'T 台北廠',
   C: 'C 常平廠',
@@ -181,7 +230,7 @@ function MoPrintContent() {
   const isDemo = searchParams.get('demo') === '1'
 
   const [records, setRecords] = useState<MoRecord[]>([])
-  const [soMap, setSoMap]     = useState<Map<string, SoLine>>(new Map())
+  const [soMap, setSoMap]     = useState<Map<string, SoLine[]>>(new Map())
   const [loading, setLoading] = useState(true)
   const [error, setError]     = useState<string | null>(null)
   const printTime = new Date().toLocaleString('zh-TW')
@@ -217,10 +266,11 @@ function MoPrintContent() {
           .in('project_id', projectIds)
         if (err) console.error('so fetch:', err)
 
-        const map = new Map<string, SoLine>()
+        const map = new Map<string, SoLine[]>()
         for (const row of (data ?? []) as SoLine[]) {
-          const normalizedLine = String(parseInt(String(row.line_no || '0'), 10))
-          map.set(`${row.project_id}|${normalizedLine}`, row)
+          const existing = map.get(row.project_id) ?? []
+          existing.push(row)
+          map.set(row.project_id, existing)
         }
         setSoMap(map)
         setLoading(false)
@@ -276,10 +326,17 @@ function MoPrintContent() {
             margin: 0 !important;
             page-break-after: always;
             break-after: page;
+            break-inside: auto;
+            min-height: 0 !important;
           }
           .mo-card:last-child {
             page-break-after: auto;
             break-after: auto;
+          }
+          /* 不讓任何 tr / div 區塊從中間被切開 */
+          tr, .mo-section {
+            break-inside: avoid;
+            page-break-inside: avoid;
           }
         }
       `}} />
@@ -313,7 +370,7 @@ function MoPrintContent() {
 
         <div style={{ marginLeft: 'auto', display: 'flex', gap: '8px', alignItems: 'center' }}>
           <span style={{ fontSize: '11px', color: '#475569' }}>
-            SO 資料：{soMap.size} 行已載入
+            SO 資料：{soMap.size} 筆訂單已載入
           </span>
           <button
             onClick={() => window.print()}
@@ -332,7 +389,8 @@ function MoPrintContent() {
       <div className="mo-pages-wrapper" style={{ background: '#64748b', padding: '24px 16px', minHeight: '100vh' }}>
         {records.map((mo, idx) => {
           const lineNo = getLineNo(mo)
-          const so = soMap.get(`${mo.source_order ?? ''}|${lineNo}`)
+          const soLines = soMap.get(mo.source_order ?? '') ?? []
+          const so = soLines.find(l => String(parseInt(String(l.line_no || '0'), 10)) === lineNo) ?? soLines[0] ?? null
 
           const part   = so?.mbp_part || so?.part || null
           const qty    = so?.order_qty_oru ?? so?.order_qty ?? null
@@ -425,7 +483,7 @@ function MoPrintContent() {
               </div>
 
               {/* ── 製令資訊 + 交期資訊（左右並排）── */}
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px', marginBottom: '10px', alignItems: 'stretch' }}>
+              <div className="mo-section" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px', marginBottom: '10px', alignItems: 'stretch' }}>
 
                 {/* 左：製令資訊 */}
                 <div>
@@ -434,22 +492,15 @@ function MoPrintContent() {
                     <tbody>
                       {([
                         ['生產貨號', mo.product_code],
-                        ['客戶名稱', mo.lot_number],
                         ['預訂產出量', mo.planned_qty ?? null],
                         ['廠別', FACTORY_LABEL[mo.factory ?? ''] ?? mo.factory ?? '—'],
                         ['開立日', mo.create_date ?? null],
                       ] as [string, string | null | undefined][]).map(([label, val]) => (
-                        <tr key={label} style={{ height: '36px' }}>
+                        <tr key={label} style={{ height: '38px' }}>
                           <td style={labelTd}>{label}</td>
                           <td style={valueTd}>{val || '—'}</td>
                         </tr>
                       ))}
-                      {mo.mo_note && (
-                        <tr>
-                          <td style={labelTd}>製令說明</td>
-                          <td style={valueTd}>{mo.mo_note}</td>
-                        </tr>
-                      )}
                     </tbody>
                   </table>
                 </div>
@@ -461,22 +512,19 @@ function MoPrintContent() {
                     <tbody>
                       <tr>
                         <td style={labelTd}>印刷交期</td>
-                        <td style={{ ...writeTd, height: '54px' }} />
-                      </tr>
-                      <tr>
+                        <td style={{ ...writeTd, height: '38px', width: '30%' }} />
                         <td style={labelTd}>雷切交期</td>
-                        <td style={{ ...writeTd, height: '54px' }} />
+                        <td style={{ ...writeTd, height: '38px' }} />
                       </tr>
                       <tr>
                         <td style={labelTd}>後加工交期</td>
-                        <td style={{ ...writeTd, height: 'auto', padding: '6px 8px' }}>
+                        <td style={{ ...writeTd, height: '57px', padding: '4px 8px' }} colSpan={3}>
                           <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
                             {/* 左：日期填寫空間 */}
                             <div style={{ flex: '0 0 auto', width: '90px', height: '28px' }} />
                             {/* 右：勾選項 */}
                             <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap', flex: 1 }}>
-                              <span style={{ fontSize: '13px', color: '#444', whiteSpace: 'nowrap' }}>類型：</span>
-                              {(['貼合', '包邊', '車縫', '胸章', '其他'] as const).map(opt => (
+                              {(['貼合', '包邊', '車縫', '胸章'] as const).map(opt => (
                                 <span key={opt} style={{ display: 'inline-flex', alignItems: 'center', gap: '3px', fontSize: '13px', whiteSpace: 'nowrap' }}>
                                   <span style={{
                                     display: 'inline-block', width: '13px', height: '13px',
@@ -490,9 +538,12 @@ function MoPrintContent() {
                         </td>
                       </tr>
                       <tr>
-                        <td style={labelTd}>出貨交期</td>
-                        <td style={{ ...valueTd, fontWeight: 700, fontSize: '17px' }}>
-                          {so?.duedate || mo.planned_end_date || '—'}
+                        <td style={{ ...labelTd, verticalAlign: 'middle' }}>出貨交期</td>
+                        <td colSpan={3} style={{ ...valueTd, fontWeight: 700, fontSize: '34px', height: '57px', verticalAlign: 'middle' }}>
+                          {(() => {
+                            const d = so?.duedate || mo.planned_end_date
+                            return d ? <>{d} <span style={{ fontSize: '24px' }}>{dayOfWeekZh(d)}</span></> : '—'
+                          })()}
                         </td>
                       </tr>
                     </tbody>
@@ -501,44 +552,84 @@ function MoPrintContent() {
               </div>
 
               {/* ── 來源訂單資訊 ── */}
-              <div style={{ marginBottom: '10px' }}>
+              <div className="mo-section" style={{ marginBottom: '10px' }}>
                 <SectionTitle color="#222">來源訂單資訊</SectionTitle>
-                {so ? (
-                  <InfoGrid rows={[
-                    ['訂單號', mo.source_order, '項號', lineNo],
-                    ['客戶', so.partner_name, '業務員', so.sales_name],
-                    ['料號', part, '版本', so.mbp_ver != null ? String(so.mbp_ver) : null],
-                    ['訂購數量', qtyStr, '交貨日', so.duedate],
-                    ...(so.description ? [['品名', so.description] as [string, string]] : []),
-                    ...(so.grade      ? [['等級', so.grade] as [string, string]] : []),
-                    ...(so.remark     ? [['REMARK', so.remark] as [string, string]] : []),
-                    ...(so.packing    ? [['PACKING', so.packing] as [string, string]] : []),
-                    ...(so.remark2    ? [['REMARK2', so.remark2] as [string, string]] : []),
-                  ]} />
-                ) : (
+                {mo.source_order ? (
                   <>
-                    <InfoGrid rows={[
-                      ['訂單號', mo.source_order, '項號', lineNo],
-                    ]} />
-                    <div style={{ padding: '8px 6px', color: '#9ca3af', fontSize: '10px', fontStyle: 'italic' }}>
-                      {mo.source_order
-                        ? '▸ 訂單詳細資訊尚未同步或查無對應行項，請至「銷售訂單同步」頁面執行同步'
-                        : '（此製令無來源訂單）'}
+                    {/* 訂單摘要列 */}
+                    <div style={{ display: 'flex', border: '1px solid #e2e4e8', borderBottom: 'none', fontSize: '13px' }}>
+                      {([
+                        ['訂單號', mo.source_order, 1],
+                        ['客戶', so?.partner_name ?? mo.lot_number ?? '—', 2],
+                        ['業務員', so?.sales_name ?? '—', 1],
+                        ['本製令項號', lineNo, 1],
+                      ] as [string, string, number][]).map(([lbl, val, flex], i, arr) => (
+                        <div key={lbl} style={{ display: 'flex', alignItems: 'stretch', flex, borderRight: i < arr.length - 1 ? '1px solid #e2e4e8' : 'none' }}>
+                          <div style={{ background: '#f2f2f2', padding: '3px 6px', color: '#555', whiteSpace: 'nowrap' as const, display: 'flex', alignItems: 'center', fontSize: '12px' }}>{lbl}</div>
+                          <div style={{ padding: '3px 6px', fontWeight: 500, display: 'flex', alignItems: 'center' }}>{val}</div>
+                        </div>
+                      ))}
                     </div>
+                    {/* 全部行項表格 */}
+                    <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '12px', tableLayout: 'fixed' }}>
+                      <colgroup>
+                        <col style={{ width: '32px' }} />
+                        <col style={{ width: '38%' }} />
+                        <col style={{ width: '80px' }} />
+                        <col />
+                      </colgroup>
+                      <thead>
+                        <tr style={{ background: '#f5f6f8' }}>
+                          {(['序', '品項編碼 / 規格', '數量', '包裝方式'] as const).map((h, hi) => (
+                            <th key={h} style={{ border: '1px solid #e2e4e8', padding: '3px 5px', fontWeight: 600, color: '#555', textAlign: hi === 0 ? 'center' as const : 'left' as const, whiteSpace: 'nowrap' as const, fontSize: '11px' }}>{h}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {soLines.length > 0 ? soLines.map(line => {
+                          const lno = String(parseInt(String(line.line_no || '0'), 10))
+                          const isThis = lno === lineNo
+                          const lqty = line.order_qty_oru ?? line.order_qty
+                          const luom = line.unit_of_measure_oru || line.unit_of_measure || ''
+                          const td = { border: '1px solid #e2e4e8', padding: '3px 5px', wordBreak: 'break-word' as const, overflowWrap: 'break-word' as const }
+                          return (
+                            <tr key={line.line_no} style={{ background: isThis ? '#eff6ff' : 'white', fontWeight: isThis ? 600 : 400 }}>
+                              <td style={{ ...td, textAlign: 'center' as const, whiteSpace: 'nowrap' as const }}>{lno}{isThis ? ' ★' : ''}</td>
+                              <td style={td}>
+                                <div style={{ fontWeight: isThis ? 700 : 500 }}>{line.mbp_part || line.part || '—'}</div>
+                                <div style={{ fontSize: '11px', color: '#555', marginTop: '1px' }}>{line.description || '—'}</div>
+                              </td>
+                              <td style={td}>{lqty != null ? `${lqty} ${luom}`.trim() : '—'}</td>
+                              <td style={td}>{line.packing || '—'}</td>
+                            </tr>
+                          )
+                        }) : (
+                          <tr>
+                            <td colSpan={4} style={{ border: '1px solid #e2e4e8', padding: '6px', fontSize: '11px', fontStyle: 'italic' as const, color: '#9ca3af', textAlign: 'center' as const }}>
+                              訂單詳細資訊尚未同步，請至「銷售訂單同步」頁面執行同步
+                            </td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
                   </>
+                ) : (
+                  <div style={{ padding: '8px 6px', color: '#9ca3af', fontSize: '11px', fontStyle: 'italic' }}>
+                    （此製令無來源訂單）
+                  </div>
                 )}
               </div>
 
               {/* ── 生產備註 ── */}
               <div style={{ flex: 1, marginBottom: '10px', display: 'flex', flexDirection: 'column' }}>
                 <SectionTitle color="#222">生產備註</SectionTitle>
-                <div style={{ border: '1px solid #ccc', flex: 1, padding: '4px 8px' }}>
+                <div style={{ border: '1px solid #ccc', flex: 1, padding: '4px 8px', minHeight: '48px' }}>
                   &nbsp;
                 </div>
               </div>
 
               {/* ── 作業確認 ── */}
-              <div>
+              <div className="mo-card-footer">
                 <SectionTitle color="#222">作業確認</SectionTitle>
                 <div style={{
                   display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)',
