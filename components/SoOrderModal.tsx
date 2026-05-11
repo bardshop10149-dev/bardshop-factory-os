@@ -20,7 +20,7 @@ interface SoOrderMeta {
   project_id: string
   begin_date: string | null
   sales_name: string | null
-  tpn_partner_id: string | null
+  partner_name: string | null
 }
 
 interface Props {
@@ -43,7 +43,7 @@ export default function SoOrderModal({ projectId, onClose }: Props) {
 
     supabase
       .from('erp_so_lines')
-      .select('project_id, begin_date, sales_name, tpn_partner_id, line_no, description, mbp_part, duedate, order_qty_oru, unit_of_measure_oru, remark, packing, remark2, hold_status')
+      .select('project_id, begin_date, sales_name, partner_name, line_no, description, mbp_part, duedate, order_qty_oru, unit_of_measure_oru, remark, packing, remark2, hold_status')
       .eq('project_id', projectId)
       .order('line_no', { ascending: true })
       .then(({ data, error: err }) => {
@@ -55,7 +55,7 @@ export default function SoOrderModal({ projectId, onClose }: Props) {
           project_id: first.project_id,
           begin_date: first.begin_date,
           sales_name: first.sales_name,
-          tpn_partner_id: first.tpn_partner_id,
+          partner_name: first.partner_name,
         })
         setLines(data.map(r => ({
           line_no: r.line_no,
@@ -93,8 +93,8 @@ export default function SoOrderModal({ projectId, onClose }: Props) {
         <div className="flex items-start justify-between px-6 py-5 border-b border-slate-800 bg-slate-900/80 rounded-t-xl flex-shrink-0">
           <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5">
             <span className="text-xl font-bold font-mono text-cyan-300 tracking-wide">{projectId}</span>
-            {meta?.tpn_partner_id && (
-              <span className="text-slate-200 text-sm font-medium">{meta.tpn_partner_id}</span>
+            {meta?.partner_name && (
+              <span className="text-slate-200 text-sm font-medium">{meta.partner_name}</span>
             )}
             {meta?.sales_name && (
               <span className="px-2 py-0.5 rounded bg-slate-800 border border-slate-700 text-slate-400 text-xs">

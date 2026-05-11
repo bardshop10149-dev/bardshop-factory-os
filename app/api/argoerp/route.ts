@@ -287,7 +287,7 @@ export async function POST(request: NextRequest) {
   try {
     const body = await request.json()
     const { action, data, interfaceId } = body as {
-      action: 'import' | 'query' | 'sync_inventory'
+      action: 'import' | 'query' | 'sync_inventory' | 'sync_customer' | 'fetch_po_pdl_links' | 'explore_so_columns' | 'test_so_detail' | 'sync_so' | 'test_remarks' | 'sync_so_remarks' | 'sync_mo' | 'sync_pj' | 'sync_bom_units' | 'sync_material_prep'
       data?: Record<string, unknown>[]
       interfaceId?: string
     }
@@ -606,7 +606,7 @@ export async function POST(request: NextRequest) {
         SEGMENT,
         TABLE: 'PJ_PROJECT',
         SHOWNULLCOLUMN: 'N',
-        CUSTOMCOLUMN: 'PROJECT_ID,BEGIN_DATE,HOLD_STATUS,TPN_PARTNER_ID',
+        CUSTOMCOLUMN: 'PROJECT_ID,BEGIN_DATE,HOLD_STATUS,TPN_PARTNER_ID,SALES_NAME,PARTNER_NAME',
         PJT_TYPE: "= 'SO'",
       })
 
@@ -687,6 +687,7 @@ export async function POST(request: NextRequest) {
           project_id:         pid,
           begin_date:         String(getRecordValue(header, 'BEGIN_DATE') ?? '').trim() || null,
           tpn_partner_id:     String(getRecordValue(header, 'TPN_PARTNER_ID') ?? '').trim() || null,
+          sales_name:         String(getRecordValue(header, 'SALES_NAME') ?? '').trim() || null,
           sales_id:           null,
           currency:           null,
           exchange_rate:      null,
@@ -699,8 +700,7 @@ export async function POST(request: NextRequest) {
           mbp_ver:            getRecordValue(row, 'MBP_VER') != null ? Number(getRecordValue(row, 'MBP_VER')) : null,
           duedate:            String(getRecordValue(row, 'DUEDATE') ?? '').trim() || null,
           description:        String(getRecordValue(row, 'REMARK') ?? '').trim() || null,
-          sales_name:         null,
-          partner_name:       null,
+          partner_name:       String(getRecordValue(header, 'PARTNER_NAME') ?? '').trim() || null,
           remark:             String(getRecordValue(row, 'REMARK') ?? '').trim() || null,
           packing:            String(getRecordValue(row, 'PACKING') ?? '').trim() || null,
           remark2:            String(getRecordValue(row, 'REMARK2') ?? '').trim() || null,
@@ -716,6 +716,7 @@ export async function POST(request: NextRequest) {
 
       try {
         const supabaseAdmin = getSupabaseAdminClient()
+
         const { error: clearError } = await supabaseAdmin.from('erp_so_lines').delete().neq('id', 0)
         if (clearError) throw clearError
 
@@ -1395,6 +1396,82 @@ export async function POST(request: NextRequest) {
         syncedCount: prepLines.length,
         headerCount: slipNos.size,
         detailTotal: prepLines.length,
+      })
+    }
+
+    if (action === 'sync_customer') {
+      const sparam = JSON.stringify({
+        APIKEY1: keys.APIKEY1,
+        APIKEY2: keys.APIKEY2,
+        APIKEY3: keys.APIKEY3,
+        SEGMENT,
+        TABLE: 'GL_TRADINGPARTNER',
+        SHOWNULLCOLUMN: 'N',
+        CUSTOMCOLUMN: 'PARTNER_ID,CNAME,FULL_CNAME',
+        CUSTOMER: "= 'Y'",
+      })
+
+      const res = await fetch(`${API_BASE}/S_QUERY`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sparam }),
+      })
+
+      const { rawText, parsed } = await readApiResponse(res)
+      const error = extractApiError(parsed)
+      const success = res.ok && isArgoSuccess(parsed)
+
+      if (!success) {
+        return NextResponse.json({
+          status: 'error',
+          error: error || 'ARGO GL_TRADINGPARTNER query failed',
+          rawText,
+        }, { status: 502 })
+      }
+
+      const queryRows = findObjectRows(parsed)
+      if (queryRows.length === 0) {
+        return NextResponse.json({
+          status: 'error',
+          error: 'ARGO 查詢成功，但找不到客戶資料列，請確認 CUSTOMER=Y 及欄位設定。',
+          rawText,
+        }, { status: 422 })
+      }
+
+      const syncedAt = new Date().toISOString()
+      const customerRows = queryRows
+        .map((row) => {
+          const partnerId = String(getRecordValue(row, 'PARTNER_ID') ?? '').trim()
+          if (!partnerId) return null
+          return {
+            partner_id: partnerId,
+            cname:      String(getRecordValue(row, 'CNAME')      ?? '').trim(),
+            full_cname: String(getRecordValue(row, 'FULL_CNAME') ?? '').trim() || null,
+            synced_at:  syncedAt,
+          }
+        })
+        .filter((r): r is NonNullable<typeof r> => Boolean(r))
+
+      try {
+        const supabaseAdmin = getSupabaseAdminClient()
+        const { error: clearError } = await supabaseAdmin.from('erp_customers').delete().neq('id', 0)
+        if (clearError) throw clearError
+
+        const batchSize = 500
+        for (let i = 0; i < customerRows.length; i += batchSize) {
+          const chunk = customerRows.slice(i, i + batchSize)
+          const { error: insertError } = await supabaseAdmin.from('erp_customers').insert(chunk)
+          if (insertError) throw insertError
+        }
+      } catch (err) {
+        const message = err instanceof Error ? formatSupabaseAdminError(err.message) : '寫入 erp_customers 失敗'
+        return NextResponse.json({ status: 'error', error: message }, { status: 500 })
+      }
+
+      return NextResponse.json({
+        status: 'ok',
+        syncedCount: customerRows.length,
+        skippedCount: queryRows.length - customerRows.length,
       })
     }
 

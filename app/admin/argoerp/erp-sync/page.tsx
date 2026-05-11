@@ -5,7 +5,7 @@ import { supabase } from '../../../../lib/supabaseClient'
 import SoOrderModal from '../../../../components/SoOrderModal'
 
 // ─── 型別 ─────────────────────────────────────────────
-type DocTypeKey = 'sales' | 'mo' | 'po' | 'subcontract' | 'inventory' | 'material_prep'
+type DocTypeKey = 'sales' | 'mo' | 'po' | 'subcontract' | 'inventory' | 'material_prep' | 'customer'
 
 interface PjSyncMapping {
   docNoField: string
@@ -98,6 +98,27 @@ interface PjRecord {
   customer_vendor: string | null
   remark: string | null
   extra: Record<string, unknown> | null
+  synced_at: string
+}
+
+interface InventoryRecord {
+  id: number
+  sequence_no: number
+  item_code: string
+  item_name: string
+  spec: string
+  unit_of_measure: string | null
+  physical_count: number
+  book_count: number
+  qisheng_sichuan_total: number
+  updated_at: string
+}
+
+interface CustomerRecord {
+  id: number
+  partner_id: string
+  cname: string
+  full_cname: string | null
   synced_at: string
 }
 
@@ -231,6 +252,17 @@ const DOC_TYPES: Record<DocTypeKey, {
         customerVendorField: 'PO_ON_ROAD',
       },
     },
+  },
+  customer: {
+    label: '客戶資料',
+    description: 'GL_TRADINGPARTNER（CUSTOMER=Y）。同步客戶代號、公司簡稱、公司全名到 erp_customers。',
+    defaultConfig: {
+      table: 'GL_TRADINGPARTNER',
+      customColumn: 'PARTNER_ID,CNAME,FULL_CNAME',
+      filters: [{ key: 'CUSTOMER', value: 'Y' }],
+      mapping: { ...EMPTY_MAPPING },
+    },
+    locked: { table: true, filters: true, mappingKeys: ['docNoField','subNoField','itemCodeField','descriptionField','qtyField','unitField','statusField','startDateField','endDateField','customerVendorField','remarkField'] },
   },
   material_prep: {
     label: '批備料單',
@@ -417,6 +449,7 @@ function SyncCard({ docKey }: SyncCardProps) {
   const isMoTab = docKey === 'mo'
   const isInventoryTab = docKey === 'inventory'
   const isMaterialPrepTab = docKey === 'material_prep'
+  const isCustomerTab = docKey === 'customer'
   const activeMappingLabels = meta.mappingLabels ?? MAPPING_LABELS
   const [config, setConfig] = useState<SyncConfig>(() => loadConfig(docKey))
   const [showConfig, setShowConfig] = useState(false)
@@ -429,6 +462,7 @@ function SyncCard({ docKey }: SyncCardProps) {
   const [soRecords, setSoRecords] = useState<SoLine[]>([])
   const [moRecords, setMoRecords] = useState<MoLine[]>([])
   const [materialPrepRecords, setMaterialPrepRecords] = useState<MaterialPrepLine[]>([])
+  const [customerRecords, setCustomerRecords] = useState<CustomerRecord[]>([])
   const [materialPrepPage, setMaterialPrepPage] = useState(1)
   const [moStatusFilter, setMoStatusFilter] = useState<'OPEN' | 'HOLD' | 'CLOSE' | null>('OPEN')
 
@@ -525,7 +559,19 @@ function SyncCard({ docKey }: SyncCardProps) {
   const fetchRecords = useCallback(async (keyword = '', page = 1) => {
     setLoadingRecords(true)
     try {
-      if (isSoTab) {
+      if (isCustomerTab) {
+        let query = supabase
+          .from('erp_customers')
+          .select('*', { count: 'exact' })
+          .order('partner_id', { ascending: true })
+        if (keyword.trim()) {
+          const kw = keyword.trim()
+          query = query.or(`partner_id.ilike.%${kw}%,cname.ilike.%${kw}%,full_cname.ilike.%${kw}%`)
+        }
+        const { data, count } = await query
+        setCustomerRecords((data ?? []) as CustomerRecord[])
+        setTotalCount(count ?? 0)
+      } else if (isSoTab) {
         const offset = (page - 1) * SO_PAGE_SIZE
         let query = supabase
           .from('erp_so_lines')
@@ -619,7 +665,7 @@ function SyncCard({ docKey }: SyncCardProps) {
     } finally {
       setLoadingRecords(false)
     }
-  }, [isSoTab, isMoTab, isMaterialPrepTab, meta.label, moStatusFilter, soStatusFilter])
+  }, [isSoTab, isMoTab, isMaterialPrepTab, isCustomerTab, meta.label, moStatusFilter, soStatusFilter])
 
   useEffect(() => { void fetchRecords() }, [fetchRecords])
 
@@ -835,13 +881,14 @@ function SyncCard({ docKey }: SyncCardProps) {
 
   const handleSync = async () => {
     const cfg = configRef.current
-    if (!isMaterialPrepTab && !cfg.table.trim()) {
+    const isHardcodedTab = isMaterialPrepTab || isSoTab || isMoTab || isInventoryTab || isCustomerTab
+    if (!isHardcodedTab && !cfg.table.trim()) {
       setMessage('請先填入 ARGO TABLE 名稱')
       setMessageOk(false)
       setShowConfig(true)
       return
     }
-    if (!isMaterialPrepTab && !cfg.mapping.docNoField.trim()) {
+    if (!isHardcodedTab && !cfg.mapping.docNoField.trim()) {
       setMessage('主單號欄位不能為空')
       setMessageOk(false)
       setShowConfig(true)
@@ -866,6 +913,12 @@ function SyncCard({ docKey }: SyncCardProps) {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ action: 'sync_mo' }),
+        })
+      } else if (isCustomerTab) {
+        res = await fetch('/api/argoerp', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'sync_customer' }),
         })
       } else if (isInventoryTab) {
         res = await fetch('/api/argoerp', {
@@ -972,25 +1025,29 @@ function SyncCard({ docKey }: SyncCardProps) {
           )}
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <button
-            type="button"
-            onClick={() => setShowConfig((p) => !p)}
-            className="rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-xs font-medium text-slate-300 hover:bg-slate-800 hover:text-white"
-          >
-            {showConfig ? '收合設定' : '展開設定'}
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              if (typeof window !== 'undefined') localStorage.removeItem(STORAGE_PREFIX + docKey)
-              setConfig(DOC_TYPES[docKey].defaultConfig)
-              setShowConfig(true)
-              setMessage('')
-            }}
-            className="rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-xs font-medium text-slate-500 hover:bg-slate-800 hover:text-slate-300"
-          >
-            重置預設
-          </button>
+          {!isCustomerTab && (
+            <button
+              type="button"
+              onClick={() => setShowConfig((p) => !p)}
+              className="rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-xs font-medium text-slate-300 hover:bg-slate-800 hover:text-white"
+            >
+              {showConfig ? '收合設定' : '展開設定'}
+            </button>
+          )}
+          {!isCustomerTab && (
+            <button
+              type="button"
+              onClick={() => {
+                if (typeof window !== 'undefined') localStorage.removeItem(STORAGE_PREFIX + docKey)
+                setConfig(DOC_TYPES[docKey].defaultConfig)
+                setShowConfig(true)
+                setMessage('')
+              }}
+              className="rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-xs font-medium text-slate-500 hover:bg-slate-800 hover:text-slate-300"
+            >
+              重置預設
+            </button>
+          )}
           {rawSample && (
             <button
               type="button"
@@ -1037,8 +1094,18 @@ function SyncCard({ docKey }: SyncCardProps) {
         </div>
       )}
 
+      {/* 客戶資料固定說明 */}
+      {isCustomerTab && (
+        <div className="border-t border-slate-800 px-4 py-3 flex flex-wrap gap-6 text-xs text-slate-400">
+          <span><span className="text-slate-500">TABLE：</span><span className="text-slate-200 font-mono">GL_TRADINGPARTNER</span></span>
+          <span><span className="text-slate-500">欄位：</span><span className="text-slate-200 font-mono">PARTNER_ID, CNAME, FULL_CNAME</span></span>
+          <span><span className="text-slate-500">過濾：</span><span className="text-slate-200 font-mono">CUSTOMER = Y</span></span>
+          <span><span className="text-slate-500">目標表：</span><span className="text-slate-200 font-mono">erp_customers</span></span>
+        </div>
+      )}
+
       {/* 設定區 */}
-      {showConfig && (
+      {!isCustomerTab && showConfig && (
         <div className="border-t border-slate-800 px-4 py-4 space-y-4">
           {/* TABLE / CUSTOMCOLUMN */}
           <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
@@ -1559,6 +1626,30 @@ function SyncCard({ docKey }: SyncCardProps) {
             </div>
           )}
           </>
+        ) : isCustomerTab ? (
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="border-b border-slate-800 bg-slate-900/50">
+                  <th className="px-3 py-2 text-left text-slate-400 font-medium">客戶代號</th>
+                  <th className="px-3 py-2 text-left text-slate-400 font-medium">公司簡稱</th>
+                  <th className="px-3 py-2 text-left text-slate-400 font-medium">公司全名</th>
+                </tr>
+              </thead>
+              <tbody>
+                {customerRecords.map((r) => (
+                  <tr key={r.id} className="border-b border-slate-800/50 hover:bg-slate-900/40">
+                    <td className="px-3 py-2 font-mono text-cyan-300 whitespace-nowrap">{r.partner_id}</td>
+                    <td className="px-3 py-2 text-slate-200">{r.cname || '—'}</td>
+                    <td className="px-3 py-2 text-slate-400 max-w-[300px] truncate">{r.full_cname ?? '—'}</td>
+                  </tr>
+                ))}
+                {!loadingRecords && customerRecords.length === 0 && (
+                  <tr><td colSpan={3} className="px-4 py-8 text-center text-slate-600">尚無資料，請先執行同步。</td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full text-xs">
@@ -1567,10 +1658,10 @@ function SyncCard({ docKey }: SyncCardProps) {
                   {isInventoryTab ? (<>
                     <th className="px-3 py-2 text-left text-slate-400 font-medium">料號</th>
                     <th className="px-3 py-2 text-left text-slate-400 font-medium">品名/規格</th>
-                    <th className="px-3 py-2 text-right text-slate-400 font-medium">庫存數量</th>
-                    <th className="px-3 py-2 text-right text-slate-400 font-medium">在途數量</th>
-                    <th className="px-3 py-2 text-left text-slate-400 font-medium">自定義1</th>
-                    <th className="px-3 py-2 text-left text-slate-400 font-medium">自定義2</th>
+                    <th className="px-3 py-2 text-right text-slate-400 font-medium">帳面數量</th>
+                    <th className="px-3 py-2 text-right text-slate-400 font-medium">起盛四川合計</th>
+                    <th className="px-3 py-2 text-left text-slate-400 font-medium">單位</th>
+                    <th className="px-3 py-2 text-right text-slate-400 font-medium">實際數量</th>
                   </>) : (<>
                   <th className="px-3 py-2 text-left text-slate-400 font-medium">主單號</th>
                   <th className="px-3 py-2 text-left text-slate-400 font-medium">子序號</th>
@@ -1589,14 +1680,14 @@ function SyncCard({ docKey }: SyncCardProps) {
               <tbody>
                 {records.map((r) => (
                   <tr key={r.id} className="border-b border-slate-800/50 hover:bg-slate-900/40">
-                    {isInventoryTab ? (<>
-                      <td className="px-3 py-2 font-mono text-cyan-300">{r.doc_no}</td>
-                      <td className="px-3 py-2 text-slate-300 max-w-[200px] truncate">{r.description ?? '—'}</td>
-                      <td className="px-3 py-2 text-right text-emerald-300 font-medium">{r.qty > 0 ? r.qty.toLocaleString() : '0'}</td>
-                      <td className="px-3 py-2 text-right text-amber-300">{r.customer_vendor ?? '—'}</td>
-                      <td className="px-3 py-2 text-slate-400">{r.status ?? '—'}</td>
-                      <td className="px-3 py-2 text-slate-400">{r.remark ?? '—'}</td>
-                    </>) : (<>
+                    {isInventoryTab ? (() => { const inv = r as unknown as InventoryRecord; return (<>
+                      <td className="px-3 py-2 font-mono text-cyan-300">{inv.item_code || '—'}</td>
+                      <td className="px-3 py-2 text-slate-300 max-w-[200px] truncate">{[inv.item_name, inv.spec].filter(Boolean).join(' ') || '—'}</td>
+                      <td className="px-3 py-2 text-right text-emerald-300 font-medium">{inv.book_count > 0 ? inv.book_count.toLocaleString() : '0'}</td>
+                      <td className="px-3 py-2 text-right text-amber-300">{inv.qisheng_sichuan_total > 0 ? inv.qisheng_sichuan_total.toLocaleString() : '0'}</td>
+                      <td className="px-3 py-2 text-slate-400">{inv.unit_of_measure ?? '—'}</td>
+                      <td className="px-3 py-2 text-slate-400">{inv.physical_count > 0 ? inv.physical_count.toLocaleString() : '0'}</td>
+                    </>)})() : (<>
                     <td className="px-3 py-2 font-mono text-cyan-300">{r.doc_no}</td>
                     <td className="px-3 py-2 text-slate-400">{r.sub_no || '—'}</td>
                     <td className="px-3 py-2 font-mono text-slate-300">{r.item_code ?? '—'}</td>
@@ -1912,6 +2003,7 @@ const TABS: { key: DocTypeKey; label: string }[] = [
   { key: 'subcontract', label: '委外製令' },
   { key: 'inventory', label: '倉庫庫存' },
   { key: 'material_prep', label: '批備料單' },
+  { key: 'customer', label: '客戶資料' },
 ]
 
 export default function ErpSyncPage() {
@@ -1967,6 +2059,9 @@ export default function ErpSyncPage() {
         } else if (tab.key === 'material_prep') {
           res = await fetch('/api/argoerp', { method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ action: 'sync_material_prep' }) })
+        } else if (tab.key === 'customer') {
+          res = await fetch('/api/argoerp', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: 'sync_customer' }) })
         } else {
           // fallback for unknown tab keys
           continue
