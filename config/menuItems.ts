@@ -42,6 +42,17 @@ export const NAV_GROUPS = [
     ]
   },
   {
+    title: '塔台SARA',
+    theme: 'emerald',
+    items: [
+      {
+        name: 'SARA 同步區',
+        path: '/admin/sara/sync',
+        icon: 'M13 10V3L4 14h7v7l9-11h-7z'
+      },
+    ]
+  },
+  {
     title: '生產管理入口',
     theme: 'blue',
     items: [

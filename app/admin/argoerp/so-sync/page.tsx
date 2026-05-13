@@ -19,6 +19,7 @@ interface SoLine {
   remark: string | null
   packing: string | null
   remark2: string | null
+  tpn_part_no: string | null
   synced_at: string
 }
 
@@ -37,7 +38,8 @@ function filterRows(rows: SoLine[], search: string) {
     (r.part ?? '').toLowerCase().includes(q) ||
     (r.remark ?? '').toLowerCase().includes(q) ||
     (r.remark2 ?? '').toLowerCase().includes(q) ||
-    (r.packing ?? '').toLowerCase().includes(q)
+    (r.packing ?? '').toLowerCase().includes(q) ||
+    (r.tpn_part_no ?? '').toLowerCase().includes(q)
   )
 }
 
@@ -241,13 +243,14 @@ export default function SoSyncPage() {
               <th className="px-3 py-2.5 text-left font-medium min-w-[100px] cursor-pointer hover:text-white select-none" onClick={() => toggleSort('duedate')}>
                 交貨日(預){sortCol === 'duedate' && <span className="ml-1 text-teal-400">{sortDir === 'asc' ? '↑' : '↓'}</span>}
               </th>
+              <th className="px-3 py-2.5 text-left font-medium min-w-[120px]">打樣/追加單號</th>
               <th className="px-3 py-2.5 text-right font-medium w-24">數量 / 單位</th>
             </tr>
           </thead>
           <tbody>
             {filtered.length === 0 && !loading && (
               <tr>
-                <td colSpan={7} className="px-4 py-8 text-center text-gray-500">
+                <td colSpan={8} className="px-4 py-8 text-center text-gray-500">
                   {rows.length === 0 ? '尚未同步，請點「立即同步」' : '無符合搜尋條件的資料'}
                 </td>
               </tr>
@@ -295,6 +298,9 @@ export default function SoSyncPage() {
 
                 {/* 交貨日 */}
                 <td className="px-3 py-2 text-yellow-400/80 text-sm">{row.duedate ?? '—'}</td>
+
+                {/* 打樣/追加單號 */}
+                <td className="px-3 py-2 font-mono text-sky-400/90 text-xs">{row.tpn_part_no ?? '—'}</td>
 
                 {/* 數量 / 單位 */}
                 <td className="px-3 py-2 text-right">

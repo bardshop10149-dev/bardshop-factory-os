@@ -707,9 +707,7 @@ export default function MaterialPrepPage() {
 
       return matchedBom.map((bom): MaterialPrepRow => {
         const rowKey = `${mo.mo_number}::${productCode}::${bom.material_code}`
-        const plateCountRaw = mo.plate_count ? mo.plate_count.trim() : ''
-        const plateCountNum = plateCountRaw && plateCountRaw !== '-' ? Number(plateCountRaw) : NaN
-        const planQty = !isNaN(plateCountNum) && plateCountNum > 0 ? plateCountNum : Number(mo.planned_qty ?? 0)
+        const planQty = Number(mo.planned_qty ?? 0)
         const productionQty = bom.production_quantity ?? 0
         const bomBaseQty = bom.quantity ?? 0
         const computedQty = productionQty > 0 ? (planQty * bomBaseQty) / productionQty : planQty * bomBaseQty

@@ -645,7 +645,7 @@ export async function POST(request: NextRequest) {
         SEGMENT,
         TABLE: 'PJ_PROJECTDETAIL',
         SHOWNULLCOLUMN: 'N',
-        CUSTOMCOLUMN: 'PJT_PROJECT_ID,LINE_NO,MBP_PART,MBP_VER,DUEDATE,ORDER_QTY_ORU,UNIT_OF_MEASURE_ORU,REMARK,PACKING,REMARK2',
+        CUSTOMCOLUMN: 'PJT_PROJECT_ID,LINE_NO,MBP_PART,MBP_VER,DUEDATE,ORDER_QTY_ORU,UNIT_OF_MEASURE_ORU,REMARK,PACKING,REMARK2,TPN_PART_NO',
         LINE_NO: '>= 0',
       })
       const soDetailRes = await fetch(`${API_BASE}/S_QUERY`, {
@@ -704,6 +704,7 @@ export async function POST(request: NextRequest) {
           remark:             String(getRecordValue(row, 'REMARK') ?? '').trim() || null,
           packing:            String(getRecordValue(row, 'PACKING') ?? '').trim() || null,
           remark2:            String(getRecordValue(row, 'REMARK2') ?? '').trim() || null,
+          tpn_part_no:        String(getRecordValue(row, 'TPN_PART_NO') ?? '').trim() || null,
           order_qty_oru:      toNumber(getRecordValue(row, 'ORDER_QTY_ORU')),
           unit_of_measure_oru: String(getRecordValue(row, 'UNIT_OF_MEASURE_ORU') ?? '').trim() || null,
           unit_price_oru:     null,

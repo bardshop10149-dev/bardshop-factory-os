@@ -40,6 +40,18 @@ function today() {
 
 // Excel 欄位順序（Tab 分隔）
 // 工單編號 | (空) | 單據種類 | 簽收人員 | (空) | 打樣 | 附素材 | 美編 | 客戶/供應商名 | LINE暱稱 | 承辦人 | 開單人員 | 品項編碼 | 品名/規格 | 備註 | 數量 | 交付日期
+
+// 清洗 TSV 儲存格：移除換行/tab 避免 Excel 貼上時錯位
+function sanitizeCell(v: string | number | null | undefined): string {
+  if (v == null) return ''
+  return String(v)
+    .replace(/\r\n/g, ' / ')   // CRLF → 分隔符
+    .replace(/[\r\n]+/g, ' / ') // 單獨 CR 或 LF
+    .replace(/\t+/g, ' ')       // tab → 空白
+    .replace(/ {2,}/g, ' ')     // 連續空白收斂
+    .trim()
+}
+
 function buildExcelRow(r: SoLine): string {
   const cols = [
     r.project_id,                          // 工單編號
@@ -59,7 +71,7 @@ function buildExcelRow(r: SoLine): string {
     r.order_qty_oru != null ? String(r.order_qty_oru) : '', // 數量
     fmtDate(r.duedate),                    // 交付日期
   ]
-  return cols.join('\t')
+  return cols.map(sanitizeCell).join('\t')
 }
 
 export default function SoQueryPage() {

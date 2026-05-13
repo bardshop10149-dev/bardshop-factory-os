@@ -27,7 +27,9 @@ function AdminNavbar() {
       cyan: { text: "text-cyan-400", activeBg: "bg-cyan-950/80", border: "border-cyan-400", glow: "shadow-[0_0_20px_rgba(34,211,238,0.6)]", hoverText: "hover:text-cyan-300", menuBorder: "border-cyan-500/50 shadow-[0_0_30px_rgba(34,211,238,0.2)]" },
       purple: { text: "text-purple-400", activeBg: "bg-purple-950/80", border: "border-purple-400", glow: "shadow-[0_0_20px_rgba(192,132,252,0.6)]", hoverText: "hover:text-purple-300", menuBorder: "border-purple-500/50 shadow-[0_0_30px_rgba(192,132,252,0.2)]" },
       blue: { text: "text-blue-400", activeBg: "bg-blue-950/80", border: "border-blue-400", glow: "shadow-[0_0_20px_rgba(96,165,250,0.6)]", hoverText: "hover:text-blue-300", menuBorder: "border-blue-500/50 shadow-[0_0_30px_rgba(96,165,250,0.2)]" },
-      orange: { text: "text-orange-400", activeBg: "bg-orange-950/80", border: "border-orange-400", glow: "shadow-[0_0_20px_rgba(251,146,60,0.6)]", hoverText: "hover:text-orange-300", menuBorder: "border-orange-500/50 shadow-[0_0_30px_rgba(251,146,60,0.2)]" }
+      orange: { text: "text-orange-400", activeBg: "bg-orange-950/80", border: "border-orange-400", glow: "shadow-[0_0_20px_rgba(251,146,60,0.6)]", hoverText: "hover:text-orange-300", menuBorder: "border-orange-500/50 shadow-[0_0_30px_rgba(251,146,60,0.2)]" },
+      indigo: { text: "text-indigo-400", activeBg: "bg-indigo-950/80", border: "border-indigo-400", glow: "shadow-[0_0_20px_rgba(129,140,248,0.6)]", hoverText: "hover:text-indigo-300", menuBorder: "border-indigo-500/50 shadow-[0_0_30px_rgba(129,140,248,0.2)]" },
+      emerald: { text: "text-emerald-400", activeBg: "bg-emerald-950/80", border: "border-emerald-400", glow: "shadow-[0_0_20px_rgba(52,211,153,0.6)]", hoverText: "hover:text-emerald-300", menuBorder: "border-emerald-500/50 shadow-[0_0_30px_rgba(52,211,153,0.2)]" }
     }
     return colors[theme] || colors['cyan']
   }
