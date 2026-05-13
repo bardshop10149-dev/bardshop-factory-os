@@ -78,12 +78,45 @@ interface PrepLog {
   status: '已備料' | '無需備料'
   lines_count: number
   interface_id: string | null
+  argo_slip_no: string | null
   logged_at: string
+}
+
+// ============================================================
+// 出單表（批備料概覽用）
+// ============================================================
+interface SheetRowBrief {
+  row_key: string
+  order_number: string
+  item_code: string
+  item_name: string
+  customer: string
+  quantity: string
+  delivery_date: string
+  mo_status: '已匯入製令' | '暫緩區' | null
+  mo_number?: string
+  material_prep_status?: '已備料' | '無需備料' | '已批備料' | null
+  // ARGO 批備料建立的單據號碼
+  argo_slip_no?: string | null
+  factory?: string
+  note?: string
+}
+
+interface SheetMeta {
+  sheet_date: string
+  row_count: number
+  pending_count?: number
+  updated_at: string
 }
 
 // ============================================================
 // 工具
 // ============================================================
+function todayStr(): string {
+  const d = new Date()
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+
 function formatQty(value: number): string {
   if (!Number.isFinite(value)) return '0'
   return Number.isInteger(value) ? String(value) : value.toFixed(2).replace(/\.00$/, '')
@@ -159,6 +192,9 @@ export default function MaterialPrepPage() {
   // ---- 檢視模式 ----
   const [viewMode, setViewMode] = useState<'pending' | 'history'>('pending')
 
+  // ---- 出單表概覽收合（預設收起）----
+  const [sheetOverviewOpen, setSheetOverviewOpen] = useState(false)
+
   // ---- 上傳紀錄 ----
   const [prepLogs, setPrepLogs] = useState<PrepLog[]>([])
   const [prepLogLoading, setPrepLogLoading] = useState(false)
@@ -174,6 +210,17 @@ export default function MaterialPrepPage() {
   const [materialPrepMsgExpanded, setMaterialPrepMsgExpanded] = useState(false)
   // 防止雙擊重複送出：useRef 在 React 畫面更新前就能同步擋住第二次點擊
   const importInFlightRef = useRef(false)
+
+  // ---- 出單表選擇 ----
+  const [selectedDate, setSelectedDate] = useState(todayStr())
+  const [availableSheets, setAvailableSheets] = useState<SheetMeta[]>([])
+  const [sheetRows, setSheetRows] = useState<SheetRowBrief[]>([])
+  const [sheetLoading, setSheetLoading] = useState(false)
+  const [moSummaryMap, setMoSummaryMap] = useState<Record<string, string>>({})
+  // mo_number -> ARGO 回傳的批備料單號
+  const [moSlipNoMap, setMoSlipNoMap] = useState<Record<string, string>>({})
+  // ref：記住當前出單表的製令清單（供 loadMoRecords 使用，避免 closure stale）
+  const currentSheetMoNumbersRef = useRef<string[]>([])
 
   // ---- 同步料件單位 ----
   const [syncingUnits, setSyncingUnits] = useState(false)
@@ -243,17 +290,50 @@ export default function MaterialPrepPage() {
     try { localStorage.setItem(PREP_CUSTOM_CODE_INPUTS_KEY, JSON.stringify(customCodeInputs)) } catch {}
   }, [customCodeInputs])
 
-  // ---- 載入未備料製令 ----
-  const loadMoRecords = useCallback(async () => {
+  // ---- 載入出單表的製令（由 loadSheet 帶入 moNumbers） ----
+  const loadMoRecords = useCallback(async (moNumbers?: string[], sheetRowsFallback?: SheetRowBrief[]) => {
+    const nums = moNumbers ?? currentSheetMoNumbersRef.current
     setMoLoading(true)
     setMoError('')
     try {
-      const res = await fetch('/api/argoerp/mo-summary?prep_status=未備料', { cache: 'no-store' })
-      const json = await res.json()
-      if (!res.ok || !json?.success) {
-        throw new Error(json?.error || `HTTP ${res.status}`)
+      if (nums.length === 0) {
+        setMoRecords([])
+        setSelectedRowKeys(new Set())
+        return
       }
-      const records: MoRecord[] = json.records ?? []
+      // 包含 prep_status = '未備料' 以及尚未設定（null）的製令
+      const { data, error } = await supabase
+        .from('argoerp_mo_summary')
+        .select('mo_number, factory, product_code, lot_number, planned_qty, source_order, mo_note, create_date, saved_at, prep_status, plate_count, machine')
+        .in('mo_number', nums)
+        .or('prep_status.eq.未備料,prep_status.is.null')
+      if (error) throw error
+      const records: MoRecord[] = (data ?? []) as MoRecord[]
+
+      // 對 argoerp_mo_summary 完全查無的製令，用出單表資料補建 fallback（確保待備料項目能顯示）
+      if (sheetRowsFallback && sheetRowsFallback.length > 0) {
+        const foundSet = new Set(records.map(r => r.mo_number))
+        for (const mo of nums) {
+          if (!foundSet.has(mo)) {
+            const sr = sheetRowsFallback.find(r => r.mo_number === mo)
+            if (sr) {
+              records.push({
+                mo_number: mo,
+                factory: sr.factory ?? '',
+                product_code: sr.item_code ?? '',
+                lot_number: sr.customer ?? '',
+                planned_qty: sr.quantity ?? '',
+                source_order: sr.order_number ?? '',
+                mo_note: sr.note ?? '',
+                prep_status: '未備料',
+                plate_count: '',
+                machine: '',
+              })
+            }
+          }
+        }
+      }
+
       setMoRecords(records)
       // 重置選取（保留仍存在的製令的行）
       setSelectedRowKeys(prev => {
@@ -268,8 +348,139 @@ export default function MaterialPrepPage() {
     }
   }, [])
 
-  useEffect(() => {
-    void loadMoRecords()
+  // ---- 載入出單表日期清單 ----
+  const loadSheetList = useCallback(async () => {
+    try {
+      const res = await fetch('/api/argoerp/daily-order-sheet')
+      const json = await res.json()
+      if (json.success) setAvailableSheets(json.sheets ?? [])
+    } catch {}
+  }, [])
+
+  // ---- 載入指定日期的出單表 ＋ 對應製令狀態 ----
+  const loadSheet = useCallback(async (date: string) => {
+    setSheetLoading(true)
+    setMoError('')
+    try {
+      const res = await fetch(`/api/argoerp/daily-order-sheet?date=${date}`)
+      const json = await res.json()
+      let moNumbers: string[] = []
+      let loadedRows: SheetRowBrief[] = []
+      if (json.success && json.sheet?.rows) {
+        loadedRows = json.sheet.rows as SheetRowBrief[]
+        setSheetRows(loadedRows)
+        moNumbers = [...new Set(
+          loadedRows
+            .filter(r => r.mo_status === '已匯入製令' && r.mo_number)
+            .map(r => r.mo_number!)
+        )]
+        // 先從出單表自身的 argo_slip_no 填入（已存在的值）
+        const slipFromSheet: Record<string, string> = {}
+        loadedRows.forEach(r => {
+          if (r.mo_number && r.argo_slip_no) slipFromSheet[r.mo_number] = r.argo_slip_no
+        })
+        if (Object.keys(slipFromSheet).length > 0) {
+          setMoSlipNoMap(slipFromSheet)
+        }
+      } else {
+        setSheetRows([])
+      }
+      currentSheetMoNumbersRef.current = moNumbers
+      if (moNumbers.length > 0) {
+        // 建立 moSummaryMap（含已備料 / 未備料 / 無需備料，用於概覽顯示）
+        const { data: summaryData } = await supabase
+          .from('argoerp_mo_summary')
+          .select('mo_number, prep_status')
+          .in('mo_number', moNumbers)
+        const summaryMap: Record<string, string> = {}
+        ;(summaryData ?? []).forEach((r: { mo_number: string; prep_status: string | null }) => {
+          summaryMap[r.mo_number] = r.prep_status ?? '未備料'
+        })
+        // 出單表本身的批備料狀態（已備料/無需備料/已批備料）也納入 summaryMap
+        loadedRows.forEach(r => {
+          if (r.mo_number && r.material_prep_status) {
+            const s = r.material_prep_status === '已批備料' ? '已備料' : r.material_prep_status
+            // 出單表已標記的優先（覆蓋 summary 的舊值）
+            if (s === '已備料' || s === '無需備料') summaryMap[r.mo_number] = s
+          }
+        })
+
+        // ── 從同步區 erp_material_prep_lines 自動比對批備料單號（同製令號） ──
+        const { data: prepLinesData } = await supabase
+          .from('erp_material_prep_lines')
+          .select('mo_number, slip_no')
+          .in('mo_number', moNumbers)
+          .not('slip_no', 'is', null)
+        const moToSlipFromPrepLines: Record<string, string> = {}
+        ;(prepLinesData ?? []).forEach((r: { mo_number: string | null; slip_no: string | null }) => {
+          if (r.mo_number && r.slip_no && !moToSlipFromPrepLines[r.mo_number]) {
+            moToSlipFromPrepLines[r.mo_number] = r.slip_no
+          }
+        })
+        // 有對應到批備料單 → 概覽顯示為已備料
+        for (const mo of Object.keys(moToSlipFromPrepLines)) {
+          if (!summaryMap[mo] || summaryMap[mo] === '未備料') {
+            summaryMap[mo] = '已備料'
+          }
+        }
+        setMoSummaryMap(summaryMap)
+
+        // 建立 moSlipNoMap — 優先順序：出單表自帶 > log > erp_material_prep_lines
+        const { data: logData } = await supabase
+          .from('argoerp_material_prep_log')
+          .select('mo_number, argo_slip_no')
+          .in('mo_number', moNumbers)
+          .not('argo_slip_no', 'is', null)
+          .order('logged_at', { ascending: false })
+        setMoSlipNoMap(prev => {
+          const next = { ...prev }
+          ;(logData ?? []).forEach((r: { mo_number: string; argo_slip_no: string | null }) => {
+            if (r.argo_slip_no && !next[r.mo_number]) {
+              next[r.mo_number] = r.argo_slip_no
+            }
+          })
+          // 最後補入 erp_material_prep_lines（優先順序最低）
+          for (const [mo, slip] of Object.entries(moToSlipFromPrepLines)) {
+            if (!next[mo]) next[mo] = slip
+          }
+          return next
+        })
+
+        // 若出單表尚未儲存此單號 → 自動 PATCH 回出單表（fire-and-forget）
+        const autoFillUpdates = loadedRows
+          .filter(r => r.mo_number && moToSlipFromPrepLines[r.mo_number] && !r.argo_slip_no)
+          .map(r => ({
+            row_key: r.row_key,
+            argo_slip_no: moToSlipFromPrepLines[r.mo_number!],
+            material_prep_status: '已備料' as const,
+          }))
+        if (autoFillUpdates.length > 0) {
+          fetch('/api/argoerp/daily-order-sheet', {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ sheet_date: date, updates: autoFillUpdates }),
+          }).catch(() => {})
+        }
+
+        // BOM 批備料表只顯示「在 erp_material_prep_lines 中沒有對應批備料單號」且「出單表尚未標為已備料/無需備料」的製令
+        const sheetDoneMos = new Set(
+          loadedRows
+            .filter(r => r.mo_number && (r.material_prep_status === '已備料' || r.material_prep_status === '無需備料' || r.material_prep_status === '已批備料'))
+            .map(r => r.mo_number!)
+        )
+        const moNumbersForBom = moNumbers.filter(mo => !moToSlipFromPrepLines[mo] && !sheetDoneMos.has(mo))
+        await loadMoRecords(moNumbersForBom, loadedRows)
+      } else {
+        setMoSummaryMap({})
+        setMoSlipNoMap({})
+        setMoRecords([])
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      setMoError(msg)
+    } finally {
+      setSheetLoading(false)
+    }
   }, [loadMoRecords])
 
   // ---- 載入上傳紀錄 ----
@@ -289,10 +500,12 @@ export default function MaterialPrepPage() {
     }
   }, [])
 
+  useEffect(() => { void loadSheetList() }, [loadSheetList])
+  useEffect(() => { void loadSheet(selectedDate) }, [selectedDate, loadSheet])
+
   useEffect(() => {
     if (viewMode === 'history') void loadPrepLogs()
-    if (viewMode === 'pending') void loadMoRecords()
-  }, [viewMode, loadPrepLogs, loadMoRecords])
+  }, [viewMode, loadPrepLogs])
 
   // ---- 載入 BOM / 庫存 / 替代料 ----
   const loadBomContext = useCallback(async () => {
@@ -659,7 +872,19 @@ export default function MaterialPrepPage() {
         }),
       }).catch(err => console.warn('[批備料紀錄] 寫入失敗', err))
 
-      await loadMoRecords()
+      // 更新出單表的批備料狀態
+      const sheetUpdates = sheetRows
+        .filter(r => moNumbers.includes(r.mo_number ?? ''))
+        .map(r => ({ row_key: r.row_key, material_prep_status: '無需備料' as const }))
+      if (sheetUpdates.length > 0) {
+        fetch('/api/argoerp/daily-order-sheet', {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sheet_date: selectedDate, updates: sheetUpdates }),
+        }).catch(() => {})
+      }
+
+      await loadSheet(selectedDate)
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
       setActionMessage(`❌ 標記失敗：${msg}`)
@@ -667,7 +892,7 @@ export default function MaterialPrepPage() {
       setActionBusy(false)
       setTimeout(() => setActionMessage(''), 6000)
     }
-  }, [selectedRowKeys, materialPrepRows, loadMoRecords])
+  }, [selectedRowKeys, materialPrepRows, moRecords, sheetRows, selectedDate, loadSheet])
 
   // ---- 操作：從紀錄重設為未備料（可再次上傳）----
   const handleResetToPending = useCallback(async () => {
@@ -821,6 +1046,29 @@ export default function MaterialPrepPage() {
       }
 
       const argoRaw = result?.rawText ? `\nARGO 回應：${result.rawText}` : ''
+
+      // 從 ARGO RESULT 陣列擷取各製令的批備料單號（SLIP_NO）
+      // 成功時 CHECK_FLAG = 'Y'，SLIP_NO = ARGO 系統產生的批備料單號
+      const argoResultRows: Record<string, unknown>[] = Array.isArray(result?.apiResult?.RESULT)
+        ? (result.apiResult.RESULT as Record<string, unknown>[])
+        : []
+      // 以 MO 號為 key，彙整 ARGO 回傳的 SLIP_NO（可能跟送出的不同）
+      const moToArgoSlipNo: Record<string, string> = {}
+      for (const row of argoResultRows) {
+        const slipNo = String(row.SLIP_NO ?? '').trim()
+        const lineNo = String(row.LINE_NO ?? '')
+        if (!slipNo) continue
+        // 找出哪個 MO 對應這個 SLIP_NO
+        // 我們送出時 SLIP_NO = moNumber，但 ARGO 可能回傳不同值
+        const matchedMo = importMos.find(mo => mo === slipNo) ?? slipNo
+        if (!moToArgoSlipNo[matchedMo]) {
+          moToArgoSlipNo[matchedMo] = slipNo
+        } else if (!moToArgoSlipNo[matchedMo].includes(slipNo)) {
+          moToArgoSlipNo[matchedMo] += `, ${slipNo}`
+        }
+        void lineNo // 保留供未來 debug 用
+      }
+
       setMaterialPrepMessage(`✅ 已送出 ${selectedImportRows.length} 筆到 ARGO，並將 ${importMos.length} 筆製令標記為「已備料」${argoRaw}`)
       setMaterialPrepMsgExpanded(false)
 
@@ -837,11 +1085,37 @@ export default function MaterialPrepPage() {
             status:       '已備料',
             lines_count:  selectedImportRows.filter(r => r.mo_number === mo).length,
             interface_id: materialPrepInterfaceId.trim(),
+            argo_slip_no: moToArgoSlipNo[mo] ?? null,
           })),
         }),
       }).catch(err => console.warn('[批備料紀錄] 寫入失敗', err))
 
-      await loadMoRecords()
+      // 即時更新概覽的批備料單號 map（不等待 loadSheet 重整）
+      setMoSlipNoMap(prev => {
+        const next = { ...prev }
+        for (const mo of importMos) {
+          if (moToArgoSlipNo[mo]) next[mo] = moToArgoSlipNo[mo]
+        }
+        return next
+      })
+
+      // 更新出單表的批備料狀態 + ARGO 批備料單號
+      const sheetUpdates = sheetRows
+        .filter(r => importMos.includes(r.mo_number ?? ''))
+        .map(r => ({
+          row_key: r.row_key,
+          material_prep_status: '已備料' as const,
+          argo_slip_no: moToArgoSlipNo[r.mo_number ?? ''] ?? null,
+        }))
+      if (sheetUpdates.length > 0) {
+        fetch('/api/argoerp/daily-order-sheet', {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sheet_date: selectedDate, updates: sheetUpdates }),
+        }).catch(() => {})
+      }
+
+      await loadSheet(selectedDate)
     } catch (error) {
       const message = error instanceof Error ? error.message : '生產批備料匯入失敗'
       setMaterialPrepMessage(`❌ ${message}`)
@@ -850,7 +1124,7 @@ export default function MaterialPrepPage() {
       setMaterialPrepImporting(false)
       importInFlightRef.current = false
     }
-  }, [selectedRowKeys, selectedImportRows, materialPrepRows, materialPrepInterfaceId, loadMoRecords])
+  }, [selectedRowKeys, selectedImportRows, materialPrepRows, materialPrepInterfaceId, moRecords, sheetRows, selectedDate, loadSheet])
 
   // ============================================================
   // Render
@@ -862,7 +1136,7 @@ export default function MaterialPrepPage() {
           <div>
             <h1 className="text-3xl font-bold tracking-tight">生產批備料</h1>
             <p className="text-slate-400 mt-1 text-sm">
-              自動列出製令總表中「未備料」的製令，比對系統 BOM / 替代料 / 物料庫存後可送 ARGO 批備料或標記為無需備料。
+              以出單表日期為主，載入指定出單表後比對 BOM / 替代料 / 物料庫存，可送 ARGO 批備料或標記為無需備料。
             </p>
           </div>
           <div className="flex gap-2 flex-wrap">
@@ -877,14 +1151,133 @@ export default function MaterialPrepPage() {
               {syncUnitsMsg && <p className="text-xs text-slate-400 max-w-xs text-right">{syncUnitsMsg}</p>}
             </div>
             <button
-              onClick={() => viewMode === 'pending' ? void loadMoRecords() : void loadPrepLogs()}
-              disabled={viewMode === 'pending' ? moLoading : prepLogLoading}
+              onClick={() => viewMode === 'pending' ? void loadSheet(selectedDate) : void loadPrepLogs()}
+              disabled={viewMode === 'pending' ? (sheetLoading || moLoading) : prepLogLoading}
               className="px-4 py-2 rounded-lg bg-slate-800 border border-slate-700 text-slate-200 hover:bg-slate-700 disabled:opacity-50 transition-colors text-sm"
             >
-              {(viewMode === 'pending' ? moLoading : prepLogLoading) ? '讀取中...' : '🔄 重新整理'}
+              {(viewMode === 'pending' ? (sheetLoading || moLoading) : prepLogLoading) ? '讀取中...' : '🔄 重新整理'}
             </button>
           </div>
         </div>
+
+        {/* ── 出單表日期選擇 ── */}
+        <div className="mb-5 bg-slate-900 border border-slate-800 rounded-lg p-4">
+          <div className="flex flex-wrap items-center gap-3">
+            <span className="text-sm font-medium text-slate-300">出單表日期</span>
+            {availableSheets.length > 0 ? (
+              <select
+                value={selectedDate}
+                onChange={e => setSelectedDate(e.target.value)}
+                className="px-3 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-slate-200 text-sm focus:outline-none focus:border-cyan-500"
+              >
+                {availableSheets.map(s => {
+                  const pending = s.pending_count ?? 0
+                  const done = pending === 0
+                  return (
+                    <option
+                      key={s.sheet_date}
+                      value={s.sheet_date}
+                      style={done ? { color: '#34d399' } : undefined}
+                    >
+                      {s.sheet_date}（{done ? '批備料完成' : `待備料 ${pending} 筆`}）
+                    </option>
+                  )
+                })}
+              </select>
+            ) : (
+              <span className="text-xs text-slate-500">尚無已儲存的出單表</span>
+            )}
+            {sheetLoading && <span className="text-xs text-slate-400">出單表讀取中...</span>}
+            {!sheetLoading && sheetRows.length === 0 && selectedDate && (
+              <span className="text-xs text-amber-400">此日期尚無出單表資料</span>
+            )}
+          </div>
+        </div>
+
+        {/* ── 出單表概覽（批備料狀態比對）── */}
+        {sheetRows.filter(r => r.mo_status === '已匯入製令').length > 0 && (() => {
+          const moRows = sheetRows.filter(r => r.mo_status === '已匯入製令')
+          const prepDoneCount = moRows.filter(r => {
+            const s = moSummaryMap[r.mo_number ?? '']
+            return s === '已備料' || s === '無需備料'
+          }).length
+          return (
+            <div className="mb-5 bg-slate-900 border border-slate-800 rounded-lg overflow-hidden">
+              <button
+                type="button"
+                onClick={() => setSheetOverviewOpen(v => !v)}
+                className="w-full px-4 py-3 border-b border-slate-700/50 flex flex-wrap items-center justify-between gap-2 hover:bg-slate-800/40 transition-colors text-left"
+              >
+                <h2 className="text-sm font-semibold text-white flex items-center gap-2">
+                  <span className={`inline-block transition-transform ${sheetOverviewOpen ? 'rotate-90' : ''}`}>▶</span>
+                  出單表概覽
+                  <span className="ml-2 text-slate-400 font-normal">{selectedDate}</span>
+                </h2>
+                <div className="flex items-center gap-3 text-xs text-slate-400">
+                  <span>已匯入製令 <span className="text-cyan-300 font-semibold">{moRows.length}</span> 張</span>
+                  <span>已備料 / 無需備料 <span className="text-emerald-300 font-semibold">{prepDoneCount}</span> 張</span>
+                  <span>待備料 <span className="text-amber-300 font-semibold">{moRows.length - prepDoneCount}</span> 張</span>
+                </div>
+              </button>
+              {sheetOverviewOpen && (
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="bg-slate-800/60 border-b border-slate-700/50">
+                      <th className="px-3 py-2 text-left text-slate-400 whitespace-nowrap">工單號 / 製令號</th>
+                      <th className="px-3 py-2 text-left text-slate-400 whitespace-nowrap">品項代碼 / 品名</th>
+                      <th className="px-3 py-2 text-left text-slate-400 whitespace-nowrap">客戶</th>
+                      <th className="px-3 py-2 text-left text-slate-400 whitespace-nowrap">ARGO 批備料單號</th>
+                      <th className="px-3 py-2 text-center text-slate-400 whitespace-nowrap">批備料狀態</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {moRows.map((row, i) => {
+                      // 優先取 moSummaryMap（從 argoerp_mo_summary 查到的），再 fallback 到 sheetRow 本身儲存的 material_prep_status
+                      const prepStatus = row.mo_number
+                        ? (moSummaryMap[row.mo_number] ?? row.material_prep_status ?? '未備料')
+                        : row.material_prep_status ?? null
+                      return (
+                        <tr key={row.row_key} className={`border-b border-slate-800/40 ${i % 2 === 0 ? 'bg-slate-900/40' : 'bg-slate-900/20'} hover:bg-slate-800/30`}>
+                          <td className="px-3 py-1.5 whitespace-nowrap">
+                            <div className="text-slate-300 font-mono text-xs">{row.order_number}</div>
+                            <div className="text-cyan-300 font-mono text-[11px] mt-0.5 opacity-80">{row.mo_number || '—'}</div>
+                          </td>
+                          <td className="px-3 py-1.5 whitespace-nowrap">
+                            <div className="text-slate-300">{row.item_code}</div>
+                            <div className="text-slate-500 truncate max-w-[200px]" title={row.item_name}>{row.item_name}</div>
+                          </td>
+                          <td className="px-3 py-1.5 text-slate-400 truncate max-w-[140px]">{row.customer || '-'}</td>
+                          <td className="px-3 py-1.5 whitespace-nowrap">
+                            {row.mo_number && moSlipNoMap[row.mo_number]
+                              ? <span className="font-mono text-emerald-300 text-xs">{moSlipNoMap[row.mo_number]}</span>
+                              : <span className="text-slate-600 text-xs">—</span>
+                            }
+                          </td>
+                          <td className="px-3 py-1.5 text-center">
+                            {prepStatus === '已備料' && (
+                              <span className="px-2 py-0.5 rounded-full bg-emerald-950/60 text-emerald-300 border border-emerald-800/50 text-xs">已備料</span>
+                            )}
+                            {prepStatus === '無需備料' && (
+                              <span className="px-2 py-0.5 rounded-full bg-amber-950/60 text-amber-300 border border-amber-800/50 text-xs">無需備料</span>
+                            )}
+                            {prepStatus === '未備料' && (
+                              <span className="px-2 py-0.5 rounded-full bg-slate-800 text-slate-400 border border-slate-700 text-xs">待備料</span>
+                            )}
+                            {!prepStatus && (
+                              <span className="text-slate-600 text-xs">—</span>
+                            )}
+                          </td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              </div>
+              )}
+            </div>
+          )
+        })()}
 
         {/* Tab 切換 */}
         <div className="mb-6 flex gap-1 border-b border-slate-800">
@@ -896,7 +1289,7 @@ export default function MaterialPrepPage() {
                 : 'border-transparent text-slate-400 hover:text-slate-200'
             }`}
           >
-            📋 未備料清單
+            📋 批備料操作（未備料）
             {moRecords.length > 0 && <span className="ml-2 px-1.5 py-0.5 rounded-full text-xs bg-slate-700 text-slate-300">{moRecords.length}</span>}
           </button>
           <button
@@ -1008,7 +1401,9 @@ export default function MaterialPrepPage() {
           ) : moError ? (
             <div className="px-4 py-10 text-center text-red-300 text-sm">{moError}</div>
           ) : moRecords.length === 0 ? (
-            <div className="px-4 py-10 text-center text-slate-500 text-sm">目前沒有未備料的製令</div>
+            <div className="px-4 py-10 text-center text-slate-500 text-sm">
+              {sheetRows.length === 0 ? '尚未載入出單表，請先選擇日期' : '此出單表中所有製令均已完成備料'}
+            </div>
           ) : bomLoading ? (
             <div className="px-4 py-10 text-center text-slate-400 text-sm">BOM / 替代料 / 庫存資料讀取中...</div>
           ) : bomError ? (
@@ -1059,7 +1454,8 @@ export default function MaterialPrepPage() {
                         className="rounded border-slate-600 bg-slate-700 text-cyan-500 focus:ring-cyan-500/30"
                       />
                     </th>
-                    <th className="px-3 py-3 text-left text-slate-300 text-xs whitespace-nowrap">製令單號 / 客戶</th>
+                    <th className="px-3 py-3 text-left text-slate-300 text-xs whitespace-nowrap sticky left-10 bg-slate-800/80 z-10">製令單號</th>
+                    <th className="px-3 py-3 text-left text-slate-300 text-xs whitespace-nowrap">客戶 / 來源訂單</th>
                     <th className="px-3 py-3 text-left text-slate-300 text-xs whitespace-nowrap">生產貨號 / 預定產出量</th>
                     <th className="px-3 py-3 text-right text-slate-300 text-xs whitespace-nowrap">映射盤數</th>
                     <th className="px-3 py-3 text-left text-slate-300 text-xs whitespace-nowrap">原料料號 / 原料名稱</th>
@@ -1085,12 +1481,15 @@ export default function MaterialPrepPage() {
                             className="rounded border-slate-600 bg-slate-700 text-cyan-500 focus:ring-cyan-500/30"
                           />
                         </td>
+                        <td className="px-3 py-2 text-xs whitespace-nowrap sticky left-10 bg-inherit z-10">
+                          <div className="text-cyan-300 font-mono font-semibold">{row.mo_number}</div>
+                          <div className="text-slate-500 text-[10px] mt-0.5">{row.factory}</div>
+                        </td>
                         <td className="px-3 py-2 text-xs whitespace-nowrap">
-                          <div className="text-cyan-300 font-mono">{row.mo_number}</div>
                           {row.source_order && row.source_order !== '-' && (
                             <button
                               onClick={() => setSoModalId(row.source_order)}
-                              className="text-amber-300/80 font-mono text-[10px] hover:text-amber-200 hover:underline underline-offset-2 text-left mt-0.5"
+                              className="text-amber-300/80 font-mono text-[10px] hover:text-amber-200 hover:underline underline-offset-2 text-left"
                             >
                               {row.source_order}
                             </button>
@@ -1272,6 +1671,7 @@ export default function MaterialPrepPage() {
                         <th className="px-3 py-3 text-right text-slate-300 text-xs whitespace-nowrap">預定量</th>
                         <th className="px-3 py-3 text-right text-slate-300 text-xs whitespace-nowrap">備料筆數</th>
                         <th className="px-3 py-3 text-left text-slate-300 text-xs whitespace-nowrap">介面</th>
+                        <th className="px-3 py-3 text-left text-slate-300 text-xs whitespace-nowrap">ARGO 批備料單號</th>
                         <th className="px-3 py-3 text-left text-slate-300 text-xs whitespace-nowrap">狀態</th>
                       </tr>
                     </thead>
@@ -1302,6 +1702,12 @@ export default function MaterialPrepPage() {
                             <td className="px-3 py-2 text-xs text-slate-300 text-right whitespace-nowrap font-mono">{log.planned_qty || '-'}</td>
                             <td className="px-3 py-2 text-xs text-slate-300 text-right whitespace-nowrap font-mono">{log.lines_count}</td>
                             <td className="px-3 py-2 text-xs text-slate-500 whitespace-nowrap">{log.interface_id || '-'}</td>
+                            <td className="px-3 py-2 text-xs whitespace-nowrap">
+                              {log.argo_slip_no
+                                ? <span className="font-mono text-cyan-300">{log.argo_slip_no}</span>
+                                : <span className="text-slate-600">—</span>
+                              }
+                            </td>
                             <td className="px-3 py-2 text-xs whitespace-nowrap">
                               <span className={`px-2 py-0.5 rounded-full border text-xs ${
                                 log.status === '已備料'

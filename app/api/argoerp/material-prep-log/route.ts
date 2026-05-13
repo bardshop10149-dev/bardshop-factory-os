@@ -11,6 +11,7 @@ interface LogRow {
   status: '已備料' | '無需備料'
   lines_count?: number
   interface_id?: string
+  argo_slip_no?: string
 }
 
 // GET: 取得批備料上傳紀錄（最新在前，可用 ?mo_number= 篩選）
@@ -65,6 +66,7 @@ export async function POST(request: NextRequest) {
       status:       r.status,
       lines_count:  r.lines_count   ?? 0,
       interface_id: r.interface_id  ?? null,
+      argo_slip_no: r.argo_slip_no  ?? null,
     }))
 
     const supabase = getSupabaseAdminClient()

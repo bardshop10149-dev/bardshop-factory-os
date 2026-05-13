@@ -20,11 +20,25 @@ export async function GET(request: NextRequest) {
         .select('sheet_date, rows, updated_at')
         .order('sheet_date', { ascending: false })
       if (error) throw error
-      const list = (data ?? []).map((r: { sheet_date: string; rows: unknown[]; updated_at: string }) => ({
-        sheet_date: r.sheet_date,
-        row_count: Array.isArray(r.rows) ? r.rows.length : 0,
-        updated_at: r.updated_at,
-      }))
+      const DONE_STATES = new Set(['已備料', '無需備料', '已批備料'])
+      const list = (data ?? []).map((r: { sheet_date: string; rows: unknown[]; updated_at: string }) => {
+        const rowsArr = Array.isArray(r.rows) ? (r.rows as Array<Record<string, unknown>>) : []
+        const pendingMos = new Set<string>()
+        for (const row of rowsArr) {
+          if (row.mo_status !== '已匯入製令') continue
+          const mo = typeof row.mo_number === 'string' ? row.mo_number : ''
+          if (!mo) continue
+          const status = typeof row.material_prep_status === 'string' ? row.material_prep_status : ''
+          if (DONE_STATES.has(status)) continue
+          pendingMos.add(mo)
+        }
+        return {
+          sheet_date: r.sheet_date,
+          row_count: rowsArr.length,
+          pending_count: pendingMos.size,
+          updated_at: r.updated_at,
+        }
+      })
       return NextResponse.json({ success: true, sheets: list })
     }
 
@@ -88,6 +102,7 @@ export async function PATCH(request: NextRequest) {
         match_pdl_seq?: number | null
         match_reason?: string | null
         material_prep_status?: string | null
+        argo_slip_no?: string | null
       }>
     }
     const { sheet_date, updates } = body
@@ -122,6 +137,7 @@ export async function PATCH(request: NextRequest) {
       if (upd.match_pdl_seq !== undefined) merged.match_pdl_seq = upd.match_pdl_seq
       if (upd.match_reason !== undefined) merged.match_reason = upd.match_reason
       if (upd.material_prep_status !== undefined) merged.material_prep_status = upd.material_prep_status
+      if (upd.argo_slip_no !== undefined) merged.argo_slip_no = upd.argo_slip_no
       return merged
     })
 
