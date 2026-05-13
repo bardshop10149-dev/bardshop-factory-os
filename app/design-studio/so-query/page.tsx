@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import Link from 'next/link'
 import { supabase } from '../../../lib/supabaseClient'
 
@@ -72,12 +72,40 @@ export default function SoQueryPage() {
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set())
   const [syncing, setSyncing]         = useState(false)
   const [syncMsg, setSyncMsg]         = useState('')
+  const [syncModalOpen, setSyncModalOpen] = useState(false)
+  const [syncStage, setSyncStage] = useState('')
+  const [syncElapsed, setSyncElapsed] = useState(0)
+  const [syncResult, setSyncResult] = useState<{ ok: boolean; text: string } | null>(null)
+  const syncStartRef = useRef<number>(0)
+
+  // 同步進行中的階段提示（依據經過時間推測）
+  useEffect(() => {
+    if (!syncing) return
+    const tick = () => {
+      const elapsed = Math.floor((Date.now() - syncStartRef.current) / 1000)
+      setSyncElapsed(elapsed)
+      if (elapsed < 3) setSyncStage('向 ARGO 請求 PJ_PROJECT 表頭…')
+      else if (elapsed < 10) setSyncStage('接收 SO 表頭資料並建立索引…')
+      else if (elapsed < 25) setSyncStage('向 ARGO 請求 PJ_PROJECTDETAIL 明細…')
+      else if (elapsed < 50) setSyncStage('合併表頭 / 明細並去重…')
+      else if (elapsed < 90) setSyncStage('寫入 Supabase（分批插入）…')
+      else setSyncStage('仍在處理中，請稍候…')
+    }
+    tick()
+    const id = window.setInterval(tick, 1000)
+    return () => window.clearInterval(id)
+  }, [syncing])
 
   const handleSyncSo = useCallback(async () => {
     if (syncing) return
     if (!window.confirm('確定要同步 ARGO 銷售訂單嗎？\n（將以 ARGO 最新資料覆寫本地快照）')) return
+    syncStartRef.current = Date.now()
     setSyncing(true)
     setSyncMsg('')
+    setSyncResult(null)
+    setSyncModalOpen(true)
+    setSyncElapsed(0)
+    setSyncStage('連線 ARGO…')
     try {
       const res = await fetch('/api/argoerp', {
         method: 'POST',
@@ -88,10 +116,16 @@ export default function SoQueryPage() {
       if (!res.ok || json?.status === 'error') {
         throw new Error(json?.error || `HTTP ${res.status}`)
       }
-      const count = json?.syncedCount ?? json?.detailTotal ?? json?.headerCount ?? '完成'
-      setSyncMsg(`✅ 同步成功：${count}`)
+      const synced = json?.syncedCount ?? '?'
+      const total = json?.totalRows ?? '?'
+      const headers = json?.headerCount ?? '?'
+      const elapsedSec = Math.floor((Date.now() - syncStartRef.current) / 1000)
+      const text = `寫入 ${synced} 筆明細（表頭 ${headers} 張 / 原始明細 ${total} 筆）\n耗時：${elapsedSec} 秒`
+      setSyncResult({ ok: true, text })
+      setSyncMsg(`✅ 同步成功：${synced} 筆`)
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
+      setSyncResult({ ok: false, text: msg })
       setSyncMsg(`❌ 同步失敗：${msg}`)
     } finally {
       setSyncing(false)
@@ -312,6 +346,61 @@ export default function SoQueryPage() {
       {rows.length > 0 && (
         <div className="px-4 py-3 border-t border-slate-800/60 text-xs text-slate-600">
           共 {rows.length.toLocaleString()} 筆
+        </div>
+      )}
+
+      {/* ─── 同步進度 Modal ─── */}
+      {syncModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm">
+          <div className="w-[420px] max-w-[92vw] rounded-2xl bg-slate-900 border border-slate-700 shadow-2xl p-6">
+            <div className="flex items-center gap-3 mb-4">
+              {syncing ? (
+                <div className="h-6 w-6 rounded-full border-2 border-sky-400 border-t-transparent animate-spin" />
+              ) : syncResult?.ok ? (
+                <div className="h-6 w-6 rounded-full bg-emerald-500 flex items-center justify-center text-sm">✓</div>
+              ) : (
+                <div className="h-6 w-6 rounded-full bg-rose-500 flex items-center justify-center text-sm">✕</div>
+              )}
+              <h3 className="text-lg font-semibold">
+                {syncing ? '正在同步銷售訂單' : syncResult?.ok ? '同步完成' : '同步失敗'}
+              </h3>
+            </div>
+
+            {syncing ? (
+              <>
+                <div className="text-sm text-slate-300 mb-2">{syncStage || '準備中…'}</div>
+                <div className="text-xs text-slate-500 mb-4">已耗時 {syncElapsed} 秒</div>
+                <div className="h-1.5 w-full overflow-hidden rounded-full bg-slate-800">
+                  <div className="h-full w-1/3 animate-pulse bg-sky-400" />
+                </div>
+                <div className="mt-4 text-xs text-slate-500">
+                  ⚠ ARGO 大量資料同步通常需 30~120 秒，請勿關閉視窗。
+                </div>
+              </>
+            ) : (
+              <>
+                <pre className={`whitespace-pre-wrap text-sm rounded-lg p-3 mb-4 border ${syncResult?.ok ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-200' : 'bg-rose-500/10 border-rose-500/30 text-rose-200'}`}>
+{syncResult?.text}
+                </pre>
+                <div className="flex justify-end gap-2">
+                  {syncResult?.ok && (
+                    <button
+                      onClick={() => { setSyncModalOpen(false); handleQuery() }}
+                      className="px-4 py-2 rounded-lg bg-sky-500 hover:bg-sky-400 text-sm font-semibold"
+                    >
+                      重新載入查詢
+                    </button>
+                  )}
+                  <button
+                    onClick={() => setSyncModalOpen(false)}
+                    className="px-4 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 text-sm"
+                  >
+                    關閉
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
         </div>
       )}
     </main>

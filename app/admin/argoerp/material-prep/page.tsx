@@ -100,6 +100,7 @@ interface SheetRowBrief {
   argo_slip_no?: string | null
   factory?: string
   note?: string
+  plate_count?: string
 }
 
 interface SheetMeta {
@@ -310,6 +311,34 @@ export default function MaterialPrepPage() {
       if (error) throw error
       const records: MoRecord[] = (data ?? []) as MoRecord[]
 
+      // 以出單表分配機台覆蓋（出單表為主，summary 為輔）
+      const assignMap: Record<string, string> = {}
+      try {
+        const assignRes = await fetch(`/api/argoerp/mo-machine-assign?mo_numbers=${encodeURIComponent(nums.join(','))}`)
+        const assignJson = await assignRes.json().catch(() => ({}))
+        if (assignJson?.success && Array.isArray(assignJson.assignments)) {
+          for (const a of assignJson.assignments as { mo_number: string; machine: string }[]) {
+            if (a.mo_number && a.machine) assignMap[a.mo_number] = a.machine
+          }
+          for (const rec of records) {
+            if (assignMap[rec.mo_number]) rec.machine = assignMap[rec.mo_number]
+          }
+        }
+      } catch { /* 忽略機台分配載入錯誤 */ }
+
+      // 以出單表的 plate_count 補齊（summary 可能沒存盤數）
+      if (sheetRowsFallback && sheetRowsFallback.length > 0) {
+        const sheetPlateMap: Record<string, string> = {}
+        sheetRowsFallback.forEach(sr => {
+          if (sr.mo_number && sr.plate_count) sheetPlateMap[sr.mo_number] = sr.plate_count
+        })
+        for (const rec of records) {
+          if ((!rec.plate_count || rec.plate_count.trim() === '') && sheetPlateMap[rec.mo_number]) {
+            rec.plate_count = sheetPlateMap[rec.mo_number]
+          }
+        }
+      }
+
       // 對 argoerp_mo_summary 完全查無的製令，用出單表資料補建 fallback（確保待備料項目能顯示）
       if (sheetRowsFallback && sheetRowsFallback.length > 0) {
         const foundSet = new Set(records.map(r => r.mo_number))
@@ -326,8 +355,8 @@ export default function MaterialPrepPage() {
                 source_order: sr.order_number ?? '',
                 mo_note: sr.note ?? '',
                 prep_status: '未備料',
-                plate_count: '',
-                machine: '',
+                plate_count: sr.plate_count ?? '',
+                machine: assignMap[mo] ?? '',
               })
             }
           }
