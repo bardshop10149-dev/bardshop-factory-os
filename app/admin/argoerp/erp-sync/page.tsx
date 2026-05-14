@@ -191,19 +191,24 @@ const DOC_TYPES: Record<DocTypeKey, {
   },
   po: {
     label: '採購單號',
-    description: 'PJT_TYPE=PO。PJT_TYPE 在 PJ_PROJECT 表頭，單表查詢即可。',
+    description: 'PJT_TYPE=PO。兩段式同步：PJ_PROJECT 表頭 + PJ_PROJECTDETAIL 明細，JS 端 JOIN，不依賴此設定（欄位映射僅供參考）。',
     defaultConfig: {
-      table: 'PJ_PROJECT',
+      table: 'PJ_PROJECT + PJ_PROJECTDETAIL',
       customColumn: '',
       filters: [{ key: 'PJT_TYPE', value: 'PO' }],
       mapping: {
         ...EMPTY_MAPPING,
         docNoField: 'PROJECT_ID',
-        descriptionField: 'PROJECT_NAME',
+        subNoField: 'LINE_NO',
+        itemCodeField: 'MBP_PART',
+        descriptionField: 'REMARK',
+        qtyField: 'ORDER_QTY_ORU',
+        unitField: 'UNIT_OF_MEASURE_ORU',
         statusField: 'HOLD_STATUS',
         startDateField: 'BEGIN_DATE',
-        endDateField: 'END_DATE',
-        customerVendorField: 'IN_CHARGE',
+        endDateField: 'DUEDATE',
+        customerVendorField: 'TPN_PARTNER_ID',
+        remarkField: 'REMARK2',
       },
     },
   },
@@ -451,12 +456,16 @@ function SyncCard({ docKey }: SyncCardProps) {
   const isInventoryTab = docKey === 'inventory'
   const isMaterialPrepTab = docKey === 'material_prep'
   const isCustomerTab = docKey === 'customer'
+  const isPoTab = docKey === 'po'
+  const isSubcontractTab = docKey === 'subcontract'
   const activeMappingLabels = meta.mappingLabels ?? MAPPING_LABELS
   const [config, setConfig] = useState<SyncConfig>(() => loadConfig(docKey))
   const [showConfig, setShowConfig] = useState(false)
   const [syncing, setSyncing] = useState(false)
   const [message, setMessage] = useState('')
   const [messageOk, setMessageOk] = useState(true)
+  const [diagRunning, setDiagRunning] = useState(false)
+  const [diagText, setDiagText] = useState('')
   const [rawSample, setRawSample] = useState<Record<string, unknown> | null>(null)
   const [showRaw, setShowRaw] = useState(false)
   const [records, setRecords] = useState<PjRecord[]>([])
@@ -466,6 +475,7 @@ function SyncCard({ docKey }: SyncCardProps) {
   const [customerRecords, setCustomerRecords] = useState<CustomerRecord[]>([])
   const [materialPrepPage, setMaterialPrepPage] = useState(1)
   const [moStatusFilter, setMoStatusFilter] = useState<'OPEN' | 'HOLD' | 'CLOSE' | null>('OPEN')
+  const [poStatusFilter, setPoStatusFilter] = useState<'OPEN' | 'HOLD' | 'CLOSE' | null>('OPEN')
 
   // 手動新增製令 modal state
   const defaultMoForm: MoModalForm = { order_number: '', line_no: '', item_code: '', item_name: '', quantity: '', delivery_date: '', factory: 'T', customer: '', note: '' }
@@ -641,10 +651,16 @@ function SyncCard({ docKey }: SyncCardProps) {
         if (!isInventory) {
           // erp_pj_sync 依 doc_type 篩選
           query = query.eq('doc_type', meta.label).order('doc_no', { ascending: true })
+          if (isPoTab && poStatusFilter) {
+            query = query.eq('status', poStatusFilter)
+          }
           if (keyword.trim()) {
             const kw = keyword.trim()
+            const baseOr = `doc_no.ilike.%${kw}%,item_code.ilike.%${kw}%,description.ilike.%${kw}%,customer_vendor.ilike.%${kw}%`
             query = query.or(
-              `doc_no.ilike.%${kw}%,item_code.ilike.%${kw}%,description.ilike.%${kw}%,customer_vendor.ilike.%${kw}%`
+              isPoTab
+                ? `${baseOr},extra->>MBP_LOT_NO.ilike.%${kw}%`
+                : baseOr
             )
           }
         } else {
@@ -666,7 +682,7 @@ function SyncCard({ docKey }: SyncCardProps) {
     } finally {
       setLoadingRecords(false)
     }
-  }, [isSoTab, isMoTab, isMaterialPrepTab, isCustomerTab, meta.label, moStatusFilter, soStatusFilter])
+  }, [isSoTab, isMoTab, isMaterialPrepTab, isCustomerTab, isPoTab, meta.label, moStatusFilter, soStatusFilter, poStatusFilter])
 
   useEffect(() => { void fetchRecords() }, [fetchRecords])
 
@@ -680,6 +696,11 @@ function SyncCard({ docKey }: SyncCardProps) {
   const handleMoPageChange = (page: number) => {
     setMoPage(page)
     void fetchRecords(search, page)
+  }
+
+  // PO 狀態篩選切換時回到第一頁
+  const handlePoStatusFilter = (s: 'OPEN' | 'HOLD' | 'CLOSE' | null) => {
+    setPoStatusFilter(s)
   }
 
   // SO 狀態篩選切換時回到第一頁
@@ -817,6 +838,153 @@ function SyncCard({ docKey }: SyncCardProps) {
   }
 
   // SO 列印（當頁）
+  const handlePoDocPrint = (targetDocNo: string) => {
+    // Group records by doc_no (single doc)
+    const grouped = new Map<string, typeof records>()
+    for (const r of records.filter(rec => rec.doc_no === targetDocNo)) {
+      if (!grouped.has(r.doc_no)) grouped.set(r.doc_no, [])
+      grouped.get(r.doc_no)!.push(r)
+    }
+
+    const poPages = Array.from(grouped.entries()).map(([docNo, lines]) => {
+      const hdr = lines[0]
+      const extra = hdr.extra as Record<string, unknown> | null | undefined
+      const headerRows: [string, string][] = [
+        ['採購單號',   docNo],
+        ['廠商代號',   hdr.customer_vendor ?? '—'],
+        ['開立日',     hdr.start_date ?? '—'],
+        ['狀態',       hdr.status ?? '—'],
+        ['幣別',       String(extra?.CURRENCY ?? '—')],
+        ['匯率',       String(extra?.EXCHANGE_RATE ?? '—')],
+        ['稅率',       String(extra?.TAX_RATE ?? '—')],
+        ['付款條件',   String(extra?.PAYMENT_TERM ?? '—')],
+        ['付款方式',   String(extra?.PAYMENT_MODE ?? '—')],
+        ['業務員',     String(extra?.SALES_ID ?? '—')],
+        ['PO 類型',    String(extra?.PO_TYPE ?? '—')],
+        ['版本',       String(extra?.MODIFY_VER ?? '—')],
+      ]
+      const headerHtml = `
+        <div class="po-header-grid">
+          ${headerRows.map(([l, v]) => `<div class="hdr-cell"><span class="hdr-label">${l}</span><span class="hdr-val">${v}</span></div>`).join('')}
+        </div>`
+
+      const detailRows = lines.map(r => {
+        const rx = r.extra as Record<string, unknown> | null | undefined
+        const remark = r.remark ? `<div class="remark">商品備註：${r.remark}</div>` : ''
+        const soLineNo = String(rx?.SO_LINE_NO ?? '')
+        const mbpLotNo = String(rx?.MBP_LOT_NO ?? '')
+        const soCell = `<div class="soref-lot">${mbpLotNo || '—'}</div><div class="soref-seq">${soLineNo || '—'}</div>`
+        return `<tr>
+          <td class="tc sn">${r.sub_no ?? '—'}</td>
+          <td class="soref-cell">${soCell}</td>
+          <td><div class="part">${r.item_code ?? '—'}</div><div class="desc">${r.description ?? ''}</div>${remark}</td>
+          <td class="tr qty">${r.qty > 0 ? r.qty.toLocaleString() : '—'}</td>
+          <td class="tc unit">${r.unit ?? '—'}</td>
+          <td class="tc duedate">${r.end_date ?? '—'}</td>
+        </tr>`
+      }).join('')
+
+      return `
+        <div class="po-card">
+          <div class="po-title-row">
+            <div class="po-number">${docNo}</div>
+            <div class="po-main-title">採購訂單<br><span class="po-sub-title">Purchase Order</span></div>
+            <div class="po-status ${(hdr.status ?? '').toLowerCase()}">${hdr.status !== 'OPEN' ? (hdr.status ?? '') : ''}</div>
+          </div>
+          <div class="section-title">採購主表</div>
+          ${headerHtml}
+          <div class="section-title" style="margin-top:10px">採購明細</div>
+          <table class="dtl-table">
+            <colgroup>
+              <col class="col-sn"><col class="col-soref"><col class="col-item">
+              <col class="col-qty"><col class="col-unit"><col class="col-due">
+            </colgroup>
+            <thead><tr>
+              <th class="tc">序號</th><th class="tc">銷售單號<br><span style="font-weight:400;font-size:9px;color:#6b7280">銷售序號</span></th><th>貨號 / 品名規格（商品備註）</th>
+              <th class="tr">數量</th><th class="tc">單位</th><th class="tc">交貨日</th>
+            </tr></thead>
+            <tbody>${detailRows}</tbody>
+          </table>
+          <div class="po-footer">
+            <span>共 ${lines.length} 項</span>
+            <span>列印時間：${new Date().toLocaleString('zh-TW')}</span>
+          </div>
+        </div>`
+    }).join('')
+
+    const html = `<!DOCTYPE html><html><head><meta charset="utf-8">
+<title>採購訂單列印</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: Arial, "Microsoft JhengHei", "PingFang TC", sans-serif; font-size: 18px; margin: 0; background: #ccc; color: #000; }
+  .po-card {
+    width: 210mm; min-height: 297mm; background: white;
+    margin: 0 auto 20px; padding: 14mm 15mm 12mm;
+    box-shadow: 0 2px 12px rgba(0,0,0,.25);
+    display: flex; flex-direction: column;
+    page-break-after: always;
+  }
+  .po-card:last-child { page-break-after: auto; }
+  .po-title-row {
+    display: grid; grid-template-columns: 1fr auto 1fr;
+    align-items: center; border-bottom: 2.5px solid #000;
+    padding-bottom: 8px; margin-bottom: 10px; gap: 12px;
+  }
+  .po-number {
+    font-size: 22px; font-weight: 800; letter-spacing: 1px;
+    border: 1.5px solid #000; background: #fff;
+    padding: 4px 10px; border-radius: 3px; display: inline-block;
+    white-space: nowrap; width: fit-content;
+  }
+  .po-main-title { text-align: center; font-size: 40px; font-weight: 900; letter-spacing: 4px; line-height: 1.2; color: #000; }
+  .po-sub-title { font-size: 15px; font-weight: 400; color: #444; letter-spacing: 2px; }
+  .po-status { text-align: right; font-size: 22px; font-weight: 700; padding: 3px 8px; border-radius: 3px; display: inline-block; justify-self: end; white-space: nowrap; }
+  .po-status.open { color: #fff; background: #fff; border: none; }
+  .po-status.close { color: #000; background: #fff; border: 1.5px solid #000; }
+  .po-status.hold { color: #000; background: #ddd; border: 1.5px solid #000; }
+  .section-title { font-size: 14px; font-weight: 700; color: #000; background: #e8e8e8; padding: 4px 8px; border-left: 3px solid #000; margin-bottom: 4px; letter-spacing: 1px; }
+  .po-header-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 0; border: 1px solid #aaa; }
+  .hdr-cell { display: flex; border-bottom: 1px solid #ccc; border-right: 1px solid #ccc; }
+  .hdr-cell:nth-child(4n) { border-right: none; }
+  .hdr-cell:nth-last-child(-n+4) { border-bottom: none; }
+  .hdr-label { background: #f0f0f0; padding: 4px 8px; font-size: 13px; color: #444; white-space: nowrap; border-right: 1px solid #ccc; min-width: 68px; }
+  .hdr-val { padding: 4px 8px; font-weight: 500; font-size: 15px; color: #000; }
+  .dtl-table { width: 100%; border-collapse: collapse; font-size: 15px; table-layout: fixed; }
+  .col-sn   { width: 40px; }
+  .col-soref{ width: 108px; }
+  .col-item { }
+  .col-qty  { width: 60px; }
+  .col-unit { width: 54px; }
+  .col-due  { width: 96px; }
+  .dtl-table th { background: #e8e8e8; border: 1px solid #aaa; padding: 5px 6px; font-weight: 700; font-size: 13px; color: #000; white-space: nowrap; }
+  .dtl-table td { border: 1px solid #ccc; padding: 4px 6px; word-break: break-word; color: #000; }
+  .dtl-table td.unit, .dtl-table td.duedate { white-space: nowrap; }
+  .dtl-table tr:nth-child(even) td { background: #f7f7f7; }
+  .tc { text-align: center; }
+  .tr { text-align: right; }
+  .part { font-weight: 600; font-family: monospace; color: #000; }
+  .desc { font-size: 13px; color: #444; margin-top: 2px; }
+  .remark { font-size: 13px; color: #000; background: #efefef; border: 1px solid #bbb; border-radius: 2px; padding: 2px 5px; margin-top: 4px; }
+  .soref-cell { border: 1px solid #ccc; padding: 4px 6px; text-align: center; }
+  .soref-lot { font-size: 15px; font-weight: 600; color: #000; white-space: nowrap; }
+  .soref-seq { font-size: 13px; color: #444; margin-top: 3px; white-space: nowrap; border-top: 1px dashed #bbb; padding-top: 3px; }
+  .po-footer { display: flex; justify-content: space-between; margin-top: 8px; padding-top: 5px; border-top: 1px solid #ccc; font-size: 13px; color: #666; }
+  @media print {
+    body { background: white; }
+    @page { size: A4 portrait; margin: 0; }
+    .po-card { box-shadow: none; margin: 0; }
+    * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
+  }
+</style></head><body>
+${poPages}
+<script>window.onload=()=>{window.print();};<\/script>
+</body></html>`
+
+    const w = window.open('', '_blank', 'width=900,height=800')
+    w?.document.write(html)
+    w?.document.close()
+  }
+
   const handleSoPrint = () => {
     const headers = ['狀態', '訂單編號', '序號', '料號', '品名/規格說明', '數量', '交貨日(預)', '客戶名稱', '業務員', '備註']
     const rows = soRecords.map((r) => [
@@ -882,7 +1050,7 @@ function SyncCard({ docKey }: SyncCardProps) {
 
   const handleSync = async () => {
     const cfg = configRef.current
-    const isHardcodedTab = isMaterialPrepTab || isSoTab || isMoTab || isInventoryTab || isCustomerTab
+    const isHardcodedTab = isMaterialPrepTab || isSoTab || isMoTab || isInventoryTab || isCustomerTab || isPoTab
     if (!isHardcodedTab && !cfg.table.trim()) {
       setMessage('請先填入 ARGO TABLE 名稱')
       setMessageOk(false)
@@ -939,6 +1107,12 @@ function SyncCard({ docKey }: SyncCardProps) {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ action: 'sync_material_prep' }),
         })
+      } else if (isPoTab) {
+        res = await fetch('/api/argoerp', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'sync_po' }),
+        })
       } else {
         const filtersObj: Record<string, string> = {}
         for (const { key, value } of cfg.filters) {
@@ -968,6 +1142,8 @@ function SyncCard({ docKey }: SyncCardProps) {
         detailAuthorized?: boolean
         detailError?: string
         totalRows?: number
+        totalHdrRows?: number
+        totalDtlRows?: number
         rawSample?: Record<string, unknown>
         rawText?: string
         debugSparam?: Record<string, unknown>
@@ -998,6 +1174,8 @@ function SyncCard({ docKey }: SyncCardProps) {
         if (!result.detailAuthorized) setMessageOk(false)
       } else if (isMaterialPrepTab) {
         setMessage(`✅ 已同步 ${result.syncedCount ?? 0} 筆批備料單明細（共 ${result.headerCount ?? 0} 張備料單）`)
+      } else if (isPoTab) {
+        setMessage(`✅ 已同步 ${result.syncedCount ?? 0} 筆採購明細（表頭 ${result.totalHdrRows ?? 0} 張 / 明細 ${result.totalDtlRows ?? 0} 筆）`)
       } else {
         setMessage(`✅ 已同步 ${result.syncedCount ?? 0} 筆 ${meta.label}`)
       }
@@ -1297,6 +1475,27 @@ function SyncCard({ docKey }: SyncCardProps) {
               ))}
             </div>
           )}
+          {isPoTab && (
+            <div className="flex gap-1">
+              {(['OPEN', 'HOLD', 'CLOSE', null] as const).map((s) => (
+                <button
+                  key={String(s)}
+                  type="button"
+                  onClick={() => handlePoStatusFilter(s)}
+                  className={`rounded px-2 py-1 text-xs font-medium transition-colors ${
+                    poStatusFilter === s
+                      ? s === 'OPEN'  ? 'bg-green-700 text-white'
+                        : s === 'HOLD'  ? 'bg-yellow-700 text-white'
+                        : s === 'CLOSE' ? 'bg-slate-600 text-white'
+                        : 'bg-cyan-700 text-white'
+                      : 'border border-slate-700 bg-slate-900 text-slate-400 hover:text-white'
+                  }`}
+                >
+                  {s ?? '全部'}
+                </button>
+              ))}
+            </div>
+          )}
           {(isSoTab || isMoTab || isMaterialPrepTab) && totalCount !== null && (
             <span className="text-xs text-slate-500 ml-auto">
               共 {totalCount.toLocaleString()} 筆
@@ -1342,6 +1541,7 @@ function SyncCard({ docKey }: SyncCardProps) {
               </button>
             </div>
           )}
+
           {!isSoTab && !isMoTab && totalCount !== null && totalCount > 200 && (
             <span className="text-xs text-slate-500">顯示前 200 筆 / 共 {totalCount.toLocaleString()} 筆</span>
           )}
@@ -1669,6 +1869,19 @@ function SyncCard({ docKey }: SyncCardProps) {
                     <th className="px-3 py-2 text-right text-slate-400 font-medium">在途數量</th>
                     <th className="px-3 py-2 text-left text-slate-400 font-medium">單位</th>
                     <th className="px-3 py-2 text-right text-slate-400 font-medium">實際數量</th>
+                  </>) : (isPoTab || isSubcontractTab) ? (<>
+                  <th className="px-3 py-2 text-left text-slate-400 font-medium whitespace-nowrap">狀態</th>
+                  <th className="px-3 py-2 text-left text-slate-400 font-medium whitespace-nowrap">{isPoTab ? '採購單號' : '製令單號'}</th>
+                  <th className="px-2 py-2 text-center text-slate-400 font-medium whitespace-nowrap">序號</th>
+                  <th className="px-3 py-2 text-left text-slate-400 font-medium whitespace-nowrap">貨號／品名規格</th>
+                  <th className="px-2 py-2 text-right text-slate-400 font-medium whitespace-nowrap">數量</th>
+                  <th className="px-2 py-2 text-left text-slate-400 font-medium whitespace-nowrap">單位</th>
+                  <th className="px-3 py-2 text-left text-slate-400 font-medium whitespace-nowrap">開立日／交貨日</th>
+                  <th className="px-3 py-2 text-left text-slate-400 font-medium whitespace-nowrap">廠商編號</th>
+                  <th className="px-3 py-2 text-left text-slate-400 font-medium whitespace-nowrap">備註2</th>
+                  <th className="px-3 py-2 text-left text-slate-400 font-medium whitespace-nowrap">批號</th>
+                  <th className="px-2 py-2 text-center text-slate-400 font-medium whitespace-nowrap">廠商料號</th>
+                  {isPoTab && <th className="px-2 py-2 text-center text-slate-400 font-medium whitespace-nowrap">列印</th>}
                   </>) : (<>
                   <th className="px-3 py-2 text-left text-slate-400 font-medium">主單號</th>
                   <th className="px-3 py-2 text-left text-slate-400 font-medium">子序號</th>
@@ -1686,32 +1899,74 @@ function SyncCard({ docKey }: SyncCardProps) {
               </thead>
               <tbody>
                 {records.map((r) => (
-                  <tr key={r.id} className="border-b border-slate-800/50 hover:bg-slate-900/40">
-                    {isInventoryTab ? (() => { const inv = r as unknown as InventoryRecord; return (<>
+                  isInventoryTab ? (() => { const inv = r as unknown as InventoryRecord; return (
+                    <tr key={r.id} className="border-b border-slate-800/50 hover:bg-slate-900/40">
                       <td className="px-3 py-2 font-mono text-cyan-300">{inv.item_code || '—'}</td>
                       <td className="px-3 py-2 text-slate-300 max-w-[200px] truncate">{[inv.item_name, inv.spec].filter(Boolean).join(' ') || '—'}</td>
                       <td className="px-3 py-2 text-right text-emerald-300 font-medium">{inv.book_count > 0 ? inv.book_count.toLocaleString() : '0'}</td>
                       <td className="px-3 py-2 text-right text-amber-300">{inv.qisheng_sichuan_total > 0 ? inv.qisheng_sichuan_total.toLocaleString() : '0'}</td>
                       <td className="px-3 py-2 text-slate-400">{inv.unit_of_measure ?? '—'}</td>
                       <td className="px-3 py-2 text-slate-400">{inv.physical_count > 0 ? inv.physical_count.toLocaleString() : '0'}</td>
-                    </>)})() : (<>
-                    <td className="px-3 py-2 font-mono text-cyan-300">{r.doc_no}</td>
-                    <td className="px-3 py-2 text-slate-400">{r.sub_no || '—'}</td>
-                    <td className="px-3 py-2 font-mono text-slate-300">{r.item_code ?? '—'}</td>
-                    <td className="px-3 py-2 text-slate-300 max-w-[160px] truncate">{r.description ?? '—'}</td>
-                    <td className="px-3 py-2 text-right text-slate-300">{r.qty > 0 ? r.qty.toLocaleString() : '—'}</td>
-                    <td className="px-3 py-2 text-slate-400">{r.unit ?? '—'}</td>
-                    <td className="px-3 py-2">
-                      {r.status ? (
-                        <span className="rounded bg-slate-800 px-1.5 py-0.5 text-slate-300">{r.status}</span>
-                      ) : '—'}
-                    </td>
-                    <td className="px-3 py-2 text-slate-400">{r.start_date ?? '—'}</td>
-                    <td className="px-3 py-2 text-slate-400">{r.end_date ?? '—'}</td>
-                    <td className="px-3 py-2 text-slate-300 max-w-[120px] truncate">{r.customer_vendor ?? '—'}</td>
-                    <td className="px-3 py-2 text-slate-400 max-w-[120px] truncate">{r.remark ?? '—'}</td>
-                    </>)}
-                  </tr>
+                    </tr>
+                  )})() : (isPoTab || isSubcontractTab) ? (
+                    <tr key={r.id} className="border-b border-slate-800/50 hover:bg-slate-900/40">
+                      <td className="px-3 py-2">
+                        {r.status ? (
+                          <span className={`rounded px-1.5 py-0.5 text-xs font-medium ${
+                            r.status === 'OPEN' ? 'bg-emerald-900/40 text-emerald-300' :
+                            r.status === 'CLOSE' ? 'bg-slate-700 text-slate-400' :
+                            'bg-amber-900/40 text-amber-300'
+                          }`}>{r.status}</span>
+                        ) : '—'}
+                      </td>
+                      <td className="px-3 py-2 font-mono text-cyan-300 whitespace-nowrap">{r.doc_no}</td>
+                      <td className="px-2 py-2 text-center text-slate-400 font-mono">{r.sub_no || '—'}</td>
+                      <td className="px-3 py-2 max-w-[200px]">
+                        <div className="font-mono text-purple-300 whitespace-nowrap">{r.item_code || '—'}</div>
+                        <div className="text-slate-400 text-xs truncate" title={r.description ?? ''}>{r.description || ''}</div>
+                      </td>
+                      <td className="px-2 py-2 text-right text-slate-300">{r.qty > 0 ? r.qty.toLocaleString() : '—'}</td>
+                      <td className="px-2 py-2 text-slate-400">{r.unit || '—'}</td>
+                      <td className="px-3 py-2 whitespace-nowrap">
+                        <div className="text-slate-400">{r.start_date ?? '—'}</div>
+                        <div className="text-yellow-400/80 text-xs">{r.end_date ?? ''}</div>
+                      </td>
+                      <td className="px-3 py-2 font-mono text-orange-300 whitespace-nowrap">{r.customer_vendor || '—'}</td>
+                      <td className="px-3 py-2 text-slate-400 max-w-[140px] truncate" title={r.remark ?? ''}>{r.remark || '—'}</td>
+                      <td className="px-3 py-2 font-mono text-teal-300 whitespace-nowrap">{String(r.extra?.MBP_LOT_NO ?? '—')}</td>
+                      <td className="px-2 py-2 text-center font-mono text-sky-200">{String(r.extra?.TPN_PART_NO ?? '—')}</td>
+                      {isPoTab && (
+                        <td className="px-2 py-2 text-center">
+                          <button
+                            type="button"
+                            onClick={() => handlePoDocPrint(r.doc_no)}
+                            className="flex items-center gap-0.5 rounded border border-slate-600 bg-slate-800 px-2 py-0.5 text-xs text-sky-400 hover:bg-slate-700"
+                          >
+                            <svg className="h-3 w-3 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M6 9V2h12v7M6 18H4a2 2 0 01-2-2v-5a2 2 0 012-2h16a2 2 0 012 2v5a2 2 0 01-2 2h-2M6 14h12v8H6v-8z" /></svg>
+                            列印
+                          </button>
+                        </td>
+                      )}
+                    </tr>
+                  ) : (
+                    <tr key={r.id} className="border-b border-slate-800/50 hover:bg-slate-900/40">
+                      <td className="px-3 py-2 font-mono text-cyan-300">{r.doc_no}</td>
+                      <td className="px-3 py-2 text-slate-400">{r.sub_no || '—'}</td>
+                      <td className="px-3 py-2 font-mono text-slate-300">{r.item_code ?? '—'}</td>
+                      <td className="px-3 py-2 text-slate-300 max-w-[160px] truncate">{r.description ?? '—'}</td>
+                      <td className="px-3 py-2 text-right text-slate-300">{r.qty > 0 ? r.qty.toLocaleString() : '—'}</td>
+                      <td className="px-3 py-2 text-slate-400">{r.unit ?? '—'}</td>
+                      <td className="px-3 py-2">
+                        {r.status ? (
+                          <span className="rounded bg-slate-800 px-1.5 py-0.5 text-slate-300">{r.status}</span>
+                        ) : '—'}
+                      </td>
+                      <td className="px-3 py-2 text-slate-400">{r.start_date ?? '—'}</td>
+                      <td className="px-3 py-2 text-slate-400">{r.end_date ?? '—'}</td>
+                      <td className="px-3 py-2 text-slate-300 max-w-[120px] truncate">{r.customer_vendor ?? '—'}</td>
+                      <td className="px-3 py-2 text-slate-400 max-w-[120px] truncate">{r.remark ?? '—'}</td>
+                    </tr>
+                  )
                 ))}
               </tbody>
             </table>
@@ -1889,10 +2144,7 @@ export default function ErpSyncPage() {
           res = await fetch('/api/argoerp', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'sync_mo' }) })
         } else if (tab.key === 'po') {
           res = await fetch('/api/argoerp', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ action: 'sync_pj', table: 'PJ_PROJECT',
-              customColumn: 'PROJECT_ID,PROJECT_NAME,HOLD_STATUS,BEGIN_DATE,END_DATE,IN_CHARGE',
-              filters: { PJT_TYPE: "= 'PO'" }, docType: '採購單號',
-              mapping: { docNoField: 'PROJECT_ID', subNoField: '', itemCodeField: '', descriptionField: 'PROJECT_NAME', qtyField: '', unitField: '', statusField: 'HOLD_STATUS', startDateField: 'BEGIN_DATE', endDateField: 'END_DATE', customerVendorField: 'IN_CHARGE', remarkField: '' } }) })
+            body: JSON.stringify({ action: 'sync_po' }) })
         } else if (tab.key === 'subcontract') {
           res = await fetch('/api/argoerp', { method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ action: 'sync_pj', table: 'PJ_PROJECT',
@@ -1918,7 +2170,7 @@ export default function ErpSyncPage() {
           // fallback for unknown tab keys
           continue
         }
-        const result = await res.json() as { status: string; error?: string; syncedCount?: number; totalRows?: number; headerCount?: number; detailTotal?: number; detailAuthorized?: boolean; rawText?: string; debugSparam?: Record<string, unknown> }
+        const result = await res.json() as { status: string; error?: string; syncedCount?: number; totalRows?: number; totalJoinRows?: number; totalHdrRows?: number; totalDtlRows?: number; headerCount?: number; detailTotal?: number; detailAuthorized?: boolean; rawText?: string; debugSparam?: Record<string, unknown> }
         if (result.status !== 'ok') {
           const sparamInfo = result.debugSparam
             ? `\n送出參數：${Object.entries(result.debugSparam).map(([k,v]) => `${k}=${String(v)}`).join(', ')}` : ''
@@ -1927,6 +2179,7 @@ export default function ErpSyncPage() {
         } else {
           let msg = ''
           if (tab.key === 'sales') msg = `已同步 ${result.syncedCount ?? 0} 筆（ARGO ${result.totalRows ?? 0} 筆）`
+          else if (tab.key === 'po') msg = `已同步 ${result.syncedCount ?? 0} 筆採購明細（表頭 ${result.totalHdrRows ?? 0} 張 / 明細 ${result.totalDtlRows ?? 0} 筆）`
           else if (tab.key === 'mo') msg = `已同步 ${result.syncedCount ?? 0} 筆（表頭 ${result.headerCount ?? 0}，明細 ${result.detailTotal ?? 0}）`
           else if (tab.key === 'material_prep') msg = `已同步 ${result.syncedCount ?? 0} 筆（表頭 ${result.headerCount ?? 0} 張，明細 ${result.detailTotal ?? 0} 筆）`
           else msg = `已同步 ${result.syncedCount ?? 0} 筆`

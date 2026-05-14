@@ -719,15 +719,17 @@ export default function OrderBatchExportPage() {
         return
       }
       const sheetRows = (json.sheet.rows ?? []) as Array<SourceRow & { mo_status?: string; match_status?: string; match_line_no?: string | null; match_pdl_seq?: number | null; match_reason?: string | null }>
-      const rows: SourceRow[] = sheetRows.map(r => ({
-        order_number: r.order_number, doc_type: r.doc_type, factory: r.factory,
-        receiver: r.receiver, is_sample: r.is_sample, has_material: r.has_material,
-        designer: r.designer, customer: r.customer, line_nickname: r.line_nickname,
-        handler: r.handler, issuer: r.issuer, item_code: r.item_code,
-        item_name: r.item_name, note: r.note, quantity: r.quantity,
-        delivery_date: r.delivery_date, plate_count: r.plate_count,
-        upload_ro: r.upload_ro, order_status: r.order_status, pm_note: r.pm_note,
-      }))
+      const rows: SourceRow[] = sheetRows
+        .filter(r => r.factory === 'T')
+        .map(r => ({
+          order_number: r.order_number, doc_type: r.doc_type, factory: r.factory,
+          receiver: r.receiver, is_sample: r.is_sample, has_material: r.has_material,
+          designer: r.designer, customer: r.customer, line_nickname: r.line_nickname,
+          handler: r.handler, issuer: r.issuer, item_code: r.item_code,
+          item_name: r.item_name, note: r.note, quantity: r.quantity,
+          delivery_date: r.delivery_date, plate_count: r.plate_count,
+          upload_ro: r.upload_ro, order_status: r.order_status, pm_note: r.pm_note,
+        }))
       setSourceRows(rows)
       setSelectedRows(new Set())
       setLoadedFromSheetDate(date)
@@ -735,15 +737,17 @@ export default function OrderBatchExportPage() {
       // 若每日出單表已有預先比對結果，直接套用，不必重跑
       const hasPrematched = sheetRows.some(r => r.match_status)
       if (hasPrematched) {
-        const presetMatches: SoMatchResult[] = sheetRows.map(r => {
-          const status = (r.match_status as SoMatchResult['status']) || 'no_order'
-          return {
-            line_no: r.match_line_no ?? null,
-            pdl_seq: r.match_pdl_seq ?? null,
-            status,
-            reason: r.match_reason ?? '',
-          }
-        })
+        const presetMatches: SoMatchResult[] = sheetRows
+          .filter(r => r.factory === 'T')
+          .map(r => {
+            const status = (r.match_status as SoMatchResult['status']) || 'no_order'
+            return {
+              line_no: r.match_line_no ?? null,
+              pdl_seq: r.match_pdl_seq ?? null,
+              status,
+              reason: r.match_reason ?? '',
+            }
+          })
         setSoMatchResults(presetMatches)
       } else {
         buildSoMatches(rows)
@@ -1427,19 +1431,10 @@ export default function OrderBatchExportPage() {
         {/* Header */}
         <div className="mb-6 border-b border-slate-800 pb-4 flex flex-col lg:flex-row lg:items-end justify-between gap-4">
           <div>
-            <h1 className="text-3xl font-bold tracking-tight">訂單批量轉製令匯出</h1>
-            <p className="text-slate-400 mt-1 text-sm">ArgoERP — 貼上工單資料 → 設定廠別 → 匯出 CSV / XLSX</p>
+            <h1 className="text-3xl font-bold tracking-tight">出單表➜製令工單</h1>
+            <p className="text-slate-400 mt-1 text-sm">ArgoERP — 每日出單表（台北）→ 比對序號 → 匯入 IFAF028 製令工單</p>
           </div>
           <div className="flex gap-2 flex-wrap">
-            <button
-              onClick={() => { setManualMoMsg(''); setShowManualMoModal(true) }}
-              className="px-4 py-2 rounded-lg bg-indigo-700 hover:bg-indigo-600 text-white font-medium transition-colors text-sm flex items-center gap-1.5"
-            >
-              ✏️ 手動新增製令
-            </button>
-            {manualMoMsg && (
-              <span className={`px-3 py-2 text-sm ${manualMoMsg.startsWith('❌') ? 'text-red-400' : 'text-emerald-400'}`}>{manualMoMsg}</span>
-            )}
             {/* 每日出單表選擇器 */}
             {sheetDatesLoading ? (
               <span className="text-slate-500 text-sm px-2">讀取出單表…</span>
@@ -1487,21 +1482,6 @@ export default function OrderBatchExportPage() {
                       }
                     </>
                   )}
-                </button>
-                <button
-                  onClick={handleCheckPoLinks}
-                  disabled={poLinksLoading}
-                  className="px-4 py-2 rounded-lg bg-violet-800 hover:bg-violet-700 disabled:bg-slate-700 disabled:text-slate-500 text-white font-medium transition-colors text-sm flex items-center gap-1.5"
-                >
-                  {poLinksLoading ? '查詢中…' : '🔗 比對採購單'}
-                </button>
-
-                <button
-                  onClick={handleSaveToSummary}
-                  className="px-4 py-2 rounded-lg bg-emerald-700 hover:bg-emerald-600 text-white font-medium transition-colors text-sm flex items-center gap-1.5"
-                >
-                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>
-                  儲存至總表
                 </button>
                 {saveMsg && (
                   <span className={`px-3 py-2 text-sm animate-pulse ${saveMsg.startsWith('❌') ? 'text-red-400' : 'text-emerald-400'}`}>{saveMsg}</span>

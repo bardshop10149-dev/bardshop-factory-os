@@ -1236,6 +1236,9 @@ export default function MaterialPrepPage() {
   }, [selectedRowKeys, selectedImportRows, materialPrepRows, materialPrepInterfaceId, moRecords, sheetRows, selectedDate, loadSheet])
 
   // ---- 盤數優先前綴：從 Supabase 載入 ----
+  // platePrefixesUserChanged：載入完成後 ref 設為 true，
+  // 確保只有使用者真正修改時才寫回，防止載入失敗時以預設值覆蓋 Supabase。
+  const platePrefixesUserChanged = useRef(false)
   useEffect(() => {
     supabase
       .from('app_settings')
@@ -1250,9 +1253,14 @@ export default function MaterialPrepPage() {
       })
   }, [])
 
-  // ---- 盤數優先前綴：寫回 Supabase（載入完成後才觸發）----
+  // ---- 盤數優先前綴：寫回 Supabase（僅使用者修改後才觸發）----
   useEffect(() => {
     if (!platePrefixesLoaded) return
+    // 第一次因 platePrefixesLoaded 變為 true 觸發時，標記已載入並跳過（避免以預設值覆蓋）
+    if (!platePrefixesUserChanged.current) {
+      platePrefixesUserChanged.current = true
+      return
+    }
     void supabase
       .from('app_settings')
       .upsert({ key: 'material_prep_plate_prefixes', value: platePrefixes, updated_at: new Date().toISOString() })

@@ -207,6 +207,9 @@ export default function DailyOrderSheetPage() {
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set())
   const [soModalId, setSoModalId] = useState<string | null>(null)
   const [searchQuery, setSearchQuery] = useState('')
+  const [globalSearch, setGlobalSearch] = useState('')
+  const [globalSearching, setGlobalSearching] = useState(false)
+  const [globalResults, setGlobalResults] = useState<{ sheet_date: string; rows: SheetRow[] }[] | null>(null)
   const [sampleRefInputs, setSampleRefInputs] = useState<Record<string, string>>({})
   const [legacyModal, setLegacyModal] = useState<{ query: string; rows: LegacyReceiptRow[]; loading: boolean } | null>(null)
 
@@ -265,6 +268,20 @@ export default function DailyOrderSheetPage() {
 
   useEffect(() => { loadSheetList() }, [loadSheetList])
   useEffect(() => { loadSheet(selectedDate) }, [selectedDate, loadSheet])
+
+  // ---- 跨日期單號搜尋 ----
+  const runGlobalSearch = useCallback(async (q: string) => {
+    const trimmed = q.trim()
+    if (!trimmed) { setGlobalResults(null); return }
+    setGlobalSearching(true)
+    setGlobalResults(null)
+    try {
+      const res = await fetch(`/api/argoerp/daily-order-sheet?search=${encodeURIComponent(trimmed)}`)
+      const json = await res.json()
+      if (json.success) setGlobalResults(json.results ?? [])
+    } catch {}
+    finally { setGlobalSearching(false) }
+  }, [])
 
   // 載入機台清單
   useEffect(() => {
@@ -733,6 +750,35 @@ export default function DailyOrderSheetPage() {
             <h1 className="text-3xl font-bold tracking-tight">每日出單表</h1>
             <p className="text-slate-400 mt-1 text-sm">貼上每日工單清單 → 儲存 → 在「訂單批量轉製令匯出」頁面選取日期載入</p>
           </div>
+
+          {/* 跨日期單號搜尋 */}
+          <div className="flex items-center gap-2 shrink-0">
+            <div className="relative">
+              <svg className="absolute left-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-4.35-4.35M17 11A6 6 0 1 1 5 11a6 6 0 0 1 12 0z"/>
+              </svg>
+              <input
+                type="text"
+                value={globalSearch}
+                onChange={e => { setGlobalSearch(e.target.value); if (!e.target.value.trim()) setGlobalResults(null) }}
+                onKeyDown={e => e.key === 'Enter' && runGlobalSearch(globalSearch)}
+                placeholder="跨日期搜尋單號…"
+                className="pl-9 pr-8 py-2 rounded-lg bg-slate-800 border border-slate-700 text-white text-sm w-52 focus:outline-none focus:border-cyan-500 placeholder:text-slate-500"
+              />
+              {globalSearch && (
+                <button onClick={() => { setGlobalSearch(''); setGlobalResults(null) }}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-300 text-xs">✕</button>
+              )}
+            </div>
+            <button
+              onClick={() => runGlobalSearch(globalSearch)}
+              disabled={!globalSearch.trim() || globalSearching}
+              className="px-3 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 disabled:bg-slate-800 disabled:text-slate-600 text-white text-sm font-medium transition-colors"
+            >
+              {globalSearching ? '搜尋中…' : '搜尋'}
+            </button>
+          </div>
+
           <div className="flex items-center gap-3 flex-wrap">
             {/* 日期選擇 */}
             <div className="flex items-center gap-2">
@@ -792,6 +838,18 @@ export default function DailyOrderSheetPage() {
                   列印{selectedKeys.size > 0 ? ` (${selectedKeys.size})` : ''}
                 </button>
                 <button
+                  onClick={() => {
+                    if (selectedKeys.size === 0) return
+                    if (!confirm(`確定刪除已勾選的 ${selectedKeys.size} 筆資料？`)) return
+                    setSheetRows(prev => prev.filter((r, i) => !selectedKeys.has(r.row_key || String(i))))
+                    setSelectedKeys(new Set())
+                  }}
+                  disabled={selectedKeys.size === 0}
+                  className="px-4 py-2 rounded-lg bg-red-900/40 border border-red-700/50 text-red-300 hover:bg-red-800 hover:text-white disabled:bg-slate-800 disabled:text-slate-600 disabled:border-slate-700 text-sm transition-colors"
+                >
+                  🗑 刪除選取列{selectedKeys.size > 0 ? ` (${selectedKeys.size})` : ''}
+                </button>
+                <button
                   onClick={handleDelete}
                   disabled={saving}
                   className="px-4 py-2 rounded-lg bg-red-900/60 border border-red-700/50 text-red-300 hover:bg-red-800 hover:text-white text-sm transition-colors"
@@ -823,6 +881,49 @@ export default function DailyOrderSheetPage() {
                   {s.sheet_date} <span className="opacity-60">{s.row_count}筆</span>
                 </button>
               ))}
+            </div>
+          )}
+
+          {/* 跨日期搜尋結果 */}
+          {(globalResults !== null) && (
+            <div className="mb-4 bg-slate-900 border border-cyan-800/50 rounded-lg overflow-hidden">
+              <div className="px-4 py-2.5 bg-cyan-900/20 border-b border-cyan-800/30 flex items-center justify-between">
+                <span className="text-sm font-semibold text-cyan-300">
+                  {globalSearching ? '搜尋中…' : globalResults.length === 0
+                    ? `找不到符合「${globalSearch}」的工單`
+                    : `「${globalSearch}」搜尋結果（${globalResults.reduce((n, r) => n + r.rows.length, 0)} 筆，共 ${globalResults.length} 個日期）`
+                  }
+                </span>
+                <button onClick={() => setGlobalResults(null)} className="text-slate-500 hover:text-slate-300 text-xs">✕ 關閉</button>
+              </div>
+              {globalResults.length > 0 && (
+                <div className="divide-y divide-slate-800">
+                  {globalResults.map(group => (
+                    <div key={group.sheet_date} className="px-4 py-3">
+                      <button
+                        onClick={() => { setSelectedDate(group.sheet_date); setGlobalResults(null); setGlobalSearch('') }}
+                        className="text-xs font-semibold text-cyan-400 hover:text-cyan-200 underline underline-offset-2 mb-2 inline-block"
+                      >
+                        📅 {group.sheet_date}（{group.rows.length} 筆）→ 跳至此日
+                      </button>
+                      <div className="flex flex-col gap-1">
+                        {group.rows.map((row, i) => (
+                          <div key={i} className="flex flex-wrap items-center gap-2 text-xs bg-slate-950/60 rounded px-3 py-1.5">
+                            <span className="font-mono text-cyan-300">{row.order_number}</span>
+                            {row.mo_number && <span className="font-mono text-emerald-300">{row.mo_number}</span>}
+                            {{T: <span className="px-1.5 py-0.5 rounded bg-blue-900/40 text-blue-300">台北</span>,
+                              C: <span className="px-1.5 py-0.5 rounded bg-orange-900/40 text-orange-300">常平</span>,
+                              O: <span className="px-1.5 py-0.5 rounded bg-purple-900/40 text-purple-300">委外</span>}[row.factory]}
+                            <span className="text-purple-300 font-mono">{row.item_code}</span>
+                            <span className="text-slate-400 truncate max-w-[220px]">{row.item_name}</span>
+                            <span className="text-slate-500 ml-auto">{row.delivery_date}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           )}
 
@@ -966,7 +1067,6 @@ export default function DailyOrderSheetPage() {
                         <th className="px-3 py-2 border-b border-slate-800 whitespace-nowrap">打樣/追加單號</th>
                         <th className="px-3 py-2 border-b border-slate-800">機台</th>
                         <th className="px-3 py-2 border-b border-slate-800">狀態</th>
-                        <th className="px-3 py-2 border-b border-slate-800">操作</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -1105,15 +1205,6 @@ export default function DailyOrderSheetPage() {
                               ) : (
                                 <span className="px-2 py-0.5 rounded border border-slate-700 text-slate-500 text-xs">尚未轉單</span>
                               )}
-                            </td>
-                            <td className="px-3 py-2">
-                              <button
-                                onClick={() => handleDeleteRow(idx)}
-                                className="px-2 py-1 rounded text-xs text-red-400 hover:bg-red-900/30 hover:text-red-300 transition-colors"
-                                title="刪除此列"
-                              >
-                                🗑
-                              </button>
                             </td>
                           </tr>
                         )

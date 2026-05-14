@@ -14,6 +14,29 @@ export async function GET(request: NextRequest) {
     const date = searchParams.get('date')
     const supabase = getSupabaseAdminClient()
 
+    const search = searchParams.get('search')
+
+    // ?search=<query> — 跨日期單號搜尋（不需 date 參數）
+    if (!date && search) {
+      const q = search.trim().toLowerCase()
+      const { data, error } = await supabase
+        .from(TABLE)
+        .select('sheet_date, rows')
+        .order('sheet_date', { ascending: false })
+      if (error) throw error
+      const results: { sheet_date: string; rows: Record<string, unknown>[] }[] = []
+      for (const sheet of (data ?? [])) {
+        const rowsArr = Array.isArray(sheet.rows) ? (sheet.rows as Array<Record<string, unknown>>) : []
+        const matched = rowsArr.filter(r => {
+          const on = typeof r.order_number === 'string' ? r.order_number.toLowerCase() : ''
+          const mo = typeof r.mo_number === 'string' ? r.mo_number.toLowerCase() : ''
+          return on.includes(q) || mo.includes(q)
+        })
+        if (matched.length > 0) results.push({ sheet_date: sheet.sheet_date, rows: matched })
+      }
+      return NextResponse.json({ success: true, results })
+    }
+
     if (!date) {
       const { data, error } = await supabase
         .from(TABLE)
