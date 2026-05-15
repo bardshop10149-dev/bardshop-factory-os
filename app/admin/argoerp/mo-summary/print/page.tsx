@@ -577,10 +577,11 @@ function MoPrintContent() {
                         <col style={{ width: '38%' }} />
                         <col style={{ width: '80px' }} />
                         <col />
+                        <col style={{ width: '60px' }} />
                       </colgroup>
                       <thead>
                         <tr style={{ background: '#f5f6f8' }}>
-                          {(['序', '品項編碼 / 規格', '數量', '包裝方式'] as const).map((h, hi) => (
+                          {(['序', '品項編碼 / 規格', '數量', '包裝方式', '等級'] as const).map((h, hi) => (
                             <th key={h} style={{ border: '1px solid #e2e4e8', padding: '3px 5px', fontWeight: 600, color: '#555', textAlign: hi === 0 ? 'center' as const : 'left' as const, whiteSpace: 'nowrap' as const, fontSize: '11px' }}>{h}</th>
                           ))}
                         </tr>
@@ -601,11 +602,12 @@ function MoPrintContent() {
                               </td>
                               <td style={td}>{lqty != null ? `${lqty} ${luom}`.trim() : '—'}</td>
                               <td style={td}>{line.packing || '—'}</td>
+                              <td style={{ ...td, textAlign: 'center' as const, whiteSpace: 'nowrap' as const, color: line.grade ? '#7c3aed' : '#9ca3af', fontWeight: line.grade ? 600 : 400 }}>{line.grade || '—'}</td>
                             </tr>
                           )
                         }) : (
                           <tr>
-                            <td colSpan={4} style={{ border: '1px solid #e2e4e8', padding: '6px', fontSize: '11px', fontStyle: 'italic' as const, color: '#9ca3af', textAlign: 'center' as const }}>
+                            <td colSpan={5} style={{ border: '1px solid #e2e4e8', padding: '6px', fontSize: '11px', fontStyle: 'italic' as const, color: '#9ca3af', textAlign: 'center' as const }}>
                               訂單詳細資訊尚未同步，請至「銷售訂單同步」頁面執行同步
                             </td>
                           </tr>

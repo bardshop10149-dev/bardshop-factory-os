@@ -37,6 +37,7 @@ interface SourceRow {
   upload_ro: string
   order_status: string
   pm_note: string
+  assigned_machine: string
 }
 
 export type MatchStatus = 'matched' | 'no_order' | 'no_qty_match'
@@ -174,6 +175,7 @@ function parseSourceRows(text: string): { rows: SourceRow[]; error: string } {
       upload_ro: (cells[17] ?? '').trim(),
       order_status: (cells[18] ?? '').trim(),
       pm_note: (cells[19] ?? '').trim(),
+      assigned_machine: (cells[20] ?? '').trim(),
     }
     if (row.order_number || row.item_code) parsed.push(row)
   }
@@ -283,7 +285,19 @@ export default function DailyOrderSheetPage() {
     finally { setGlobalSearching(false) }
   }, [])
 
-  // 載入機台清單
+  // ---- is_sample 預填「打樣/追加單號」輸入框 ----
+  useEffect(() => {
+    setSampleRefInputs(prev => {
+      const updates: Record<string, string> = {}
+      for (const r of sheetRows) {
+        const sk = r.row_key
+        if (r.is_sample && !prev[sk]) updates[sk] = r.is_sample
+      }
+      return Object.keys(updates).length > 0 ? { ...prev, ...updates } : prev
+    })
+  }, [sheetRows])
+
+  // ---- 載入機台清單 ----
   useEffect(() => {
     fetch('/api/argoerp/machines')
       .then(r => r.json())
@@ -387,7 +401,7 @@ export default function DailyOrderSheetPage() {
       create_date: selectedDate,
       factory: r.factory,
       prep_status: r.material_prep_status || '',
-      machine: r.mo_number ? (moMachines[r.mo_number] || '') : '',
+      machine: r.mo_number ? (moMachines[r.mo_number] || r.assigned_machine || '') : (r.assigned_machine || ''),
       line_no_override: r.match_line_no || undefined,
     }))
 
@@ -1193,6 +1207,8 @@ export default function DailyOrderSheetPage() {
                                   <option value="">— —</option>
                                   {machines.map(m => <option key={m} value={m}>{m}</option>)}
                                 </select>
+                              ) : row.assigned_machine ? (
+                                <span className="px-2 py-0.5 rounded text-xs font-mono bg-slate-700 text-slate-300 border border-slate-600">{row.assigned_machine}</span>
                               ) : (
                                 <span className="text-slate-600 text-xs">—</span>
                               )}

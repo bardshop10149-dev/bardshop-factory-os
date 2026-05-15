@@ -871,13 +871,14 @@ function SyncCard({ docKey }: SyncCardProps) {
       const detailRows = lines.map(r => {
         const rx = r.extra as Record<string, unknown> | null | undefined
         const remark = r.remark ? `<div class="remark">商品備註：${r.remark}</div>` : ''
+        const packing = rx?.PACKING ? `<div class="packing">包裝方式：${String(rx.PACKING)}</div>` : ''
         const soLineNo = String(rx?.SO_LINE_NO ?? '')
         const mbpLotNo = String(rx?.MBP_LOT_NO ?? '')
         const soCell = `<div class="soref-lot">${mbpLotNo || '—'}</div><div class="soref-seq">${soLineNo || '—'}</div>`
         return `<tr>
           <td class="tc sn">${r.sub_no ?? '—'}</td>
           <td class="soref-cell">${soCell}</td>
-          <td><div class="part">${r.item_code ?? '—'}</div><div class="desc">${r.description ?? ''}</div>${remark}</td>
+          <td><div class="part">${r.item_code ?? '—'}</div><div class="desc">${r.description ?? ''}</div>${remark}${packing}</td>
           <td class="tr qty">${r.qty > 0 ? r.qty.toLocaleString() : '—'}</td>
           <td class="tc unit">${r.unit ?? '—'}</td>
           <td class="tc duedate">${r.end_date ?? '—'}</td>
@@ -931,13 +932,12 @@ function SyncCard({ docKey }: SyncCardProps) {
     padding-bottom: 8px; margin-bottom: 10px; gap: 12px;
   }
   .po-number {
-    font-size: 22px; font-weight: 800; letter-spacing: 1px;
-    border: 1.5px solid #000; background: #fff;
-    padding: 4px 10px; border-radius: 3px; display: inline-block;
-    white-space: nowrap; width: fit-content;
+    font-size: 22px; font-weight: bold; letter-spacing: 1px;
+    border: 1px solid #555; background: #f0f0f0;
+    padding: 3px 8px; border-radius: 3px; display: inline-block;
   }
-  .po-main-title { text-align: center; font-size: 40px; font-weight: 900; letter-spacing: 4px; line-height: 1.2; color: #000; }
-  .po-sub-title { font-size: 15px; font-weight: 400; color: #444; letter-spacing: 2px; }
+  .po-main-title { text-align: center; font-size: 36px; font-weight: 900; letter-spacing: 5px; line-height: 1.2; color: #000; -webkit-text-stroke: 1px #000; }
+  .po-sub-title { font-size: 14px; font-weight: 400; color: #666; letter-spacing: 1px; }
   .po-status { text-align: right; font-size: 22px; font-weight: 700; padding: 3px 8px; border-radius: 3px; display: inline-block; justify-self: end; white-space: nowrap; }
   .po-status.open { color: #fff; background: #fff; border: none; }
   .po-status.close { color: #000; background: #fff; border: 1.5px solid #000; }
@@ -965,6 +965,7 @@ function SyncCard({ docKey }: SyncCardProps) {
   .part { font-weight: 600; font-family: monospace; color: #000; }
   .desc { font-size: 13px; color: #444; margin-top: 2px; }
   .remark { font-size: 13px; color: #000; background: #efefef; border: 1px solid #bbb; border-radius: 2px; padding: 2px 5px; margin-top: 4px; }
+  .packing { font-size: 13px; color: #1a5276; background: #d6eaf8; border: 1px solid #7fb3d3; border-radius: 2px; padding: 2px 5px; margin-top: 3px; }
   .soref-cell { border: 1px solid #ccc; padding: 4px 6px; text-align: center; }
   .soref-lot { font-size: 15px; font-weight: 600; color: #000; white-space: nowrap; }
   .soref-seq { font-size: 13px; color: #444; margin-top: 3px; white-space: nowrap; border-top: 1px dashed #bbb; padding-top: 3px; }

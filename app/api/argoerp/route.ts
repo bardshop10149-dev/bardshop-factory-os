@@ -649,7 +649,7 @@ export async function POST(request: NextRequest) {
         SEGMENT,
         TABLE: 'PJ_PROJECTDETAIL',
         SHOWNULLCOLUMN: 'N',
-        CUSTOMCOLUMN: 'PJT_PROJECT_ID,LINE_NO,MBP_PART,MBP_VER,DUEDATE,ORDER_QTY_ORU,UNIT_OF_MEASURE_ORU,REMARK,PACKING,REMARK2,TPN_PART_NO',
+        CUSTOMCOLUMN: 'PJT_PROJECT_ID,LINE_NO,MBP_PART,MBP_VER,DUEDATE,ORDER_QTY_ORU,UNIT_OF_MEASURE_ORU,REMARK,PACKING,REMARK2,TPN_PART_NO,GRADE',
         LINE_NO: '>= 0',
       })
       const soDetailRes = await fetch(`${API_BASE}/S_QUERY`, {
@@ -712,7 +712,7 @@ export async function POST(request: NextRequest) {
           order_qty_oru:      toNumber(getRecordValue(row, 'ORDER_QTY_ORU')),
           unit_of_measure_oru: String(getRecordValue(row, 'UNIT_OF_MEASURE_ORU') ?? '').trim() || null,
           unit_price_oru:     null,
-          grade:              null,
+          grade:              String(getRecordValue(row, 'GRADE') ?? '').trim() || null,
           create_date:        null,
           update_date:        null,
           synced_at:          syncedAt,
@@ -824,7 +824,7 @@ export async function POST(request: NextRequest) {
         SEGMENT,
         TABLE: 'PJ_PROJECTDETAIL',
         SHOWNULLCOLUMN: 'Y',
-        CUSTOMCOLUMN: 'PJT_PROJECT_ID,LINE_NO,MBP_PART,MBP_LOT_NO,ORDER_QTY_ORU,UNIT_OF_MEASURE_ORU,DUEDATE,REMARK,REMARK2,UNIT_PRICE_ORU,MBP_VER,PDL_SEQ_SO,TPN_PART_NO',
+        CUSTOMCOLUMN: 'PJT_PROJECT_ID,LINE_NO,MBP_PART,MBP_LOT_NO,ORDER_QTY_ORU,UNIT_OF_MEASURE_ORU,DUEDATE,REMARK,REMARK2,PACKING,UNIT_PRICE_ORU,MBP_VER,PDL_SEQ_SO,TPN_PART_NO',
         PJT_TYPE: "= 'PO'",
         LINE_NO: '>= 1',
       })
@@ -876,6 +876,7 @@ export async function POST(request: NextRequest) {
           SO_PROJECT_ID:  String(getRecordValue(dtl, 'SO_PROJECT_ID') ?? '').trim() || null,
           SO_LINE_NO:     getRecordValue(dtl, 'PDL_SEQ_SO') != null ? String(getRecordValue(dtl, 'PDL_SEQ_SO')) : null,
           TPN_PART_NO:    String(getRecordValue(dtl, 'TPN_PART_NO') ?? '').trim() || null,
+          PACKING:        String(getRecordValue(dtl, 'PACKING') ?? '').trim() || null,
           SALES_ID:       String(getRecordValue(hdr, 'SALES_ID') ?? '').trim() || null,
           PAYMENT_TERM:   String(getRecordValue(hdr, 'PAYMENT_TERM') ?? '').trim() || null,
           PAYMENT_MODE:   String(getRecordValue(hdr, 'PAYMENT_MODE') ?? '').trim() || null,

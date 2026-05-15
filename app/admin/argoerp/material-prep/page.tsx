@@ -131,6 +131,7 @@ const PREP_MATERIAL_OVERRIDES_KEY = 'argoerp_material_prep_material_overrides'
 const PREP_CUSTOM_CODE_INPUTS_KEY = 'argoerp_material_prep_custom_code_inputs'
 const PREP_PLATE_PREFIXES_KEY = 'argoerp_material_prep_plate_prefixes'
 const PREP_NO_BUFFER_KEYS_KEY = 'argoerp_material_prep_no_buffer_keys'
+const PREP_NO_NEED_KEYS_KEY   = 'argoerp_material_prep_no_need_keys'
 const DEFAULT_PLATE_PREFIXES = ['MACRT']
 
 function loadFromLocalStorage<T>(key: string, fallback: T): T {
@@ -185,6 +186,11 @@ export default function MaterialPrepPage() {
   // ---- 取消放數的列（料號→row_key）----
   const [noBufferKeys, setNoBufferKeys] = useState<Set<string>>(
     () => new Set(loadFromLocalStorage<string[]>(PREP_NO_BUFFER_KEYS_KEY, []))
+  )
+
+  // ---- 逐列「無需備料」排除（row_key 集合）----
+  const [noNeedRowKeys, setNoNeedRowKeys] = useState<Set<string>>(
+    () => new Set(loadFromLocalStorage<string[]>(PREP_NO_NEED_KEYS_KEY, []))
   )
 
   // ---- 換料 panel 開關（每行獨立）----
@@ -278,6 +284,11 @@ export default function MaterialPrepPage() {
     if (typeof window === 'undefined') return
     try { localStorage.setItem(PREP_NO_BUFFER_KEYS_KEY, JSON.stringify([...noBufferKeys])) } catch {}
   }, [noBufferKeys])
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    try { localStorage.setItem(PREP_NO_NEED_KEYS_KEY, JSON.stringify([...noNeedRowKeys])) } catch {}
+  }, [noNeedRowKeys])
 
   useEffect(() => {
     if (typeof window === 'undefined') return
@@ -849,6 +860,7 @@ export default function MaterialPrepPage() {
   const selectedImportRows = useMemo(() => {
     return materialPrepRows
       .filter(row => selectedRowKeys.has(row.row_key))
+      .filter(row => !noNeedRowKeys.has(row.row_key))
       .filter(row => row.status !== '無BOM')
       .filter(row => row.selected_material_code && row.selected_material_stock_qty >= row.required_qty)
       .map(row => ({
@@ -863,7 +875,7 @@ export default function MaterialPrepPage() {
           ? '依原 BOM 備料'
           : `替代料：${row.source_material_code} -> ${row.selected_material_code}`,
       }))
-  }, [materialPrepRows, selectedRowKeys, unitMap])
+  }, [materialPrepRows, selectedRowKeys, noNeedRowKeys, unitMap])
 
   // ---- 操作：勾選 ----
   const handleSelectMaterialOverride = useCallback((rowKey: string, materialCode: string) => {
@@ -906,11 +918,35 @@ export default function MaterialPrepPage() {
     }
   }, [customCodeInputs])
 
-  // ---- 操作：標記為「無需備料」----
+  // ---- 操作：標記為「無需備料」（逐列，僅全數覆蓋時才更新 DB）----
   const handleMarkNoNeed = useCallback(async () => {
     if (selectedRowKeys.size === 0) return
-    const moNumbers = [...new Set(materialPrepRows.filter(r => selectedRowKeys.has(r.row_key)).map(r => r.mo_number))]
-    if (!window.confirm(`確定將 ${moNumbers.length} 筆製令標記為「無需備料」？\n（總表狀態會改為已備料但實際不執行批備料）`)) return
+    const selectedRows = materialPrepRows.filter(r => selectedRowKeys.has(r.row_key))
+
+    // 加入本地 noNeedRowKeys
+    const newNoNeedKeys = new Set([...noNeedRowKeys, ...selectedRows.map(r => r.row_key)])
+    setNoNeedRowKeys(newNoNeedKeys)
+
+    // 取消勾選這些列
+    setSelectedRowKeys(prev => {
+      const next = new Set(prev)
+      selectedRows.forEach(r => next.delete(r.row_key))
+      return next
+    })
+
+    // 找出「所有行都在 noNeedRowKeys 裡」的製令 → 整張標記 DB
+    const affectedMoNumbers = [...new Set(selectedRows.map(r => r.mo_number))]
+    const moToMarkDone = affectedMoNumbers.filter(mo => {
+      const allRowsForMo = materialPrepRows.filter(r => r.mo_number === mo)
+      return allRowsForMo.every(r => newNoNeedKeys.has(r.row_key))
+    })
+
+    if (moToMarkDone.length === 0) {
+      // 部分排除：僅本地追蹤，不動 DB
+      setActionMessage(`✅ 已將 ${selectedRows.length} 列標記為無需備料（部分排除，製令整體仍待備料）`)
+      setTimeout(() => setActionMessage(''), 6000)
+      return
+    }
 
     setActionBusy(true)
     setActionMessage('')
@@ -918,18 +954,18 @@ export default function MaterialPrepPage() {
       const res = await fetch('/api/argoerp/mo-summary', {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ mo_numbers: moNumbers, prep_status: '無需備料' }),
+        body: JSON.stringify({ mo_numbers: moToMarkDone, prep_status: '無需備料' }),
       })
       const json = await res.json()
       if (!res.ok || !json?.success) throw new Error(json?.error || `HTTP ${res.status}`)
-      setActionMessage(`✅ 已將 ${json.updated ?? moNumbers.length} 筆標記為「無需備料」`)
+      setActionMessage(`✅ 已將 ${selectedRows.length} 列排除，${moToMarkDone.length} 筆製令全數無需備料，已更新狀態`)
 
       // 寫入批備料紀錄（fire-and-forget）
       fetch('/api/argoerp/material-prep-log', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          rows: moNumbers.map(mo => ({
+          rows: moToMarkDone.map(mo => ({
             mo_number:    mo,
             factory:      moRecords.find(r => r.mo_number === mo)?.factory      ?? '',
             product_code: moRecords.find(r => r.mo_number === mo)?.product_code ?? '',
@@ -943,7 +979,7 @@ export default function MaterialPrepPage() {
 
       // 更新出單表的批備料狀態
       const sheetUpdates = sheetRows
-        .filter(r => moNumbers.includes(r.mo_number ?? ''))
+        .filter(r => moToMarkDone.includes(r.mo_number ?? ''))
         .map(r => ({ row_key: r.row_key, material_prep_status: '無需備料' as const }))
       if (sheetUpdates.length > 0) {
         fetch('/api/argoerp/daily-order-sheet', {
@@ -961,7 +997,7 @@ export default function MaterialPrepPage() {
       setActionBusy(false)
       setTimeout(() => setActionMessage(''), 6000)
     }
-  }, [selectedRowKeys, materialPrepRows, moRecords, sheetRows, selectedDate, loadSheet])
+  }, [selectedRowKeys, materialPrepRows, noNeedRowKeys, moRecords, sheetRows, selectedDate, loadSheet])
 
   // ---- 操作：取消「無需備料」標記（改回待備料）----
   const handleRevertNoNeed = useCallback(async (moNumber: string) => {
@@ -1181,6 +1217,13 @@ export default function MaterialPrepPage() {
       setMaterialPrepMessage(`✅ 已送出 ${selectedImportRows.length} 筆到 ARGO，並將 ${importMos.length} 筆製令標記為「已備料」${argoRaw}`)
       setMaterialPrepMsgExpanded(false)
 
+      // 清除已完成製令的 noNeedRowKeys（避免殘留影響下次）
+      setNoNeedRowKeys(prev => {
+        const next = new Set(prev)
+        materialPrepRows.filter(r => importMos.includes(r.mo_number)).forEach(r => next.delete(r.row_key))
+        return next
+      })
+
       // 寫入批備料紀錄（fire-and-forget）
       fetch('/api/argoerp/material-prep-log', {
         method: 'POST',
@@ -1233,7 +1276,7 @@ export default function MaterialPrepPage() {
       setMaterialPrepImporting(false)
       importInFlightRef.current = false
     }
-  }, [selectedRowKeys, selectedImportRows, materialPrepRows, materialPrepInterfaceId, moRecords, sheetRows, selectedDate, loadSheet])
+  }, [selectedRowKeys, selectedImportRows, materialPrepRows, materialPrepInterfaceId, moRecords, sheetRows, selectedDate, loadSheet, noNeedRowKeys])
 
   // ---- 盤數優先前綴：從 Supabase 載入 ----
   // platePrefixesUserChanged：載入完成後 ref 設為 true，
@@ -1702,14 +1745,20 @@ export default function MaterialPrepPage() {
                 <tbody>
                   {filteredPrepRows.map((row, index) => {
                     const checked = selectedRowKeys.has(row.row_key)
+                    const isNoNeed = noNeedRowKeys.has(row.row_key)
                     return (
-                      <tr key={`${row.row_key}-${index}`} className={`border-b border-slate-800/50 ${checked ? 'bg-cyan-950/30' : index % 2 === 0 ? 'bg-slate-900/40' : 'bg-slate-900/20'} hover:bg-slate-800/40`}>
+                      <tr key={`${row.row_key}-${index}`} className={`border-b border-slate-800/50 ${
+                        isNoNeed ? 'bg-amber-950/30 opacity-60' :
+                        checked ? 'bg-cyan-950/30' :
+                        index % 2 === 0 ? 'bg-slate-900/40' : 'bg-slate-900/20'
+                      } hover:bg-slate-800/40`}>
                         <td className="px-2 py-2 text-center sticky left-0 bg-inherit z-10">
                           <input
                             type="checkbox"
-                            checked={checked}
-                            onChange={() => toggleRow(row.row_key)}
-                            className="rounded border-slate-600 bg-slate-700 text-cyan-500 focus:ring-cyan-500/30"
+                            checked={checked && !isNoNeed}
+                            disabled={isNoNeed}
+                            onChange={() => !isNoNeed && toggleRow(row.row_key)}
+                            className="rounded border-slate-600 bg-slate-700 text-cyan-500 focus:ring-cyan-500/30 disabled:opacity-40"
                           />
                         </td>
                         <td className="px-3 py-2 text-xs sticky left-10 bg-inherit z-10">
@@ -1849,6 +1898,16 @@ export default function MaterialPrepPage() {
                           })()}
                         </td>
                         <td className="px-3 py-2 text-xs">
+                          {isNoNeed ? (
+                            <div className="flex flex-col gap-1">
+                              <span className="px-1.5 py-0.5 rounded-full text-[10px] font-medium bg-amber-950/60 text-amber-300 border border-amber-700/50 w-fit">無需備料</span>
+                              <button
+                                onClick={() => setNoNeedRowKeys(prev => { const n = new Set(prev); n.delete(row.row_key); return n })
+                                }
+                                className="text-[10px] text-slate-400 hover:text-white underline underline-offset-1"
+                              >✕ 取消排除</button>
+                            </div>
+                          ) : (
                           <span className={`px-1.5 py-0.5 rounded-full text-[10px] font-medium ${
                             row.status === '可直接備料' ? 'bg-emerald-950/50 text-emerald-300 border border-emerald-800/40' :
                             row.status === '建議替代' ? 'bg-amber-950/50 text-amber-300 border border-amber-800/40' :
@@ -1859,6 +1918,7 @@ export default function MaterialPrepPage() {
                              row.status === '建議替代' ? '替代' :
                              row.status}
                           </span>
+                          )}
                         </td>
                         <td className="px-3 py-2 text-slate-400 text-xs break-words" title={row.note}>{row.note}</td>
                       </tr>

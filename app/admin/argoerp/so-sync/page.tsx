@@ -20,6 +20,7 @@ interface SoLine {
   packing: string | null
   remark2: string | null
   tpn_part_no: string | null
+  grade: string | null
   synced_at: string
 }
 
@@ -39,7 +40,8 @@ function filterRows(rows: SoLine[], search: string) {
     (r.remark ?? '').toLowerCase().includes(q) ||
     (r.remark2 ?? '').toLowerCase().includes(q) ||
     (r.packing ?? '').toLowerCase().includes(q) ||
-    (r.tpn_part_no ?? '').toLowerCase().includes(q)
+    (r.tpn_part_no ?? '').toLowerCase().includes(q) ||
+    (r.grade ?? '').toLowerCase().includes(q)
   )
 }
 
@@ -241,6 +243,9 @@ export default function SoSyncPage() {
                   }
                   {row.packing && (
                     <div className="text-xs text-amber-400/80 mt-0.5">📦 {row.packing}</div>
+                  )}
+                  {row.grade && (
+                    <div className="text-xs text-purple-400/80 mt-0.5">⭐ {row.grade}</div>
                   )}
                 </td>
 
