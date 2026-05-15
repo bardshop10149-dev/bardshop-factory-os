@@ -86,8 +86,8 @@ function genPoNo() {
 function makeDefaultHeader(): PoHeader {
   return {
     project_id: genPoNo(), modify_ver: '1', begin_date: fmtDate(new Date()),
-    hold_status: 'OPEN', tpn_partner_id: '', department: 'C1000',
-    sales_id: '', po_type: 'GENERAL', payment_term: '',
+    hold_status: 'OPEN', tpn_partner_id: 'C01510', department: 'M1100',
+    sales_id: '', po_type: 'GENERAL', payment_term: 'PM30',
     payment_mode: 'T', currency: 'NTD', exchange_rate: '1', tax_rate: '0.05',
   }
 }
@@ -674,7 +674,7 @@ export default function PoBatchExportCPage() {
                   ['BEGIN_DATE', '開立日期（手動設定）'],
                   ['HOLD_STATUS', '訂單狀態（預設 OPEN）'],
                   ['TPN_PARTNER_ID', '廠商編號（手動設定）'],
-                  ['SEG_SEGMENT_NO_DEPARTMENT', '部門（預設 C1000）'],
+                  ['SEG_SEGMENT_NO_DEPARTMENT', '部門（預設 M1100）'],
                   ['SALES_ID', '業務員（手動設定）'],
                   ['PO_TYPE', '訂單類別（GENERAL）'],
                   ['PAYMENT_TERM', '付款條件（手動設定）'],

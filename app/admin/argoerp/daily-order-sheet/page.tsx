@@ -206,6 +206,7 @@ export default function DailyOrderSheetPage() {
   const [syncingMo, setSyncingMo] = useState(false)
   const [machines, setMachines] = useState<string[]>([])
   const [moMachines, setMoMachines] = useState<Record<string, string>>({})
+  const [rowMachines, setRowMachines] = useState<Record<string, string>>({})
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set())
   const [soModalId, setSoModalId] = useState<string | null>(null)
   const [searchQuery, setSearchQuery] = useState('')
@@ -401,7 +402,7 @@ export default function DailyOrderSheetPage() {
       create_date: selectedDate,
       factory: r.factory,
       prep_status: r.material_prep_status || '',
-      machine: r.mo_number ? (moMachines[r.mo_number] || r.assigned_machine || '') : (r.assigned_machine || ''),
+      machine: r.mo_number ? (moMachines[r.mo_number] || '') : (rowMachines[r.row_key] || ''),
       line_no_override: r.match_line_no || undefined,
     }))
 
@@ -1207,10 +1208,15 @@ export default function DailyOrderSheetPage() {
                                   <option value="">— —</option>
                                   {machines.map(m => <option key={m} value={m}>{m}</option>)}
                                 </select>
-                              ) : row.assigned_machine ? (
-                                <span className="px-2 py-0.5 rounded text-xs font-mono bg-slate-700 text-slate-300 border border-slate-600">{row.assigned_machine}</span>
                               ) : (
-                                <span className="text-slate-600 text-xs">—</span>
+                                <select
+                                  value={rowMachines[row.row_key] || ''}
+                                  onChange={e => setRowMachines(prev => ({ ...prev, [row.row_key]: e.target.value }))}
+                                  className="bg-slate-800 border border-slate-600 text-slate-200 text-xs rounded px-2 py-1 focus:outline-none focus:border-cyan-500 min-w-[90px]"
+                                >
+                                  <option value="">— —</option>
+                                  {machines.map(m => <option key={m} value={m}>{m}</option>)}
+                                </select>
                               )}
                             </td>
                             <td className="px-3 py-2">
