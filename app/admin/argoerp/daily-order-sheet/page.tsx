@@ -842,12 +842,13 @@ export default function DailyOrderSheetPage() {
             String(c.extra?.SO_PROJECT_ID ?? '') === (row.order_number ?? '')
           )
         }
-        // fallback：僅料號 + 數量（可能跨 SO 誤配，最後手段）
+        // fallback：僅料號 + 數量，且 MBP_LOT_NO 為空（有批號的PO已明確屬於特定SO，不得跨SO誤配）
         if (hitIdx === -1) {
           hitIdx = pool.findIndex(c =>
             !c._used &&
             (c.item_code ?? '') === row.item_code &&
-            c.qty === qty
+            c.qty === qty &&
+            !String(c.extra?.MBP_LOT_NO ?? '').trim()
           )
         }
         if (hitIdx === -1) {
@@ -1064,9 +1065,9 @@ export default function DailyOrderSheetPage() {
             // 第三優先：料號 + 數量 + SO_PROJECT_ID === 銷售訂單號
             if (hitIdx === -1)
               hitIdx = pool.findIndex(c => !c._used && (c.item_code ?? '') === row.item_code && c.qty === qty && String(c.extra?.SO_PROJECT_ID ?? '') === (row.order_number ?? ''))
-            // fallback：僅料號 + 數量
+            // fallback：僅料號 + 數量，且 MBP_LOT_NO 為空
             if (hitIdx === -1)
-              hitIdx = pool.findIndex(c => !c._used && (c.item_code ?? '') === row.item_code && c.qty === qty)
+              hitIdx = pool.findIndex(c => !c._used && (c.item_code ?? '') === row.item_code && c.qty === qty && !String(c.extra?.MBP_LOT_NO ?? '').trim())
             if (hitIdx === -1) return { ...row, po_number: null, po_sub_no: null, po_status: 'no_match' }
             pool[hitIdx]._used = true
             return { ...row, po_number: pool[hitIdx].doc_no, po_sub_no: pool[hitIdx].sub_no, po_status: 'matched' }
