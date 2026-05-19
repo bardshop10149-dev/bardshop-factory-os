@@ -1277,7 +1277,7 @@ export async function POST(request: NextRequest) {
         TABLE: 'IV_NOTICE,IV_NOTICEDETAIL',
         SHOWCOLUMNTIME: 'Y',
         SHOWNULLCOLUMN: 'Y',
-        CUSTOMCOLUMN: 'IV_NOTICE.SLIP_NO,IV_NOTICE.SLIP_DATE,IV_NOTICE.PJT_PROJECT_ID,IV_NOTICE.MO_MBP_PART,IV_NOTICE.MO_QTY,IV_NOTICEDETAIL.LINE_NO,IV_NOTICEDETAIL.MBP_PART,IV_NOTICEDETAIL.NOTICE_QTY',
+        CUSTOMCOLUMN: 'IV_NOTICE.SLIP_NO,IV_NOTICE.SLIP_DATE,IV_NOTICE.PJT_PROJECT_ID,IV_NOTICE.MO_MBP_PART,IV_NOTICE.MO_QTY,IV_NOTICE.REMARK,IV_NOTICEDETAIL.LINE_NO,IV_NOTICEDETAIL.MBP_PART,IV_NOTICEDETAIL.NOTICE_QTY',
         'IV_NOTICEDETAIL.NTC_SLIP_NO': '=IV_NOTICE.SLIP_NO',
       })
 
@@ -1312,6 +1312,7 @@ export async function POST(request: NextRequest) {
         line_no: number | null
         mbp_part: string | null
         notice_qty: number
+        remark: string | null
         synced_at: string
       }[] = []
 
@@ -1328,6 +1329,7 @@ export async function POST(request: NextRequest) {
           line_no:    getRecordValue(row, 'LINE_NO') != null ? Number(getRecordValue(row, 'LINE_NO')) : null,
           mbp_part:   String(getRecordValue(row, 'MBP_PART') ?? '').trim() || null,
           notice_qty: Number(getRecordValue(row, 'NOTICE_QTY') ?? 0) || 0,
+          remark:     String(getRecordValue(row, 'REMARK') ?? '').trim() || null,
           synced_at: syncedAt,
         })
       }

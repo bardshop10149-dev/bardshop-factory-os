@@ -1,6 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
+import Link from 'next/link'
 import { supabase } from '../../lib/supabaseClient'
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -39,6 +40,7 @@ interface PrepLine {
   line_no: number | null
   mbp_part: string | null
   notice_qty: number
+  remark: string | null
 }
 
 interface MoDetail {
@@ -48,6 +50,7 @@ interface MoDetail {
   customer: string
   order_number: string
   machine: string
+  remark: string
   notice_qty: number
   slip_no: string | null
   slip_date: string | null
@@ -101,7 +104,7 @@ function exportCsv(groups: MaterialGroup[], date: string) {
           g.material_code, g.material_name ?? '', g.unit,
           String(g.total_qty), mo.slip_no ? 'Y' : '',
           mo.mo_number, mo.fg_part, mo.item_name, mo.customer, mo.order_number,
-          String(mo.notice_qty), mo.machine, mo.slip_no ?? '', mo.slip_date ?? '',
+          String(mo.notice_qty), mo.remark || mo.machine, mo.slip_no ?? '', mo.slip_date ?? '',,
           mo.delivery_date, mo.factory,
         ])
       }
@@ -212,7 +215,7 @@ export default function MaterialIssuePage() {
       const [prepLinesResult, machineAssignResult] = await Promise.all([
         supabase
           .from('erp_material_prep_lines')
-          .select('slip_no, slip_date, mo_number, fg_part, mo_qty, line_no, mbp_part, notice_qty')
+          .select('slip_no, slip_date, mo_number, fg_part, mo_qty, line_no, mbp_part, notice_qty, remark')
           .in('mo_number', moNumbers)
           .order('mo_number', { ascending: true })
           .order('line_no', { ascending: true }),
@@ -296,6 +299,7 @@ export default function MaterialIssuePage() {
           customer:             sheetRow?.customer ?? '',
           order_number:         sheetRow?.order_number ?? '',
           machine,
+          remark:               line.remark ?? '',
           notice_qty:           Number(line.notice_qty) || 0,
           slip_no:              line.slip_no ?? null,
           slip_date:            line.slip_date ?? null,
@@ -323,6 +327,7 @@ export default function MaterialIssuePage() {
             customer:             row.customer ?? '',
             order_number:         row.order_number ?? '',
             machine:              machineByMo.get(mo) ?? row.machine ?? row.assigned_machine ?? '',
+            remark:               '',
             notice_qty:           0,
             slip_no:              row.argo_slip_no ?? null,
             slip_date:            null,
@@ -418,6 +423,12 @@ export default function MaterialIssuePage() {
             </p>
           </div>
           <div className="flex gap-2">
+            <Link
+              href="/"
+              className="px-4 py-2 rounded-lg bg-slate-700 border border-slate-600 text-slate-200 hover:bg-slate-600 text-sm transition-colors"
+            >
+              🏠 首頁
+            </Link>
             <button
               onClick={syncPrepLines}
               disabled={syncing || loading}
@@ -542,7 +553,7 @@ export default function MaterialIssuePage() {
             {filteredGroups.map(g => {
               const isExp   = expanded.has(g.group_key)
               const hasSlip = g.mos.some(m => m.slip_no)
-              const machines = [...new Set(g.mos.map(m => m.machine).filter(Boolean))].join('、')
+              const machines = [...new Set(g.mos.map(m => m.remark || m.machine).filter(Boolean))].join('、')
 
               return (
                 <div key={g.group_key} className="rounded-lg border border-slate-800 overflow-hidden print:border-slate-400 print:mb-2">
@@ -637,7 +648,7 @@ export default function MaterialIssuePage() {
                                 {mo.notice_qty > 0 ? mo.notice_qty.toLocaleString() : '—'}
                               </td>
                               <td className="px-3 py-1.5 text-slate-200 whitespace-nowrap print:text-black">
-                                {mo.machine || <span className="text-slate-600">—</span>}
+                                {mo.remark || mo.machine || <span className="text-slate-600">—</span>}
                               </td>
                               <td className="px-3 py-1.5 font-mono whitespace-nowrap">
                                 {mo.slip_no
@@ -704,7 +715,7 @@ export default function MaterialIssuePage() {
                         <td className="px-3 py-2 text-slate-300 max-w-[180px] truncate">{mo.item_name || '—'}</td>
                         <td className="px-3 py-2 text-slate-400 max-w-[120px] truncate">{mo.customer || '—'}</td>
                         <td className="px-3 py-2 font-mono text-slate-400 whitespace-nowrap">{mo.order_number || '—'}</td>
-                        <td className="px-3 py-2 text-slate-200 whitespace-nowrap">{mo.machine || '—'}</td>
+                        <td className="px-3 py-2 text-slate-200 whitespace-nowrap">{mo.remark || mo.machine || '—'}</td>
                         <td className="px-3 py-2">
                           <span className={`px-1.5 py-0.5 rounded text-[10px] border ${
                             mo.material_prep_status === '已批備料'

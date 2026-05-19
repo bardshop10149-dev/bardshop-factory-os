@@ -132,6 +132,7 @@ const PREP_CUSTOM_CODE_INPUTS_KEY = 'argoerp_material_prep_custom_code_inputs'
 const PREP_PLATE_PREFIXES_KEY = 'argoerp_material_prep_plate_prefixes'
 const PREP_NO_BUFFER_KEYS_KEY = 'argoerp_material_prep_no_buffer_keys'
 const PREP_NO_NEED_KEYS_KEY   = 'argoerp_material_prep_no_need_keys'
+const PREP_EXTRA_NOBOM_KEY    = 'argoerp_material_prep_extra_nobom'
 const DEFAULT_PLATE_PREFIXES = ['MACRT']
 
 function loadFromLocalStorage<T>(key: string, fallback: T): T {
@@ -202,6 +203,27 @@ export default function MaterialPrepPage() {
       else next.add(rowKey)
       return next
     })
+  }, [])
+
+  // ---- 無BOM 追加用料列（parentKey → slotId[]）----
+  const [extraNoBomSlots, setExtraNoBomSlots] = useState<Record<string, string[]>>(
+    () => loadFromLocalStorage<Record<string, string[]>>(PREP_EXTRA_NOBOM_KEY, {})
+  )
+  const addExtraNoBomRow = useCallback((parentKey: string) => {
+    setExtraNoBomSlots(prev => ({
+      ...prev,
+      [parentKey]: [...(prev[parentKey] ?? []), String(Date.now())],
+    }))
+  }, [])
+  const removeExtraNoBomRow = useCallback((parentKey: string, slotId: string) => {
+    setExtraNoBomSlots(prev => {
+      const next = (prev[parentKey] ?? []).filter(id => id !== slotId)
+      if (next.length === 0) { const { [parentKey]: _, ...rest } = prev; return rest }
+      return { ...prev, [parentKey]: next }
+    })
+    const rowKey = `${parentKey}::EX_${slotId}`
+    setMaterialOverrides(prev => { const { [rowKey]: _, ...rest } = prev; return rest })
+    setCustomCodeInputs(prev => { const { [rowKey]: _, ...rest } = prev; return rest })
   }, [])
 
   // ---- 選取 / 操作 ----
@@ -322,6 +344,11 @@ export default function MaterialPrepPage() {
     if (typeof window === 'undefined') return
     try { localStorage.setItem(PREP_CUSTOM_CODE_INPUTS_KEY, JSON.stringify(customCodeInputs)) } catch {}
   }, [customCodeInputs])
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    try { localStorage.setItem(PREP_EXTRA_NOBOM_KEY, JSON.stringify(extraNoBomSlots)) } catch {}
+  }, [extraNoBomSlots])
 
   // ---- 載入出單表的製令（由 loadSheet 帶入 moNumbers） ----
   const loadMoRecords = useCallback(async (moNumbers?: string[], sheetRowsFallback?: SheetRowBrief[]) => {
@@ -684,38 +711,7 @@ export default function MaterialPrepPage() {
       const matchedBom = bomRows.filter(row => row.product_code === productCode)
     if (matchedBom.length === 0) {
         const rowKey = `${mo.mo_number}::${productCode}::NO_BOM`
-        const customCode = materialOverrides[rowKey]
-        const customStock = customCode ? (inventoryMap[customCode] ?? 0) : 0
-        const displayQty = qtyOverrides[rowKey] !== undefined && qtyOverrides[rowKey] !== '' ? Number(qtyOverrides[rowKey]) : 0
-        if (customCode) {
-          return [{
-            row_key: rowKey,
-            mo_number: mo.mo_number,
-            customer: sourceOrderCustomerMap[mo.source_order ?? ''] || '-',
-            source_order: mo.source_order || '-',
-            product_code: productCode || '-',
-            planned_qty: Number(mo.planned_qty ?? 0),
-            plate_count: mo.plate_count || '-',
-            factory: mo.factory || '-',
-            machine: mo.machine || '',
-            std_qty: 0,
-            source_material_code: '-',
-            source_material_name: '自訂原料',
-            required_qty: displayQty,
-            unit: '-',
-            stock_qty: customStock,
-            substitute_options: [{ code: customCode, name: customCode, stock_qty: customStock, label: `${customCode}｜自訂｜庫存 ${formatQty(customStock)}` }],
-            selected_material_code: customCode,
-            selected_material_name: customCode,
-            selected_material_stock_qty: customStock,
-            status: displayQty > 0 && customStock >= displayQty ? '可直接備料' : '缺料',
-            note: displayQty === 0 ? '自訂原料，請填寫需求量' : customStock >= displayQty ? '自訂原料，庫存足夠' : '自訂原料，庫存不足',
-            is_buffered: false,
-            uses_plate_count: false,
-          }]
-        }
-        return [{
-          row_key: rowKey,
+        const moBase = {
           mo_number: mo.mo_number,
           customer: sourceOrderCustomerMap[mo.source_order ?? ''] || '-',
           source_order: mo.source_order || '-',
@@ -725,20 +721,53 @@ export default function MaterialPrepPage() {
           factory: mo.factory || '-',
           machine: mo.machine || '',
           std_qty: 0,
-          source_material_code: '-',
-          source_material_name: '查無 BOM',
-          required_qty: 0,
           unit: '-',
-          stock_qty: 0,
-          substitute_options: [],
-          selected_material_code: '',
-          selected_material_name: '',
-          selected_material_stock_qty: 0,
-          status: '無BOM',
-          note: '此生產貨號尚未在系統 BOM 表建立對應',
           is_buffered: false,
           uses_plate_count: false,
-        }]
+        }
+
+        // 建立單一 NO_BOM 列（含自訂料號支援）的 helper
+        const makeNoBomRow = (key: string, label: string): MaterialPrepRow => {
+          const customCode = materialOverrides[key]
+          const customStock = customCode ? (inventoryMap[customCode] ?? 0) : 0
+          const displayQty = qtyOverrides[key] !== undefined && qtyOverrides[key] !== '' ? Number(qtyOverrides[key]) : 0
+          if (customCode) {
+            return {
+              ...moBase,
+              row_key: key,
+              source_material_code: '-',
+              source_material_name: label,
+              required_qty: displayQty,
+              stock_qty: customStock,
+              substitute_options: [{ code: customCode, name: customCode, stock_qty: customStock, label: `${customCode}｜自訂｜庫存 ${formatQty(customStock)}` }],
+              selected_material_code: customCode,
+              selected_material_name: customCode,
+              selected_material_stock_qty: customStock,
+              status: displayQty > 0 && customStock >= displayQty ? '可直接備料' : '缺料',
+              note: displayQty === 0 ? `${label}，請填寫需求量` : customStock >= displayQty ? `${label}，庫存足夠` : `${label}，庫存不足`,
+            }
+          }
+          return {
+            ...moBase,
+            row_key: key,
+            source_material_code: '-',
+            source_material_name: key === rowKey ? '查無 BOM' : label,
+            required_qty: 0,
+            stock_qty: 0,
+            substitute_options: [],
+            selected_material_code: '',
+            selected_material_name: '',
+            selected_material_stock_qty: 0,
+            status: '無BOM',
+            note: key === rowKey ? '此生產貨號尚未在系統 BOM 表建立對應' : '請輸入料號',
+          }
+        }
+
+        const baseRow = makeNoBomRow(rowKey, '自訂原料')
+        const extraRows = (extraNoBomSlots[rowKey] ?? []).map(slotId =>
+          makeNoBomRow(`${rowKey}::EX_${slotId}`, '追加用料')
+        )
+        return [baseRow, ...extraRows]
       }
 
       return matchedBom.map((bom): MaterialPrepRow => {
@@ -836,7 +865,7 @@ export default function MaterialPrepPage() {
         }
       })
     })
-  }, [moRecords, bomRows, inventoryMap, substituteMap, materialOverrides, qtyOverrides, sourceOrderCustomerMap, noBufferKeys, platePrefixes])
+  }, [moRecords, bomRows, inventoryMap, substituteMap, materialOverrides, qtyOverrides, sourceOrderCustomerMap, noBufferKeys, platePrefixes, extraNoBomSlots])
 
   const materialPrepSummary = useMemo(() => {
     return materialPrepRows.reduce<Record<MaterialPrepRow['status'], number>>((acc, row) => {
@@ -871,6 +900,8 @@ export default function MaterialPrepPage() {
         material_code: row.selected_material_code,
         required_qty: formatQty(row.required_qty),
         unit: unitMap[row.selected_material_code] || row.unit,
+        row_key: row.row_key,
+        machine: row.machine,
         note: row.source_material_code === row.selected_material_code
           ? '依原 BOM 備料'
           : `替代料：${row.source_material_code} -> ${row.selected_material_code}`,
@@ -1153,7 +1184,7 @@ export default function MaterialPrepPage() {
           QTY_PACK: '',
           UNIT_OF_MEASURE_PACK: '',
           STD_QTY: 1,
-          REMARK: remarkOverrides[moNumber] !== undefined ? remarkOverrides[moNumber] : (materialPrepRows.find(r => r.mo_number === moNumber)?.machine || ''),
+          REMARK: remarkOverrides[row.row_key] !== undefined ? remarkOverrides[row.row_key] : (row.machine || ''),
         })
       })
     }
@@ -1779,10 +1810,10 @@ export default function MaterialPrepPage() {
                           </div>
                           <input
                             type="text"
-                            value={remarkOverrides[row.mo_number] !== undefined ? remarkOverrides[row.mo_number] : (row.machine || '')}
-                            onChange={e => setRemarkOverrides(prev => ({ ...prev, [row.mo_number]: e.target.value }))}
+                            value={remarkOverrides[row.row_key] !== undefined ? remarkOverrides[row.row_key] : (row.machine || '')}
+                            onChange={e => setRemarkOverrides(prev => ({ ...prev, [row.row_key]: e.target.value }))}
                             placeholder="機台 / 備料備註"
-                            title="將作為 ARGO REMARK 匙入"
+                            title="將作為 ARGO REMARK 匙入（逐列獨立）"
                             className="mt-1 w-full px-1.5 py-0.5 text-[10px] rounded bg-slate-800 border border-slate-700/60 text-slate-300 placeholder-slate-600 focus:outline-none focus:border-cyan-500/50"
                           />
                         </td>
@@ -1855,6 +1886,34 @@ export default function MaterialPrepPage() {
                             >
                               換
                             </button>
+                            {/* NO_BOM：＋ 新增追加用料列 */}
+                            {(() => {
+                              const isExtraRow = row.row_key.includes('::NO_BOM::EX_')
+                              const parentKey = isExtraRow
+                                ? row.row_key.replace(/::EX_[^:]+$/, '')
+                                : row.row_key
+                              const isNoBomFamily = row.row_key.includes('::NO_BOM')
+                              if (!isNoBomFamily) return null
+                              if (isExtraRow) {
+                                // 追加列：顯示 ✕ 刪除本列
+                                const slotId = row.row_key.split('::EX_').pop()!
+                                return (
+                                  <button
+                                    onClick={() => removeExtraNoBomRow(parentKey, slotId)}
+                                    title="移除此追加用料列"
+                                    className="px-1.5 py-1 text-xs rounded border bg-red-900/40 border-red-700/50 text-red-300 hover:bg-red-800 shrink-0"
+                                  >✕</button>
+                                )
+                              }
+                              // 主列：顯示 ＋ 新增追加列
+                              return (
+                                <button
+                                  onClick={() => addExtraNoBomRow(parentKey)}
+                                  title="新增追加用料列（同製令多種原料）"
+                                  className="px-1.5 py-1 text-xs rounded border bg-indigo-900/40 border-indigo-700/50 text-indigo-300 hover:bg-indigo-800 shrink-0"
+                                >＋</button>
+                              )
+                            })()}
                           </div>
                           {(swapOpenKeys.has(row.row_key) || row.status === '缺料' || row.status === '無BOM') && (
                             <div className="flex items-center gap-1">
