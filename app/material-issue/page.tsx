@@ -104,7 +104,7 @@ function exportCsv(groups: MaterialGroup[], date: string) {
           g.material_code, g.material_name ?? '', g.unit,
           String(g.total_qty), mo.slip_no ? 'Y' : '',
           mo.mo_number, mo.fg_part, mo.item_name, mo.customer, mo.order_number,
-          String(mo.notice_qty), mo.remark || mo.machine, mo.slip_no ?? '', mo.slip_date ?? '',,
+          String(mo.notice_qty), mo.remark || mo.machine || '', mo.slip_no ?? '', mo.slip_date ?? '',
           mo.delivery_date, mo.factory,
         ])
       }
