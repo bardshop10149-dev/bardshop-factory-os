@@ -84,7 +84,7 @@ function fmtDateLabel(s: string) {
   return `${parts[0]}/${parseInt(parts[1])}/${parseInt(parts[2])}`
 }
 
-function exportCsv(groups: MaterialGroup[], date: string) {
+function exportCsv(groups: MaterialGroup[], date: string, issuedSet: Set<string>, mode: 'pending' | 'issued' | 'all') {
   const header = [
     '料號', '品名', '單位', '總需求量', '已批備料',
     '製令單號', '成品料號', '品名', '客戶', '工單號',
@@ -93,13 +93,19 @@ function exportCsv(groups: MaterialGroup[], date: string) {
   const rows: string[][] = []
   for (const g of groups) {
     if (!g.has_argo_lines || g.mos.length === 0) {
-      rows.push([
-        g.material_code, g.material_name ?? '', g.unit,
-        g.total_qty > 0 ? String(g.total_qty) : '', g.mos.some(m => m.slip_no) ? 'Y' : '',
-        '', '', '', '', '', '', '', '', '', '', '',
-      ])
+      if (mode !== 'issued') {
+        rows.push([
+          g.material_code, g.material_name ?? '', g.unit,
+          g.total_qty > 0 ? String(g.total_qty) : '', g.mos.some(m => m.slip_no) ? 'Y' : '',
+          '', '', '', '', '', '', '', '', '', '', '',
+        ])
+      }
     } else {
       for (const mo of g.mos) {
+        const key = mo.slip_no && mo.line_no != null ? `${mo.slip_no}:${mo.line_no}` : null
+        const issued = key ? issuedSet.has(key) : false
+        if (mode === 'pending' && issued) continue
+        if (mode === 'issued' && !issued) continue
         rows.push([
           g.material_code, g.material_name ?? '', g.unit,
           String(g.total_qty), mo.slip_no ? 'Y' : '',
@@ -110,6 +116,7 @@ function exportCsv(groups: MaterialGroup[], date: string) {
       }
     }
   }
+  const label = mode === 'issued' ? '已發料' : mode === 'pending' ? '未發料' : '全部'
   const csv = [header, ...rows]
     .map(r => r.map(v => `"${String(v).replace(/"/g, '""')}"`).join(','))
     .join('\n')
@@ -117,7 +124,7 @@ function exportCsv(groups: MaterialGroup[], date: string) {
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
   a.href = url
-  a.download = `發料清單_${date}.csv`
+  a.download = `發料清單_${label}_${date}.csv`
   a.click()
   URL.revokeObjectURL(url)
 }
@@ -507,11 +514,18 @@ export default function MaterialIssuePage() {
               {syncing ? '⏳ 同步中…' : '🔁 同步批備料單'}
             </button>
             <button
-              onClick={() => filteredGroups.length > 0 && exportCsv(filteredGroups, selectedDate)}
+              onClick={() => filteredGroups.length > 0 && exportCsv(filteredGroups, selectedDate, issuedSet, 'pending')}
               disabled={filteredGroups.length === 0}
               className="px-4 py-2 rounded-lg bg-emerald-800 border border-emerald-600 text-emerald-200 hover:bg-emerald-700 disabled:opacity-40 text-sm transition-colors"
             >
-              ⬇️ 匯出 CSV
+              ⬇️ 未發料 CSV
+            </button>
+            <button
+              onClick={() => filteredGroups.length > 0 && exportCsv(filteredGroups, selectedDate, issuedSet, 'issued')}
+              disabled={filteredGroups.length === 0}
+              className="px-4 py-2 rounded-lg bg-blue-800 border border-blue-600 text-blue-200 hover:bg-blue-700 disabled:opacity-40 text-sm transition-colors"
+            >
+              ⬇️ 已發料 CSV
             </button>
             <button
               onClick={() => window.print()}
