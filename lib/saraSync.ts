@@ -171,7 +171,7 @@ interface SaraResource {
   changeover_time?: number | null
   change_over_time?: number | null
   disabled: boolean
-  job_name?: Array<{ id: number; job_name: string; type: string; line: string | null }>
+  job_name?: Array<{ id: number | null; job_name: string; type: string; line: string | null }>
   events?: Array<{
     started_on: string
     ended_on: string
@@ -215,13 +215,15 @@ export async function syncResources(): Promise<SyncResult> {
     }
 
     const jobRows = list.flatMap(r =>
-      (r.job_name ?? []).map(j => ({
-        resource_id: r.id,
-        job_id: j.id,
-        job_name: j.job_name,
-        type: j.type,
-        line: j.line ?? null,
-      })),
+      (r.job_name ?? [])
+        .filter(j => j.id != null)   // SARA API 偶爾回傳 id: null，跳過避免 NOT NULL 違反
+        .map(j => ({
+          resource_id: r.id,
+          job_id: j.id,
+          job_name: j.job_name,
+          type: j.type,
+          line: j.line ?? null,
+        })),
     )
     if (jobRows.length > 0) {
       const { error } = await sb
