@@ -75,7 +75,7 @@ function parseSoDigits(orderNumber: string): string {
 }
 
 function makeDefaultHeader(): PrHeader {
-  return { department: 'M1100', hold_status: 'UNSIGNED', interface_id: 'IFAF043' }
+  return { department: 'M1100', hold_status: 'UNSIGNED', interface_id: 'IFAF105' }
 }
 
 function buildApplyId(orderNumber: string, lineNo: string | null): string {
@@ -173,6 +173,9 @@ export default function PrBatchExportOPage() {
 
       const results: MatchResult[] = []
       const uomMap = new Map<number, string>() // rowIndex → unit_of_measure_oru
+      // 追蹤已被拁走的 line_no，防止兩筆同商品同數量的明細都拁到同一行
+      const claimedLines = new Map<string, Set<string>>() // project_id → Set<line_no>
+
       for (let idx = 0; idx < sourceRows.length; idx++) {
         const row = sourceRows[idx]
         const digits = parseSoDigits(row.order_number)
@@ -181,7 +184,27 @@ export default function PrBatchExportOPage() {
           .select('line_no, pdl_seq, order_qty_oru, unit_of_measure_oru')
           .eq('project_id', row.order_number)
           .eq('mbp_part', row.item_code)
-          .limit(5)
+          .limit(10)
+
+        const pickLine = (candidates: typeof data) => {
+          if (!candidates || candidates.length === 0) return null
+          const claimed = claimedLines.get(row.order_number) ?? new Set<string>()
+          const qty = Number(row.quantity)
+          // 先找尚未被拁走且數量符合的
+          const best = candidates.find(
+            r => !claimed.has(String(r.line_no)) && Math.abs(Number(r.order_qty_oru) - qty) < 0.01
+          )
+            // 如果沒有，取尚未被拁走的任一行
+            ?? candidates.find(r => !claimed.has(String(r.line_no)))
+            // 最後退而求其次：拁到數量符合的（已被拁）
+            ?? candidates.find(r => Math.abs(Number(r.order_qty_oru) - qty) < 0.01)
+            ?? candidates[0]
+          if (best) {
+            if (!claimedLines.has(row.order_number)) claimedLines.set(row.order_number, new Set())
+            claimedLines.get(row.order_number)!.add(String(best.line_no))
+          }
+          return best ?? null
+        }
 
         if (!data || data.length === 0) {
           // 嘗試只用數字部分比對 project_id
@@ -190,13 +213,12 @@ export default function PrBatchExportOPage() {
             .select('line_no, pdl_seq, order_qty_oru, unit_of_measure_oru')
             .ilike('project_id', `%${digits}%`)
             .eq('mbp_part', row.item_code)
-            .limit(5)
+            .limit(10)
           if (!d2 || d2.length === 0) {
             results.push({ status: 'no_order', line_no: null, reason: '找不到對應 SO 明細' })
             continue
           }
-          const qty = Number(row.quantity)
-          const hit = d2.find(r => Math.abs(Number(r.order_qty_oru) - qty) < 0.01) ?? d2[0]
+          const hit = pickLine(d2)
           if (hit?.unit_of_measure_oru) uomMap.set(idx, hit.unit_of_measure_oru)
           results.push({
             status: hit ? 'matched' : 'no_qty_match',
@@ -205,12 +227,11 @@ export default function PrBatchExportOPage() {
           })
           continue
         }
-        const qty = Number(row.quantity)
-        const hit = data.find(r => Math.abs(Number(r.order_qty_oru) - qty) < 0.01) ?? data[0]
+        const hit = pickLine(data)
         if (hit?.unit_of_measure_oru) uomMap.set(idx, hit.unit_of_measure_oru)
         results.push({
           status: 'matched',
-          line_no: String(hit.line_no),
+          line_no: String(hit!.line_no),
           reason: '',
         })
       }
