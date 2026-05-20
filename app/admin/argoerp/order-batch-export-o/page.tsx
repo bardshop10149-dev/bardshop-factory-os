@@ -764,7 +764,7 @@ export default function PrBatchExportOPage() {
       </div>
 
       {soModalId && (
-        <SoOrderModal orderId={soModalId} onClose={() => setSoModalId(null)} />
+        <SoOrderModal projectId={soModalId} onClose={() => setSoModalId(null)} />
       )}
     </main>
   )
