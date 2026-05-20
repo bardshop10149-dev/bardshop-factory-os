@@ -11,7 +11,6 @@
  */
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import * as XLSX from 'xlsx'
 import Link from 'next/link'
 import SoOrderModal from '../../../../components/SoOrderModal'
 
@@ -251,19 +250,6 @@ export default function PrBatchExportOPage() {
       return rec
     })
   }, [sourceRows, lineEdits, matchResults, header])
-
-  // ── 匯出 XLSX ──
-  const doExport = useCallback(() => {
-    if (payload.length === 0) return
-    const now = new Date()
-    const ts = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}_${String(now.getHours()).padStart(2, '0')}${String(now.getMinutes()).padStart(2, '0')}`
-    const fn = `ArgoERP_委外請購_${loadedDate ?? ts}`
-    const dataRows = payload.map(r => ERP_KEYS.map(k => r[k] ?? ''))
-    const ws = XLSX.utils.aoa_to_sheet([[...ERP_KEYS], ...dataRows])
-    const wb = XLSX.utils.book_new()
-    XLSX.utils.book_append_sheet(wb, ws, '請購單')
-    XLSX.writeFile(wb, `${fn}.xlsx`)
-  }, [payload, loadedDate])
 
   // ── 匯入 ArgoERP ──
   const handleImport = useCallback(async () => {
@@ -571,12 +557,6 @@ export default function PrBatchExportOPage() {
         {/* ── 操作列 ── */}
         {sourceRows.length > 0 && (
           <div className="flex flex-wrap items-center gap-3">
-            <button
-              onClick={doExport}
-              className="px-4 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 text-white text-sm font-medium transition-colors"
-            >
-              ⬇️ 匯出 XLSX
-            </button>
             <button
               onClick={handleImport}
               disabled={importing || payload.length === 0}
