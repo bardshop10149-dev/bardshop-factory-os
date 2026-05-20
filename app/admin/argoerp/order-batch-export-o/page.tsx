@@ -34,11 +34,12 @@ interface SourceRow {
   mo_status?: string
 }
 
-interface PrHeader {
-  department:     string   // SEG_SEGMENT_NO_DEPARTMENT
-  hold_status:    'HOLD' | 'CLOSE' | 'UNSIGNED'
-  interface_id:   string   // 請購單 ERP 介面 ID
-}
+// ─────────────────────────────────────────────────────────────────────────────
+// Constants
+// ─────────────────────────────────────────────────────────────────────────────
+const PR_DEPARTMENT  = 'M1100'
+const PR_HOLD_STATUS = 'UNSIGNED'
+const PR_INTERFACE_ID = 'IFAF105'
 
 interface LineEdit {
   mbp_ver:  string
@@ -55,7 +56,9 @@ interface MatchResult {
 // ─────────────────────────────────────────────────────────────────────────────
 // Constants
 // ─────────────────────────────────────────────────────────────────────────────
-const HEADER_KEY = 'argoerp_pr_o_header_v1'
+const PR_DEPARTMENT   = 'M1100'
+const PR_HOLD_STATUS  = 'UNSIGNED'
+const PR_INTERFACE_ID = 'IFAF105'
 
 const ERP_KEYS = [
   'APPLY_ID', 'APPLY_DATE', 'SEG_SEGMENT_NO_DEPARTMENT', 'HOLD_STATUS',
@@ -74,10 +77,6 @@ function parseSoDigits(orderNumber: string): string {
   return m ? m[1] : orderNumber.replace(/\D/g, '')
 }
 
-function makeDefaultHeader(): PrHeader {
-  return { department: 'M1100', hold_status: 'UNSIGNED', interface_id: 'IFAF105' }
-}
-
 function buildApplyId(orderNumber: string, lineNo: string | null): string {
   const digits = parseSoDigits(orderNumber)
   const seq = lineNo ? String(Number(lineNo)).padStart(2, '0') : '00'
@@ -90,8 +89,6 @@ function buildApplyId(orderNumber: string, lineNo: string | null): string {
 export default function PrBatchExportOPage() {
   const [sourceRows, setSourceRows]     = useState<SourceRow[]>([])
   const [lineEdits, setLineEdits]       = useState<LineEdit[]>([])
-  const [header, setHeader]             = useState<PrHeader>(makeDefaultHeader)
-  const [headerOpen, setHeaderOpen]     = useState(false)
   const [matchResults, setMatchResults] = useState<MatchResult[]>([])
   const [matching, setMatching]         = useState(false)
   const [soModalId, setSoModalId]       = useState<string | null>(null)
@@ -104,20 +101,6 @@ export default function PrBatchExportOPage() {
   const [importing, setImporting]       = useState(false)
   const [msg, setMsg]                   = useState('')
   const [activeTab, setActiveTab]       = useState<'pending' | 'skip'>('pending')
-
-  // ── 初始化表頭設定（不還原資料列）──
-  useEffect(() => {
-    try {
-      const h = localStorage.getItem(HEADER_KEY)
-      if (h) {
-        const saved = JSON.parse(h) as Partial<PrHeader>
-        setHeader(prev => ({ ...prev, ...saved }))
-      }
-    } catch {}
-  }, [])
-  useEffect(() => {
-    localStorage.setItem(HEADER_KEY, JSON.stringify(header))
-  }, [header])
 
   // ── 載入可用出單日期 ──
   useEffect(() => {
@@ -262,8 +245,8 @@ export default function PrBatchExportOPage() {
       const rec: Record<string, string> = {}
       rec['APPLY_ID']                   = applyId
       rec['APPLY_DATE']                 = today
-      rec['SEG_SEGMENT_NO_DEPARTMENT']  = header.department.trim() || 'M1100'
-      rec['HOLD_STATUS']                = header.hold_status
+      rec['SEG_SEGMENT_NO_DEPARTMENT']  = PR_DEPARTMENT
+      rec['HOLD_STATUS']                = PR_HOLD_STATUS
       if (remark) rec['REMARK']         = remark
       rec['LINE_NO']                    = String(lineCounters[applyId])
       rec['MBP_PART']                   = row.item_code
@@ -278,7 +261,6 @@ export default function PrBatchExportOPage() {
 
   // ── 匯入 ArgoERP ──
   const handleImport = useCallback(async () => {
-    if (!header.interface_id.trim()) { alert('請填寫請購單介面 ID'); return }
     if (payload.length === 0) { alert('尚無明細資料'); return }
     if (!loadedDate) { alert('請先載入出單表'); return }
     setImporting(true); setMsg('')
@@ -286,7 +268,7 @@ export default function PrBatchExportOPage() {
       const res = await fetch('/api/argoerp', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'import', interfaceId: header.interface_id.trim(), data: payload }),
+        body: JSON.stringify({ action: 'import', interfaceId: PR_INTERFACE_ID, data: payload }),
       })
       const json = await res.json().catch(() => ({}))
       if (json.status === 'success' || json.ok === true || res.ok) {
@@ -311,7 +293,7 @@ export default function PrBatchExportOPage() {
     } finally {
       setImporting(false)
     }
-  }, [header.interface_id, payload, loadedDate, sourceRows])
+  }, [payload, loadedDate, sourceRows])
 
   // ── 標記無須轉請購 ──
   const markSkip = useCallback((rowKey: string) => {
@@ -345,7 +327,7 @@ export default function PrBatchExportOPage() {
       <div className="border-b border-slate-800/60 bg-slate-900/60 px-6 py-4 flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold text-purple-300">出單表 ➜ 委外請購</h1>
-          <p className="text-sm text-slate-400 mt-1">ArgoERP 請購單（{header.interface_id}）— 載入委外訂單 → 比對序號 → 匯入</p>
+          <p className="text-sm text-slate-400 mt-1">ArgoERP 請購單（{PR_INTERFACE_ID}）— 載入委外訂單 → 比對序號 → 匯入</p>
         </div>
         <div className="flex gap-2">
           <Link href="/admin/argoerp" className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-sm border border-slate-700">
@@ -355,57 +337,6 @@ export default function PrBatchExportOPage() {
       </div>
 
       <div className="p-6 max-w-7xl space-y-5">
-
-        {/* ── 表頭設定 ── */}
-        <div className="rounded-xl border border-purple-700/40 bg-purple-950/20">
-          <button
-            className="w-full flex items-center justify-between px-5 py-3 text-left"
-            onClick={() => setHeaderOpen(v => !v)}
-          >
-            <span className="font-semibold text-purple-200">⚙️ 請購單表頭設定</span>
-            <span className="text-slate-400 text-sm">{headerOpen ? '▲ 收起' : '▼ 展開'}</span>
-          </button>
-          {headerOpen && (
-            <div className="px-5 pb-5 grid grid-cols-2 md:grid-cols-4 gap-4 border-t border-purple-700/30">
-              <div>
-                <label className="block text-xs text-slate-400 mb-1">請購部門 <span className="text-red-400">*</span></label>
-                <input
-                  value={header.department}
-                  onChange={e => setHeader(h => ({ ...h, department: e.target.value }))}
-                  className="w-full px-3 py-1.5 rounded bg-slate-800 border border-slate-700 text-sm text-slate-200 focus:outline-none focus:border-purple-500"
-                  placeholder="M1100"
-                />
-              </div>
-              <div>
-                <label className="block text-xs text-slate-400 mb-1">請購單狀態</label>
-                <select
-                  value={header.hold_status}
-                  onChange={e => setHeader(h => ({ ...h, hold_status: e.target.value as PrHeader['hold_status'] }))}
-                  className="w-full px-3 py-1.5 rounded bg-slate-800 border border-slate-700 text-sm text-slate-200 focus:outline-none focus:border-purple-500"
-                >
-                  <option value="HOLD">HOLD</option>
-                  <option value="CLOSE">CLOSE</option>
-                  <option value="UNSIGNED">UNSIGNED</option>
-                </select>
-              </div>
-              <div>
-                <label className="block text-xs text-slate-400 mb-1">ERP 介面 ID <span className="text-red-400">*</span></label>
-                <input
-                  value={header.interface_id}
-                  onChange={e => setHeader(h => ({ ...h, interface_id: e.target.value }))}
-                  className="w-full px-3 py-1.5 rounded bg-slate-800 border border-slate-700 text-sm font-mono text-slate-200 focus:outline-none focus:border-purple-500"
-                  placeholder="IFAF043"
-                />
-                <div className="text-[10px] text-slate-500 mt-0.5">請確認請購單介面 ID</div>
-              </div>
-              <div className="flex flex-col justify-end">
-                <div className="text-xs text-slate-500">請購單號規則</div>
-                <div className="font-mono text-purple-300 text-sm mt-0.5">MPO + SO數字 + 兩碼序號</div>
-                <div className="text-[10px] text-slate-500 mt-0.5">序號取自 SO 比對結果</div>
-              </div>
-            </div>
-          )}
-        </div>
 
         {/* ── 載入出單表 ── */}
         <div className="rounded-xl border border-slate-700 bg-slate-900/40 p-4">
