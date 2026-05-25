@@ -133,6 +133,7 @@ const PREP_PLATE_PREFIXES_KEY = 'argoerp_material_prep_plate_prefixes'
 const PREP_NO_BUFFER_KEYS_KEY = 'argoerp_material_prep_no_buffer_keys'
 const PREP_NO_NEED_KEYS_KEY   = 'argoerp_material_prep_no_need_keys'
 const PREP_EXTRA_NOBOM_KEY    = 'argoerp_material_prep_extra_nobom'
+const SUPABASE_OVERRIDES_KEY  = 'material_prep_overrides'   // app_settings key
 const DEFAULT_PLATE_PREFIXES = ['MACRT']
 
 function loadFromLocalStorage<T>(key: string, fallback: T): T {
@@ -162,20 +163,14 @@ export default function MaterialPrepPage() {
   const [substituteMap, setSubstituteMap] = useState<Record<string, SubstituteRuleRow[]>>({})
   const [bomLoading, setBomLoading] = useState(false)
   const [bomError, setBomError] = useState('')
-  const [materialOverrides, setMaterialOverrides] = useState<Record<string, string>>(
-    () => loadFromLocalStorage<Record<string, string>>(PREP_MATERIAL_OVERRIDES_KEY, {})
-  )
+  const [materialOverrides, setMaterialOverrides] = useState<Record<string, string>>({})  // loaded from Supabase on mount
 
   // ---- 來源訂單→客戶 map（從 erp_pj_sync 查詢）----
   const [sourceOrderCustomerMap, setSourceOrderCustomerMap] = useState<Record<string, string>>({})
 
   // ---- 需求量覆寫 / 自訂料號 ----
-  const [qtyOverrides, setQtyOverrides] = useState<Record<string, string>>(
-    () => loadFromLocalStorage<Record<string, string>>(PREP_QTY_OVERRIDES_KEY, {})
-  )
-  const [customCodeInputs, setCustomCodeInputs] = useState<Record<string, string>>(
-    () => loadFromLocalStorage<Record<string, string>>(PREP_CUSTOM_CODE_INPUTS_KEY, {})
-  )
+  const [qtyOverrides, setQtyOverrides] = useState<Record<string, string>>({})  // loaded from Supabase on mount
+  const [customCodeInputs, setCustomCodeInputs] = useState<Record<string, string>>({})  // loaded from Supabase on mount
   const [customCodeStocks, setCustomCodeStocks] = useState<Record<string, number | null>>({})
 
   // ---- 盤數優先前綴設定（從 Supabase app_settings 載入） ----
@@ -185,14 +180,10 @@ export default function MaterialPrepPage() {
   const [platePrefixInput, setPlatePrefixInput] = useState('')
 
   // ---- 取消放數的列（料號→row_key）----
-  const [noBufferKeys, setNoBufferKeys] = useState<Set<string>>(
-    () => new Set(loadFromLocalStorage<string[]>(PREP_NO_BUFFER_KEYS_KEY, []))
-  )
+  const [noBufferKeys, setNoBufferKeys] = useState<Set<string>>(new Set())  // loaded from Supabase on mount
 
   // ---- 逐列「無需備料」排除（row_key 集合）----
-  const [noNeedRowKeys, setNoNeedRowKeys] = useState<Set<string>>(
-    () => new Set(loadFromLocalStorage<string[]>(PREP_NO_NEED_KEYS_KEY, []))
-  )
+  const [noNeedRowKeys, setNoNeedRowKeys] = useState<Set<string>>(new Set())  // loaded from Supabase on mount
 
   // ---- 換料 panel 開關（每行獨立）----
   const [swapOpenKeys, setSwapOpenKeys] = useState<Set<string>>(new Set())
@@ -206,9 +197,7 @@ export default function MaterialPrepPage() {
   }, [])
 
   // ---- 無BOM 追加用料列（parentKey → slotId[]）----
-  const [extraNoBomSlots, setExtraNoBomSlots] = useState<Record<string, string[]>>(
-    () => loadFromLocalStorage<Record<string, string[]>>(PREP_EXTRA_NOBOM_KEY, {})
-  )
+  const [extraNoBomSlots, setExtraNoBomSlots] = useState<Record<string, string[]>>({})  // loaded from Supabase on mount
   const addExtraNoBomRow = useCallback((parentKey: string) => {
     setExtraNoBomSlots(prev => ({
       ...prev,
@@ -297,25 +286,58 @@ export default function MaterialPrepPage() {
   // ---- 載入暫存 interface id ----
   // 介面編號已固定為 IFAF078，不再使用 localStorage
 
-  useEffect(() => {
-    if (typeof window === 'undefined') return
-    try { localStorage.setItem(PREP_QTY_OVERRIDES_KEY, JSON.stringify(qtyOverrides)) } catch {}
-  }, [qtyOverrides])
+  // ---- 從 Supabase app_settings 載入全部覆寫設定（多電腦共用）----
+  const overridesLoaded = useRef(false)
+  const overridesSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   useEffect(() => {
-    if (typeof window === 'undefined') return
-    try { localStorage.setItem(PREP_NO_BUFFER_KEYS_KEY, JSON.stringify([...noBufferKeys])) } catch {}
-  }, [noBufferKeys])
+    supabase
+      .from('app_settings')
+      .select('value')
+      .eq('key', SUPABASE_OVERRIDES_KEY)
+      .maybeSingle()
+      .then(({ data }) => {
+        if (data?.value && typeof data.value === 'object') {
+          const v = data.value as Record<string, unknown>
+          if (v.qty_overrides)       setQtyOverrides(v.qty_overrides as Record<string, string>)
+          if (v.material_overrides)  setMaterialOverrides(v.material_overrides as Record<string, string>)
+          if (v.no_buffer_keys)      setNoBufferKeys(new Set(v.no_buffer_keys as string[]))
+          if (v.no_need_keys)        setNoNeedRowKeys(new Set(v.no_need_keys as string[]))
+          if (v.custom_code_inputs)  setCustomCodeInputs(v.custom_code_inputs as Record<string, string>)
+          if (v.extra_nobom_slots)   setExtraNoBomSlots(v.extra_nobom_slots as Record<string, string[]>)
+        } else {
+          // Supabase 無資料，嘗試從 localStorage 復原（遅袋過渡）
+          setQtyOverrides(loadFromLocalStorage<Record<string, string>>(PREP_QTY_OVERRIDES_KEY, {}))
+          setMaterialOverrides(loadFromLocalStorage<Record<string, string>>(PREP_MATERIAL_OVERRIDES_KEY, {}))
+          setNoBufferKeys(new Set(loadFromLocalStorage<string[]>(PREP_NO_BUFFER_KEYS_KEY, [])))
+          setNoNeedRowKeys(new Set(loadFromLocalStorage<string[]>(PREP_NO_NEED_KEYS_KEY, [])))
+          setCustomCodeInputs(loadFromLocalStorage<Record<string, string>>(PREP_CUSTOM_CODE_INPUTS_KEY, {}))
+          setExtraNoBomSlots(loadFromLocalStorage<Record<string, string[]>>(PREP_EXTRA_NOBOM_KEY, {}))
+        }
+        overridesLoaded.current = true
+      })
+  }, [])
 
+  // ---- 覆寫設定變更時，debounce 500ms 寫回 Supabase ----
   useEffect(() => {
-    if (typeof window === 'undefined') return
-    try { localStorage.setItem(PREP_NO_NEED_KEYS_KEY, JSON.stringify([...noNeedRowKeys])) } catch {}
-  }, [noNeedRowKeys])
-
-  useEffect(() => {
-    if (typeof window === 'undefined') return
-    try { localStorage.setItem(PREP_MATERIAL_OVERRIDES_KEY, JSON.stringify(materialOverrides)) } catch {}
-  }, [materialOverrides])
+    if (!overridesLoaded.current) return
+    if (overridesSaveTimer.current) clearTimeout(overridesSaveTimer.current)
+    overridesSaveTimer.current = setTimeout(() => {
+      void supabase.from('app_settings').upsert({
+        key: SUPABASE_OVERRIDES_KEY,
+        value: {
+          qty_overrides:      qtyOverrides,
+          material_overrides: materialOverrides,
+          no_buffer_keys:     [...noBufferKeys],
+          no_need_keys:       [...noNeedRowKeys],
+          custom_code_inputs: customCodeInputs,
+          extra_nobom_slots:  extraNoBomSlots,
+        },
+        updated_at: new Date().toISOString(),
+      })
+    }, 500)
+    return () => { if (overridesSaveTimer.current) clearTimeout(overridesSaveTimer.current) }
+  }, [qtyOverrides, materialOverrides, noBufferKeys, noNeedRowKeys, customCodeInputs, extraNoBomSlots])
 
   // 手動選取/輸入的料號不在 loadBomContext 的 allInventoryCodes 內，需額外補查單位
   useEffect(() => {
@@ -339,16 +361,6 @@ export default function MaterialPrepPage() {
         }
       })
   }, [materialOverrides])
-
-  useEffect(() => {
-    if (typeof window === 'undefined') return
-    try { localStorage.setItem(PREP_CUSTOM_CODE_INPUTS_KEY, JSON.stringify(customCodeInputs)) } catch {}
-  }, [customCodeInputs])
-
-  useEffect(() => {
-    if (typeof window === 'undefined') return
-    try { localStorage.setItem(PREP_EXTRA_NOBOM_KEY, JSON.stringify(extraNoBomSlots)) } catch {}
-  }, [extraNoBomSlots])
 
   // ---- 載入出單表的製令（由 loadSheet 帶入 moNumbers） ----
   const loadMoRecords = useCallback(async (moNumbers?: string[], sheetRowsFallback?: SheetRowBrief[]) => {
