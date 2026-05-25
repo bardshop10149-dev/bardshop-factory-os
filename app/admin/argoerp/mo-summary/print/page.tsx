@@ -43,6 +43,7 @@ const DEMO_SO_MAP = new Map<string, SoLine[]>([
     {
       project_id: 'RO26050101', line_no: '15',
       mbp_part: 'LED-BOX-40', mbp_ver: 1,
+      tpn_partner_id: null,
       partner_name: '台灣客戶股份有限公司', sales_name: '陳業務',
       duedate: '2026/05/20',
       order_qty_oru: 1000, unit_of_measure_oru: '個',
@@ -55,6 +56,7 @@ const DEMO_SO_MAP = new Map<string, SoLine[]>([
     {
       project_id: 'RO26050101', line_no: '16',
       mbp_part: 'LED-DRIVER-40', mbp_ver: 1,
+      tpn_partner_id: null,
       partner_name: '台灣客戶股份有限公司', sales_name: '陳業務',
       duedate: '2026/05/22',
       order_qty_oru: 100, unit_of_measure_oru: '個',
@@ -67,6 +69,7 @@ const DEMO_SO_MAP = new Map<string, SoLine[]>([
     {
       project_id: 'RO26050101', line_no: '17',
       mbp_part: 'LED-FRAME-40', mbp_ver: null,
+      tpn_partner_id: null,
       partner_name: '台灣客戶股份有限公司', sales_name: '陳業務',
       duedate: '2026/05/22',
       order_qty_oru: 1000, unit_of_measure_oru: '個',
@@ -81,6 +84,7 @@ const DEMO_SO_MAP = new Map<string, SoLine[]>([
     {
       project_id: 'RO26050203', line_no: '23',
       mbp_part: 'PCB-V2-CP', mbp_ver: 2,
+      tpn_partner_id: null,
       partner_name: '常平外銷客戶', sales_name: '李業務',
       duedate: '2026/05/30',
       order_qty_oru: 500, unit_of_measure_oru: 'PCS',
@@ -93,6 +97,7 @@ const DEMO_SO_MAP = new Map<string, SoLine[]>([
     {
       project_id: 'RO26050203', line_no: '24',
       mbp_part: 'PCB-V2-FULL', mbp_ver: 2,
+      tpn_partner_id: null,
       partner_name: '常平外銷客戶', sales_name: '李業務',
       duedate: '2026/05/30',
       order_qty_oru: 200, unit_of_measure_oru: 'PCS',
