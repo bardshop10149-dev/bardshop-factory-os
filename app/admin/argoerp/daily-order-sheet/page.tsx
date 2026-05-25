@@ -748,6 +748,22 @@ export default function DailyOrderSheetPage() {
 
       setSheetRows(next)
 
+      // 若 row 原本已分配機台，轉換成 MO 後遷移至 moMachines
+      const toMigrate = next.filter(r => r.mo_number && r.machine)
+      if (toMigrate.length > 0) {
+        const assignments = toMigrate.map(r => ({ mo_number: r.mo_number!, machine: r.machine! }))
+        setMoMachines(prev => {
+          const m = { ...prev }
+          for (const a of assignments) if (!m[a.mo_number]) m[a.mo_number] = a.machine
+          return m
+        })
+        await fetch('/api/argoerp/mo-machine-assign', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ assignments }),
+        }).catch(() => {})
+      }
+
       // 立即儲存
       const res = await fetch('/api/argoerp/daily-order-sheet', {
         method: 'POST',
@@ -1174,6 +1190,23 @@ export default function DailyOrderSheetPage() {
 
       // ── 最終儲存（僅此一次）──────────────────────────────────
       setSheetRows(currentRows)
+
+      // 若 row 原本已分配機台，轉換成 MO 後遷移至 moMachines
+      const toMigrate = currentRows.filter(r => r.mo_number && r.machine)
+      if (toMigrate.length > 0) {
+        const assignments = toMigrate.map(r => ({ mo_number: r.mo_number!, machine: r.machine! }))
+        setMoMachines(prev => {
+          const next2 = { ...prev }
+          for (const a of assignments) if (!next2[a.mo_number]) next2[a.mo_number] = a.machine
+          return next2
+        })
+        await fetch('/api/argoerp/mo-machine-assign', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ assignments }),
+        }).catch(() => {})
+      }
+
       const res = await fetch('/api/argoerp/daily-order-sheet', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
