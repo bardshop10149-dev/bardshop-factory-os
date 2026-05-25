@@ -87,7 +87,7 @@ function genPoNo() {
 function makeDefaultHeader(): PoHeader {
   return {
     project_id: genPoNo(), modify_ver: '1', begin_date: fmtDate(new Date()),
-    hold_status: 'UNSIGNED', tpn_partner_id: 'C01510', department: 'M1100',
+    hold_status: 'OPEN', tpn_partner_id: 'C01510', department: 'M1100',
     sales_id: '10149', po_type: 'GENERAL', payment_term: 'PM30',
     payment_mode: 'T', currency: 'CNY', exchange_rate: '4', tax_rate: '0',
   }
