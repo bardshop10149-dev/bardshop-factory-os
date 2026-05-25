@@ -335,7 +335,14 @@ export default function DailyOrderSheetPage() {
       const res = await fetch(`/api/argoerp/daily-order-sheet?date=${date}`)
       const json = await res.json()
       if (json.success && json.sheet) {
-        setSheetRows(Array.isArray(json.sheet.rows) ? json.sheet.rows as SheetRow[] : [])
+        const rows: SheetRow[] = Array.isArray(json.sheet.rows) ? json.sheet.rows as SheetRow[] : []
+        setSheetRows(rows)
+        // 還原沒有 mo_number 的 row-level 機台分配
+        const rmMap: Record<string, string> = {}
+        for (const r of rows) {
+          if (!r.mo_number && r.machine) rmMap[r.row_key] = r.machine
+        }
+        setRowMachines(rmMap)
         setCurrentRawText(json.sheet.raw_text ?? '')
       } else {
         setSheetRows([])
@@ -2037,7 +2044,18 @@ export default function DailyOrderSheetPage() {
                               ) : (
                                 <select
                                   value={rowMachines[row.row_key] || ''}
-                                  onChange={e => setRowMachines(prev => ({ ...prev, [row.row_key]: e.target.value }))}
+                                  onChange={async e => {
+                                    const machine = e.target.value
+                                    setRowMachines(prev => ({ ...prev, [row.row_key]: machine }))
+                                    // 回寫 sheetRows 並立即儲存
+                                    const next = sheetRows.map(r => r.row_key === row.row_key ? { ...r, machine } : r)
+                                    setSheetRows(next)
+                                    await fetch('/api/argoerp/daily-order-sheet', {
+                                      method: 'POST',
+                                      headers: { 'Content-Type': 'application/json' },
+                                      body: JSON.stringify({ sheet_date: selectedDate, raw_text: currentRawText, rows: next }),
+                                    }).catch(() => {})
+                                  }}
                                   className="bg-slate-800 border border-slate-600 text-slate-200 text-xs rounded px-2 py-1 focus:outline-none focus:border-cyan-500 min-w-[90px]"
                                 >
                                   <option value="">— —</option>
