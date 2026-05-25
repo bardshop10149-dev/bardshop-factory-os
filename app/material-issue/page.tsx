@@ -148,6 +148,16 @@ export default function MaterialIssuePage() {
   const [issuedSet, setIssuedSet]         = useState<Set<string>>(new Set())   // "slip_no:line_no"
   const [tab, setTab]                     = useState<'pending' | 'issued'>('pending')
   const [issuingKey, setIssuingKey]       = useState<string | null>(null)
+  const [customerCodeMap, setCustomerCodeMap] = useState<Map<string, string>>(new Map()) // cname → partner_id
+
+  // ── Load customer code map ─────────────────────────────────────────────────────
+  useEffect(() => {
+    supabase.from('erp_customers').select('partner_id, cname').then(({ data }) => {
+      const map = new Map<string, string>()
+      for (const c of (data ?? []) as { partner_id: string; cname: string }[]) map.set(c.cname, c.partner_id)
+      setCustomerCodeMap(map)
+    })
+  }, [])
 
   // ── Load date list ──────────────────────────────────────────────────────────
   useEffect(() => {
@@ -754,7 +764,10 @@ export default function MaterialIssuePage() {
                                 {mo.item_name || '—'}
                               </td>
                               <td className="px-3 py-1.5 text-slate-400 max-w-[120px] truncate print:text-black" title={mo.customer}>
-                                {mo.customer || '—'}
+                                {(() => {
+                                  const code = customerCodeMap.get(mo.customer)
+                                  return code ? `[${code}] ${mo.customer}` : (mo.customer || '—')
+                                })()}
                               </td>
                               <td className="px-3 py-1.5 font-mono text-slate-400 whitespace-nowrap print:text-black">
                                 {mo.order_number || '—'}

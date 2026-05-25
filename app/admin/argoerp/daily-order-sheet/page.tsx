@@ -49,7 +49,7 @@ export interface SheetRow extends SourceRow {
   // 常平採購單比對結果（對應 erp_pj_sync）
   po_number?: string | null
   po_sub_no?: string | null
-  po_status?: 'matched' | 'no_match' | null
+  po_status?: 'matched' | 'no_match' | 'no_po' | null
   // 序號比對結果（對應 erp_so_lines）
   match_status?: MatchStatus | null
   match_line_no?: string | null
@@ -771,6 +771,7 @@ export default function DailyOrderSheetPage() {
   const matchPoRows = (rows: SheetRow[], pool: PoCandidate[], factory: 'C' | 'O'): SheetRow[] =>
     rows.map(row => {
       if (row.factory !== factory) return row
+      if (row.po_status === 'no_po') return row  // 使用者已標記無須採購，保留
       if (!row.item_code) return { ...row, po_number: null, po_sub_no: null, po_status: 'no_match' }
       const qty = parseFloat(String(row.quantity).replace(/,/g, '')) || 0
       const matchLineNo = (row.match_line_no ?? '').trim()
@@ -913,7 +914,8 @@ export default function DailyOrderSheetPage() {
         for (const row of rows) {
           const hasMo  = row.mo_status === '已匯入製令'
           const hasPo  = row.po_status === 'matched' && !!row.po_number
-          if (!hasMo && !hasPo) {
+          const isNoPo = row.po_status === 'no_po'
+          if (!hasMo && !hasPo && !isNoPo) {
             missing.push({ sheet_date: sheet.sheet_date, ...row })
           }
         }
@@ -1418,6 +1420,32 @@ export default function DailyOrderSheetPage() {
   }, [selectedDate])
 
   // ---- 切換廠別 ----
+  // ---- 標記/取消 無須採購（O廠列）----
+  const handleToggleNoPo = useCallback(async (rowKey: string) => {
+    const next: SheetRow[] = sheetRows.map(r => {
+      if ((r.row_key || '') !== rowKey) return r
+      const newStatus = r.po_status === 'no_po' ? null : 'no_po' as const
+      return { ...r, po_status: newStatus, po_number: newStatus === 'no_po' ? null : r.po_number, po_sub_no: newStatus === 'no_po' ? null : r.po_sub_no }
+    })
+    setSheetRows(next)
+    setSaving(true)
+    try {
+      const res = await fetch('/api/argoerp/daily-order-sheet', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sheet_date: selectedDate, raw_text: currentRawText, rows: next }),
+      })
+      const json = await res.json()
+      if (!res.ok || !json.success) throw new Error(json.error || `HTTP ${res.status}`)
+      setSaveMsg('✅ 已更新')
+      setTimeout(() => setSaveMsg(''), 2000)
+    } catch (e) {
+      setSaveMsg(`❌ 儲存失敗：${e}`)
+    } finally {
+      setSaving(false)
+    }
+  }, [sheetRows, selectedDate, currentRawText])
+
   const handleChangeFactory = useCallback((idx: number, factory: 'T' | 'C' | 'O') => {
     setSheetRows(prev => prev.map((r, i) => {
       if (i !== idx) return r
@@ -1830,6 +1858,8 @@ export default function DailyOrderSheetPage() {
                                 ? 'bg-orange-950/20'
                                 : row.factory === 'O' && row.po_status === 'matched'
                                 ? 'bg-purple-950/20'
+                                : row.factory === 'O' && row.po_status === 'no_po'
+                                ? 'bg-slate-900/60'
                                 : 'hover:bg-slate-900/50'
                             }`}
                           >
@@ -1898,14 +1928,55 @@ export default function DailyOrderSheetPage() {
                                     <span className={row.factory === 'C' ? 'text-orange-300' : 'text-purple-300'}>{row.po_number}</span>
                                     {row.po_sub_no && <span className="text-slate-500 ml-1">#{row.po_sub_no}</span>}
                                   </div>
+                                ) : row.po_status === 'no_po' ? (
+                                  <div className="flex items-center gap-1.5">
+                                    <span className="px-1.5 py-0.5 rounded border text-[10px] bg-slate-800 text-slate-400 border-slate-600">無須採購</span>
+                                    {row.factory === 'O' && (
+                                      <button
+                                        onClick={() => void handleToggleNoPo(sk)}
+                                        className="text-[10px] text-slate-500 hover:text-amber-400 transition-colors"
+                                        title="取消無須採購"
+                                      >↺撤销</button>
+                                    )}
+                                  </div>
                                 ) : row.po_status === 'no_match' ? (
-                                  row.mo_number
-                                    ? <span className="text-violet-300">{row.mo_number}</span>
-                                    : <span className="text-red-400 text-[10px]">無對應採購單</span>
+                                  <div>
+                                    {row.mo_number
+                                      ? <span className="text-violet-300">{row.mo_number}</span>
+                                      : <span className="text-red-400 text-[10px]">無對應採購單</span>}
+                                    {row.factory === 'O' && (
+                                      <div className="mt-1">
+                                        <button
+                                          onClick={() => void handleToggleNoPo(sk)}
+                                          className="px-1.5 py-0.5 rounded border text-[10px] bg-slate-800 text-slate-400 border-slate-600 hover:bg-slate-700 hover:text-slate-200 transition-colors"
+                                        >無須採購</button>
+                                      </div>
+                                    )}
+                                  </div>
                                 ) : row.mo_number ? (
-                                  <span className="text-violet-300">{row.mo_number}</span>
+                                  <div>
+                                    <span className="text-violet-300">{row.mo_number}</span>
+                                    {row.factory === 'O' && (
+                                      <div className="mt-1">
+                                        <button
+                                          onClick={() => void handleToggleNoPo(sk)}
+                                          className="px-1.5 py-0.5 rounded border text-[10px] bg-slate-800 text-slate-400 border-slate-600 hover:bg-slate-700 hover:text-slate-200 transition-colors"
+                                        >無須採購</button>
+                                      </div>
+                                    )}
+                                  </div>
                                 ) : (
-                                  <span className="text-slate-600">—</span>
+                                  <div>
+                                    <span className="text-slate-600">—</span>
+                                    {row.factory === 'O' && (
+                                      <div className="mt-1">
+                                        <button
+                                          onClick={() => void handleToggleNoPo(sk)}
+                                          className="px-1.5 py-0.5 rounded border text-[10px] bg-slate-800 text-slate-400 border-slate-600 hover:bg-slate-700 hover:text-slate-200 transition-colors"
+                                        >無須採購</button>
+                                      </div>
+                                    )}
+                                  </div>
                                 )
                               ) : row.mo_number ? (
                                 <span className="text-violet-300">{row.mo_number}</span>

@@ -186,7 +186,7 @@ export default function PoBatchExportOPage() {
       type SheetRowRaw = SourceRow & { po_status?: string; po_number?: string | null; match_line_no?: string | null }
       const allORows = (j.sheet.rows ?? []).filter((x: SheetRowRaw) => x.factory === 'O')
       const rows: SourceRow[] = allORows
-        .filter((x: SheetRowRaw) => !x.po_number && x.po_status !== 'matched')
+        .filter((x: SheetRowRaw) => !x.po_number && x.po_status !== 'matched' && x.po_status !== 'no_po')
         .map((x: SheetRowRaw) => ({ ...x, match_line_no: x.match_line_no ?? null }))
       if (allORows.length === 0) {
         alert(`${date} 出單表中沒有委外廠訂單`)

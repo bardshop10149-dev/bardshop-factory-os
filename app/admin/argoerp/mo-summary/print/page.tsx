@@ -129,6 +129,7 @@ interface SoLine {
   line_no: string
   mbp_part: string | null
   mbp_ver: number | null
+  tpn_partner_id: string | null
   partner_name: string | null
   sales_name: string | null
   duedate: string | null
@@ -231,6 +232,7 @@ function MoPrintContent() {
 
   const [records, setRecords] = useState<MoRecord[]>([])
   const [soMap, setSoMap]     = useState<Map<string, SoLine[]>>(new Map())
+  const [customerCodeMap, setCustomerCodeMap] = useState<Map<string, string>>(new Map()) // cname → partner_id
   const [loading, setLoading] = useState(true)
   const [error, setError]     = useState<string | null>(null)
   const printTime = new Date().toLocaleString('zh-TW')
@@ -257,12 +259,22 @@ function MoPrintContent() {
       const projectIds = [
         ...new Set(mos.map(m => m.source_order).filter((x): x is string => !!x)),
       ]
-      if (projectIds.length === 0) { setLoading(false); return }
+      if (projectIds.length === 0) {
+        // 沒有來源訂單，仍然載入客戶代碼表供 lot_number 使用
+        void (async () => {
+          const { data: custData } = await supabase.from('erp_customers').select('partner_id, cname')
+          const codeMap = new Map<string, string>()
+          for (const c of (custData ?? []) as { partner_id: string; cname: string }[]) codeMap.set(c.cname, c.partner_id)
+          setCustomerCodeMap(codeMap)
+          setLoading(false)
+        })()
+        return
+      }
 
       void (async () => {
         const { data, error: err } = await supabase
           .from('erp_so_lines')
-          .select('project_id,line_no,mbp_part,mbp_ver,partner_name,sales_name,duedate,order_qty_oru,unit_of_measure_oru,description,remark,packing,remark2,grade,part,order_qty,unit_of_measure')
+          .select('project_id,line_no,mbp_part,mbp_ver,tpn_partner_id,partner_name,sales_name,duedate,order_qty_oru,unit_of_measure_oru,description,remark,packing,remark2,grade,part,order_qty,unit_of_measure')
           .in('project_id', projectIds)
         if (err) console.error('so fetch:', err)
 
@@ -273,6 +285,17 @@ function MoPrintContent() {
           map.set(row.project_id, existing)
         }
         setSoMap(map)
+
+        // 同時載入客戶代碼表（供無 SO 的 lot_number fallback 使用）
+        const { data: custData } = await supabase
+          .from('erp_customers')
+          .select('partner_id, cname')
+        const codeMap = new Map<string, string>()
+        for (const c of (custData ?? []) as { partner_id: string; cname: string }[]) {
+          codeMap.set(c.cname, c.partner_id)
+        }
+        setCustomerCodeMap(codeMap)
+
         setLoading(false)
       })()
     } catch (e) {
@@ -560,7 +583,11 @@ function MoPrintContent() {
                     <div style={{ display: 'flex', border: '1px solid #e2e4e8', borderBottom: 'none', fontSize: '13px' }}>
                       {([
                         ['訂單號', mo.source_order, 1],
-                        ['客戶', so?.partner_name ?? mo.lot_number ?? '—', 2],
+                        ['客戶', (() => {
+                          const name = so?.partner_name ?? mo.lot_number ?? '—'
+                          const code = so?.tpn_partner_id ?? customerCodeMap.get(name) ?? null
+                          return code ? `[${code}] ${name}` : name
+                        })(), 2],
                         ['業務員', so?.sales_name ?? '—', 1],
                         ['本製令項號', lineNo, 1],
                       ] as [string, string, number][]).map(([lbl, val, flex], i, arr) => (
