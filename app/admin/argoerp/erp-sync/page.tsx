@@ -892,7 +892,9 @@ function SyncCard({ docKey }: SyncCardProps) {
           ${headerRows.map(([l, v]) => `<div class="hdr-cell"><span class="hdr-label">${l}</span><span class="hdr-val">${v}</span></div>`).join('')}
         </div>`
 
-      const detailRows = lines.map(r => {
+      const detailRows = [...lines].sort((a, b) =>
+        (a.sub_no ?? '').localeCompare(b.sub_no ?? '', undefined, { numeric: true })
+      ).map(r => {
         const rx = r.extra as Record<string, unknown> | null | undefined
         const remark = r.remark ? `<div class="remark">商品備註：${r.remark}</div>` : ''
         const packing = rx?.PACKING ? `<div class="packing">包裝方式：${String(rx.PACKING)}</div>` : ''
