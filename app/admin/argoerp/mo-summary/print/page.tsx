@@ -127,6 +127,7 @@ interface MoRecord {
   prep_status?: string
   machine?: string
   line_no_override?: string  // 直接指定行號（供每日出單表列印使用）
+  po_number?: string | null   // ERP 採購單號（POC/POO 開頭）
 }
 
 interface SoLine {
@@ -277,7 +278,7 @@ function PoCard({
             background: '#f0f0f0', padding: '3px 8px', border: '1px solid #555',
             display: 'inline-block', borderRadius: '3px', color: '#000',
           }}>
-            {mo.mo_number}
+            {mo.po_number || mo.mo_number}
           </div>
           <div style={{ marginTop: '6px', display: 'flex', gap: '6px' }}>
             {(['急件單', '打樣單'] as const).map(label => (
