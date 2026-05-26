@@ -287,7 +287,7 @@ export async function POST(request: NextRequest) {
   try {
     const body = await request.json()
     const { action, data, interfaceId } = body as {
-      action: 'import' | 'query' | 'sync_inventory' | 'sync_customer' | 'fetch_po_pdl_links' | 'explore_so_columns' | 'test_so_detail' | 'test_po_detail' | 'sync_so' | 'sync_mo' | 'sync_pj' | 'sync_po' | 'sync_pr' | 'sync_bom_units' | 'sync_material_prep'
+      action: 'import' | 'query' | 'sync_inventory' | 'sync_customer' | 'fetch_po_pdl_links' | 'explore_so_columns' | 'test_so_detail' | 'test_po_detail' | 'sync_so' | 'sync_mo' | 'sync_pj' | 'sync_po' | 'sync_pr' | 'sync_bom_units' | 'sync_bom_structure' | 'sync_material_prep'
       data?: Record<string, unknown>[]
       interfaceId?: string
     }
@@ -1329,7 +1329,7 @@ export async function POST(request: NextRequest) {
         SEGMENT,
         TABLE: 'MM_BOM_PART',
         SHOWNULLCOLUMN: 'N',
-        CUSTOMCOLUMN: 'PART,UNIT_OF_MEASURE',
+        CUSTOMCOLUMN: 'PART,UNIT_OF_MEASURE,PART_NAME,PART_DESC',
         PART: 'IS NOT NULL',   // ARGO 需要至少一個 filter，否則空 WHERE 子句 → ORA-00936
       })
       const argoRes = await fetch(`${API_BASE}/S_QUERY`, {
@@ -1348,15 +1348,17 @@ export async function POST(request: NextRequest) {
         return NextResponse.json({ status: 'error', error: 'ARGO 查無 MM_BOM_PART 資料' }, { status: 422 })
       }
 
-      // 整理：過濾掉 PART 或 UNIT_OF_MEASURE 為空的
+      // 整理：過濾掉 PART 為空的（UNIT_OF_MEASURE / PART_NAME / PART_DESC 允許為 null）
       const syncedAt = new Date().toISOString()
       const upsertRows = bomRows
         .map(row => ({
           part_code: String(getRecordValue(row, 'PART') ?? '').trim(),
           unit_of_measure: String(getRecordValue(row, 'UNIT_OF_MEASURE') ?? '').trim() || null,
+          part_name: String(getRecordValue(row, 'PART_NAME') ?? '').trim() || null,
+          part_desc: String(getRecordValue(row, 'PART_DESC') ?? '').trim() || null,
           synced_at: syncedAt,
         }))
-        .filter(r => r.part_code && r.unit_of_measure)
+        .filter(r => r.part_code)
 
       const supabaseAdmin = getSupabaseAdminClient()
       const BATCH_SIZE = 500
@@ -1374,6 +1376,69 @@ export async function POST(request: NextRequest) {
         status: 'ok',
         totalFromArgo: bomRows.length,
         upsertedCount,
+      })
+    }
+
+    if (action === 'sync_bom_structure') {
+      // ── 全量同步 MM_BOM_STRUCTURE BOM展開結構 到 Supabase mm_bom_structure ──
+      const sparam = JSON.stringify({
+        APIKEY1: keys.APIKEY1,
+        APIKEY2: keys.APIKEY2,
+        APIKEY3: keys.APIKEY3,
+        SEGMENT,
+        TABLE: 'MM_BOM_STRUCTURE',
+        SHOWNULLCOLUMN: 'N',
+        CUSTOMCOLUMN: 'MBP_PART,MBP_VER,MBP_CHILD_PART,MBP_CHILD_VER,LINE_NO,CHILD_QTY,CHILD_SCRAP,LOT_CHILD_QTY,LOT_BASE',
+        MBP_PART: 'IS NOT NULL',  // ARGO 需要至少一個 filter，否則 ORA-00936
+      })
+      const argoRes = await fetch(`${API_BASE}/S_QUERY`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sparam }),
+      })
+      const { parsed: argoParsed, rawText: argoRaw } = await readApiResponse(argoRes)
+      const argoError = extractApiError(argoParsed)
+      if (!argoRes.ok || !isArgoSuccess(argoParsed)) {
+        return NextResponse.json({ status: 'error', error: argoError || 'ARGO MM_BOM_STRUCTURE query failed', rawText: argoRaw }, { status: 502 })
+      }
+
+      const bomRows = findObjectRows(argoParsed)
+      if (bomRows.length === 0) {
+        return NextResponse.json({ status: 'error', error: 'ARGO 查無 MM_BOM_STRUCTURE 資料' }, { status: 422 })
+      }
+
+      const syncedAt = new Date().toISOString()
+      const upsertRows = bomRows
+        .map(row => ({
+          parent_part:   String(getRecordValue(row, 'MBP_PART')       ?? '').trim(),
+          bom_ver:       Number(getRecordValue(row, 'MBP_VER')        ?? 1),
+          child_part:    String(getRecordValue(row, 'MBP_CHILD_PART') ?? '').trim(),
+          child_ver:     Number(getRecordValue(row, 'MBP_CHILD_VER')  ?? 1),
+          line_no:       Number(getRecordValue(row, 'LINE_NO')         ?? 1),
+          child_qty:     Number(getRecordValue(row, 'CHILD_QTY')       ?? 0),
+          child_scrap:   Number(getRecordValue(row, 'CHILD_SCRAP')     ?? 0),
+          lot_child_qty: getRecordValue(row, 'LOT_CHILD_QTY') != null ? Number(getRecordValue(row, 'LOT_CHILD_QTY')) : null,
+          lot_base:      getRecordValue(row, 'LOT_BASE')      != null ? Number(getRecordValue(row, 'LOT_BASE'))      : null,
+          synced_at: syncedAt,
+        }))
+        .filter(r => r.parent_part && r.child_part)
+
+      const supabaseAdmin = getSupabaseAdminClient()
+      const BATCH_SIZE = 500
+      let upsertedCount = 0
+      for (let i = 0; i < upsertRows.length; i += BATCH_SIZE) {
+        const chunk = upsertRows.slice(i, i + BATCH_SIZE)
+        const { error: upsertError } = await supabaseAdmin
+          .from('mm_bom_structure')
+          .upsert(chunk, { onConflict: 'parent_part,bom_ver,child_part,child_ver,line_no' })
+        if (upsertError) throw upsertError
+        upsertedCount += chunk.length
+      }
+
+      return NextResponse.json({
+        status: 'ok',
+        syncedCount: upsertedCount,
+        totalFromArgo: bomRows.length,
       })
     }
 

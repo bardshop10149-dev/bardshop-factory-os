@@ -627,15 +627,50 @@ export default function MaterialPrepPage() {
     setBomError('')
 
     try {
-      const { data: bomData, error: bomDataError } = await supabase
-        .from('bom')
-        .select('product_code, product_name, production_quantity, production_unit, note, material_code, material_name, quantity, unit')
-        .in('product_code', productCodes)
+      // ── ERP BOM：mm_bom_structure（母件→子件），取各 parent_part 的最低版本 ──
+      const { data: erpBomData, error: erpBomErr } = await supabase
+        .from('mm_bom_structure')
+        .select('parent_part, child_part, lot_child_qty, lot_base, bom_ver')
+        .in('parent_part', productCodes)
+      if (erpBomErr) throw erpBomErr
 
-      if (bomDataError) throw bomDataError
+      type ErpBomRow = { parent_part: string; child_part: string; lot_child_qty: number | null; lot_base: number | null; bom_ver: number }
+      const allErpBom = (erpBomData ?? []) as ErpBomRow[]
 
-      const rows = (bomData as BomRow[] | null) || []
-      const materialCodes = Array.from(new Set(rows.map(row => row.material_code).filter(Boolean)))
+      // 每個 parent_part 只取最低 bom_ver
+      const minVerMap: Record<string, number> = {}
+      allErpBom.forEach(r => {
+        if (minVerMap[r.parent_part] === undefined || r.bom_ver < minVerMap[r.parent_part]) {
+          minVerMap[r.parent_part] = r.bom_ver
+        }
+      })
+      const filteredErpBom = allErpBom.filter(r => r.bom_ver === minVerMap[r.parent_part])
+
+      // 取子件的中文名稱與單位（mm_bom_part_units）
+      const materialCodes = Array.from(new Set(filteredErpBom.map(r => r.child_part).filter(Boolean)))
+      const partInfoMap: Record<string, { part_name: string | null; unit_of_measure: string | null }> = {}
+      if (materialCodes.length > 0) {
+        const { data: partData } = await supabase
+          .from('mm_bom_part_units')
+          .select('part_code, part_name, unit_of_measure')
+          .in('part_code', materialCodes)
+        ;((partData ?? []) as Array<{ part_code: string; part_name: string | null; unit_of_measure: string | null }>).forEach(p => {
+          partInfoMap[p.part_code] = { part_name: p.part_name, unit_of_measure: p.unit_of_measure }
+        })
+      }
+
+      // 組合 BomRow（保持原有介面欄位，供 materialPrepRows 計算邏輯不變）
+      const rows: BomRow[] = filteredErpBom.map(r => ({
+        product_code: r.parent_part,
+        product_name: null,
+        production_quantity: r.lot_base ?? 1,
+        production_unit: null,
+        note: null,
+        material_code: r.child_part,
+        material_name: partInfoMap[r.child_part]?.part_name ?? null,
+        quantity: r.lot_child_qty ?? 0,
+        unit: partInfoMap[r.child_part]?.unit_of_measure ?? null,
+      }))
 
       const { data: substituteData, error: substituteError } = await supabase
         .from('material_substitute_rules')

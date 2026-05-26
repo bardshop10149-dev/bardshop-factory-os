@@ -823,14 +823,21 @@ export default function DailyOrderSheetPage() {
           String(c.extra?.MBP_LOT_NO ?? '').trim() === (row.order_number ?? '').trim()
         )
       // 第三優先：料號 + 數量 + TPN_PART_NO === match_line_no
-      if (hitIdx === -1 && matchLineNo)
+      // 僅委外（O）適用：常平 PO 的 TPN_PART_NO 是行號，會與 SO 序號碰巧相同而誤配
+      // 委外需同時確認 SO_PROJECT_ID 或 MBP_LOT_NO 指向同一工單（避免行號碰巧相符）
+      if (hitIdx === -1 && matchLineNo && factory === 'O')
         hitIdx = pool.findIndex(c =>
           !c._used && (c.item_code ?? '') === row.item_code && c.qty === qty &&
-          String(c.extra?.TPN_PART_NO ?? '') === matchLineNo
+          String(c.extra?.TPN_PART_NO ?? '') === matchLineNo &&
+          (
+            String(c.extra?.SO_PROJECT_ID ?? '').trim() === (row.order_number ?? '').trim() ||
+            String(c.extra?.MBP_LOT_NO ?? '').trim() === (row.order_number ?? '').trim()
+          )
         )
       // fallback：僅料號 + 數量，且 MBP_LOT_NO 為空，且 SO_PROJECT_ID 也為空或一致，
       // 且 PO 開單日距出單表日期不超過 6 個月（防止舊年份 PO 誤配新訂單）
-      if (hitIdx === -1)
+      // 常平（C）與委外（O）都有明確的批號/來源訂單可比對，不走此 fallback
+      if (hitIdx === -1 && factory !== 'C' && factory !== 'O')
         hitIdx = pool.findIndex(c =>
           !c._used && (c.item_code ?? '') === row.item_code && c.qty === qty &&
           !String(c.extra?.MBP_LOT_NO ?? '').trim() &&
@@ -879,7 +886,7 @@ export default function DailyOrderSheetPage() {
         }
       }
 
-      // ── 委外（42828690）──
+      // ── 委外（任意廠商，排除常平 C01510）──
       if (oRows.length > 0) {
         const itemCodesO = [...new Set(oRows.map(r => r.item_code).filter(Boolean))]
         if (itemCodesO.length > 0) {
@@ -888,7 +895,7 @@ export default function DailyOrderSheetPage() {
             .select('doc_no, sub_no, item_code, qty, status, start_date, extra')
             .eq('doc_type', '採購單號')
             .eq('status', 'OPEN')
-            .eq('customer_vendor', '42828690')
+            .neq('customer_vendor', 'C01510')
             .in('item_code', itemCodesO)
             .order('doc_no', { ascending: false })
           if (errO) throw errO
@@ -1184,7 +1191,7 @@ export default function DailyOrderSheetPage() {
           }
         }
 
-        // 委外（O）
+        // 委外（O）— 任意廠商，排除常平 C01510
         if (hasORows) {
           const itemCodesO = [...new Set(currentRows.filter(r => r.factory === 'O').map(r => r.item_code).filter(Boolean))]
           if (itemCodesO.length > 0) {
@@ -1193,7 +1200,7 @@ export default function DailyOrderSheetPage() {
               .select('doc_no, sub_no, item_code, qty, status, start_date, extra')
               .eq('doc_type', '採購單號')
               .eq('status', 'OPEN')
-              .eq('customer_vendor', '42828690')
+              .neq('customer_vendor', 'C01510')
               .in('item_code', itemCodesO)
               .order('doc_no', { ascending: false })
             if (poErrO) throw poErrO
@@ -1359,13 +1366,13 @@ export default function DailyOrderSheetPage() {
         extra: (r.extra ?? null) as Record<string, unknown> | null, _used: false,
       }))
 
-      // 委外（42828690）
+      // 委外（任意廠商，排除常平 C01510）
       const { data: allPoRowsO, error: poErrO } = await supabase
         .from('erp_pj_sync')
         .select('doc_no, sub_no, item_code, qty, status, start_date, extra')
         .eq('doc_type', '採購單號')
         .eq('status', 'OPEN')
-        .eq('customer_vendor', '42828690')
+        .neq('customer_vendor', 'C01510')
         .order('doc_no', { ascending: false })
       if (poErrO) throw poErrO
       const globalPoPoolO: Candidate[] = (allPoRowsO ?? []).map(r => ({
@@ -1899,7 +1906,7 @@ export default function DailyOrderSheetPage() {
                         <th className="px-3 py-2 border-b border-slate-800">批備料</th>
                         <th className="px-3 py-2 border-b border-slate-800 whitespace-nowrap">打樣/追加單號</th>
                         <th className="px-3 py-2 border-b border-slate-800">機台</th>
-                        <th className="px-3 py-2 border-b border-slate-800">狀態</th>
+                        <th className="px-3 py-2 border-b border-slate-800 w-20">狀態</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -1984,7 +1991,7 @@ export default function DailyOrderSheetPage() {
                             </td>
                             <td className="px-3 py-2 text-slate-300 text-right">{row.quantity}</td>
                             <td className="px-3 py-2 text-yellow-400 text-center font-mono font-semibold">{row.plate_count || '—'}</td>
-                            <td className="px-3 py-2 text-slate-400 max-w-[120px] truncate" title={row.customer}>{row.customer}</td>
+                            <td className="px-3 py-2 text-slate-400 w-[110px] whitespace-normal break-words leading-snug">{row.customer}</td>
                             <td className="px-3 py-2 text-slate-500 whitespace-nowrap">{row.delivery_date}</td>
                             <td className="px-3 py-2 font-mono text-xs">
                               {(row.factory === 'C' || row.factory === 'O') ? (
@@ -2119,13 +2126,13 @@ export default function DailyOrderSheetPage() {
                                 </select>
                               )}
                             </td>
-                            <td className="px-3 py-2">
+                            <td className="px-3 py-2 w-20">
                               {statusInfo ? (
-                                <span className={`px-2 py-0.5 rounded border text-xs font-medium ${statusInfo.cls}`}>
+                                <span className={`px-1.5 py-0.5 rounded border text-xs font-medium whitespace-normal leading-snug inline-block ${statusInfo.cls}`}>
                                   {statusInfo.label}
                                 </span>
                               ) : (
-                                <span className="px-2 py-0.5 rounded border border-slate-700 text-slate-500 text-xs">尚未轉單</span>
+                                <span className="px-1.5 py-0.5 rounded border border-slate-700 text-slate-500 text-xs whitespace-normal leading-snug inline-block">尚未轉單</span>
                               )}
                             </td>
                           </tr>
