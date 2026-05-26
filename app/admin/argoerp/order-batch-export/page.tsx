@@ -310,7 +310,7 @@ function mapAllToExport(srcRows: SourceRow[], matchResults?: SoMatchResult[]): E
 
     row.planned_start_date = nextBizDay                // 預定投產日：下一個工作日
     row.planned_end_date = src.delivery_date            // 預定結案日：交付日期
-    row.mo_status = 'OPEN'                             // 製令狀態
+    row.mo_status = src.factory === 'T' ? 'OPEN' : 'UNSIGNED'  // 製令=OPEN；採購單(C/O)=UNSIGNED
     row.department = 'M1100'                           // 部門
     row.cost_department = 'M1000'                      // 成本部門
     row.seq_number = lineNo ? String(Number(lineNo)) : '1'  // 編號：來源訂單項號（LINE_NO）
