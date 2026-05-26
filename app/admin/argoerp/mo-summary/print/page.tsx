@@ -245,7 +245,6 @@ function PoCard({
   const soLines = soMap.get(mo.source_order ?? '') ?? []
   const so = soLines.find(l => String(parseInt(String(l.line_no || '0'), 10)) === lineNo) ?? soLines[0] ?? null
 
-  const factoryColor = FACTORY_COLOR[mo.factory ?? ''] ?? '#374151'
   const factoryLabel = FACTORY_LABEL[mo.factory ?? ''] ?? mo.factory ?? '—'
 
   const labelTd: React.CSSProperties = { border: '1px solid #ccc', padding: '4px 6px', fontSize: '14px', color: '#555', background: '#f2f2f2', width: '70px', whiteSpace: 'nowrap' }
@@ -267,11 +266,12 @@ function PoCard({
       <div style={{
         display: 'grid', gridTemplateColumns: '1fr auto 1fr',
         alignItems: 'center', gap: '8px',
-        borderBottom: `2px solid ${factoryColor}`,
+        borderBottom: '2px solid #000',
         paddingBottom: '8px', marginBottom: '10px',
       }}>
         {/* 左：採購單號 + 急件/打樣 */}
         <div>
+          <div style={{ fontSize: '11px', color: '#555', marginBottom: '3px', fontWeight: 600, letterSpacing: '1px' }}>採購單號</div>
           <div style={{
             fontSize: '22px', fontWeight: 'bold', letterSpacing: '1px',
             background: '#f0f0f0', padding: '3px 8px', border: '1px solid #555',
@@ -294,7 +294,7 @@ function PoCard({
 
         {/* 中：採購單 大標題 */}
         <div style={{ textAlign: 'center' }}>
-          <div style={{ fontSize: '36px', fontWeight: 900, letterSpacing: '5px', color: factoryColor, WebkitTextStroke: `1px ${factoryColor}` }}>
+          <div style={{ fontSize: '36px', fontWeight: 900, letterSpacing: '5px', color: '#000', WebkitTextStroke: '1px #000' }}>
             採購單
           </div>
           <div style={{ fontSize: '14px', color: '#666', marginTop: '3px', letterSpacing: '1px' }}>
@@ -304,9 +304,9 @@ function PoCard({
 
         {/* 右：供應廠別 */}
         <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center' }}>
-          <div style={{ border: `2px solid ${factoryColor}`, borderRadius: '4px', padding: '8px 14px', minWidth: '160px', textAlign: 'center' }}>
+          <div style={{ border: '2px solid #222', borderRadius: '4px', padding: '8px 14px', minWidth: '160px', textAlign: 'center' }}>
             <div style={{ fontSize: '11px', color: '#555', marginBottom: '4px', fontWeight: 600, letterSpacing: '1px' }}>供應廠別</div>
-            <div style={{ fontSize: '22px', fontWeight: 800, color: factoryColor, letterSpacing: '1px' }}>
+            <div style={{ fontSize: '22px', fontWeight: 800, color: '#000', letterSpacing: '1px' }}>
               {factoryLabel}
             </div>
           </div>
@@ -317,7 +317,7 @@ function PoCard({
       <div className="mo-section" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px', marginBottom: '10px', alignItems: 'stretch' }}>
         {/* 左：採購資訊 */}
         <div>
-          <SectionTitle color={factoryColor}>採購資訊</SectionTitle>
+          <SectionTitle color="#222">採購資訊</SectionTitle>
           <table style={{ width: '100%', borderCollapse: 'collapse' }}>
             <tbody>
               {([
@@ -337,7 +337,7 @@ function PoCard({
 
         {/* 右：交期資訊 */}
         <div>
-          <SectionTitle color={factoryColor}>交期資訊</SectionTitle>
+          <SectionTitle color="#222">交期資訊</SectionTitle>
           <table style={{ width: '100%', borderCollapse: 'collapse' }}>
             <tbody>
               <tr style={{ height: '38px' }}>
@@ -364,7 +364,7 @@ function PoCard({
 
       {/* ── 採購備註（品名規格 + SO 備註/包裝）── */}
       <div className="mo-section" style={{ marginBottom: '10px' }}>
-        <SectionTitle color={factoryColor}>採購備註</SectionTitle>
+        <SectionTitle color="#222">採購備註</SectionTitle>
         <table style={{ width: '100%', borderCollapse: 'collapse' }}>
           <tbody>
             <tr>
@@ -389,7 +389,7 @@ function PoCard({
 
       {/* ── 來源訂單資訊 ── */}
       <div className="mo-section" style={{ marginBottom: '10px' }}>
-        <SectionTitle color={factoryColor}>來源訂單資訊</SectionTitle>
+        <SectionTitle color="#222">來源訂單資訊</SectionTitle>
         {mo.source_order ? (
           <>
             {/* 訂單摘要列 */}
@@ -462,9 +462,9 @@ function PoCard({
         )}
       </div>
 
-      {/* ── 空白備註欄 ── */}
+      {/* ── 備註欄 ── */}
       <div style={{ flex: 1, marginBottom: '10px', display: 'flex', flexDirection: 'column' }}>
-        <SectionTitle color={factoryColor}>生產備註</SectionTitle>
+        <SectionTitle color="#222">備註欄</SectionTitle>
         <div style={{ border: '1px solid #ccc', flex: 1, padding: '4px 8px', minHeight: '48px' }}>
           &nbsp;
         </div>
@@ -472,9 +472,9 @@ function PoCard({
 
       {/* ── 作業確認 ── */}
       <div className="mo-card-footer">
-        <SectionTitle color={factoryColor}>作業確認</SectionTitle>
+        <SectionTitle color="#222">作業確認</SectionTitle>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', border: '1px solid #bbb' }}>
-          {['採購人員', '倉管收料', '品檢驗收', '財務對帳'].map((role, ri) => (
+          {['倉管收料', '品檢驗收', '入庫作業', '銷單作業'].map((role, ri) => (
             <div key={role} style={{ borderRight: ri < 3 ? '1px solid #bbb' : 'none' }}>
               <div style={{ padding: '6px 10px 28px', borderBottom: '1px solid #bbb' }}>
                 <div style={{ fontSize: '13px', color: '#6b7280', fontWeight: 500 }}>{role}</div>
