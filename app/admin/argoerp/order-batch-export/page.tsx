@@ -481,9 +481,9 @@ async function saveRecordsToSummaryDbUpsert(records: ReturnType<typeof buildSumm
   }
 }
 
-// 雙寫：先寫 DB，DB 成功再寫 localStorage（讓 DB 為主、本地為備援）
+// 雙寫：先寫 DB（upsert 模式，避免重複 key 錯誤），DB 成功再寫 localStorage（讓 DB 為主、本地為備援）
 async function saveRecordsToSummary(records: ReturnType<typeof buildSummaryRecords>): Promise<void> {
-  await saveRecordsToSummaryDb(records)
+  await saveRecordsToSummaryDbUpsert(records)
   try { saveRecordsToSummaryLocal(records) } catch {}
   // 同步更新 seq cache
   for (const r of records) {
@@ -1068,7 +1068,7 @@ export default function OrderBatchExportPage() {
       } catch (saveErr) {
         const sm = saveErr instanceof Error ? saveErr.message : '未知錯誤'
         console.error('[ArgoERP 匯入] DB 儲存總表失敗', saveErr)
-        alert(`⚠️ ERP 已匯入成功，但製令總表（Supabase）儲存失敗：${sm}\n\n請記下以下製令號並手動補登：\n${records.map(r => r.mo_number).join(', ')}`)
+        setSaveMsg(`⚠️ ERP 匯入成功，但製令總表（Supabase）儲存失敗：${sm}`)
       }
 
       // 寫入製令上傳紀錄（fire-and-forget，不阻塞主流程）
@@ -1106,12 +1106,7 @@ export default function OrderBatchExportPage() {
 
       const successMsg = `✅ ${factoryLabel(factory)} ${records.length} 筆已匯入 ERP ${targetLabel}並儲存至製令總表`
       setSaveMsg(successMsg)
-      // 顯示首筆製令號 + ERP 原始回應，確認資料有進 ERP（DEBUG 用，確認後可移除）
-      const firstMo = records[0]?.mo_number ?? '?'
-      const erpRaw = typeof result?.rawText === 'string'
-        ? result.rawText.slice(0, 400)
-        : JSON.stringify(result?.apiResult ?? '').slice(0, 400)
-      alert(`${successMsg}\n\n首筆製令號：${firstMo}\n\n【ERP 原始回應（前400字）】\n${erpRaw}`)
+      alert(successMsg)
 
       setTimeout(() => setSaveMsg(''), 6000)
     } catch (error) {
