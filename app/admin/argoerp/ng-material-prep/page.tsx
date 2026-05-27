@@ -252,6 +252,24 @@ export default function NgMaterialPrepPage() {
         }
       }
 
+      // 5. 以出單表分配機台覆寫（mo-machine-assign API）
+      if (merged.length > 0) {
+        try {
+          const nums = merged.map(m => m.mo_number)
+          const assignRes = await fetch(`/api/argoerp/mo-machine-assign?mo_numbers=${encodeURIComponent(nums.join(','))}`)
+          const assignJson = await assignRes.json().catch(() => ({}))
+          if (assignJson?.success && Array.isArray(assignJson.assignments)) {
+            const assignMap: Record<string, string> = {}
+            for (const a of assignJson.assignments as { mo_number: string; machine: string }[]) {
+              if (a.mo_number && a.machine) assignMap[a.mo_number] = a.machine
+            }
+            for (const rec of merged) {
+              if (assignMap[rec.mo_number]) rec.machine = assignMap[rec.mo_number]
+            }
+          }
+        } catch { /* 忽略機台分配載入錯誤 */ }
+      }
+
       setMoList(merged)
     } catch (e) {
       setSoError(e instanceof Error ? e.message : '搜尋失敗')
