@@ -917,7 +917,17 @@ export default function NgMaterialPrepPage() {
               <div><span className="text-slate-500">品號</span><p className="text-cyan-300 font-mono mt-0.5">{selectedMo.product_code || '-'}</p></div>
               <div><span className="text-slate-500">數量</span><p className="text-white font-mono mt-0.5">{selectedMo.planned_qty || '-'}</p></div>
               <div><span className="text-slate-500">盤數</span><p className="text-white font-mono mt-0.5">{selectedMo.plate_count || '-'}</p></div>
-              <div><span className="text-slate-500">機台</span><p className="text-white font-mono mt-0.5">{selectedMo.machine || '-'}</p></div>
+              <div>
+                <span className="text-slate-500">機台</span>
+                <input
+                  type="text"
+                  value={selectedMo.machine || ''}
+                  onChange={e => setSelectedMo(prev => prev ? { ...prev, machine: e.target.value } : prev)}
+                  placeholder="輸入機台"
+                  title="將作為每行 ARGO REMARK 預設值"
+                  className="block w-full mt-0.5 px-2 py-0.5 rounded bg-slate-800 border border-slate-600 text-white font-mono text-xs focus:outline-none focus:border-cyan-500"
+                />
+              </div>
             </div>
 
             {bomLoading ? (
