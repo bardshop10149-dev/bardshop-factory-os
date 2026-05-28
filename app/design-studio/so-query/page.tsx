@@ -11,6 +11,7 @@ interface SoLine {
   begin_date: string | null
   sales_name: string | null
   partner_name: string | null
+  tpn_part_no: string | null
   line_no: string
   mbp_part: string | null
   duedate: string | null
@@ -39,7 +40,7 @@ function today() {
 }
 
 // Excel 欄位順序（Tab 分隔）
-// 工單編號 | (空) | 單據種類 | 簽收人員 | (空) | 打樣 | 附素材 | 美編 | 客戶/供應商名 | LINE暱稱 | 承辦人 | 開單人員 | 品項編碼 | 品名/規格 | 備註 | 數量 | 交付日期
+// 工單編號 | (空) | 單據種類 | 簽收人員 | 打樣 | 附素材 | 前置單號 | 客戶/供應商名 | LINE暱稱 | 承辦人 | 開單人員 | 品項編碼 | 品名/規格 | 備註 | 數量 | 交付日期 | 盤數
 
 // 清洗 TSV 儲存格：移除換行/tab 避免 Excel 貼上時錯位
 function sanitizeCell(v: string | number | null | undefined): string {
@@ -55,21 +56,22 @@ function sanitizeCell(v: string | number | null | undefined): string {
 function buildExcelRow(r: SoLine): string {
   const cols = [
     r.project_id,                          // 工單編號
+    '',                                    // (空)
     '',                                    // 單據種類
     '',                                    // 簽收人員
-    '',                                    // (空) ← 單據種類跟打樣之間加的一格
+    r.tpn_part_no ?? '',                   // 前置單號（E欄）
     '',                                    // 打樣
     '',                                    // 附素材
-    '',                                    // 美編
     r.partner_name ?? '',                  // 客戶/供應商名
     '',                                    // LINE暱稱
-    r.sales_name ?? '',                    // 承辦人 ← 業務
+    r.sales_name ?? '',                    // 承辦人
     '',                                    // 開單人員
     r.mbp_part ?? '',                      // 品項編碼
     r.description ?? '',                   // 品名/規格
-    r.packing ?? '',                       // 備註 ← 商品備註
+    r.packing ?? '',                       // 備註
     r.order_qty_oru != null ? String(r.order_qty_oru) : '', // 數量
     fmtDate(r.duedate),                    // 交付日期
+    '',                                    // 盤數
   ]
   return cols.map(sanitizeCell).join('\t')
 }
@@ -158,7 +160,7 @@ export default function SoQueryPage() {
 
     const { data, error } = await supabase
       .from('erp_so_lines')
-      .select('id,project_id,begin_date,sales_name,partner_name,line_no,mbp_part,duedate,order_qty_oru,unit_of_measure_oru,description,packing,remark2')
+      .select('id,project_id,begin_date,sales_name,partner_name,tpn_part_no,line_no,mbp_part,duedate,order_qty_oru,unit_of_measure_oru,description,packing,remark2')
       .in('project_id', ids)
       .order('project_id', { ascending: true })
       .order('line_no',    { ascending: true })
@@ -187,7 +189,7 @@ export default function SoQueryPage() {
     setTimeout(() => setCopyMsg(''), 3000)
   }, [rows, selectedIds])
 
-  const COLS = 11 // colSpan 數量（含勾選欄）
+  const COLS = 12 // colSpan 數量（含勾選欄）
 
   const allSelected = rows.length > 0 && rows.every(r => selectedIds.has(r.id))
   const toggleAll = () => {
@@ -291,6 +293,7 @@ export default function SoQueryPage() {
               <th className="px-3 py-2.5 text-left whitespace-nowrap">序號</th>
               <th className="px-3 py-2.5 text-left whitespace-nowrap">下單日</th>
               <th className="px-3 py-2.5 text-left whitespace-nowrap">交期</th>
+              <th className="px-3 py-2.5 text-left whitespace-nowrap">前置單號</th>
               <th className="px-3 py-2.5 text-left whitespace-nowrap">客戶名稱</th>
               <th className="px-3 py-2.5 text-left whitespace-nowrap">業務</th>
               <th className="px-3 py-2.5 text-left whitespace-nowrap">料號</th>
@@ -339,6 +342,7 @@ export default function SoQueryPage() {
                 <td className={`px-3 py-2 whitespace-nowrap font-medium ${normalizeDate(r.duedate) && (normalizeDate(r.duedate) ?? '') < today() ? 'text-red-400' : 'text-emerald-400'}`}>
                   {fmtDate(r.duedate)}
                 </td>
+                <td className="px-3 py-2 font-mono text-sky-400/90 whitespace-nowrap">{r.tpn_part_no ?? '—'}</td>
                 <td className="px-3 py-2 text-slate-200 max-w-[140px] truncate" title={r.partner_name ?? ''}>{r.partner_name ?? '—'}</td>
                 <td className="px-3 py-2 text-slate-400 whitespace-nowrap">{r.sales_name ?? '—'}</td>
                 <td className="px-3 py-2 font-mono text-slate-300 whitespace-nowrap">{r.mbp_part ?? '—'}</td>

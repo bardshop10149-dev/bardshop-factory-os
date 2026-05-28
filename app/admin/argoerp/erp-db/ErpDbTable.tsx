@@ -68,6 +68,16 @@ const COL_MAP: Record<string, ColDef[]> = {
     { key: 'unit_of_measure', label: '單位' },
     { key: 'updated_at',  label: '更新時間', date: true },
   ],
+  BOM結構: [
+    { key: 'parent_part',  label: '母件料號', mono: true },
+    { key: 'bom_ver',      label: 'BOM版本',  mono: true, align: 'right' },
+    { key: 'line_no',      label: '行號',     mono: true, align: 'right' },
+    { key: 'child_part',   label: '子件料號', mono: true },
+    { key: 'child_qty',    label: '用量',     align: 'right', mono: true },
+    { key: 'child_scrap',  label: '損耗率',   align: 'right', mono: true },
+    { key: 'lot_base',     label: '批量基準', align: 'right', mono: true },
+    { key: 'synced_at',    label: '同步時間', date: true },
+  ],
 }
 
 // ─── 每種 docType 的 Supabase 資料來源 ─────────────────────
@@ -76,6 +86,7 @@ type SourceConfig =
   | { from: 'erp_mo_lines' }
   | { from: 'erp_pj_sync'; docType: string }
   | { from: 'material_inventory_list' }
+  | { from: 'mm_bom_structure' }
 
 const SOURCE_MAP: Record<string, SourceConfig> = {
   銷售訂單: { from: 'erp_so_lines' },
@@ -83,12 +94,14 @@ const SOURCE_MAP: Record<string, SourceConfig> = {
   採購單號: { from: 'erp_pj_sync', docType: '採購單號' },
   委外製令: { from: 'erp_pj_sync', docType: '委外製令' },
   倉庫庫存: { from: 'material_inventory_list' },
+  BOM結構:  { from: 'mm_bom_structure' },
 }
 
 // ─── 同步動作設定 ────────────────────────────────────────────
 type SyncAction =
   | { action: 'sync_so' }
   | { action: 'sync_mo' }
+  | { action: 'sync_bom_structure' }
   | { action: 'sync_pj'; table: string; customColumn?: string; filters?: Record<string, string>; mapping: Record<string, string> }
   | { action: 'sync_inventory'; table: string; customColumn?: string; filters?: Record<string, string>; mapping: Record<string, string> }
 
@@ -113,6 +126,7 @@ const SYNC_ACTION_MAP: Record<string, SyncAction> = {
     filters: { ROWNUM: '<= 10000' },
     mapping: { itemCodeField: 'PART', descriptionField: 'PART_DESC', bookCountField: 'BOH', transitCountField: 'PO_ON_ROAD' },
   },
+  BOM結構: { action: 'sync_bom_structure' },
 }
 
 function formatDate(ts: string): string {
@@ -162,6 +176,8 @@ export default function ErpDbTable({ docType, title }: Props) {
         query = supabase.from('erp_so_lines').select('*').order('project_id', { ascending: true }).order('line_no', { ascending: true })
       } else if (sourceCfg.from === 'erp_mo_lines') {
         query = supabase.from('erp_mo_lines').select('*').order('project_id', { ascending: true }).order('line_no', { ascending: true })
+      } else if (sourceCfg.from === 'mm_bom_structure') {
+        query = supabase.from('mm_bom_structure').select('id,parent_part,bom_ver,line_no,child_part,child_qty,child_scrap,lot_base,synced_at').order('parent_part', { ascending: true }).order('line_no', { ascending: true })
       } else {
         query = supabase.from('material_inventory_list').select('id,item_code,item_name,spec,book_count,physical_count,unit_of_measure,updated_at').order('item_code', { ascending: true })
       }
@@ -193,7 +209,7 @@ export default function ErpDbTable({ docType, title }: Props) {
     setSyncMsg(null)
     try {
       let body: Record<string, unknown>
-      if (syncCfg.action === 'sync_so' || syncCfg.action === 'sync_mo') {
+      if (syncCfg.action === 'sync_so' || syncCfg.action === 'sync_mo' || syncCfg.action === 'sync_bom_structure') {
         body = { action: syncCfg.action }
       } else if (syncCfg.action === 'sync_inventory') {
         body = {
@@ -217,9 +233,12 @@ export default function ErpDbTable({ docType, title }: Props) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       })
-      const json = await res.json() as { status: string; syncedCount?: number; error?: string }
+      const json = await res.json() as { status: string; syncedCount?: number; totalFromArgo?: number; error?: string }
       if (json.status === 'ok') {
-        setSyncMsg(`✅ 同步完成：${json.syncedCount ?? 0} 筆`)
+        const msg = json.totalFromArgo != null
+          ? `✅ 同步完成：${json.syncedCount ?? 0} 筆（ARGO 取得 ${json.totalFromArgo} 筆）`
+          : `✅ 同步完成：${json.syncedCount ?? 0} 筆`
+        setSyncMsg(msg)
         void load()
       } else {
         setSyncMsg(`❌ 同步失敗：${json.error ?? '未知錯誤'}`)

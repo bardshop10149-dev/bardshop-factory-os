@@ -5,7 +5,7 @@ import { supabase } from '../../../../lib/supabaseClient'
 import SoOrderModal from '../../../../components/SoOrderModal'
 
 // ─── 型別 ─────────────────────────────────────────────
-type DocTypeKey = 'sales' | 'mo' | 'pr' | 'po' | 'subcontract' | 'inventory' | 'material_prep' | 'customer'
+type DocTypeKey = 'sales' | 'mo' | 'pr' | 'po' | 'subcontract' | 'inventory' | 'material_prep' | 'customer' | 'bom_structure'
 
 interface PjSyncMapping {
   docNoField: string
@@ -281,6 +281,17 @@ const DOC_TYPES: Record<DocTypeKey, {
         customerVendorField: 'PO_ON_ROAD',
       },
     },
+  },
+  bom_structure: {
+    label: 'BOM 結構',
+    description: 'ARGO MM_BOM_STRUCTURE — 母件→子件展開資料，同步至 mm_bom_structure。',
+    defaultConfig: {
+      table: 'MM_BOM_STRUCTURE',
+      customColumn: 'MBP_PART,MBP_VER,MBP_CHILD_PART,MBP_CHILD_VER,LINE_NO,CHILD_QTY,CHILD_SCRAP,LOT_CHILD_QTY,LOT_BASE',
+      filters: [{ key: 'MBP_PART', value: 'IS NOT NULL' }],
+      mapping: { ...EMPTY_MAPPING },
+    },
+    locked: { table: true, filters: true, mappingKeys: ['docNoField','subNoField','itemCodeField','descriptionField','qtyField','unitField','statusField','startDateField','endDateField','customerVendorField','remarkField'] },
   },
   customer: {
     label: '客戶資料',
@@ -2159,6 +2170,90 @@ ${poPages}
   )
 }
 
+// ─── BOM 結構同步卡片（獨立元件，不走 SyncCard 複雜邏輯）──────
+function BomSyncCard({ resetKey }: { resetKey?: number }) {
+  const [syncing, setSyncing] = useState(false)
+  const [msg, setMsg] = useState<string | null>(null)
+  const [msgOk, setMsgOk] = useState(true)
+  const [syncedAt, setSyncedAt] = useState<string | null>(null)
+  const [total, setTotal] = useState<number | null>(null)
+
+  useEffect(() => {
+    supabase.from('mm_bom_structure')
+      .select('synced_at', { count: 'exact', head: false })
+      .order('synced_at', { ascending: false }).limit(1)
+      .then(({ data, count }) => {
+        if (data?.[0]) setSyncedAt((data[0] as { synced_at: string }).synced_at)
+        if (count !== null) setTotal(count)
+      })
+  }, [resetKey])
+
+  const handleSync = async () => {
+    setSyncing(true)
+    setMsg(null)
+    try {
+      const res = await fetch('/api/argoerp', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'sync_bom_structure' }),
+      })
+      const json = await res.json() as { status: string; syncedCount?: number; totalFromArgo?: number; error?: string }
+      if (json.status === 'ok') {
+        setMsgOk(true)
+        setMsg(`✅ 同步完成：${json.syncedCount ?? 0} 筆（ARGO 取得 ${json.totalFromArgo ?? 0} 筆）`)
+        setSyncedAt(new Date().toISOString())
+        setTotal(json.syncedCount ?? null)
+      } else {
+        setMsgOk(false)
+        setMsg(`❌ 同步失敗：${json.error ?? '未知錯誤'}`)
+      }
+    } catch (e) {
+      setMsgOk(false)
+      setMsg(`❌ ${e instanceof Error ? e.message : '連線錯誤'}`)
+    } finally {
+      setSyncing(false)
+    }
+  }
+
+  return (
+    <div className="rounded-2xl border border-slate-800 bg-slate-900 p-6 max-w-2xl">
+      <div className="flex flex-col gap-1 mb-5">
+        <h2 className="text-lg font-bold text-white">BOM 結構同步</h2>
+        <p className="text-xs text-slate-400">來源：ARGO ERP <span className="font-mono text-slate-300">MM_BOM_STRUCTURE</span>，目標：Supabase <span className="font-mono text-slate-300">mm_bom_structure</span></p>
+      </div>
+
+      <div className="grid grid-cols-2 gap-4 mb-6">
+        <div className="rounded-xl bg-slate-800/60 px-4 py-3">
+          <p className="text-xs text-slate-500 mb-1">目前 Supabase 筆數</p>
+          <p className="text-2xl font-bold font-mono text-cyan-300">{total !== null ? total.toLocaleString() : '—'}</p>
+        </div>
+        <div className="rounded-xl bg-slate-800/60 px-4 py-3">
+          <p className="text-xs text-slate-500 mb-1">最後同步時間</p>
+          <p className="text-sm font-mono text-slate-300">{syncedAt ? new Date(syncedAt).toLocaleString('zh-TW', { hour12: false }) : '尚未同步'}</p>
+        </div>
+      </div>
+
+      <div className="flex items-center gap-4 flex-wrap">
+        <button
+          type="button"
+          onClick={() => void handleSync()}
+          disabled={syncing}
+          className="px-6 py-2.5 rounded-xl bg-cyan-700 hover:bg-cyan-600 disabled:opacity-50 text-white text-sm font-semibold transition-colors"
+        >
+          {syncing ? '⏳ 同步中...' : '⟳ 立即同步 ARGO'}
+        </button>
+        {msg && <span className={`text-sm ${msgOk ? 'text-emerald-400' : 'text-red-400'}`}>{msg}</span>}
+      </div>
+
+      <div className="mt-6 rounded-xl border border-slate-700 bg-slate-800/40 p-4 text-xs text-slate-400 space-y-1">
+        <p><span className="text-slate-300 font-medium">同步邏輯：</span>批次 500 筆，依 (parent_part, bom_ver, child_part, child_ver, line_no) UPSERT</p>
+        <p><span className="text-slate-300 font-medium">欄位：</span>parent_part、bom_ver、child_part、child_ver、line_no、child_qty、child_scrap、lot_child_qty、lot_base</p>
+        <p><span className="text-slate-300 font-medium">瀏覽/查詢：</span>前往 <a href="/admin/argoerp/erp-db/bom" className="text-cyan-400 underline hover:text-cyan-300">ERP DB → BOM 結構</a></p>
+      </div>
+    </div>
+  )
+}
+
 // ─── 主頁面 ──────────────────────────────────────────
 const TABS: { key: DocTypeKey; label: string }[] = [
   { key: 'sales', label: '銷售訂單' },
@@ -2169,6 +2264,7 @@ const TABS: { key: DocTypeKey; label: string }[] = [
   { key: 'inventory', label: '倉庫庫存' },
   { key: 'material_prep', label: '批備料單' },
   { key: 'customer', label: '客戶資料' },
+  { key: 'bom_structure', label: 'BOM 結構' },
 ]
 
 export default function ErpSyncPage() {
@@ -2227,6 +2323,9 @@ export default function ErpSyncPage() {
         } else if (tab.key === 'customer') {
           res = await fetch('/api/argoerp', { method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ action: 'sync_customer' }) })
+        } else if (tab.key === 'bom_structure') {
+          res = await fetch('/api/argoerp', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: 'sync_bom_structure' }) })
         } else {
           // fallback for unknown tab keys
           continue
@@ -2244,6 +2343,7 @@ export default function ErpSyncPage() {
           else if (tab.key === 'po') msg = `已同步 ${result.syncedCount ?? 0} 筆採購明細（表頭 ${result.totalHdrRows ?? 0} 張 / 明細 ${result.totalDtlRows ?? 0} 筆）`
           else if (tab.key === 'mo') msg = `已同步 ${result.syncedCount ?? 0} 筆（表頭 ${result.headerCount ?? 0}，明細 ${result.detailTotal ?? 0}）`
           else if (tab.key === 'material_prep') msg = `已同步 ${result.syncedCount ?? 0} 筆（表頭 ${result.headerCount ?? 0} 張，明細 ${result.detailTotal ?? 0} 筆）`
+          else if (tab.key === 'bom_structure') msg = `已同步 ${result.syncedCount ?? 0} 筆（ARGO ${(result as Record<string, unknown>).totalFromArgo ?? 0} 筆）`
           else msg = `已同步 ${result.syncedCount ?? 0} 筆`
           updateStep(i, { status: 'done', message: msg })
         }
@@ -2357,7 +2457,9 @@ export default function ErpSyncPage() {
       </div>
 
       {/* Content */}
-      <SyncCard key={`${activeTab}-${syncAllLastTime?.getTime() ?? 0}`} docKey={activeTab} />
+      {activeTab === 'bom_structure'
+        ? <BomSyncCard resetKey={syncAllLastTime?.getTime() ?? 0} />
+        : <SyncCard key={`${activeTab}-${syncAllLastTime?.getTime() ?? 0}`} docKey={activeTab} />}
     </div>
   )
 }
