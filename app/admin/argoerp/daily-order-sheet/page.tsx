@@ -261,6 +261,7 @@ export default function DailyOrderSheetPage() {
   ]
   const [soModalId, setSoModalId] = useState<string | null>(null)
   const [searchQuery, setSearchQuery] = useState('')
+  const [activeFactory, setActiveFactory] = useState<'ALL' | 'T' | 'C' | 'O'>('ALL')
   const [globalSearch, setGlobalSearch] = useState('')
   const [globalSearching, setGlobalSearching] = useState(false)
   const [globalResults, setGlobalResults] = useState<{ sheet_date: string; rows: SheetRow[] }[] | null>(null)
@@ -1867,6 +1868,39 @@ export default function DailyOrderSheetPage() {
               </div>
             )}
 
+            {/* 廠別快速標籤 */}
+            {!loading && sheetRows.length > 0 && (
+              <div className="mb-3 flex items-center gap-1 flex-wrap">
+                {(['ALL', 'T', 'C', 'O'] as const).map(f => {
+                  const count = f === 'ALL' ? sheetRows.length : sheetRows.filter(r => r.factory === f).length
+                  if (f !== 'ALL' && count === 0) return null
+                  const label = f === 'ALL' ? '全部' : f === 'T' ? '美日廠' : f === 'C' ? '常平廠' : '委外'
+                  const colors = f === 'ALL'
+                    ? 'bg-slate-700 text-slate-200 border-slate-600'
+                    : f === 'T' ? 'bg-cyan-900/60 text-cyan-200 border-cyan-700/60'
+                    : f === 'C' ? 'bg-orange-900/60 text-orange-200 border-orange-700/60'
+                    : 'bg-purple-900/60 text-purple-200 border-purple-700/60'
+                  const activeColors = f === 'ALL'
+                    ? 'bg-slate-500 text-white border-slate-400'
+                    : f === 'T' ? 'bg-cyan-700 text-white border-cyan-500'
+                    : f === 'C' ? 'bg-orange-700 text-white border-orange-500'
+                    : 'bg-purple-700 text-white border-purple-500'
+                  return (
+                    <button
+                      key={f}
+                      onClick={() => setActiveFactory(f)}
+                      className={`px-3 py-1 rounded-full text-xs font-medium border transition-colors ${
+                        activeFactory === f ? activeColors : colors + ' hover:opacity-80'
+                      }`}
+                    >
+                      {label}
+                      <span className="ml-1.5 opacity-75">{count}</span>
+                    </button>
+                  )
+                })}
+              </div>
+            )}
+
             {/* 搜尋列 */}
             {!loading && sheetRows.length > 0 && (
               <div className="mb-3 flex items-center gap-2">
@@ -1932,6 +1966,7 @@ export default function DailyOrderSheetPage() {
                     </thead>
                     <tbody>
                       {sheetRows.filter(r => {
+                        if (activeFactory !== 'ALL' && r.factory !== activeFactory) return false
                         if (!searchQuery.trim()) return true
                         const q = searchQuery.trim().toLowerCase()
                         return (r.order_number?.toLowerCase().includes(q)) || (r.mo_number?.toLowerCase().includes(q)) || (r.po_number?.toLowerCase().includes(q))
