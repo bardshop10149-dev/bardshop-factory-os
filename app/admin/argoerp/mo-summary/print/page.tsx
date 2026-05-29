@@ -255,7 +255,7 @@ function PoCard({
     <div
       className="mo-card"
       style={{
-        width: '210mm', minHeight: '297mm', background: 'white',
+        width: '210mm', background: 'white',
         margin: '0 auto 24px', padding: '13mm 15mm 10mm',
         boxSizing: 'border-box', boxShadow: '0 4px 24px rgba(0,0,0,0.35)',
         display: 'flex', flexDirection: 'column',
@@ -493,7 +493,7 @@ function PoCard({
         marginTop: '8px', paddingTop: '4px', borderTop: '1px solid #e5e7eb',
         display: 'flex', justifyContent: 'space-between', fontSize: '12px', color: '#9ca3af',
       }}>
-        <span>列印時間：{printTime}</span>
+        <span className="no-print">列印時間：{printTime}</span>
         <span>{idx + 1} / {total}</span>
       </div>
     </div>
@@ -636,6 +636,13 @@ function MoPrintContent() {
             break-inside: avoid;
             page-break-inside: avoid;
           }
+          /* 作業確認區塊不被分頁切開 */
+          .mo-card-footer {
+            break-inside: avoid;
+            page-break-inside: avoid;
+            break-before: avoid;
+            page-break-before: avoid;
+          }
         }
       `}} />
 
@@ -710,7 +717,6 @@ function MoPrintContent() {
               className="mo-card"
               style={{
                 width: '210mm',
-                minHeight: '297mm',
                 background: 'white',
                 margin: '0 auto 24px',
                 padding: '13mm 15mm 10mm',
@@ -973,7 +979,7 @@ function MoPrintContent() {
                 display: 'flex', justifyContent: 'space-between',
                 fontSize: '12px', color: '#9ca3af',
               }}>
-                <span>列印時間：{printTime}</span>
+                <span className="no-print">列印時間：{printTime}</span>
                 <span>{idx + 1} / {records.length}</span>
               </div>
             </div>
