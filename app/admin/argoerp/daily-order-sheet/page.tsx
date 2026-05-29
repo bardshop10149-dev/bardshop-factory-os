@@ -844,12 +844,13 @@ export default function DailyOrderSheetPage() {
           !c._used && (c.item_code ?? '') === row.item_code && c.qty === qty &&
           String(c.extra?.MBP_LOT_NO ?? '').trim() === (row.order_number ?? '').trim()
         )
-      // 第三優先：料號 + 數量 + TPN_PART_NO === match_line_no
+      // 第三優先：料號 + TPN_PART_NO === match_line_no + SO_PROJECT_ID / MBP_LOT_NO 指向同一工單
       // 僅委外（O）適用：常平 PO 的 TPN_PART_NO 是行號，會與 SO 序號碰巧相同而誤配
       // 委外需同時確認 SO_PROJECT_ID 或 MBP_LOT_NO 指向同一工單（避免行號碰巧相符）
+      // 注意：此優先不要求 qty 完全相符，因 ERP 採購單 qty 可能與出單表數量不同（如留樣分批）
       if (hitIdx === -1 && matchLineNo && factory === 'O')
         hitIdx = pool.findIndex(c =>
-          !c._used && (c.item_code ?? '') === row.item_code && c.qty === qty &&
+          !c._used && (c.item_code ?? '') === row.item_code &&
           String(c.extra?.TPN_PART_NO ?? '') === matchLineNo &&
           (
             String(c.extra?.SO_PROJECT_ID ?? '').trim() === (row.order_number ?? '').trim() ||

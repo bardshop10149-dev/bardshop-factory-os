@@ -1057,7 +1057,32 @@ export default function OrderBatchExportPage() {
             if (row.po_status === 'matched') return row
             const itemCode = row.item_code as string
             const qty = parseFloat(String(row.quantity ?? '').replace(/,/g, '')) || 0
-            const hitIdx = pool.findIndex(c => !c._used && c.item_code === itemCode && c.qty === qty)
+            const matchLineNo = String(row.match_line_no ?? '').trim()
+            const orderNo = String(row.order_number ?? '').trim()
+            // P1: 料號 + 數量 + SO_PROJECT_ID
+            let hitIdx = pool.findIndex(c =>
+              !c._used && c.item_code === itemCode && c.qty === qty &&
+              String(c.extra?.SO_PROJECT_ID ?? '').trim() === orderNo
+            )
+            // P2: 料號 + 數量 + MBP_LOT_NO
+            if (hitIdx === -1)
+              hitIdx = pool.findIndex(c =>
+                !c._used && c.item_code === itemCode && c.qty === qty &&
+                String(c.extra?.MBP_LOT_NO ?? '').trim() === orderNo
+              )
+            // P3（O 廠）: 料號 + TPN_PART_NO + SO/LOT 指向同一工單（不要求 qty 完全相符）
+            if (hitIdx === -1 && matchLineNo && fac === 'O')
+              hitIdx = pool.findIndex(c =>
+                !c._used && c.item_code === itemCode &&
+                String(c.extra?.TPN_PART_NO ?? '') === matchLineNo &&
+                (
+                  String(c.extra?.SO_PROJECT_ID ?? '').trim() === orderNo ||
+                  String(c.extra?.MBP_LOT_NO ?? '').trim() === orderNo
+                )
+              )
+            // fallback: 料號 + 數量
+            if (hitIdx === -1)
+              hitIdx = pool.findIndex(c => !c._used && c.item_code === itemCode && c.qty === qty)
             if (hitIdx === -1) return { ...row, po_status: 'no_match' }
             const delivDateStr = String(row.delivery_date ?? sDate).replace(/\//g, '-')
             pool[hitIdx]._used = true
