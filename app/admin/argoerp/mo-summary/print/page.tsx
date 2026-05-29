@@ -322,7 +322,7 @@ function PoCard({
             <tbody>
               {([
                 ['來源訂單', mo.source_order],
-                ['廠別',     factoryLabel],
+                ['項號',     lineNo ?? null],
                 ['採購貨號', mo.product_code],
                 ['採購數量', mo.planned_qty ?? null],
               ] as [string, string | null | undefined][]).map(([label, val]) => (
@@ -345,8 +345,8 @@ function PoCard({
                 <td style={{ ...valueTd, fontWeight: 600 }}>{mo.create_date || '—'}</td>
               </tr>
               <tr style={{ height: '38px' }}>
-                <td style={labelTd}>項號</td>
-                <td style={valueTd}>{lineNo || '—'}</td>
+                <td style={labelTd}>廠別</td>
+                <td style={valueTd}>{factoryLabel || '—'}</td>
               </tr>
               <tr>
                 <td style={{ ...labelTd, verticalAlign: 'middle' }}>要求到料日</td>
