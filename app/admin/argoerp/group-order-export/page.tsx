@@ -158,6 +158,10 @@ export default function GroupOrderExportPage() {
       )
     }
     return true
+  }).sort((a, b) => {
+    const aPin = a.mo_status === '已匯入製令' ? 0 : 1
+    const bPin = b.mo_status === '已匯入製令' ? 0 : 1
+    return aPin - bPin
   })
 
   const allSelected = displayRows.length > 0 && displayRows.every(r => selectedKeys.has(r.row_key))
@@ -440,16 +444,12 @@ export default function GroupOrderExportPage() {
                     <input type="checkbox" checked={allSelected} onChange={toggleAll} className="accent-cyan-500 cursor-pointer" />
                   </th>
                   <th className="px-3 py-2 border-b border-slate-800 w-8">#</th>
-                  <th className="px-3 py-2 border-b border-slate-800 whitespace-nowrap text-slate-500">出單日期</th>
-                  <th className="px-3 py-2 border-b border-slate-800 text-cyan-400">工單編號</th>
-                  <th className="px-3 py-2 border-b border-slate-800">單據種類</th>
-                  <th className="px-3 py-2 border-b border-slate-800">廠別</th>
+                  <th className="px-3 py-2 border-b border-slate-800 whitespace-nowrap"><div className="text-slate-500">出單日期</div><div className="text-cyan-400">工單編號</div></th>
                   <th className="px-3 py-2 border-b border-slate-800">客戶</th>
                   <th className="px-3 py-2 border-b border-slate-800 text-purple-300 min-w-[260px]">品項編碼 / 品名規格</th>
                   <th className="px-3 py-2 border-b border-slate-800">備註</th>
                   <th className="px-3 py-2 border-b border-slate-800 text-right">數量</th>
                   <th className="px-3 py-2 border-b border-slate-800 whitespace-nowrap">交付日</th>
-                  <th className="px-3 py-2 border-b border-slate-800 text-yellow-400 text-center">盤數</th>
                   <th className="px-3 py-2 border-b border-slate-800">承辦人</th>
                   <th className="px-3 py-2 border-b border-slate-800 text-cyan-300 min-w-[160px]">製令單號（手動填入）</th>
                   <th className="px-3 py-2 border-b border-slate-800 w-24">狀態</th>
@@ -479,10 +479,7 @@ export default function GroupOrderExportPage() {
                         />
                       </td>
                       <td className="px-3 py-2 text-slate-600">{idx + 1}</td>
-                      <td className="px-3 py-2 font-mono text-slate-500 whitespace-nowrap">{row.sheet_date}</td>
-                      <td className="px-3 py-2 font-mono text-cyan-300 whitespace-nowrap">{row.order_number}</td>
-                      <td className="px-3 py-2 text-slate-300 whitespace-nowrap">{row.doc_type}</td>
-                      <td className="px-3 py-2"><FactoryBadge factory={row.factory} /></td>
+                      <td className="px-3 py-2 whitespace-nowrap"><div className="font-mono text-slate-500 text-[11px]">{row.sheet_date}</div><div className="font-mono text-cyan-300">{row.order_number}</div></td>
                       <td className="px-3 py-2 text-slate-300">{row.customer}</td>
                       <td className="px-3 py-2">
                         <div className="text-purple-300 font-mono">{row.item_code}</div>
@@ -491,7 +488,6 @@ export default function GroupOrderExportPage() {
                       <td className="px-3 py-2 text-slate-400 max-w-[160px] truncate" title={row.note}>{row.note}</td>
                       <td className="px-3 py-2 text-right text-white whitespace-nowrap">{row.quantity}</td>
                       <td className="px-3 py-2 whitespace-nowrap text-slate-300">{row.delivery_date}</td>
-                      <td className="px-3 py-2 text-center text-yellow-400">{row.plate_count}</td>
                       <td className="px-3 py-2 text-slate-400">{row.handler}</td>
                       <td className="px-3 py-2">
                         {isImported ? (
