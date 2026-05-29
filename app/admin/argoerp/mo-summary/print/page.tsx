@@ -488,11 +488,11 @@ function PoCard({
       </div>
 
       {/* ── 頁尾 ── */}
-      <div style={{
+      <div className="no-print" style={{
         marginTop: '8px', paddingTop: '4px', borderTop: '1px solid #e5e7eb',
         display: 'flex', justifyContent: 'space-between', fontSize: '12px', color: '#9ca3af',
       }}>
-        <span className="no-print">列印時間：{printTime}</span>
+        <span>列印時間：{printTime}</span>
         <span>{idx + 1} / {total}</span>
       </div>
     </div>
@@ -607,7 +607,7 @@ function MoPrintContent() {
     <>
       {/* ── 全域列印 CSS ───────────────────────────────────── */}
       <style dangerouslySetInnerHTML={{ __html: `
-        @page { size: A4 portrait; margin: 0; }
+        @page { size: A4 portrait; margin: 8mm 0; }
         @media print {
           .mo-toolbar { display: none !important; }
           .no-print { display: none !important; }
@@ -970,13 +970,13 @@ function MoPrintContent() {
               </div>
 
               {/* ── 頁尾 ── */}
-              <div style={{
+              <div className="no-print" style={{
                 marginTop: '8px', paddingTop: '4px',
                 borderTop: '1px solid #e5e7eb',
                 display: 'flex', justifyContent: 'space-between',
                 fontSize: '12px', color: '#9ca3af',
               }}>
-                <span className="no-print">列印時間：{printTime}</span>
+                <span>列印時間：{printTime}</span>
                 <span>{idx + 1} / {records.length}</span>
               </div>
             </div>
