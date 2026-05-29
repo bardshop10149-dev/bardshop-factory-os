@@ -321,10 +321,10 @@ function PoCard({
           <table style={{ width: '100%', borderCollapse: 'collapse' }}>
             <tbody>
               {([
+                ['來源訂單', mo.source_order],
+                ['廠別',     factoryLabel],
                 ['採購貨號', mo.product_code],
                 ['採購數量', mo.planned_qty ?? null],
-                ['廠別',     factoryLabel],
-                ['開立日',   mo.create_date ?? null],
               ] as [string, string | null | undefined][]).map(([label, val]) => (
                 <tr key={label} style={{ height: '38px' }}>
                   <td style={labelTd}>{label}</td>
@@ -341,8 +341,8 @@ function PoCard({
           <table style={{ width: '100%', borderCollapse: 'collapse' }}>
             <tbody>
               <tr style={{ height: '38px' }}>
-                <td style={labelTd}>來源訂單</td>
-                <td style={{ ...valueTd, fontWeight: 600 }}>{mo.source_order || '—'}</td>
+                <td style={labelTd}>開立日</td>
+                <td style={{ ...valueTd, fontWeight: 600 }}>{mo.create_date || '—'}</td>
               </tr>
               <tr style={{ height: '38px' }}>
                 <td style={labelTd}>項號</td>
