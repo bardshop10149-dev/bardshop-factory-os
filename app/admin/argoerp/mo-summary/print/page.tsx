@@ -630,8 +630,8 @@ function MoPrintContent() {
             page-break-after: auto;
             break-after: auto;
           }
-          /* 不讓任何 tr / div 區塊從中間被切開 */
-          tr, .mo-section {
+          /* 只保護單一列（tr）不被從中間切開；section 本身允許換頁 */
+          tr {
             break-inside: avoid;
             page-break-inside: avoid;
           }
