@@ -1895,6 +1895,11 @@ export default function DailyOrderSheetPage() {
                     已匯入製令：<span className="text-emerald-400">{sheetRows.filter(r => r.mo_status === '已匯入製令').length}</span>
                     ／暫緩區：<span className="text-amber-400">{sheetRows.filter(r => r.mo_status === '暫緩區').length}</span>
                     ／尚未轉單：<span className="text-slate-400">{sheetRows.filter(r => !r.mo_status).length}</span>
+                    {sheetRows.some(r => (r.doc_type ?? '').includes('集單')) && (
+                      <span className="ml-2 text-violet-400">
+                        ／集單隱藏：{sheetRows.filter(r => (r.doc_type ?? '').includes('集單')).length}（<a href="/admin/argoerp/group-order-export" className="underline hover:text-violet-200">前往集合單頁面</a>）
+                      </span>
+                    )}
                   </span>
                 </div>
                 {!showPasteArea && currentRawText && (
@@ -2006,6 +2011,8 @@ export default function DailyOrderSheetPage() {
                     </thead>
                     <tbody>
                       {sheetRows.filter(r => {
+                        // 集單類型由「集合單➜製令工單」頁面管理，此頁面不顯示
+                        if ((r.doc_type ?? '').includes('集單')) return false
                         if (activeFactory !== 'ALL' && r.factory !== activeFactory) return false
                         if (!searchQuery.trim()) return true
                         const q = searchQuery.trim().toLowerCase()
