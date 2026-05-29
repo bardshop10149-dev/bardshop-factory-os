@@ -893,7 +893,12 @@ export default function DailyOrderSheetPage() {
     setSyncingPo(true)
     setSaveMsg('')
     try {
-      let next: SheetRow[] = sheetRows
+      // 先從 DB 拉最新 rows，確保多台電腦作業時能取得其他人的人工確認結果（po_confirmed）
+      const latestRes = await fetch(`/api/argoerp/daily-order-sheet?date=${selectedDate}`)
+      const latestJson = await latestRes.json()
+      let next: SheetRow[] = latestJson.success && latestJson.sheet?.rows
+        ? (latestJson.sheet.rows as SheetRow[])
+        : sheetRows
 
       // ── 常平（C01510）──
       if (cRows.length > 0) {
