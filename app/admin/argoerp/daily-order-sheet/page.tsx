@@ -1596,10 +1596,20 @@ export default function DailyOrderSheetPage() {
 
   const hasUnsaved = sheetRows.length > 0 && (rawText.trim() ? true : false)
   const hasData = sheetRows.length > 0
-  const allSelected = sheetRows.length > 0 && sheetRows.every((r, i) => selectedKeys.has(r.row_key || String(i)))
+
+  // 與表格中相同的篩選條件，確保全選只選當前顯示的列
+  const visibleRows = sheetRows.filter(r => {
+    if ((r.doc_type ?? '').includes('集單')) return false
+    if (activeFactory !== 'ALL' && r.factory !== activeFactory) return false
+    if (!searchQuery.trim()) return true
+    const q = searchQuery.trim().toLowerCase()
+    return (r.order_number?.toLowerCase().includes(q)) || (r.mo_number?.toLowerCase().includes(q)) || (r.po_number?.toLowerCase().includes(q))
+  })
+
+  const allSelected = visibleRows.length > 0 && visibleRows.every((r, i) => selectedKeys.has(r.row_key || String(i)))
   const toggleAll = () => {
     if (allSelected) setSelectedKeys(new Set())
-    else setSelectedKeys(new Set(sheetRows.map((r, i) => r.row_key || String(i))))
+    else setSelectedKeys(new Set(visibleRows.map((r, i) => r.row_key || String(i))))
   }
 
   return (
@@ -2010,14 +2020,7 @@ export default function DailyOrderSheetPage() {
                       </tr>
                     </thead>
                     <tbody>
-                      {sheetRows.filter(r => {
-                        // 集單類型由「集合單➜製令工單」頁面管理，此頁面不顯示
-                        if ((r.doc_type ?? '').includes('集單')) return false
-                        if (activeFactory !== 'ALL' && r.factory !== activeFactory) return false
-                        if (!searchQuery.trim()) return true
-                        const q = searchQuery.trim().toLowerCase()
-                        return (r.order_number?.toLowerCase().includes(q)) || (r.mo_number?.toLowerCase().includes(q)) || (r.po_number?.toLowerCase().includes(q))
-                      }).map((row, idx) => {
+                      {visibleRows.map((row, idx) => {
                         const effectiveStatus = row.mo_status ?? ((row.factory === 'C' || row.factory === 'O') && row.po_status === 'matched' ? '已匯入採單' : null)
                         const statusInfo = effectiveStatus ? STATUS_LABELS[effectiveStatus] : null
                         const sk = row.row_key || String(idx)
