@@ -258,7 +258,6 @@ function PoCard({
         width: '210mm', background: 'white',
         margin: '0 auto 24px', padding: '13mm 15mm 10mm',
         boxSizing: 'border-box', boxShadow: '0 4px 24px rgba(0,0,0,0.35)',
-        display: 'flex', flexDirection: 'column',
         fontFamily: 'Arial, "Microsoft JhengHei", "PingFang TC", sans-serif',
         color: '#111',
       }}
@@ -464,9 +463,9 @@ function PoCard({
       </div>
 
       {/* ── 備註欄 ── */}
-      <div style={{ flex: 1, marginBottom: '10px', display: 'flex', flexDirection: 'column' }}>
+      <div style={{ marginBottom: '10px' }}>
         <SectionTitle color="#222">備註欄</SectionTitle>
-        <div style={{ border: '1px solid #ccc', flex: 1, padding: '4px 8px', minHeight: '48px' }}>
+        <div style={{ border: '1px solid #ccc', padding: '4px 8px', minHeight: '56px' }}>
           &nbsp;
         </div>
       </div>
@@ -722,8 +721,6 @@ function MoPrintContent() {
                 padding: '13mm 15mm 10mm',
                 boxSizing: 'border-box',
                 boxShadow: '0 4px 24px rgba(0,0,0,0.35)',
-                display: 'flex',
-                flexDirection: 'column',
                 fontFamily: 'Arial, "Microsoft JhengHei", "PingFang TC", sans-serif',
                 color: '#111',
               }}
@@ -936,9 +933,9 @@ function MoPrintContent() {
               </div>
 
               {/* ── 生產備註 ── */}
-              <div style={{ flex: 1, marginBottom: '10px', display: 'flex', flexDirection: 'column' }}>
+              <div style={{ marginBottom: '10px' }}>
                 <SectionTitle color="#222">生產備註</SectionTitle>
-                <div style={{ border: '1px solid #ccc', flex: 1, padding: '4px 8px', minHeight: '48px' }}>
+                <div style={{ border: '1px solid #ccc', padding: '4px 8px', minHeight: '56px' }}>
                   &nbsp;
                 </div>
               </div>
