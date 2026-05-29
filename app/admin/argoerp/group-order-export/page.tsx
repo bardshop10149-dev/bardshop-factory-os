@@ -451,11 +451,6 @@ export default function GroupOrderExportPage() {
                   <th className="px-3 py-2 border-b border-slate-800 whitespace-nowrap">交付日</th>
                   <th className="px-3 py-2 border-b border-slate-800 text-yellow-400 text-center">盤數</th>
                   <th className="px-3 py-2 border-b border-slate-800">承辦人</th>
-                  <th className="px-3 py-2 border-b border-slate-800">開單人員</th>
-                  <th className="px-3 py-2 border-b border-slate-800">打樣</th>
-                  <th className="px-3 py-2 border-b border-slate-800">附素材</th>
-                  <th className="px-3 py-2 border-b border-slate-800">訂單狀態</th>
-                  <th className="px-3 py-2 border-b border-slate-800">生管備註</th>
                   <th className="px-3 py-2 border-b border-slate-800 text-cyan-300 min-w-[160px]">製令單號（手動填入）</th>
                   <th className="px-3 py-2 border-b border-slate-800 w-24">狀態</th>
                 </tr>
@@ -498,11 +493,6 @@ export default function GroupOrderExportPage() {
                       <td className="px-3 py-2 whitespace-nowrap text-slate-300">{row.delivery_date}</td>
                       <td className="px-3 py-2 text-center text-yellow-400">{row.plate_count}</td>
                       <td className="px-3 py-2 text-slate-400">{row.handler}</td>
-                      <td className="px-3 py-2 text-slate-400">{row.issuer}</td>
-                      <td className="px-3 py-2 text-slate-400">{row.is_sample}</td>
-                      <td className="px-3 py-2 text-slate-400">{row.has_material}</td>
-                      <td className="px-3 py-2 text-slate-400">{row.order_status}</td>
-                      <td className="px-3 py-2 text-slate-500 max-w-[140px] truncate" title={row.pm_note}>{row.pm_note}</td>
                       <td className="px-3 py-2">
                         {isImported ? (
                           <span className="font-mono text-emerald-400">{row.mo_number}</span>
