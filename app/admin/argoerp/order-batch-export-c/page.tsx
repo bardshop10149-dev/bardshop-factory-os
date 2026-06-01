@@ -87,7 +87,7 @@ function genPoNo() {
 function makeDefaultHeader(): PoHeader {
   return {
     project_id: genPoNo(), modify_ver: '1', begin_date: fmtDate(new Date()),
-    hold_status: 'OPEN', tpn_partner_id: 'C01510', department: 'M1100',
+    hold_status: 'UNSIGNED', tpn_partner_id: 'C01510', department: 'M1100',
     sales_id: '10149', po_type: 'GENERAL', payment_term: 'PM30',
     payment_mode: 'T', currency: 'CNY', exchange_rate: '4', tax_rate: '0',
   }
@@ -556,9 +556,6 @@ export default function PoBatchExportCPage() {
                 <select value={header.hold_status} onChange={e => setH('hold_status', e.target.value as PoHeader['hold_status'])}
                   className="w-full px-3 py-1.5 rounded-lg bg-slate-800 border border-slate-600 text-white text-sm focus:outline-none">
                   <option value="UNSIGNED">UNSIGNED</option>
-                  <option value="OPEN">OPEN</option>
-                  <option value="HOLD">HOLD</option>
-                  <option value="CLOSE">CLOSE</option>
                 </select>
               </div>
               <div>
