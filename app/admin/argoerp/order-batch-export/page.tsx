@@ -713,7 +713,7 @@ export default function OrderBatchExportPage() {
       }
       const sheetRows = (json.sheet.rows ?? []) as Array<SourceRow & { mo_status?: string; match_status?: string; match_line_no?: string | null; match_pdl_seq?: number | null; match_reason?: string | null }>
       const rows: SourceRow[] = sheetRows
-        .filter(r => r.factory === 'T' && (includeAlreadyImported || r.mo_status !== '已匯入製令'))
+        .filter(r => r.factory === 'T' && !(r.doc_type ?? '').includes('集單') && (includeAlreadyImported || r.mo_status !== '已匯入製令'))
         .map(r => ({
           order_number: r.order_number, doc_type: r.doc_type, factory: r.factory,
           receiver: r.receiver, is_sample: r.is_sample, has_material: r.has_material,
