@@ -579,11 +579,18 @@ export default function MaterialPrepPage() {
             .map(([mo]) => mo)
         )
         const moNumbersForBom = moNumbers.filter(mo => !moToSlipFromPrepLines[mo] && !sheetDoneMos.has(mo) && !summaryDoneMos.has(mo))
+        // 以實際待備料數更新下拉選單標籤（避免 API 計數與顯示不一致）
+        setAvailableSheets(prev => prev.map(s =>
+          s.sheet_date === date ? { ...s, pending_count: moNumbersForBom.length } : s
+        ))
         await loadMoRecords(moNumbersForBom, loadedRows)
       } else {
         setMoSummaryMap({})
         setMoSlipNoMap({})
         setMoRecords([])
+        setAvailableSheets(prev => prev.map(s =>
+          s.sheet_date === date ? { ...s, pending_count: 0 } : s
+        ))
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
