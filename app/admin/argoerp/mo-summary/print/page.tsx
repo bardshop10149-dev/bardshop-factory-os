@@ -607,6 +607,20 @@ function MoPrintContent() {
           .no-print { display: none !important; }
           html { -webkit-filter: grayscale(100%) !important; filter: grayscale(100%) !important; }
           * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
+          .mo-card,
+          .mo-card * {
+            color: #000 !important;
+            text-shadow: none !important;
+            box-shadow: none !important;
+          }
+          .mo-card th,
+          .mo-card td,
+          .mo-card tr,
+          .mo-card div,
+          .mo-card span {
+            background: #fff !important;
+            border-color: #bbb !important;
+          }
           html, body { background: white !important; color: black !important; }
           /* 隱藏 admin layout 的裝飾背景層 */
           body > * { background: white !important; }

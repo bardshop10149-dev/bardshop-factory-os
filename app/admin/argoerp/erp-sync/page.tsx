@@ -820,7 +820,19 @@ function SyncCard({ docKey }: SyncCardProps) {
   th { background: #f0f0f0; font-weight: 600; text-align: left; padding: 4px 6px; border: 1px solid #ccc; }
   td { padding: 3px 6px; border: 1px solid #ddd; }
   tr:nth-child(even) td { background: #fafafa; }
-  @media print { @page { margin: 10mm; size: landscape; } html { -webkit-filter: grayscale(100%) !important; filter: grayscale(100%) !important; } * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; } }
+  @media print {
+    @page { margin: 10mm; size: landscape; }
+    html { -webkit-filter: grayscale(100%) !important; filter: grayscale(100%) !important; }
+    * {
+      -webkit-print-color-adjust: exact !important;
+      print-color-adjust: exact !important;
+      color: #000 !important;
+      background: #fff !important;
+      border-color: #bbb !important;
+      text-shadow: none !important;
+      box-shadow: none !important;
+    }
+  }
 </style></head><body>
 <h2>製令單列表</h2>
 <p>狀態篩選：${moStatusFilter ?? '全部'} ／ 第 ${moPage} 頁 ／ 列印時間：${new Date().toLocaleString('zh-TW')}</p>
@@ -1019,7 +1031,15 @@ function SyncCard({ docKey }: SyncCardProps) {
     @page { size: A4 portrait; margin: 0; }
     .po-card { box-shadow: none; margin: 0; }
     html { -webkit-filter: grayscale(100%) !important; filter: grayscale(100%) !important; }
-    * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
+    * {
+      -webkit-print-color-adjust: exact !important;
+      print-color-adjust: exact !important;
+      color: #000 !important;
+      background: #fff !important;
+      border-color: #bbb !important;
+      text-shadow: none !important;
+      box-shadow: none !important;
+    }
   }
 </style></head><body>
 ${poPages}
@@ -1058,7 +1078,19 @@ ${poPages}
   th { background: #f0f0f0; font-weight: 600; text-align: left; padding: 4px 6px; border: 1px solid #ccc; }
   td { padding: 3px 6px; border: 1px solid #ddd; }
   tr:nth-child(even) td { background: #fafafa; }
-  @media print { @page { margin: 10mm; size: landscape; } html { -webkit-filter: grayscale(100%) !important; filter: grayscale(100%) !important; } * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; } }
+  @media print {
+    @page { margin: 10mm; size: landscape; }
+    html { -webkit-filter: grayscale(100%) !important; filter: grayscale(100%) !important; }
+    * {
+      -webkit-print-color-adjust: exact !important;
+      print-color-adjust: exact !important;
+      color: #000 !important;
+      background: #fff !important;
+      border-color: #bbb !important;
+      text-shadow: none !important;
+      box-shadow: none !important;
+    }
+  }
 </style></head><body>
 <h2>銷售訂單列表</h2>
 <p>狀態篩選：${soStatusFilter ?? '全部'} ／ 第 ${soPage} 頁 ／ 列印時間：${new Date().toLocaleString('zh-TW')}</p>
