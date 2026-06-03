@@ -188,11 +188,12 @@ function getLineNo(mo: MoRecord): string {
 }
 
 // ── 子元件 ───────────────────────────────────────────────────
-function SectionTitle({ children, color = '#1e3a5f' }: { children: string; color?: string }) {
+function SectionTitle({ children, color = '#e5e7eb' }: { children: string; color?: string }) {
   return (
     <div style={{
-      background: color, color: 'white',
+      background: color, color: '#111',
       padding: '4px 10px', fontSize: '15px', fontWeight: 'bold',
+      borderLeft: '3px solid #8b8b8b',
       marginBottom: '6px', letterSpacing: '0.5px',
     }}>
       {children}
@@ -319,7 +320,7 @@ function PoCard({
       <div className="mo-section" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px', marginBottom: '10px', alignItems: 'stretch' }}>
         {/* 左：採購資訊 */}
         <div>
-          <SectionTitle color="#222">採購資訊</SectionTitle>
+          <SectionTitle color="#e5e7eb">採購資訊</SectionTitle>
           <table style={{ width: '100%', borderCollapse: 'collapse' }}>
             <tbody>
               <tr style={{ height: '76px' }}>
@@ -336,7 +337,7 @@ function PoCard({
 
         {/* 右：交期資訊 */}
         <div>
-          <SectionTitle color="#222">交期資訊</SectionTitle>
+          <SectionTitle color="#e5e7eb">交期資訊</SectionTitle>
           <table style={{ width: '100%', borderCollapse: 'collapse' }}>
             <tbody>
               <tr style={{ height: '38px' }}>
@@ -391,7 +392,7 @@ function PoCard({
 
       {/* ── 來源訂單資訊 ── */}
       <div className="mo-section" style={{ marginBottom: '10px' }}>
-        <SectionTitle color="#222">來源訂單資訊</SectionTitle>
+        <SectionTitle color="#e5e7eb">來源訂單資訊</SectionTitle>
         {mo.source_order ? (
           <>
             {/* 訂單摘要列 */}
@@ -466,7 +467,7 @@ function PoCard({
 
       {/* ── 作業確認 ── */}
       <div className="mo-card-footer" style={{ marginTop: 'auto' }}>
-        <SectionTitle color="#222">作業確認</SectionTitle>
+        <SectionTitle color="#e5e7eb">作業確認</SectionTitle>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', border: '1px solid #bbb' }}>
           {['倉管收料', '品檢驗收', '入庫作業', '銷單作業'].map((role, ri) => (
             <div key={role} style={{ borderRight: ri < 3 ? '1px solid #bbb' : 'none' }}>
@@ -816,7 +817,7 @@ function MoPrintContent() {
 
                 {/* 左：製令資訊 */}
                 <div>
-                  <SectionTitle color="#222">製令資訊</SectionTitle>
+                  <SectionTitle color="#e5e7eb">製令資訊</SectionTitle>
                   <table style={{ width: '100%', borderCollapse: 'collapse' }}>
                     <tbody>
                       {([
@@ -836,7 +837,7 @@ function MoPrintContent() {
 
                 {/* 右：交期資訊 */}
                 <div>
-                  <SectionTitle color="#222">交期資訊</SectionTitle>
+                  <SectionTitle color="#e5e7eb">交期資訊</SectionTitle>
                   <table style={{ width: '100%', borderCollapse: 'collapse' }}>
                     <tbody>
                       <tr>
@@ -882,7 +883,7 @@ function MoPrintContent() {
 
               {/* ── 來源訂單資訊 ── */}
               <div className="mo-section" style={{ marginBottom: '10px' }}>
-                <SectionTitle color="#222">來源訂單資訊</SectionTitle>
+                <SectionTitle color="#e5e7eb">來源訂單資訊</SectionTitle>
                 {mo.source_order ? (
                   <>
                     {/* 訂單摘要列 */}
@@ -957,7 +958,7 @@ function MoPrintContent() {
 
               {/* ── 生產備註 ── */}
               <div style={{ marginBottom: '10px' }}>
-                <SectionTitle color="#222">生產備註</SectionTitle>
+                <SectionTitle color="#e5e7eb">生產備註</SectionTitle>
                 <div style={{ border: '1px solid #ccc', padding: '4px 8px', minHeight: '56px' }}>
                   &nbsp;
                 </div>
@@ -965,7 +966,7 @@ function MoPrintContent() {
 
               {/* ── 作業確認 ── */}
               <div className="mo-card-footer">
-                <SectionTitle color="#222">作業確認</SectionTitle>
+                <SectionTitle color="#e5e7eb">作業確認</SectionTitle>
                 <div style={{
                   display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)',
                   border: '1px solid #bbb',
