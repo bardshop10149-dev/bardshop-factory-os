@@ -61,7 +61,7 @@ interface MatchResult {
 // ─────────────────────────────────────────────────────────────────────────────
 // Constants
 // ─────────────────────────────────────────────────────────────────────────────
-const STORAGE_KEY = 'argoerp_po_c_v1'
+
 const HEADER_KEY  = 'argoerp_po_c_header_v1'
 
 /** IFAF024 ERP 欄位順序（匯出 CSV/XLSX 用） */
@@ -133,11 +133,6 @@ export default function PoBatchExportCPage() {
       }
     } catch {}
   }, [])
-
-  useEffect(() => {
-    if (sourceRows.length > 0)
-      localStorage.setItem(STORAGE_KEY, JSON.stringify({ rows: sourceRows, edits: lineEdits, date: loadedDate }))
-  }, [sourceRows, lineEdits, loadedDate])
 
   useEffect(() => { localStorage.setItem(HEADER_KEY, JSON.stringify(header)) }, [header])
 
@@ -263,7 +258,6 @@ export default function PoBatchExportCPage() {
         const m = `✅ 採購單 ${header.project_id} 已匯入 ERP（${payload.length} 筆明細）`
         setMsg(m); alert(m)
         setSourceRows([]); setLineEdits([]); setLoadedDate(null)
-        localStorage.removeItem(STORAGE_KEY)
       } else {
         const raw = typeof result?.rawText === 'string'
           ? result.rawText.slice(0, 500)
@@ -294,7 +288,6 @@ export default function PoBatchExportCPage() {
 
   const handleClearAll = useCallback(() => {
     setSourceRows([]); setLineEdits([]); setMatchResults([]); setLoadedDate(null)
-    localStorage.removeItem(STORAGE_KEY)
   }, [])
 
   // ── 移除已匯入項目（比對 erp_pj_sync sub_no = LINE_NO）──

@@ -33,7 +33,6 @@ interface StagingRow extends SourceRow {
   staged_at: string // ISO datetime
 }
 
-const EXPORT_KEY = 'argoerp_order_batch_export_v2'
 
 function formatStagedAt(iso: string): string {
   if (!iso) return ''
@@ -137,21 +136,11 @@ export default function StagingPage() {
     }
   }, [rows])
 
-  // 退回到匯出區（刪除 Supabase 紀錄 + 寫回 order-batch-export localStorage）
+  // 退回到匯出區（刪除 Supabase 暫緩紀錄；出單表 mo_status 仍為「暫緩區」，
+  //   需至出單表➜製令工單 重新載入對應日期即可看到已退回的訂單）
   const handleReturnToExport = useCallback(async () => {
     if (selectedRows.size === 0) return
     const returning = rows.filter((_, i) => selectedRows.has(i))
-    try {
-      const raw = localStorage.getItem(EXPORT_KEY)
-      const existing: SourceRow[] = raw ? JSON.parse(raw) : []
-      // 從 StagingRow 取出原 SourceRow 欄位（去除 id / hold_reason / staged_at）
-      const sourceOnly: SourceRow[] = returning.map(({ id, hold_reason, staged_at, ...rest }) => rest)
-      const merged = [...existing, ...sourceOnly]
-      localStorage.setItem(EXPORT_KEY, JSON.stringify(merged))
-    } catch {
-      alert('退回失敗：無法寫入匯出區')
-      return
-    }
     const ids = returning.map(r => r.id)
     const res = await fetch('/api/argoerp/staging', {
       method: 'DELETE',
@@ -161,6 +150,10 @@ export default function StagingPage() {
     if (res.ok) {
       setRows(prev => prev.filter((_, i) => !selectedRows.has(i)))
       setSelectedRows(new Set())
+      alert(`已退回 ${returning.length} 筆訂單。請至「出單表➜製令工單」重新載入對應日期以取回。`)
+    } else {
+      const j = await res.json().catch(() => ({}))
+      alert(`退回失敗：${j.error ?? '未知錯誤'}`)
     }
   }, [selectedRows, rows])
 

@@ -63,7 +63,7 @@ interface MatchResult {
 // ─────────────────────────────────────────────────────────────────────────────
 // Constants
 // ─────────────────────────────────────────────────────────────────────────────
-const STORAGE_KEY = 'argoerp_po_o_v1'
+
 const HEADER_KEY  = 'argoerp_po_o_header_v1'
 
 /** IFAF024 ERP 欄位順序（匯出 CSV/XLSX 用） */
@@ -152,11 +152,6 @@ export default function PoBatchExportOPage() {
       }
     } catch {}
   }, [])
-
-  useEffect(() => {
-    if (sourceRows.length > 0)
-      localStorage.setItem(STORAGE_KEY, JSON.stringify({ rows: sourceRows, edits: lineEdits, poNos: rowPoNos, date: loadedDate }))
-  }, [sourceRows, lineEdits, rowPoNos, loadedDate])
 
   useEffect(() => { localStorage.setItem(HEADER_KEY, JSON.stringify(header)) }, [header])
 
@@ -305,7 +300,6 @@ export default function PoBatchExportOPage() {
       const m = `✅ 全部 ${payload.length} 張委外採購單已匯入 ERP`
       setMsg(m); alert(m)
       setSourceRows([]); setLineEdits([]); setRowPoNos([]); setLoadedDate(null)
-      localStorage.removeItem(STORAGE_KEY)
     } else {
       const m = `⚠️ 匯入完成：${successCount} 成功，${errors.length} 失敗`
       setMsg(m)
@@ -336,7 +330,6 @@ export default function PoBatchExportOPage() {
   const handleClearAll = useCallback(() => {
     setSourceRows([]); setLineEdits([]); setRowPoNos([]); setMatchResults([]); setLoadedDate(null)
     setImportProgress(null)
-    localStorage.removeItem(STORAGE_KEY)
   }, [])
 
   // ── 移除已匯入項目（查 erp_pj_sync doc_no IN rowPoNos）──

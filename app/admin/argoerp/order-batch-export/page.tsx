@@ -333,10 +333,6 @@ function mapAllToExport(srcRows: SourceRow[], matchResults?: SoMatchResult[]): E
   })
 }
 
-// ==================== localStorage ====================
-const STORAGE_KEY = 'argoerp_order_batch_export_v2'
-const FAILED_IMPORTS_KEY = 'argoerp_failed_imports'
-
 // ==================== TSV 解析器（處理含 Tab/換行的引號欄位）====================
 function parseTSV(text: string): string[][] {
   const rows: string[][] = []
@@ -385,38 +381,6 @@ function parseTSV(text: string): string[][] {
   if (cells.some(c => c !== '')) rows.push(cells)
 
   return rows
-}
-
-function loadFromStorage(): SourceRow[] {
-  if (typeof window === 'undefined') return []
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY)
-    return raw ? JSON.parse(raw) : []
-  } catch { return [] }
-}
-
-function saveToStorage(rows: SourceRow[]) {
-  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(rows)) } catch {}
-}
-
-function loadFailedImports(): FailedImportItem[] {
-  if (typeof window === 'undefined') return []
-  try {
-    const raw = localStorage.getItem(FAILED_IMPORTS_KEY)
-    return raw ? JSON.parse(raw) : []
-  } catch {
-    return []
-  }
-}
-
-function saveFailedImports(items: FailedImportItem[]) {
-  try {
-    if (items.length === 0) {
-      localStorage.removeItem(FAILED_IMPORTS_KEY)
-      return
-    }
-    localStorage.setItem(FAILED_IMPORTS_KEY, JSON.stringify(items))
-  } catch {}
 }
 
 const MO_SUMMARY_KEY = 'argoerp_mo_summary'
@@ -1670,7 +1634,6 @@ export default function OrderBatchExportPage() {
     setSourceRows([])
     setSelectedRows(new Set())
     setLoadedFromSheetDate(null)
-    localStorage.removeItem(STORAGE_KEY)
   }, [])
 
   const toggleSelectAll = useCallback(() => {

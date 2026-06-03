@@ -434,28 +434,6 @@ export default function FactoryOrderExportPage({
     skippedCount: number
   }>(null)
 
-  // ── localStorage helpers ──
-  function loadRows(): SourceRow[] {
-    if (typeof window === 'undefined') return []
-    try { return JSON.parse(localStorage.getItem(storageKey) ?? '[]') } catch { return [] }
-  }
-  function saveRows(rows: SourceRow[]) {
-    try { localStorage.setItem(storageKey, JSON.stringify(rows)) } catch {}
-  }
-  function loadFailed(): FailedImportItem[] {
-    if (typeof window === 'undefined') return []
-    try { return JSON.parse(localStorage.getItem(failedKey) ?? '[]') } catch { return [] }
-  }
-  function saveFailed(items: FailedImportItem[]) {
-    try {
-      if (items.length === 0) { localStorage.removeItem(failedKey); return }
-      localStorage.setItem(failedKey, JSON.stringify(items))
-    } catch {}
-  }
-
-  useEffect(() => { if (sourceRows.length > 0) saveRows(sourceRows) }, [sourceRows])
-  useEffect(() => { saveFailed(failedImports) }, [failedImports])
-
   // ── 載入出單表日期清單 ──
   useEffect(() => {
     setSheetDatesLoading(true)
@@ -840,8 +818,7 @@ export default function FactoryOrderExportPage({
 
   const handleClearAll = useCallback(() => {
     setSourceRows([]); setSelectedRows(new Set()); setLoadedFromSheetDate(null)
-    localStorage.removeItem(storageKey)
-  }, [storageKey])
+  }, [])
 
   // ── Derived ──
   const exportPreviewRows = useMemo(
