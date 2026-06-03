@@ -53,6 +53,8 @@ interface FailedImportItem {
 
 type ExportRow = Record<string, string>
 
+type PostSyncStep = { label: string; status: 'pending' | 'running' | 'done' | 'error' }
+
 // ──────────────────────────────────────────────────────────────────────────────
 // ArgoERP 匯出欄位定義（IFAF044 採購單格式）
 // ──────────────────────────────────────────────────────────────────────────────
@@ -425,6 +427,7 @@ export default function FactoryOrderExportPage({
   const [importing, setImporting]       = useState(false)
 
   const [failedImports, setFailedImports] = useState<FailedImportItem[]>([])
+  const [postSyncModal, setPostSyncModal] = useState<{ show: boolean; steps: PostSyncStep[]; error: string | null } | null>(null)
 
   const [importPreview, setImportPreview] = useState<null | {
     rows: Array<{ mo_number: string; product_code: string; source_order: string; source_order_line: string; planned_qty: string; planned_end_date: string }>
@@ -619,6 +622,35 @@ export default function FactoryOrderExportPage({
     }
   }, [exportFormat, factory])
 
+  // ── 匯入後自動同步 ──
+  const runPostImportSync = useCallback(async (sheetDate: string) => {
+    const steps: PostSyncStep[] = [
+      { label: 'ERP 同步：採購單', status: 'running' },
+      { label: `出單表同步完成（${sheetDate}）`, status: 'pending' },
+    ]
+    const setStep = (idx: number, status: PostSyncStep['status']) =>
+      setPostSyncModal(prev => prev ? {
+        ...prev,
+        steps: prev.steps.map((s, i) => i === idx ? { ...s, status } : s),
+      } : null)
+    setPostSyncModal({ show: true, steps, error: null })
+    try {
+      const syncRes = await fetch('/api/argoerp', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'sync_po' }),
+      })
+      const syncJson = await syncRes.json() as { status?: string; error?: unknown }
+      if (!syncRes.ok || syncJson.status !== 'ok') {
+        throw new Error(`ERP 同步失敗：${String(syncJson.error ?? `HTTP ${syncRes.status}`)}`)
+      }
+      setStep(0, 'done')
+      setStep(1, 'done')
+    } catch (e) {
+      setPostSyncModal(prev => prev ? { ...prev, error: e instanceof Error ? e.message : String(e) } : null)
+    }
+  }, [])
+
   // ── 匯入前預覽 ──
   const handleShowPreview = useCallback(async () => {
     if (sourceRows.length === 0) return
@@ -783,6 +815,8 @@ export default function FactoryOrderExportPage({
       const erpRaw  = typeof result?.rawText === 'string' ? result.rawText.slice(0, 400) : JSON.stringify(result?.apiResult ?? '').slice(0, 400)
       const successMsg = `✅ ${records.length} 筆已匯入 ERP ${targetLabel}並儲存至製令總表`
       setSaveMsg(successMsg)
+      const today = new Date().toISOString().slice(0, 10)
+      void runPostImportSync(today)
       alert(`${successMsg}\n\n首筆單號：${firstMo}\n\n【ERP 回應】\n${erpRaw}`)
       setTimeout(() => setSaveMsg(''), 6000)
     } catch (error) {
@@ -794,7 +828,7 @@ export default function FactoryOrderExportPage({
     } finally {
       setImporting(false)
     }
-  }, [sourceRows, soMatchResults, storageKey, loadedFromSheetDate, updateSheetRowStatuses])
+  }, [sourceRows, soMatchResults, storageKey, loadedFromSheetDate, updateSheetRowStatuses, runPostImportSync])
 
   // ── 選取 ──
   const toggleSelectAll = useCallback(() => {
@@ -1208,6 +1242,71 @@ export default function FactoryOrderExportPage({
 
       {/* ── SO 查詢 Modal ── */}
       {soModalId && <SoOrderModal projectId={soModalId} onClose={() => setSoModalId(null)} />}
+
+      {/* ── 匯入後自動同步進度 Modal（阻擋操作）── */}
+      {postSyncModal?.show && (
+        <div className="fixed inset-0 bg-black/80 z-[100] flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-slate-700 rounded-2xl shadow-2xl w-full max-w-md p-6">
+            <div className="flex items-center gap-3 mb-5">
+              <div className="p-2 rounded-full bg-teal-900/50 text-teal-400">
+                <svg className="w-5 h-5 animate-spin" fill="none" viewBox="0 0 24 24">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
+                </svg>
+              </div>
+              <div>
+                <h3 className="text-white font-bold text-base">匯入後自動同步中</h3>
+                <p className="text-slate-400 text-xs">全部步驟完成前請勿關閉此視窗</p>
+              </div>
+            </div>
+            <div className="space-y-3">
+              {postSyncModal.steps.map((step, i) => (
+                <div key={i} className="flex items-center gap-3">
+                  <div className="w-6 h-6 flex items-center justify-center shrink-0">
+                    {step.status === 'done' && (
+                      <svg className="w-5 h-5 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" /></svg>
+                    )}
+                    {step.status === 'running' && (
+                      <svg className="w-5 h-5 text-cyan-400 animate-spin" fill="none" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
+                      </svg>
+                    )}
+                    {step.status === 'error' && (
+                      <svg className="w-5 h-5 text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+                    )}
+                    {step.status === 'pending' && (
+                      <div className="w-3 h-3 rounded-full border-2 border-slate-600 mx-auto" />
+                    )}
+                  </div>
+                  <span className={`text-sm ${
+                    step.status === 'done' ? 'text-emerald-400' :
+                    step.status === 'running' ? 'text-cyan-300 font-medium' :
+                    step.status === 'error' ? 'text-red-400' :
+                    'text-slate-500'
+                  }`}>{step.label}</span>
+                </div>
+              ))}
+            </div>
+            {postSyncModal.error && (
+              <div className="mt-4 p-3 bg-red-950/40 border border-red-700/50 rounded-lg text-red-300 text-xs">
+                <p className="font-semibold mb-1">錯誤</p>
+                <p>{postSyncModal.error}</p>
+              </div>
+            )}
+            {(postSyncModal.steps.every(s => s.status === 'done') || !!postSyncModal.error) && (
+              <div className="mt-5 flex justify-end">
+                <button
+                  onClick={() => setPostSyncModal(null)}
+                  className="px-5 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 text-white text-sm font-medium transition-colors"
+                >
+                  關閉
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   )
 }
