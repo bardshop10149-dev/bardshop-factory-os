@@ -364,6 +364,14 @@ export default function DailyOrderSheetPage() {
   useEffect(() => { loadSheetList() }, [loadSheetList])
   useEffect(() => { loadSheet(selectedDate) }, [selectedDate, loadSheet])
 
+  // 當日期清單載入後，若尚未選日期，自動選今天或最近一筆
+  useEffect(() => {
+    if (selectedDate || availableSheets.length === 0) return
+    const today = todayStr()
+    const hasToday = availableSheets.some(s => s.sheet_date === today)
+    setSelectedDate(hasToday ? today : availableSheets[0].sheet_date)
+  }, [availableSheets, selectedDate])
+
   // ---- 跨日期單號搜尋 ----
   const runGlobalSearch = useCallback(async (q: string) => {
     const trimmed = q.trim()
@@ -390,13 +398,13 @@ export default function DailyOrderSheetPage() {
     })
   }, [sheetRows])
 
-  // ---- 載入機台清單 ----
+  // ---- 載入機台清單（selectedDate 變動時重試，避免首次失敗後選單空白）----
   useEffect(() => {
     fetch('/api/argoerp/machines')
       .then(r => r.json())
       .then(j => { if (j.success) setMachines((j.machines as { name: string }[]).map(m => m.name)) })
       .catch(() => {})
-  }, [])
+  }, [selectedDate])
 
   // 當出單表載入後，載入對應製令的機台分配
   useEffect(() => {
