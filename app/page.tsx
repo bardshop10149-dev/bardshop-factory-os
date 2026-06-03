@@ -288,6 +288,7 @@ export default function HomePage() {
   const canProductionAdmin = hasFeaturePermission('production_admin')
   const canSystemSettings = hasFeaturePermission('system_settings')
   const canQa = hasFeaturePermission('qa')
+  const canArgoDB = hasFeaturePermission('argo_db')
 
   return (
     <div className="min-h-screen bg-[#050b14] text-slate-300 font-sans selection:bg-cyan-500 selection:text-white relative overflow-y-auto flex flex-col items-center justify-start md:justify-center py-4 md:py-0">
@@ -760,6 +761,35 @@ export default function HomePage() {
             </p>
             <span className="hidden md:inline-block px-4 py-2 rounded border border-slate-600 text-slate-300 text-xs font-mono group-hover:bg-yellow-600 group-hover:border-yellow-600 group-hover:text-white transition-all">
               VIEW RECORDS &rarr;
+            </span>
+          </Link>
+
+          {/* ARGO資料庫 (Orange-Red) */}
+          <Link href="/admin/argoerp/argo-db"
+            onClick={guardFeatureAccess('argo_db', 'ARGO資料庫')}
+            onMouseEnter={() => setIsHovered('none')}
+            onMouseLeave={() => setIsHovered('none')}
+            className={`
+              group relative h-40 md:h-60 lg:h-64 rounded-2xl border border-slate-700 bg-slate-900/40 backdrop-blur-sm 
+              flex flex-col items-center justify-center text-center p-3 md:p-6 transition-all duration-500 cursor-pointer
+              hover:border-orange-500 hover:bg-slate-800/60 hover:shadow-[0_0_30px_rgba(249,115,22,0.15)]
+              ${canArgoDB ? '' : 'opacity-50 grayscale'}
+            `}
+          >
+            <div className="absolute top-4 right-4 flex items-center gap-1.5 px-2 py-1 bg-orange-500/10 rounded border border-orange-500/20">
+              <span className="text-[10px] text-orange-400 font-bold uppercase tracking-wider">ARGO ERP</span>
+            </div>
+            <div className="mb-3 md:mb-6 p-3 md:p-4 rounded-full bg-slate-800 group-hover:bg-orange-900/50 text-slate-400 group-hover:text-orange-400 transition-colors">
+              <svg className="w-7 h-7 md:w-10 md:h-10" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M4 7v10c0 2 1 3 3 3h10c2 0 3-1 3-3V7c0-2-1-3-3-3H7C5 4 4 5 4 7zm0 5h16M9 4v16" />
+              </svg>
+            </div>
+            <h2 className="text-base md:text-xl font-bold text-white mb-1 md:mb-2 group-hover:text-orange-400 transition-colors">ARGO資料庫</h2>
+            <p className="text-slate-500 text-[10px] md:text-xs mb-3 md:mb-6 group-hover:text-slate-300 px-1 md:px-2 hidden md:block">
+              ArgoERP 資料同步與管理。<br/>(ARGO Database)
+            </p>
+            <span className="hidden md:inline-block px-4 py-2 rounded border border-slate-600 text-slate-300 text-xs font-mono group-hover:bg-orange-600 group-hover:border-orange-600 group-hover:text-white transition-all">
+              OPEN DB &rarr;
             </span>
           </Link>
 
