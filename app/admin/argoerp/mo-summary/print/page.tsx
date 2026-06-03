@@ -235,14 +235,11 @@ function InfoGrid({ rows }: {
 
 // ── 採購單卡片（常平 C / 委外 O）────────────────────────────
 function PoCard({
-  mo, idx, total, soMap, customerCodeMap, printTime,
+  mo, soMap, customerCodeMap,
 }: {
   mo: MoRecord
-  idx: number
-  total: number
   soMap: Map<string, SoLine[]>
   customerCodeMap: Map<string, string>
-  printTime: string
 }) {
   const lineNo = getLineNo(mo)
   const soLines = soMap.get(mo.source_order ?? '') ?? []
@@ -482,14 +479,6 @@ function PoCard({
         </div>
       </div>
 
-      {/* ── 頁尾 ── */}
-      <div className="no-print" style={{
-        marginTop: '8px', paddingTop: '4px', borderTop: '1px solid #e5e7eb',
-        display: 'flex', justifyContent: 'space-between', fontSize: '12px', color: '#9ca3af',
-      }}>
-        <span>列印時間：{printTime}</span>
-        <span>{idx + 1} / {total}</span>
-      </div>
     </div>
   )
 }
@@ -504,7 +493,6 @@ function MoPrintContent() {
   const [customerCodeMap, setCustomerCodeMap] = useState<Map<string, string>>(new Map()) // cname → partner_id
   const [loading, setLoading] = useState(true)
   const [error, setError]     = useState<string | null>(null)
-  const printTime = new Date().toLocaleString('zh-TW')
 
   useEffect(() => {
     // ── Demo 模式：使用假資料，不讀 sessionStorage ──
@@ -714,10 +702,10 @@ function MoPrintContent() {
 
       {/* ── 頁面容器 ───────────────────────────────────────── */}
       <div className="mo-pages-wrapper" style={{ background: '#64748b', padding: '24px 16px', minHeight: '100vh' }}>
-        {records.map((mo, idx) => {
+        {records.map((mo) => {
           // 常平 C / 委外 O → 採購單格式
           if (mo.factory === 'C' || mo.factory === 'O') {
-            return <PoCard key={mo.mo_number} mo={mo} idx={idx} total={records.length} soMap={soMap} customerCodeMap={customerCodeMap} printTime={printTime} />
+            return <PoCard key={mo.mo_number} mo={mo} soMap={soMap} customerCodeMap={customerCodeMap} />
           }
 
           const lineNo = getLineNo(mo)
@@ -993,16 +981,6 @@ function MoPrintContent() {
                 </div>
               </div>
 
-              {/* ── 頁尾 ── */}
-              <div className="no-print" style={{
-                marginTop: '8px', paddingTop: '4px',
-                borderTop: '1px solid #e5e7eb',
-                display: 'flex', justifyContent: 'space-between',
-                fontSize: '12px', color: '#9ca3af',
-              }}>
-                <span>列印時間：{printTime}</span>
-                <span>{idx + 1} / {records.length}</span>
-              </div>
             </div>
           )
         })}
