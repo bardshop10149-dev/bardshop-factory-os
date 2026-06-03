@@ -3,6 +3,7 @@
 import { useEffect, useState, Suspense } from 'react'
 import { useSearchParams } from 'next/navigation'
 import { supabase } from '@/lib/supabaseClient'
+import { exportPoToWord } from './exportWord'
 
 // ── 假資料（?demo=1 預覽用）──────────────────────────────────
 const DEMO_RECORDS: MoRecord[] = [
@@ -604,7 +605,7 @@ function MoPrintContent() {
         @media print {
           .mo-toolbar { display: none !important; }
           .no-print { display: none !important; }
-          * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
+          html { filter: grayscale(100%); }
           html, body { background: white !important; color: black !important; }
           /* 隱藏 admin layout 的裝飾背景層 */
           body > * { background: white !important; }
@@ -672,6 +673,16 @@ function MoPrintContent() {
           <span style={{ fontSize: '11px', color: '#475569' }}>
             SO 資料：{soMap.size} 筆訂單已載入
           </span>
+          <button
+            onClick={() => void exportPoToWord(records, soMap, customerCodeMap)}
+            style={{
+              padding: '8px 18px', background: '#16a34a', borderRadius: '6px',
+              cursor: 'pointer', color: 'white', fontSize: '13px',
+              fontWeight: 700, border: 'none',
+            }}
+          >
+            📄 下載 Word
+          </button>
           <button
             onClick={() => window.print()}
             style={{
