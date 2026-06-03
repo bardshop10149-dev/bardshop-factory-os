@@ -552,20 +552,8 @@ export default function FactoryOrderExportPage({
       setSelectedRows(new Set())
       setLoadedFromSheetDate(date)
 
-      const hasPrematched = sheetRows.some(r => r.match_status)
-      if (hasPrematched) {
-        const presetMatches: SoMatchResult[] = sheetRows
-          .filter(r => r.factory === factory)
-          .map(r => ({
-            line_no:  r.match_line_no ?? null,
-            pdl_seq:  r.match_pdl_seq ?? null,
-            status:   (r.match_status as SoMatchResult['status']) || 'no_order',
-            reason:   r.match_reason ?? '',
-          }))
-        setSoMatchResults(presetMatches)
-      } else {
-        buildSoMatches(rows)
-      }
+      // 每次載入都重新查詢 erp_so_lines，確保取得最新比對結果
+      buildSoMatches(rows)
     } catch (e) {
       alert(`載入出單表失敗：${e}`)
     }
