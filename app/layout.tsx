@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
+import MigrationBanner from '../components/MigrationBanner';
 // import TaskFloatingWidget from '../components/TaskFloatingWidget'; // 🔥 1. 引入元件
 
 const geistSans = Geist({
@@ -28,7 +29,10 @@ export default function RootLayout({
       <body
         className={`${geistSans.variable} ${geistMono.variable} antialiased`}
       >
-        {children}
+        {process.env.NEXT_PUBLIC_SHOW_MIGRATION_BANNER === 'true'
+          ? <MigrationBanner />
+          : children
+        }
 
         {/* <TaskFloatingWidget /> */}
         
