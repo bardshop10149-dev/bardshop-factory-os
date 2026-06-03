@@ -723,8 +723,8 @@ export default function FactoryOrderExportPage({
       const nowStr = new Date().toLocaleString('zh-TW')
       const records = buildSummaryRecords(filteredRows, nowStr, filteredMatch, storageKey)
 
-      // 製令已存在 → 補存 Supabase
-      if (!isSuccess && errorStr.includes('製令單號已存在')) {
+      // 採購單/製令已存在 → 補存 Supabase
+      if (!isSuccess && (errorStr.includes('製令單號已存在') || errorStr.includes('不可重複寫入訂單檔'))) {
         await saveRecordsToSummaryDbUpsert(records)
         setFailedImports(prev => removeFailedImportsByRows(prev, filteredRows))
         const importedKeys = new Set(filteredRows.map(createSourceRowKey))
