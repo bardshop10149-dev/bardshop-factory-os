@@ -244,6 +244,9 @@ function PoCard({
   const lineNo = getLineNo(mo)
   const soLines = soMap.get(mo.source_order ?? '') ?? []
   const so = soLines.find(l => String(parseInt(String(l.line_no || '0'), 10)) === lineNo) ?? soLines[0] ?? null
+  const poUnit = so?.unit_of_measure_oru || so?.unit_of_measure || ''
+  const poQtyValue = (mo.planned_qty || '').trim()
+  const poQtyDisplay = poQtyValue ? `${poQtyValue}${poUnit ? ` ${poUnit}` : ''}` : '—'
 
   const factoryLabel = FACTORY_LABEL[mo.factory ?? ''] ?? mo.factory ?? '—'
 
@@ -326,7 +329,7 @@ function PoCard({
               </tr>
               <tr style={{ height: '76px' }}>
                 <td style={{ ...labelTd, verticalAlign: 'middle' }}>採購數量</td>
-                <td style={{ ...valueTd, fontSize: '24px', fontWeight: 600, verticalAlign: 'middle' }}>{mo.planned_qty || '—'}</td>
+                <td style={{ ...valueTd, fontSize: '24px', fontWeight: 600, verticalAlign: 'middle' }}>{poQtyDisplay}</td>
               </tr>
             </tbody>
           </table>
