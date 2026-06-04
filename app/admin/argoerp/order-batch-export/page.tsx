@@ -528,6 +528,39 @@ function sourceRowsToTsv(rows: SourceRow[]): string {
   return [header, ...lines].join('\n')
 }
 
+const SOURCE_ROWS_STORAGE_KEY = 'argoerp_order_batch_source_rows'
+const FAILED_IMPORTS_STORAGE_KEY = 'argoerp_order_batch_failed_imports'
+
+function saveToStorage(rows: SourceRow[]): void {
+  if (typeof window === 'undefined') return
+  try {
+    localStorage.setItem(SOURCE_ROWS_STORAGE_KEY, JSON.stringify(rows))
+  } catch {
+    // ignore local cache failure
+  }
+}
+
+function saveFailedImports(items: FailedImportItem[]): void {
+  if (typeof window === 'undefined') return
+  try {
+    localStorage.setItem(FAILED_IMPORTS_STORAGE_KEY, JSON.stringify(items))
+  } catch {
+    // ignore local cache failure
+  }
+}
+
+function loadFailedImportsFromStorage(): FailedImportItem[] {
+  if (typeof window === 'undefined') return []
+  try {
+    const raw = localStorage.getItem(FAILED_IMPORTS_STORAGE_KEY)
+    if (!raw) return []
+    const parsed = JSON.parse(raw)
+    return Array.isArray(parsed) ? (parsed as FailedImportItem[]) : []
+  } catch {
+    return []
+  }
+}
+
 function factoryLabel(factory: 'T' | 'C' | 'O'): string {
   if (factory === 'O') return '委外'
   if (factory === 'C') return '常平'
@@ -579,6 +612,10 @@ export default function OrderBatchExportPage() {
   const [manualMoErrors, setManualMoErrors] = useState<Record<string, string>>({})
   const [manualMoImporting, setManualMoImporting] = useState(false)
   const [manualMoMsg, setManualMoMsg] = useState('')
+
+  useEffect(() => {
+    setFailedImports(loadFailedImportsFromStorage())
+  }, [])
 
   // ---- 匯入後自動同步進度 Modal ----
   type PostSyncStep = { label: string; status: 'pending' | 'running' | 'done' | 'error' }
