@@ -212,6 +212,15 @@ function parseSourceRows(text: string): { rows: SourceRow[]; error: string } {
   return { rows: parsed, error: '' }
 }
 
+function encodeTsvCell(v: string): string {
+  if (/["\t\n\r]/.test(v)) return `"${v.replace(/"/g, '""')}"`
+  return v
+}
+
+function rowsToTsv(rows: string[][]): string {
+  return rows.map(r => r.map(c => encodeTsvCell(c ?? '')).join('\t')).join('\n')
+}
+
 function toCsvCell(v: unknown): string {
   return `"${String(v ?? '').replace(/"/g, '""')}"`
 }
@@ -244,6 +253,8 @@ export default function DailyOrderSheetPage() {
   const [availableSheets, setAvailableSheets] = useState<SheetMeta[]>([])
   const [sheetRows, setSheetRows] = useState<SheetRow[]>([])
   const [rawText, setRawText] = useState('')
+  const [rawEditorMode, setRawEditorMode] = useState<'excel' | 'text'>('excel')
+  const [rawGrid, setRawGrid] = useState<string[][]>([])
   const [currentRawText, setCurrentRawText] = useState('')   // stored raw_text for this date
   const [showPasteArea, setShowPasteArea] = useState(false)
   const [parseError, setParseError] = useState('')
@@ -383,6 +394,14 @@ export default function DailyOrderSheetPage() {
 
   useEffect(() => { loadSheetList() }, [loadSheetList])
   useEffect(() => { loadSheet(selectedDate) }, [selectedDate, loadSheet])
+
+  useEffect(() => {
+    if (!rawText.trim()) {
+      setRawGrid([])
+      return
+    }
+    setRawGrid(parseTSV(rawText))
+  }, [rawText])
 
   // 當日期清單載入後，若尚未選日期，自動選今天或最近一筆
   useEffect(() => {
@@ -1935,12 +1954,71 @@ export default function DailyOrderSheetPage() {
                 <p className="text-xs text-slate-500 mb-3">
                   從 Excel / Google Sheet 複製工單表格後貼上（Tab 分隔）。儲存後可在「訂單批量轉製令匯出」頁面選取此日期載入。
                 </p>
-                <textarea
-                  value={rawText}
-                  onChange={e => setRawText(e.target.value)}
-                  placeholder="從 Excel 複製工單表格後貼上此處..."
-                  className="w-full h-44 bg-slate-950 border border-slate-700 rounded-lg p-3 text-sm text-slate-200 font-mono resize-y focus:outline-none focus:border-cyan-500/50 focus:ring-1 focus:ring-cyan-500/30 placeholder:text-slate-600"
-                />
+                <div className="mb-2 flex items-center gap-2">
+                  <button
+                    onClick={() => setRawEditorMode('excel')}
+                    className={`px-3 py-1.5 rounded text-xs border ${rawEditorMode === 'excel' ? 'bg-cyan-700 border-cyan-500 text-white' : 'bg-slate-800 border-slate-700 text-slate-300 hover:text-white'}`}
+                  >
+                    Excel 格式
+                  </button>
+                  <button
+                    onClick={() => setRawEditorMode('text')}
+                    className={`px-3 py-1.5 rounded text-xs border ${rawEditorMode === 'text' ? 'bg-cyan-700 border-cyan-500 text-white' : 'bg-slate-800 border-slate-700 text-slate-300 hover:text-white'}`}
+                  >
+                    純文字
+                  </button>
+                </div>
+
+                {rawEditorMode === 'text' ? (
+                  <textarea
+                    value={rawText}
+                    onChange={e => setRawText(e.target.value)}
+                    placeholder="從 Excel 複製工單表格後貼上此處..."
+                    className="w-full h-44 bg-slate-950 border border-slate-700 rounded-lg p-3 text-sm text-slate-200 font-mono resize-y focus:outline-none focus:border-cyan-500/50 focus:ring-1 focus:ring-cyan-500/30 placeholder:text-slate-600"
+                  />
+                ) : (
+                  <div className="border border-slate-700 rounded-lg bg-slate-950 overflow-auto max-h-[420px]">
+                    {rawGrid.length === 0 ? (
+                      <div className="p-4 text-xs text-slate-500">先貼上資料，這裡會以 Excel 表格方式顯示，可直接修正儲存格內容。</div>
+                    ) : (
+                      <table className="min-w-full border-collapse text-xs">
+                        <thead className="sticky top-0 bg-slate-900 z-10">
+                          <tr>
+                            <th className="px-2 py-1 border-b border-slate-700 text-slate-400">#</th>
+                            {Array.from({ length: rawGrid.reduce((m, r) => Math.max(m, r.length), 0) }).map((_, ci) => (
+                              <th key={`col-${ci}`} className="px-2 py-1 border-b border-slate-700 text-slate-400 min-w-[120px]">欄位 {ci + 1}</th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {rawGrid.map((row, ri) => {
+                            const maxCols = rawGrid.reduce((m, r) => Math.max(m, r.length), 0)
+                            return (
+                              <tr key={`raw-row-${ri}`} className="border-b border-slate-800/60">
+                                <td className="px-2 py-1 align-top text-slate-500">{ri + 1}</td>
+                                {Array.from({ length: maxCols }).map((_, ci) => (
+                                  <td key={`raw-cell-${ri}-${ci}`} className="px-1 py-1 align-top">
+                                    <input
+                                      value={row[ci] ?? ''}
+                                      onChange={(e) => {
+                                        const next = rawGrid.map(r => [...r])
+                                        if (!next[ri]) next[ri] = []
+                                        next[ri][ci] = e.target.value
+                                        setRawGrid(next)
+                                        setRawText(rowsToTsv(next))
+                                      }}
+                                      className="w-full bg-slate-900 border border-slate-700 rounded px-1.5 py-1 text-slate-200 focus:outline-none focus:border-cyan-500"
+                                    />
+                                  </td>
+                                ))}
+                              </tr>
+                            )
+                          })}
+                        </tbody>
+                      </table>
+                    )}
+                  </div>
+                )}
                 {parseError && (
                   <p className="mt-2 text-red-400 text-sm">{parseError}</p>
                 )}
@@ -1999,7 +2077,7 @@ export default function DailyOrderSheetPage() {
                 </div>
                 {!showPasteArea && currentRawText && (
                   <button
-                    onClick={() => { setRawText(currentRawText); setShowPasteArea(true) }}
+                    onClick={() => { setRawText(currentRawText); setRawEditorMode('excel'); setShowPasteArea(true) }}
                     className="text-xs text-slate-400 hover:text-slate-200 underline"
                   >
                     查看原始資料
@@ -2111,7 +2189,7 @@ export default function DailyOrderSheetPage() {
                         const sk = row.row_key || String(idx)
                         return (
                           <tr
-                            key={row.row_key || idx}
+                            key={`${row.row_key || 'row'}::${idx}`}
                             className={`border-b border-slate-800/60 transition-colors ${
                               row.mo_status === '已匯入製令'
                                 ? 'bg-emerald-950/20'
