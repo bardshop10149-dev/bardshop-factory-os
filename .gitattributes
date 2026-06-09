@@ -1,0 +1,20 @@
+# 跨 OS 換行一致 —— Windows(工廠/筆電/辦公室)與 Mac(AIR)切換時,
+# 不再因 CRLF/LF 差異讓整包檔案出現「假變動(false modified)」。
+* text=auto eol=lf
+
+# Shell script 一律 LF(避免在 Windows 被改成 CRLF 導致 hook 跑不動)
+*.sh text eol=lf
+
+# 二進位檔不要被當文字處理(避免換行轉換損毀檔案)
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ico  binary
+*.webp binary
+*.pdf  binary
+*.xlsx binary
+*.xls  binary
+*.woff  binary
+*.woff2 binary
+*.ttf  binary

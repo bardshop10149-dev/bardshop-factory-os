@@ -1,0 +1,40 @@
+#!/bin/sh
+# ──────────────────────────────────────────────────────────────────────
+#  pre-push hook — 多機開發防撞(feature branch + PR 工作流)
+#
+#  啟用方式(每台機器 clone 後只需跑一次):
+#       git config core.hooksPath .githooks
+#  Windows 用 Git for Windows 內建 bash 執行,Mac/Linux 原生 sh,皆相容。
+# ──────────────────────────────────────────────────────────────────────
+protected_branch="main"
+
+# (1) 禁止直接 push 到 main —— 一律走 feature 分支 + PR
+while read -r local_ref local_sha remote_ref remote_sha; do
+  if [ "$remote_ref" = "refs/heads/$protected_branch" ]; then
+    echo ""
+    echo "⛔ 禁止直接 push 到 '$protected_branch'。請改用 feature 分支 + PR:"
+    echo "     git switch -c feat/你的功能名"
+    echo "     git push -u origin feat/你的功能名   # 再到 GitHub 開 PR"
+    echo ""
+    echo "  (確定要繞過可加 --no-verify,但正常情況請別這麼做)"
+    echo ""
+    exit 1
+  fi
+done
+
+# (2) 落後 upstream 就擋 —— 避免覆蓋別台機器已經推上去的 commit
+if git fetch --quiet 2>/dev/null; then
+  upstream=$(git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null)
+  if [ -n "$upstream" ]; then
+    behind=$(git rev-list --count 'HEAD..@{u}' 2>/dev/null || echo 0)
+    if [ "${behind:-0}" -gt 0 ]; then
+      echo ""
+      echo "⛔ 你的分支落後 $upstream 共 $behind 個 commit(可能是別台機器推的)。"
+      echo "   先同步再 push:  git pull --rebase"
+      echo ""
+      exit 1
+    fi
+  fi
+fi
+
+exit 0

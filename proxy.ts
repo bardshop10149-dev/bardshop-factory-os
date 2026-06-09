@@ -1,6 +1,17 @@
 import { NextResponse } from 'next/server'
 import type { NextRequest } from 'next/server'
 
+/**
+ * 驗證 token 是否符合 JWT 格式（三段 base64url 以 . 分隔）。
+ * 防止偽造的固定字串（例如 "authorized"）通過身份驗證。
+ * 注意：此處僅驗證格式，不驗證簽章；完整簽章驗證需搭配 SUPABASE_JWT_SECRET + jose。
+ */
+function isJwtFormat(token: string): boolean {
+  const parts = token.split('.')
+  if (parts.length !== 3) return false
+  return parts.every(p => p.length > 0 && /^[A-Za-z0-9_-]+$/.test(p))
+}
+
 export function proxy(request: NextRequest) {
   const path = request.nextUrl.pathname
 
@@ -8,8 +19,10 @@ export function proxy(request: NextRequest) {
   if (path.startsWith('/api')) {
     return NextResponse.next()
   }
-  
-  const token = request.cookies.get('bardshop-token')?.value
+
+  const rawToken = request.cookies.get('bardshop-token')?.value
+  // 只接受符合 JWT 格式的 token（三段 base64url），拒絕舊版固定字串
+  const token = rawToken && isJwtFormat(rawToken) ? rawToken : undefined
   const role = request.cookies.get('bardshop-role')?.value
   const permissionsCookie = request.cookies.get('bardshop-permissions')?.value || ''
   const permissions = new Set(

@@ -3,26 +3,8 @@
 import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import Link from 'next/link'
-import { supabase } from '../../lib/supabaseClient' // 引入 Supabase
 
 const REMEMBER_EMAIL_KEY = 'bardshop_remember_email'
-
-const isMissingAuthUserIdColumnError = (error: { message?: string } | null | undefined) =>
-  Boolean(error?.message?.includes('auth_user_id'))
-
-const normalizeLegacyPermissions = (rawPermissions: string[] = []) => {
-  const normalized = new Set<string>()
-
-  rawPermissions.forEach((permission) => {
-    if (permission === 'production') normalized.add('dashboard')
-    else if (permission === 'admin') {
-      normalized.add('production_admin')
-      normalized.add('system_settings')
-    } else normalized.add(permission)
-  })
-
-  return Array.from(normalized)
-}
 
 export default function LoginPage() {
   const [isLoading, setIsLoading] = useState(false)
@@ -43,76 +25,37 @@ export default function LoginPage() {
     e.preventDefault()
     setIsLoading(true)
     setErrorMsg('')
-    
+
     try {
-      // 1. 去資料庫找這個人 (直接查 members 表)
-      const { data: member, error } = await supabase
-        .from('members')
-        .select('id, auth_user_id, email, password, real_name, is_admin, permissions')
-        .eq('email', formData.email)
-        .single()
+      // 送到 /api/auth/login；伺服器端完成 Supabase Auth 驗證並設定 httpOnly cookies
+      const res = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: formData.email, password: formData.password }),
+      })
 
-      if (error || !member) {
-        throw new Error('找不到此帳號，請確認 Email 是否正確')
+      const json = await res.json() as { ok?: boolean; error?: string; name?: string; email?: string; role?: string }
+
+      if (!res.ok || !json.ok) {
+        throw new Error(json.error ?? '登入失敗')
       }
 
-      // 2. 檢查密碼 (注意：這裡直接比對明碼，需確保資料庫內的密碼也是明碼)
-      // 如果資料庫密碼是 123456，這裡輸入 123456 就會過
-      if (String(member.password) !== String(formData.password)) {
-        throw new Error('密碼錯誤')
-      }
-
-      // 3. 登入成功：儲存使用者資訊到瀏覽器
-      // 🔥 關鍵步驟：把 Email 存起來，讓其他頁面知道是誰登入的
-      localStorage.setItem('bardshop_user_email', member.email)
-      localStorage.setItem('bardshop_user_name', member.real_name)
-
+      // 記住我（僅 email，不存密碼）
       if (rememberMe) {
-        localStorage.setItem(REMEMBER_EMAIL_KEY, member.email)
+        localStorage.setItem(REMEMBER_EMAIL_KEY, formData.email)
       } else {
         localStorage.removeItem(REMEMBER_EMAIL_KEY)
       }
 
-      // 4. 設定 Cookie (給 Middleware 過路檢察用)
-      document.cookie = `bardshop-token=authorized; path=/; max-age=86400; SameSite=Lax;`
-      const finalPermissions = Boolean(member.is_admin)
-        ? ['dashboard', 'notice', 'estimation', 'tasks', 'qa_report', 'qa', 'production_admin', 'system_settings']
-        : normalizeLegacyPermissions(Array.isArray(member.permissions) ? member.permissions : [])
+      // 儲存使用者基本資訊供前端顯示（非敏感）
+      if (json.email) localStorage.setItem('bardshop_user_email', json.email)
+      if (json.name)  localStorage.setItem('bardshop_user_name',  json.name)
 
-      const isAdminRole =
-        Boolean(member.is_admin) ||
-        finalPermissions.includes('production_admin')
-
-      const role = isAdminRole ? 'admin' : 'ops'
-      document.cookie = `bardshop-role=${role}; path=/; max-age=86400; SameSite=Lax;`
-      document.cookie = `bardshop-permissions=${encodeURIComponent(finalPermissions.join(','))}; path=/; max-age=86400; SameSite=Lax;`
-
-      // 4-1. 盡力將 members 綁定 auth_user_id（有 Supabase Auth session 時才會生效）
-      try {
-        const { data: authData } = await supabase.auth.getUser()
-        const authUserId = authData.user?.id
-
-        if (authUserId && member.id && member.auth_user_id !== authUserId) {
-          const { error: syncError } = await supabase
-            .from('members')
-            .update({ auth_user_id: authUserId })
-            .eq('id', member.id)
-
-          if (syncError && !isMissingAuthUserIdColumnError(syncError)) {
-            console.warn('回寫 auth_user_id 失敗:', syncError.message)
-          }
-        }
-      } catch {
-        // ignore sync errors to avoid affecting login flow
-      }
-
-      // 5. 轉址進首頁
-      // 使用 router.push 比 window.location.href 更平滑
+      // Cookies（bardshop-token, bardshop-role, bardshop-permissions）已由 API 設定
       router.push('/')
 
     } catch (err: unknown) {
-      const errorMessage = err instanceof Error ? err.message : '登入失敗'
-      setErrorMsg(errorMessage)
+      setErrorMsg(err instanceof Error ? err.message : '登入失敗')
       setIsLoading(false)
     }
   }
