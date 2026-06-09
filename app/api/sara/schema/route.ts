@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server'
 import { getSupabaseAdminClient } from '@/lib/supabaseAdmin'
+import { guardAdmin } from '@/lib/requireAuth'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -29,6 +30,8 @@ function inferType(val: unknown): string {
 
 export async function GET() {
   try {
+    const guard = await guardAdmin()
+    if (!guard.ok) return guard.res
     const sb = getSupabaseAdminClient()
     const results = await Promise.all(
       SARA_TABLES.map(async (table) => {

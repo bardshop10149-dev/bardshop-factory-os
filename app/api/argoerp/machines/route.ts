@@ -1,10 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getSupabaseAdminClient, formatSupabaseAdminError } from '@/lib/supabaseAdmin'
+import { guardPermission } from '@/lib/requireAuth'
 
 const TABLE = 'argoerp_machines'
 
 // GET: 取得機台清單（依 sort_order, id 排序）
 export async function GET() {
+  const guard = await guardPermission('production_admin')
+  if (!guard.ok) return guard.res
   try {
     const supabase = getSupabaseAdminClient()
     const { data, error } = await supabase
@@ -23,6 +26,8 @@ export async function GET() {
 
 // POST: 新增機台 { name: string }
 export async function POST(request: NextRequest) {
+  const guard = await guardPermission('production_admin')
+  if (!guard.ok) return guard.res
   try {
     const { name } = await request.json() as { name?: string }
     if (!name?.trim()) {
@@ -51,6 +56,8 @@ export async function POST(request: NextRequest) {
 
 // DELETE: 刪除機台 { name: string }
 export async function DELETE(request: NextRequest) {
+  const guard = await guardPermission('production_admin')
+  if (!guard.ok) return guard.res
   try {
     const { name } = await request.json() as { name?: string }
     if (!name?.trim()) {
@@ -68,6 +75,8 @@ export async function DELETE(request: NextRequest) {
 
 // PATCH: 重新命名機台 { old_name: string, new_name: string }
 export async function PATCH(request: NextRequest) {
+  const guard = await guardPermission('production_admin')
+  if (!guard.ok) return guard.res
   try {
     const { old_name, new_name } = await request.json() as { old_name?: string; new_name?: string }
     if (!old_name?.trim() || !new_name?.trim()) {

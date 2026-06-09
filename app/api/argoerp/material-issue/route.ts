@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getSupabaseAdminClient } from '../../../../lib/supabaseAdmin'
+import { guardPermission } from '@/lib/requireAuth'
 
 interface IssueBody {
   slip_no?: string
@@ -7,6 +8,8 @@ interface IssueBody {
 }
 
 export async function GET(req: NextRequest) {
+  const guard = await guardPermission('production_admin')
+  if (!guard.ok) return guard.res
   const { searchParams } = new URL(req.url)
   const slipNos = (searchParams.get('slip_nos') ?? '').split(',').map(s => s.trim()).filter(Boolean)
   if (slipNos.length === 0) return NextResponse.json({ issued: [] })
@@ -22,6 +25,8 @@ export async function GET(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
+  const guard = await guardPermission('production_admin')
+  if (!guard.ok) return guard.res
   const body = await req.json() as IssueBody
   const { slip_no, line_no } = body
   if (!slip_no || line_no == null) {
@@ -38,6 +43,8 @@ export async function POST(req: NextRequest) {
 }
 
 export async function DELETE(req: NextRequest) {
+  const guard = await guardPermission('production_admin')
+  if (!guard.ok) return guard.res
   const body = await req.json() as IssueBody
   const { slip_no, line_no } = body
   if (!slip_no || line_no == null) {

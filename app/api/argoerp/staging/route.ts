@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getSupabaseAdminClient, formatSupabaseAdminError } from '@/lib/supabaseAdmin'
+import { guardPermission } from '@/lib/requireAuth'
 
 export const dynamic = 'force-dynamic'
 
@@ -14,6 +15,8 @@ const ALLOWED = [
 
 // GET: 取得所有暫緩訂單（依 staged_at 升冪）
 export async function GET() {
+  const guard = await guardPermission('production_admin')
+  if (!guard.ok) return guard.res
   try {
     const supabase = getSupabaseAdminClient()
     const { data, error } = await supabase
@@ -30,6 +33,8 @@ export async function GET() {
 
 // POST: 新增暫緩訂單 { rows: StagingRow[] }
 export async function POST(request: NextRequest) {
+  const guard = await guardPermission('production_admin')
+  if (!guard.ok) return guard.res
   try {
     const { rows } = await request.json() as { rows?: Record<string, unknown>[] }
     if (!Array.isArray(rows) || rows.length === 0) {
@@ -55,6 +60,8 @@ export async function POST(request: NextRequest) {
 
 // DELETE: 刪除 { ids: number[] }
 export async function DELETE(request: NextRequest) {
+  const guard = await guardPermission('production_admin')
+  if (!guard.ok) return guard.res
   try {
     const { ids } = await request.json() as { ids?: number[] }
     if (!Array.isArray(ids) || ids.length === 0) {
@@ -72,6 +79,8 @@ export async function DELETE(request: NextRequest) {
 
 // PATCH: 更新暫緩原因 { id: number, hold_reason: string }
 export async function PATCH(request: NextRequest) {
+  const guard = await guardPermission('production_admin')
+  if (!guard.ok) return guard.res
   try {
     const { id, hold_reason } = await request.json() as { id?: number; hold_reason?: string }
     if (typeof id !== 'number') {

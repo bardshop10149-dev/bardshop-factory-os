@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { saraFetch, getSaraTokenCacheState, getSaraToken } from '@/lib/saraClient'
 import { syncWorkcenters, syncJobs, syncOrders, syncResources, syncLotRoutes, syncReports, type LotDetailItem } from '@/lib/saraSync'
+import { guardPermission } from '@/lib/requireAuth'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -59,40 +60,20 @@ function is404ErrorMessage(msg: string): boolean {
 }
 
 export async function GET(request: NextRequest) {
+  const guard = await guardPermission('production_admin')
+  if (!guard.ok) return guard.res
+
   const { searchParams } = new URL(request.url)
   const action = searchParams.get('action')
 
   if (action === 'ping') {
     try {
-      const token = await getSaraToken(true)
+      await getSaraToken(true)
       return NextResponse.json({
         ok: true,
         message: '已成功取得 SARA token',
-        tokenPreview: token.slice(0, 16) + '...',
-        tokenLength: token.length,
         cache: getSaraTokenCacheState(),
       })
-    } catch (e) {
-      return NextResponse.json({ ok: false, error: e instanceof Error ? e.message : String(e) }, { status: 500 })
-    }
-  }
-
-  if (action === 'raw_token') {
-    // Debug：直接呼叫 temp_token 端點，回傳原始 JSON（不含 secret）
-    try {
-      const base = process.env.SARA_BASE_URL?.replace(/\/+$/, '') || 'https://sara-factory.com/api/data_export'
-      const secret = process.env.SARA_CLIENT_SECRET
-      if (!secret) return NextResponse.json({ ok: false, error: '未設定 SARA_CLIENT_SECRET' }, { status: 500 })
-      const res = await fetch(`${base}/temp_token`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ client_secret: secret }),
-        cache: 'no-store',
-      })
-      const text = await res.text()
-      let body: unknown = text
-      try { body = JSON.parse(text) } catch { /* ignore */ }
-      return NextResponse.json({ ok: res.ok, status: res.status, body })
     } catch (e) {
       return NextResponse.json({ ok: false, error: e instanceof Error ? e.message : String(e) }, { status: 500 })
     }
@@ -107,14 +88,16 @@ export async function GET(request: NextRequest) {
 
 export async function POST(request: NextRequest) {
   try {
+    const guard = await guardPermission('production_admin')
+    if (!guard.ok) return guard.res
+
     const json = await request.json().catch(() => ({})) as { action?: string; body?: unknown }
     const action = json.action ?? ''
 
     if (action === 'ping') {
-      const token = await getSaraToken(true)
+      await getSaraToken(true)
       return NextResponse.json({
         ok: true,
-        tokenPreview: token.slice(0, 16) + '...',
         cache: getSaraTokenCacheState(),
       })
     }

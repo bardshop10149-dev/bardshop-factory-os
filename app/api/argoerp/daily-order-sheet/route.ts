@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getSupabaseAdminClient, formatSupabaseAdminError } from '@/lib/supabaseAdmin'
+import { guardPermission } from '@/lib/requireAuth'
 
 export const dynamic = 'force-dynamic'
 
@@ -9,6 +10,8 @@ const TABLE = 'daily_order_sheets'
 //   無 date 參數 → 回傳所有已儲存日期 ([{sheet_date, row_count, updated_at}])
 //   有 date=YYYY-MM-DD → 回傳該日出單表（含 rows）
 export async function GET(request: NextRequest) {
+  const guard = await guardPermission('production_admin')
+  if (!guard.ok) return guard.res
   try {
     const { searchParams } = new URL(request.url)
     const date = searchParams.get('date')
@@ -85,6 +88,8 @@ export async function GET(request: NextRequest) {
 // POST: 新增或完整取代一天的出單表
 // Body: { sheet_date: 'YYYY-MM-DD', raw_text: string, rows: SheetRow[] }
 export async function POST(request: NextRequest) {
+  const guard = await guardPermission('production_admin')
+  if (!guard.ok) return guard.res
   try {
     const body = await request.json() as {
       sheet_date?: string
@@ -113,6 +118,8 @@ export async function POST(request: NextRequest) {
 // PATCH: 更新特定列的狀態（mo_status / mo_number / 序號比對 / 批備料）
 // Body: { sheet_date: 'YYYY-MM-DD', updates: [{ row_key, mo_status?, mo_number?, match_status?, match_line_no?, match_pdl_seq?, match_reason?, material_prep_status? }] }
 export async function PATCH(request: NextRequest) {
+  const guard = await guardPermission('production_admin')
+  if (!guard.ok) return guard.res
   try {
     const body = await request.json() as {
       sheet_date?: string
@@ -187,6 +194,8 @@ export async function PATCH(request: NextRequest) {
 // DELETE: 刪除指定日期的出單表
 // Query: ?date=YYYY-MM-DD
 export async function DELETE(request: NextRequest) {
+  const guard = await guardPermission('production_admin')
+  if (!guard.ok) return guard.res
   try {
     const { searchParams } = new URL(request.url)
     const date = searchParams.get('date')

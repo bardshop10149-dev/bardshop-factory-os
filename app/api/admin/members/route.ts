@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server'
-import { cookies } from 'next/headers'
 import { formatSupabaseAdminError, getSupabaseAdminClient } from '../../../../lib/supabaseAdmin'
+import { guardAdmin } from '../../../../lib/requireAuth'
 
 type CreateMemberBody = {
   real_name?: string
@@ -39,12 +39,9 @@ async function findAuthUserByEmail(email: string) {
 
 export async function POST(request: Request) {
   try {
+    const guard = await guardAdmin()
+    if (!guard.ok) return guard.res
     const supabaseAdmin = getSupabaseAdminClient()
-    const cookieStore = await cookies()
-    const role = cookieStore.get('bardshop-role')?.value
-    if (role !== 'admin') {
-      return NextResponse.json({ error: '無權限執行此操作' }, { status: 403 })
-    }
 
     const body = (await request.json()) as CreateMemberBody
     const email = body.email?.trim()
