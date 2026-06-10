@@ -137,6 +137,9 @@ interface SoLine {
   mbp_ver: number | null
   tpn_partner_id: string | null
   partner_name: string | null
+  delivery_address?: string | null
+  customer_remark?: string | null
+  invoice_format?: string | null
   sales_name: string | null
   duedate: string | null
   order_qty_oru: number | null
@@ -175,6 +178,24 @@ const FACTORY_COLOR: Record<string, string> = {
 }
 
 const RENDER_CHUNK_SIZE = 20
+
+const EXPORT_MODE_LABELS: Record<string, string> = {
+  '1': '有統編-發票隨貨',
+  '2': '有統編-電子發票',
+  '3': '月結合併開立',
+  '4': '無統編-發票隨貨',
+  '5': '無統編-個人載具',
+  '6': '零元或不開立',
+  '7': '特殊-請洽業務',
+  '8': '至SHOPLINE開立',
+}
+
+function formatExportMode(value: string | null | undefined): string {
+  const raw = String(value ?? '').trim()
+  if (!raw) return '—'
+  const label = EXPORT_MODE_LABELS[raw]
+  return label ? `${raw} ${label}` : raw
+}
 
 function getLineNo(mo: MoRecord): string {
   if (mo.line_no_override !== undefined && mo.line_no_override !== null && mo.line_no_override !== '') {
@@ -385,10 +406,10 @@ function PoCard({
               <td style={{ ...labelTd, whiteSpace: 'normal' }}>品名規格</td>
               <td style={{ ...valueTd, fontSize: '13px' }}>{mo.mo_note || '—'}</td>
             </tr>
-            {so?.remark && (
+            {so?.customer_remark && (
               <tr>
                 <td style={labelTd}>訂單備註</td>
-                <td style={{ ...valueTd, fontSize: '13px' }}>{so.remark}</td>
+                <td style={{ ...valueTd, fontSize: '13px' }}>{so.customer_remark}</td>
               </tr>
             )}
             {so?.packing && (
@@ -406,42 +427,81 @@ function PoCard({
         <SectionTitle color="#e5e7eb">來源訂單資訊</SectionTitle>
         {mo.source_order ? (
           <>
-            {/* 訂單摘要列 */}
-            <div style={{ display: 'flex', border: '1px solid #e2e4e8', borderBottom: 'none', fontSize: '13px' }}>
-              {([
-                ['訂單號', mo.source_order, 1],
-                ['客戶', (() => {
+            {([
+              [
+                ['銷售單號', mo.source_order || '—'],
+                ['負責業務', so?.sales_name || '—'],
+              ],
+              [
+                ['製令項號', lineNo],
+                ['發票型態', formatExportMode(so?.invoice_format || soLines.find(l => l.invoice_format)?.invoice_format)],
+              ],
+              [
+                ['客戶名稱', (() => {
                   const name = so?.partner_name ?? mo.lot_number ?? '—'
                   const code = so?.tpn_partner_id ?? customerCodeMap.get(name) ?? null
                   return code ? `[${code}] ${name}` : name
-                })(), 2],
-                ['業務員', so?.sales_name ?? '—', 1],
-                ['本採購項號', lineNo, 1],
-              ] as [string, string, number][]).map(([lbl, val, flex], i, arr) => (
-                <div key={lbl} style={{ display: 'flex', alignItems: 'stretch', flex, borderRight: i < arr.length - 1 ? '1px solid #e2e4e8' : 'none' }}>
-                  <div style={{ background: '#f2f2f2', padding: '3px 6px', color: '#555', whiteSpace: 'nowrap' as const, display: 'flex', alignItems: 'center', fontSize: '12px' }}>{lbl}</div>
-                  <div style={{ padding: '3px 6px', fontWeight: 500, display: 'flex', alignItems: 'center' }}>{val}</div>
-                </div>
-              ))}
-            </div>
+                })()],
+                ['交貨地址', so?.delivery_address || soLines.find(l => l.delivery_address)?.delivery_address || '—'],
+              ],
+            ] as [[string, string], [string, string]][]).map(([left, right], idx) => (
+              <div
+                key={`${left[0]}-${right[0]}`}
+                style={{
+                  display: 'flex',
+                  border: '1px solid #e2e4e8',
+                  borderTop: idx === 0 ? '1px solid #e2e4e8' : 'none',
+                  borderBottom: 'none',
+                  fontSize: '13px',
+                }}
+              >
+                {[left, right].map(([lbl, val], sideIdx) => (
+                  <div
+                    key={lbl}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'stretch',
+                      flex: '1 1 50%',
+                      minWidth: 0,
+                      borderRight: sideIdx === 0 ? '1px solid #e2e4e8' : 'none',
+                    }}
+                  >
+                    <div style={{ background: '#f2f2f2', padding: '3px 6px', color: '#555', whiteSpace: 'nowrap' as const, display: 'flex', alignItems: 'center', fontSize: '12px' }}>{lbl}</div>
+                    <div style={{ padding: '3px 6px', fontWeight: 500, display: 'flex', alignItems: 'center', minWidth: 0, wordBreak: 'break-word' as const, overflowWrap: 'break-word' as const }}>
+                      {val || '—'}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ))}
             {/* 全部行項表格 — 本採購項加底色＋星號 */}
             <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '12px', tableLayout: 'fixed' }}>
               <colgroup>
                 <col style={{ width: '32px' }} />
-                <col style={{ width: '38%' }} />
+                <col style={{ width: '36%' }} />
                 <col style={{ width: '80px' }} />
-                <col />
+                <col style={{ width: '28%' }} />
                 <col style={{ width: '60px' }} />
+                <col style={{ width: '96px' }} />
               </colgroup>
               <thead>
                 <tr style={{ background: '#f5f6f8' }}>
-                  {(['序', '品項編碼 / 規格', '數量', '包裝方式', '等級'] as const).map((h, hi) => (
+                  {(['序', '品項編碼 / 規格', '數量', '包裝方式', '等級', '交貨日'] as const).map((h, hi) => (
                     <th key={h} style={{ border: '1px solid #e2e4e8', padding: '3px 5px', fontWeight: 600, color: '#555', textAlign: hi === 0 ? 'center' as const : 'left' as const, whiteSpace: 'nowrap' as const, fontSize: '11px' }}>{h}</th>
                   ))}
                 </tr>
               </thead>
               <tbody>
-                {soLines.length > 0 ? soLines.map(line => {
+                {soLines.length > 0 ? [...soLines]
+                  .sort((a, b) => {
+                    const an = parseInt(String(a.line_no || '0'), 10)
+                    const bn = parseInt(String(b.line_no || '0'), 10)
+                    if (Number.isNaN(an) && Number.isNaN(bn)) return String(a.line_no || '').localeCompare(String(b.line_no || ''))
+                    if (Number.isNaN(an)) return 1
+                    if (Number.isNaN(bn)) return -1
+                    return an - bn
+                  })
+                  .map(line => {
                   const lno = String(parseInt(String(line.line_no || '0'), 10))
                   const isThis = lno === lineNo
                   const lqty = line.order_qty_oru ?? line.order_qty
@@ -457,11 +517,12 @@ function PoCard({
                       <td style={td}>{lqty != null ? `${lqty} ${luom}`.trim() : '—'}</td>
                       <td style={td}>{line.packing || '—'}</td>
                       <td style={{ ...td, textAlign: 'center', whiteSpace: 'nowrap', color: line.grade ? '#000' : '#6b7280', fontWeight: line.grade ? 600 : 400 }}>{line.grade || '—'}</td>
+                      <td style={td}>{line.duedate || '—'}</td>
                     </tr>
                   )
                 }) : (
                   <tr>
-                    <td colSpan={5} style={{ border: '1px solid #e2e4e8', padding: '6px', fontSize: '11px', fontStyle: 'italic', color: '#9ca3af', textAlign: 'center' }}>
+                    <td colSpan={6} style={{ border: '1px solid #e2e4e8', padding: '6px', fontSize: '11px', fontStyle: 'italic', color: '#9ca3af', textAlign: 'center' }}>
                       訂單詳細資訊尚未同步，請至「銷售訂單同步」頁面執行同步
                     </td>
                   </tr>
@@ -607,7 +668,7 @@ function MoPrintContent() {
       void (async () => {
         const { data, error: err } = await supabase
           .from('erp_so_lines')
-          .select('project_id,line_no,mbp_part,mbp_ver,tpn_partner_id,partner_name,sales_name,duedate,order_qty_oru,unit_of_measure_oru,description,remark,packing,remark2,grade,part,order_qty,unit_of_measure')
+          .select('project_id,line_no,mbp_part,mbp_ver,tpn_partner_id,partner_name,delivery_address,customer_remark,invoice_format,sales_name,duedate,order_qty_oru,unit_of_measure_oru,description,remark,packing,remark2,grade,part,order_qty,unit_of_measure')
           .in('project_id', projectIds)
         if (err) console.error('so fetch:', err)
 
@@ -973,54 +1034,101 @@ function MoPrintContent() {
                 </div>
               </div>
 
+              {/* ── 生產品項商品備註（顯示本製令項） ── */}
+              <div style={{ marginBottom: '10px' }}>
+                <SectionTitle color="#e5e7eb">生產品項商品備註</SectionTitle>
+                <div style={{ border: '1px solid #ccc', padding: '6px 8px', minHeight: '56px', fontSize: '14px', lineHeight: 1.5 }}>
+                  {so?.remark || '—'}
+                </div>
+              </div>
+
               {/* ── 來源訂單資訊 ── */}
               <div className="mo-section" style={{ marginBottom: '10px' }}>
                 <SectionTitle color="#e5e7eb">來源訂單資訊</SectionTitle>
                 {mo.source_order ? (
                   <>
-                    {/* 訂單摘要列 */}
-                    <div style={{ display: 'flex', border: '1px solid #e2e4e8', borderBottom: 'none', fontSize: '13px' }}>
-                      {([
-                        ['訂單號', mo.source_order, 1],
-                        ['客戶', (() => {
+                    {([
+                      [
+                        ['銷售單號', mo.source_order || '—'],
+                        ['負責業務', so?.sales_name || '—'],
+                      ],
+                      [
+                        ['製令項號', lineNo],
+                        ['發票型態', formatExportMode(so?.invoice_format || soLines.find(l => l.invoice_format)?.invoice_format)],
+                      ],
+                      [
+                        ['客戶名稱', (() => {
                           const name = so?.partner_name ?? mo.lot_number ?? '—'
                           const code = so?.tpn_partner_id ?? customerCodeMap.get(name) ?? null
                           return code ? `[${code}] ${name}` : name
-                        })(), 2],
-                        ['業務員', so?.sales_name ?? '—', 1],
-                        ['本製令項號', lineNo, 1],
-                      ] as [string, string, number][]).map(([lbl, val, flex], i, arr) => (
-                        <div key={lbl} style={{ display: 'flex', alignItems: 'stretch', flex, borderRight: i < arr.length - 1 ? '1px solid #e2e4e8' : 'none' }}>
-                          <div style={{ background: '#f2f2f2', padding: '3px 6px', color: '#555', whiteSpace: 'nowrap' as const, display: 'flex', alignItems: 'center', fontSize: '12px' }}>{lbl}</div>
-                          <div style={{ padding: '3px 6px', fontWeight: 500, display: 'flex', alignItems: 'center' }}>{val}</div>
-                        </div>
-                      ))}
-                    </div>
+                        })()],
+                        ['交貨地址', so?.delivery_address || soLines.find(l => l.delivery_address)?.delivery_address || '—'],
+                      ],
+                    ] as [[string, string], [string, string]][]).map(([left, right], idx) => (
+                      <div
+                        key={`${left[0]}-${right[0]}`}
+                        style={{
+                          display: 'flex',
+                          border: '1px solid #e2e4e8',
+                          borderTop: idx === 0 ? '1px solid #e2e4e8' : 'none',
+                          borderBottom: 'none',
+                          fontSize: '13px',
+                        }}
+                      >
+                        {[left, right].map(([lbl, val], sideIdx) => (
+                          <div
+                            key={lbl}
+                            style={{
+                              display: 'flex',
+                              alignItems: 'stretch',
+                              flex: '1 1 50%',
+                              minWidth: 0,
+                              borderRight: sideIdx === 0 ? '1px solid #e2e4e8' : 'none',
+                            }}
+                          >
+                            <div style={{ background: '#f2f2f2', padding: '3px 6px', color: '#555', whiteSpace: 'nowrap' as const, display: 'flex', alignItems: 'center', fontSize: '12px' }}>{lbl}</div>
+                            <div style={{ padding: '3px 6px', fontWeight: 500, display: 'flex', alignItems: 'center', minWidth: 0, wordBreak: 'break-word' as const, overflowWrap: 'break-word' as const }}>
+                              {val || '—'}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    ))}
                     {/* 全部行項表格 */}
                     <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '12px', tableLayout: 'fixed' }}>
                       <colgroup>
                         <col style={{ width: '32px' }} />
-                        <col style={{ width: '38%' }} />
+                        <col style={{ width: '36%' }} />
                         <col style={{ width: '80px' }} />
-                        <col />
+                        <col style={{ width: '28%' }} />
                         <col style={{ width: '60px' }} />
+                        <col style={{ width: '96px' }} />
                       </colgroup>
                       <thead>
                         <tr style={{ background: '#f5f6f8' }}>
-                          {(['序', '品項編碼 / 規格', '數量', '包裝方式', '等級'] as const).map((h, hi) => (
+                          {(['序', '品項編碼 / 規格', '數量', '包裝方式', '等級', '交貨日'] as const).map((h, hi) => (
                             <th key={h} style={{ border: '1px solid #e2e4e8', padding: '3px 5px', fontWeight: 600, color: '#555', textAlign: hi === 0 ? 'center' as const : 'left' as const, whiteSpace: 'nowrap' as const, fontSize: '11px' }}>{h}</th>
                           ))}
                         </tr>
                       </thead>
                       <tbody>
-                        {soLines.length > 0 ? soLines.map(line => {
+                        {soLines.length > 0 ? [...soLines]
+                          .sort((a, b) => {
+                            const an = parseInt(String(a.line_no || '0'), 10)
+                            const bn = parseInt(String(b.line_no || '0'), 10)
+                            if (Number.isNaN(an) && Number.isNaN(bn)) return String(a.line_no || '').localeCompare(String(b.line_no || ''))
+                            if (Number.isNaN(an)) return 1
+                            if (Number.isNaN(bn)) return -1
+                            return an - bn
+                          })
+                          .map(line => {
                           const lno = String(parseInt(String(line.line_no || '0'), 10))
                           const isThis = lno === lineNo
                           const lqty = line.order_qty_oru ?? line.order_qty
                           const luom = line.unit_of_measure_oru || line.unit_of_measure || ''
                           const td = { border: '1px solid #e2e4e8', padding: '3px 5px', wordBreak: 'break-word' as const, overflowWrap: 'break-word' as const }
                           return (
-                            <tr key={line.line_no} style={{ background: isThis ? '#eff6ff' : 'white', fontWeight: isThis ? 600 : 400 }}>
+                            <tr key={line.line_no} style={{ background: isThis ? '#f3f4f6' : 'white', fontWeight: isThis ? 600 : 400 }}>
                               <td style={{ ...td, textAlign: 'center' as const, whiteSpace: 'nowrap' as const }}>{lno}{isThis ? ' ★' : ''}</td>
                               <td style={td}>
                                 <div style={{ fontWeight: isThis ? 700 : 500 }}>{line.mbp_part || line.part || '—'}</div>
@@ -1028,12 +1136,13 @@ function MoPrintContent() {
                               </td>
                               <td style={td}>{lqty != null ? `${lqty} ${luom}`.trim() : '—'}</td>
                               <td style={td}>{line.packing || '—'}</td>
-                              <td style={{ ...td, textAlign: 'center' as const, whiteSpace: 'nowrap' as const, color: line.grade ? '#7c3aed' : '#9ca3af', fontWeight: line.grade ? 600 : 400 }}>{line.grade || '—'}</td>
+                              <td style={{ ...td, textAlign: 'center' as const, whiteSpace: 'nowrap' as const, color: line.grade ? '#000' : '#6b7280', fontWeight: line.grade ? 600 : 400 }}>{line.grade || '—'}</td>
+                              <td style={td}>{line.duedate || '—'}</td>
                             </tr>
                           )
                         }) : (
                           <tr>
-                            <td colSpan={5} style={{ border: '1px solid #e2e4e8', padding: '6px', fontSize: '11px', fontStyle: 'italic' as const, color: '#9ca3af', textAlign: 'center' as const }}>
+                            <td colSpan={6} style={{ border: '1px solid #e2e4e8', padding: '6px', fontSize: '11px', fontStyle: 'italic' as const, color: '#9ca3af', textAlign: 'center' as const }}>
                               訂單詳細資訊尚未同步，請至「銷售訂單同步」頁面執行同步
                             </td>
                           </tr>
@@ -1048,14 +1157,6 @@ function MoPrintContent() {
                 )}
               </div>
 
-              {/* ── 生產備註 ── */}
-              <div style={{ marginBottom: '10px' }}>
-                <SectionTitle color="#e5e7eb">生產備註</SectionTitle>
-                <div style={{ border: '1px solid #ccc', padding: '4px 8px', minHeight: '56px' }}>
-                  &nbsp;
-                </div>
-              </div>
-
               {/* ── 作業確認 ── */}
               <div className="mo-card-footer">
                 <SectionTitle color="#e5e7eb">作業確認</SectionTitle>
@@ -1063,7 +1164,7 @@ function MoPrintContent() {
                   display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)',
                   border: '1px solid #bbb',
                 }}>
-                  {['倉管發料', '品檢抽驗', '包裝人員', '出貨人員'].map((role, ri) => (
+                  {['印刷人員', '品檢抽驗', '包裝人員', '出貨人員'].map((role, ri) => (
                     <div key={role} style={{
                       borderRight: ri < 3 ? '1px solid #bbb' : 'none',
                     }}>
