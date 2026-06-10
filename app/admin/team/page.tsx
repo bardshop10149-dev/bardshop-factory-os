@@ -205,6 +205,20 @@ export default function TeamPage() {
       }
     }
 
+    // 修正：既有成員若有輸入新密碼，呼叫後端把密碼真正寫進 Supabase Auth。
+    // （原本只更新了 members.password，Auth 不會變，導致改了密碼仍登不進去）
+    if (!error && formData.id && formData.password) {
+      const pwRes = await fetch('/api/admin/members/set-password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ memberId: formData.id, password: formData.password }),
+      })
+      if (!pwRes.ok) {
+        const result = await pwRes.json().catch(() => ({})) as { error?: string }
+        error = { message: result.error || `更新登入密碼失敗 (HTTP ${pwRes.status})` }
+      }
+    }
+
     if (error) {
       alert(`儲存失敗: ${error.message}`)
     } else {
