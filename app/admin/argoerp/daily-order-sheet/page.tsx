@@ -397,15 +397,48 @@ export default function DailyOrderSheetPage() {
       const res = await fetch(`/api/argoerp/daily-order-sheet?date=${date}`)
       const json = await res.json()
       if (json.success && json.sheet) {
-        const rows: SheetRow[] = Array.isArray(json.sheet.rows) ? json.sheet.rows as SheetRow[] : []
-        setSheetRows(rows)
+        const storedRows: SheetRow[] = Array.isArray(json.sheet.rows) ? json.sheet.rows as SheetRow[] : []
+        const rawTextStored: string = json.sheet.raw_text ?? ''
+
+        // 以 raw_text 重新解析確保所有廠別（T/C/O）都能正確還原，
+        // 再以 row_key 對應，保留 DB 裡已有的 MO / 採購單 / 機台等富化資料
+        let finalRows: SheetRow[] = storedRows
+        if (rawTextStored.trim()) {
+          const { rows: parsedRows } = parseSourceRows(rawTextStored)
+          if (parsedRows.length > 0) {
+            const enrichedMap = new Map(storedRows.map(r => [r.row_key, r]))
+            finalRows = parsedRows.map(r => {
+              const key = createRowKey(r)
+              const stored = enrichedMap.get(key)
+              const base: SheetRow = { ...r, row_key: key, mo_status: stored?.mo_status ?? null }
+              if (stored) {
+                if (stored.mo_number       !== undefined) base.mo_number       = stored.mo_number
+                if (stored.po_number       !== undefined) base.po_number       = stored.po_number
+                if (stored.po_sub_no       !== undefined) base.po_sub_no       = stored.po_sub_no
+                if (stored.po_status       !== undefined) base.po_status       = stored.po_status
+                if (stored.po_qty_erp      !== undefined) base.po_qty_erp      = stored.po_qty_erp
+                if (stored.po_confirmed    !== undefined) base.po_confirmed    = stored.po_confirmed
+                if (stored.match_status    !== undefined) base.match_status    = stored.match_status
+                if (stored.match_line_no   !== undefined) base.match_line_no   = stored.match_line_no
+                if (stored.match_pdl_seq   !== undefined) base.match_pdl_seq   = stored.match_pdl_seq
+                if (stored.match_reason    !== undefined) base.match_reason    = stored.match_reason
+                if (stored.material_prep_status !== undefined) base.material_prep_status = stored.material_prep_status
+                if (stored.argo_slip_no    !== undefined) base.argo_slip_no    = stored.argo_slip_no
+                if (stored.machine         !== undefined) base.machine         = stored.machine
+              }
+              return base
+            })
+          }
+        }
+
+        setSheetRows(finalRows)
         // 還原沒有 mo_number 的 row-level 機台分配
         const rmMap: Record<string, string> = {}
-        for (const r of rows) {
+        for (const r of finalRows) {
           if (!r.mo_number && r.machine) rmMap[r.row_key] = r.machine
         }
         setRowMachines(rmMap)
-        setCurrentRawText(json.sheet.raw_text ?? '')
+        setCurrentRawText(rawTextStored)
       } else {
         setSheetRows([])
         setCurrentRawText('')
