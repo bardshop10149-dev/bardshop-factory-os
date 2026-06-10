@@ -8,9 +8,14 @@ export async function POST(request: NextRequest) {
   try {
     const body = await request.json()
 
-    // 1. 驗證 Supabase Webhook 來源
+    // 1. 驗證 Supabase Webhook 來源（fail-closed：未設定 secret 一律拒絕，
+    //    避免任何人偽造 record 觸發 LINE 推播）
+    if (!WEBHOOK_SECRET) {
+      console.error('[line-notify] WEBHOOK_SECRET 未設定，拒絕請求')
+      return NextResponse.json({ error: 'Webhook 未正確設定' }, { status: 503 })
+    }
     const authHeader = request.headers.get('authorization')
-    if (WEBHOOK_SECRET && authHeader !== `Bearer ${WEBHOOK_SECRET}`) {
+    if (authHeader !== `Bearer ${WEBHOOK_SECRET}`) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
     }
 

@@ -42,3 +42,6 @@ next-env.d.ts
 
 .vercel
 .env*.local
+
+# one-off debug/probe scripts (never commit — may contain secrets)
+_tmp_*

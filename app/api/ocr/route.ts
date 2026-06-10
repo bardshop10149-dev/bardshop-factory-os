@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { guardAuth } from '@/lib/requireAuth'
 
 const GOOGLE_VISION_API_KEY = process.env.GOOGLE_VISION_API_KEY || ''
 const VISION_API_URL = `https://vision.googleapis.com/v1/images:annotate?key=${GOOGLE_VISION_API_KEY}`
@@ -44,6 +45,9 @@ function extractBlocks(annotation: Record<string, any>): OcrBlock[] {
 }
 
 export async function POST(req: NextRequest) {
+  const guard = await guardAuth()
+  if (!guard.ok) return guard.res
+
   if (!GOOGLE_VISION_API_KEY) {
     return NextResponse.json(
       { error: '尚未設定 GOOGLE_VISION_API_KEY，請在 .env.local 中新增' },
@@ -55,6 +59,10 @@ export async function POST(req: NextRequest) {
     const { image } = await req.json()
     if (!image || typeof image !== 'string') {
       return NextResponse.json({ error: '缺少圖片資料' }, { status: 400 })
+    }
+    // 限制輸入大小，避免濫用 Google Vision 配額 / DoS（base64 約 13.3MB ≈ 10MB 圖片）
+    if (image.length > 13_300_000) {
+      return NextResponse.json({ error: '圖片過大' }, { status: 413 })
     }
 
     const base64 = image.replace(/^data:image\/\w+;base64,/, '')

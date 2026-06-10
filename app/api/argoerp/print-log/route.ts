@@ -1,10 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getSupabaseAdminClient, formatSupabaseAdminError } from '@/lib/supabaseAdmin'
+import { guardPermission } from '@/lib/requireAuth'
 
 const TABLE = 'argoerp_mo_print_log'
 
 // GET: 取得所有列印紀錄（可選 ?mo_number= 篩選）
 export async function GET(request: NextRequest) {
+  const guard = await guardPermission('production_admin')
+  if (!guard.ok) return guard.res
   try {
     const mo = new URL(request.url).searchParams.get('mo_number')
     const supabase = getSupabaseAdminClient()
@@ -22,6 +25,8 @@ export async function GET(request: NextRequest) {
 
 // POST: 新增列印紀錄 { mo_numbers: string[] }
 export async function POST(request: NextRequest) {
+  const guard = await guardPermission('production_admin')
+  if (!guard.ok) return guard.res
   try {
     const { mo_numbers } = await request.json() as { mo_numbers?: string[] }
     if (!Array.isArray(mo_numbers) || mo_numbers.length === 0) {
@@ -41,6 +46,8 @@ export async function POST(request: NextRequest) {
 
 // DELETE: 清除紀錄 { mo_number: string } → 清除該製令全部紀錄
 export async function DELETE(request: NextRequest) {
+  const guard = await guardPermission('production_admin')
+  if (!guard.ok) return guard.res
   try {
     const { mo_number } = await request.json() as { mo_number?: string }
     if (!mo_number?.trim()) {

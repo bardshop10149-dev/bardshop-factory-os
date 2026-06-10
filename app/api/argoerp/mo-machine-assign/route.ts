@@ -1,10 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getSupabaseAdminClient, formatSupabaseAdminError } from '@/lib/supabaseAdmin'
+import { guardPermission } from '@/lib/requireAuth'
 
 const TABLE = 'argoerp_mo_machine_assign'
 
 // GET: 回傳所有機台分配（或以 ?mo_numbers=MO1,MO2 過濾）
 export async function GET(request: NextRequest) {
+  const guard = await guardPermission('production_admin')
+  if (!guard.ok) return guard.res
   try {
     const supabase = getSupabaseAdminClient()
     const { searchParams } = new URL(request.url)
@@ -31,6 +34,8 @@ export async function GET(request: NextRequest) {
 
 // POST: upsert 一批機台分配 { assignments: [{ mo_number, machine }] }
 export async function POST(request: NextRequest) {
+  const guard = await guardPermission('production_admin')
+  if (!guard.ok) return guard.res
   try {
     const body = await request.json() as { assignments?: { mo_number: string; machine: string }[] }
     const assignments = body.assignments

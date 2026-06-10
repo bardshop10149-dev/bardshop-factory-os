@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 
 import { formatSupabaseAdminError, getSupabaseAdminClient } from '../../../lib/supabaseAdmin'
+import { guardPermission } from '@/lib/requireAuth'
 
 const API_BASE = process.env.ARGOERP_API_BASE!
 const USERNAME = process.env.ARGOERP_USERNAME!
@@ -273,6 +274,9 @@ async function getApiKeys(): Promise<{ APIKEY1: string; APIKEY2: string; APIKEY3
 
 // GET: 測試連線 — 取得版本 + 金鑰驗證
 export async function GET() {
+  const guard = await guardPermission('production_admin')
+  if (!guard.ok) return guard.res
+
   try {
     // 1. 取得 API 版本
     const versionRes = await fetch(`${API_BASE}/S_VERSION`, { method: 'GET' })
@@ -296,6 +300,9 @@ export async function GET() {
 
 // POST: 匯入製令資料
 export async function POST(request: NextRequest) {
+  const guard = await guardPermission('production_admin')
+  if (!guard.ok) return guard.res
+
   try {
     const body = await request.json()
     const { action, data, interfaceId } = body as {

@@ -87,17 +87,20 @@ export async function POST(request: Request) {
       role,
     })
 
+    // 正式環境加上 Secure（HTTPS-only）；本機 dev 走 http 故不加，避免登入 cookie 不被送出
+    const secure = process.env.NODE_ENV === 'production' ? '; Secure' : ''
+
     // httpOnly cookies（安全憑證）
     response.headers.append('Set-Cookie',
-      `bardshop-token=${access_token}; Path=/; Max-Age=${maxAge}; SameSite=Lax; HttpOnly`)
+      `bardshop-token=${access_token}; Path=/; Max-Age=${maxAge}; SameSite=Lax; HttpOnly${secure}`)
     response.headers.append('Set-Cookie',
-      `bardshop-refresh=${refresh_token}; Path=/; Max-Age=${refreshMaxAge}; SameSite=Lax; HttpOnly`)
+      `bardshop-refresh=${refresh_token}; Path=/; Max-Age=${refreshMaxAge}; SameSite=Lax; HttpOnly${secure}`)
 
     // 前端可讀 cookies（僅 UI 邏輯用）
     response.headers.append('Set-Cookie',
-      `bardshop-role=${role}; Path=/; Max-Age=${maxAge}; SameSite=Lax`)
+      `bardshop-role=${role}; Path=/; Max-Age=${maxAge}; SameSite=Lax${secure}`)
     response.headers.append('Set-Cookie',
-      `bardshop-permissions=${encodeURIComponent(finalPermissions.join(','))}; Path=/; Max-Age=${maxAge}; SameSite=Lax`)
+      `bardshop-permissions=${encodeURIComponent(finalPermissions.join(','))}; Path=/; Max-Age=${maxAge}; SameSite=Lax${secure}`)
 
     return response
   } catch (err) {

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getSupabaseAdminClient, formatSupabaseAdminError } from '@/lib/supabaseAdmin'
+import { guardPermission } from '@/lib/requireAuth'
 
 export const dynamic = 'force-dynamic'
 
@@ -44,6 +45,8 @@ function pickAllowed(rec: Record<string, unknown>): Record<string, unknown> {
 // GET：列出所有製令；可用 ?date=YYYYMMDD&factory=T 篩選
 // ============================================================
 export async function GET(request: NextRequest) {
+  const guard = await guardPermission('production_admin')
+  if (!guard.ok) return guard.res
   try {
     const url = new URL(request.url)
     const date = url.searchParams.get('date')        // 例: 20260422
@@ -80,6 +83,8 @@ export async function GET(request: NextRequest) {
 // 預設（無參數）→ INSERT，mo_number 已存在則報錯（不覆蓋）
 // ============================================================
 export async function POST(request: NextRequest) {
+  const guard = await guardPermission('production_admin')
+  if (!guard.ok) return guard.res
   try {
     const url = new URL(request.url)
     const isUpsert = url.searchParams.get('mode') === 'upsert'
@@ -154,6 +159,8 @@ export async function POST(request: NextRequest) {
 // body: { mo_numbers: string[] }
 // ============================================================
 export async function DELETE(request: NextRequest) {
+  const guard = await guardPermission('production_admin')
+  if (!guard.ok) return guard.res
   try {
     const body = await request.json()
     const moNumbers: string[] = Array.isArray(body?.mo_numbers) ? body.mo_numbers : []
@@ -189,6 +196,8 @@ export async function DELETE(request: NextRequest) {
 const VALID_PREP_STATUS = new Set(['未備料', '已備料', '無需備料'])
 
 export async function PATCH(request: NextRequest) {
+  const guard = await guardPermission('production_admin')
+  if (!guard.ok) return guard.res
   try {
     const body = await request.json()
     const moNumbers: string[] = Array.isArray(body?.mo_numbers) ? body.mo_numbers : []
@@ -229,6 +238,8 @@ export async function PATCH(request: NextRequest) {
 // body: { mo_number: string, fields: Partial<MoRecord> }
 // ============================================================
 export async function PUT(request: NextRequest) {
+  const guard = await guardPermission('production_admin')
+  if (!guard.ok) return guard.res
   try {
     const body = await request.json()
     const moNumber: string = body?.mo_number

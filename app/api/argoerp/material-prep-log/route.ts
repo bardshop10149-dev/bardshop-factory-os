@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getSupabaseAdminClient, formatSupabaseAdminError } from '@/lib/supabaseAdmin'
+import { guardPermission } from '@/lib/requireAuth'
 
 const TABLE = 'argoerp_material_prep_log'
 
@@ -16,6 +17,8 @@ interface LogRow {
 
 // GET: 取得批備料上傳紀錄（最新在前，可用 ?mo_number= 篩選）
 export async function GET(request: NextRequest) {
+  const guard = await guardPermission('production_admin')
+  if (!guard.ok) return guard.res
   try {
     const { searchParams } = new URL(request.url)
     const moNumber = searchParams.get('mo_number')
@@ -42,6 +45,8 @@ export async function GET(request: NextRequest) {
 
 // POST: 批次新增批備料紀錄 { rows: LogRow[] }
 export async function POST(request: NextRequest) {
+  const guard = await guardPermission('production_admin')
+  if (!guard.ok) return guard.res
   try {
     const { rows } = await request.json() as { rows?: LogRow[] }
     if (!Array.isArray(rows) || rows.length === 0) {
