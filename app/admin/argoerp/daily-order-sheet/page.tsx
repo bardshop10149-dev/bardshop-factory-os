@@ -293,6 +293,8 @@ export default function DailyOrderSheetPage() {
   const [machines, setMachines] = useState<string[]>([])
   const [moMachines, setMoMachines] = useState<Record<string, string>>({})
   const [rowMachines, setRowMachines] = useState<Record<string, string>>({})
+  const [savingMachine, setSavingMachine] = useState(false)
+  const [machineChanged, setMachineChanged] = useState(false)
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set())
 
   // ---- 分頁 ----
@@ -542,14 +544,59 @@ export default function DailyOrderSheetPage() {
       .catch(() => {})
   }, [sheetRows])
 
-  const setMoMachine = useCallback(async (moNumber: string, machine: string) => {
+  const setMoMachine = useCallback((moNumber: string, machine: string) => {
     setMoMachines(prev => ({ ...prev, [moNumber]: machine }))
-    await fetch('/api/argoerp/mo-machine-assign', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ assignments: [{ mo_number: moNumber, machine }] }),
-    }).catch(() => {})
+    setMachineChanged(true)
   }, [])
+
+  // ---- 儲存機台分配：PATCH 到 Supabase + mo-machine-assign，然後重新讀回 ----
+  const handleSaveMachines = useCallback(async () => {
+    if (!selectedDate) return
+    setSavingMachine(true)
+    setSaveMsg('')
+    try {
+      // 1. 更新 mo-machine-assign 表（有 mo_number 的列）
+      const moAssignments = sheetRows
+        .filter(r => r.mo_number)
+        .map(r => ({
+          mo_number: r.mo_number!,
+          machine: moMachines[r.mo_number!] || '',
+        }))
+      if (moAssignments.length > 0) {
+        await fetch('/api/argoerp/mo-machine-assign', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ assignments: moAssignments }),
+        })
+      }
+
+      // 2. PATCH daily_order_sheets.rows 的 machine 欄位（所有列）
+      const updates = sheetRows.map(r => ({
+        row_key: r.row_key,
+        machine: r.mo_number
+          ? (moMachines[r.mo_number] || '')
+          : (rowMachines[r.row_key] || ''),
+      }))
+      const res = await fetch('/api/argoerp/daily-order-sheet', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sheet_date: selectedDate, updates }),
+      })
+      const json = await res.json()
+      if (!res.ok || !json.success) throw new Error(json.error || `HTTP ${res.status}`)
+
+      // 3. 重新從 DB 讀回，確認儲存成功
+      await loadSheet(selectedDate)
+      setMachineChanged(false)
+      setSaveMsg('✅ 機台分配已儲存並確認')
+      setTimeout(() => setSaveMsg(''), 4000)
+    } catch (e) {
+      setSaveMsg(`❌ 機台儲存失敗：${e instanceof Error ? e.message : String(e)}`)
+      setTimeout(() => setSaveMsg(''), 5000)
+    } finally {
+      setSavingMachine(false)
+    }
+  }, [sheetRows, selectedDate, moMachines, rowMachines, loadSheet])
 
   // ---- 解析貼上資料 ----
   const handleParse = useCallback(() => {
@@ -878,9 +925,9 @@ export default function DailyOrderSheetPage() {
         }
       }
 
-      setSheetRows(next)
-
       // 若 row 原本已分配機台，轉換成 MO 後遷移至 moMachines
+      // ⚠️ 必須在 setSheetRows 之前完成，否則 useEffect(sheetRows) 會重新 fetch
+      //    mo-machine-assign 舊資料覆蓋掉剛遷移的機台
       const toMigrate = next.filter(r => r.mo_number && r.machine)
       if (toMigrate.length > 0) {
         const assignments = toMigrate.map(r => ({ mo_number: r.mo_number!, machine: r.machine! }))
@@ -895,6 +942,8 @@ export default function DailyOrderSheetPage() {
           body: JSON.stringify({ assignments }),
         }).catch(() => {})
       }
+
+      setSheetRows(next)
 
       // 立即儲存
       const res = await fetch('/api/argoerp/daily-order-sheet', {
@@ -1857,6 +1906,18 @@ export default function DailyOrderSheetPage() {
                   {syncingAll ? '全同步中…' : '⚡ 一鍵全同步'}
                 </button>
                 <button
+                  onClick={() => void handleSaveMachines()}
+                  disabled={savingMachine || !machineChanged}
+                  className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
+                    machineChanged
+                      ? 'bg-yellow-600 hover:bg-yellow-500 text-white'
+                      : 'bg-slate-700 text-slate-500 border border-slate-600'
+                  } disabled:cursor-not-allowed`}
+                  title="將目前所有機台選擇儲存至 Supabase，並重新讀回確認"
+                >
+                  {savingMachine ? '儲存中…' : `🖥 儲存機台分配${machineChanged ? ' *' : ''}`}
+                </button>
+                <button
                   onClick={() => { setShowPasteArea(v => !v); setRawText('') }}
                   className="px-4 py-2 rounded-lg bg-cyan-700 hover:bg-cyan-600 text-white text-sm font-medium transition-colors"
                 >
@@ -2468,17 +2529,10 @@ export default function DailyOrderSheetPage() {
                               {row.mo_number ? (
                                 <select
                                   value={moMachines[row.mo_number] || ''}
-                                  onChange={async e => {
+                                  onChange={e => {
                                     const machine = e.target.value
-                                    await setMoMachine(row.mo_number!, machine)
-                                    // 同步更新本地 sheetRows 狀態
+                                    setMoMachine(row.mo_number!, machine)
                                     setSheetRows(prev => prev.map(r => r.mo_number === row.mo_number ? { ...r, machine } : r))
-                                    // 用 PATCH 只更新機台欄位，避免全量覆蓋其他欄位
-                                    await fetch('/api/argoerp/daily-order-sheet', {
-                                      method: 'PATCH',
-                                      headers: { 'Content-Type': 'application/json' },
-                                      body: JSON.stringify({ sheet_date: selectedDate, updates: [{ row_key: row.row_key, machine }] }),
-                                    }).catch(() => {})
                                   }}
                                   className="bg-slate-800 border border-slate-600 text-slate-200 text-xs rounded px-2 py-1 focus:outline-none focus:border-cyan-500 min-w-[90px]"
                                 >
@@ -2488,16 +2542,11 @@ export default function DailyOrderSheetPage() {
                               ) : (
                                 <select
                                   value={rowMachines[row.row_key] || ''}
-                                  onChange={async e => {
+                                  onChange={e => {
                                     const machine = e.target.value
                                     setRowMachines(prev => ({ ...prev, [row.row_key]: machine }))
                                     setSheetRows(prev => prev.map(r => r.row_key === row.row_key ? { ...r, machine } : r))
-                                    // 用 PATCH 只更新機台欄位，避免全量覆蓋其他欄位
-                                    await fetch('/api/argoerp/daily-order-sheet', {
-                                      method: 'PATCH',
-                                      headers: { 'Content-Type': 'application/json' },
-                                      body: JSON.stringify({ sheet_date: selectedDate, updates: [{ row_key: row.row_key, machine }] }),
-                                    }).catch(() => {})
+                                    setMachineChanged(true)
                                   }}
                                   className="bg-slate-800 border border-slate-600 text-slate-200 text-xs rounded px-2 py-1 focus:outline-none focus:border-cyan-500 min-w-[90px]"
                                 >
