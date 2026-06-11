@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getSupabaseAdminClient, formatSupabaseAdminError } from '@/lib/supabaseAdmin'
-import { guardPermission } from '@/lib/requireAuth'
+import { guardAuth, guardPermission } from '@/lib/requireAuth'
 
 export const dynamic = 'force-dynamic'
 
@@ -10,7 +10,7 @@ const TABLE = 'daily_order_sheets'
 //   無 date 參數 → 回傳所有已儲存日期 ([{sheet_date, row_count, updated_at}])
 //   有 date=YYYY-MM-DD → 回傳該日出單表（含 rows）
 export async function GET(request: NextRequest) {
-  const guard = await guardPermission('production_admin')
+  const guard = await guardAuth()
   if (!guard.ok) return guard.res
   try {
     const { searchParams } = new URL(request.url)

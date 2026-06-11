@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 
 import { formatSupabaseAdminError, getSupabaseAdminClient } from '../../../lib/supabaseAdmin'
-import { guardPermission } from '@/lib/requireAuth'
+import { guardAuth, guardPermission } from '@/lib/requireAuth'
 
 const API_BASE = process.env.ARGOERP_API_BASE!
 const USERNAME = process.env.ARGOERP_USERNAME!
@@ -300,9 +300,6 @@ export async function GET() {
 
 // POST: 匯入製令資料
 export async function POST(request: NextRequest) {
-  const guard = await guardPermission('production_admin')
-  if (!guard.ok) return guard.res
-
   try {
     const body = await request.json()
     const { action, data, interfaceId } = body as {
@@ -310,6 +307,12 @@ export async function POST(request: NextRequest) {
       data?: Record<string, unknown>[]
       interfaceId?: string
     }
+
+    // 權限分級：只有「寫入 ERP」(import) 需 production_admin；其餘同步/查詢類只需登入即可。
+    const guard = action === 'import'
+      ? await guardPermission('production_admin')
+      : await guardAuth()
+    if (!guard.ok) return guard.res
 
     // 取得金鑰（5 分鐘時效）
     const keys = await getApiKeys()
