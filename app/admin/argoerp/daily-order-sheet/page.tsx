@@ -173,11 +173,10 @@ function parseSourceRows(text: string): { rows: SourceRow[]; error: string } {
     const lineText = rowCells.join('\t')
     const firstCell = rowCells[0]?.trim() ?? ''
     const looksLikeOrderNo = /^[A-Za-z]{1,4}\d/.test(firstCell)
-    if (headerKeywords.some(kw => lineText.includes(kw)) || (!looksLikeOrderNo && h === startIdx)) {
+    if (!looksLikeOrderNo && (headerKeywords.some(kw => lineText.includes(kw)) || h === startIdx)) {
       startIdx = h + 1
     } else break
   }
-
   const parsed: SourceRow[] = []
   for (let i = startIdx; i < allRows.length; i++) {
     const cells = allRows[i]
