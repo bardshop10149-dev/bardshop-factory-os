@@ -49,7 +49,7 @@ export async function POST(request: NextRequest) {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'X-Internal-Secret': webhookSecret,
+      'X-Internal-Secret': expectedSecret,
     },
     body: JSON.stringify({ action: action as AllowedAction }),
   })
