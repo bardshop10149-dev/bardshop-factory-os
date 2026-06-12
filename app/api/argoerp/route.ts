@@ -309,8 +309,14 @@ export async function POST(request: NextRequest) {
     }
 
     // 權限分級：只有「寫入 ERP」(import) 需 production_admin；其餘同步/查詢類只需登入即可。
+    // 若來自內部 webhook（X-Internal-Secret 驗證通過），直接放行。
+    const internalSecret = request.headers.get('X-Internal-Secret') ?? ''
+    const webhookSecret = process.env.WEBHOOK_SECRET ?? ''
+    const isInternalCall = !!(webhookSecret && internalSecret === webhookSecret)
+
     const guard = action === 'import'
       ? await guardPermission('production_admin')
+      : isInternalCall ? { ok: true as const, res: null }
       : await guardAuth()
     if (!guard.ok) return guard.res
 

@@ -32,7 +32,6 @@ export async function POST(request: NextRequest) {
     )
   }
 
-  const adminToken = process.env.ARGOERP_ADMIN_TOKEN ?? ''
   const baseUrl = process.env.NEXT_PUBLIC_BASE_URL ?? 'http://localhost:3000'
 
   // run_mo_match 直接呼叫內部 batch API，不需要 bardshop-token
@@ -45,12 +44,12 @@ export async function POST(request: NextRequest) {
     return NextResponse.json(json, { status: res.status })
   }
 
-  // 其餘同步 action 轉發到 /api/argoerp（需要管理員 token）
+  // 其餘同步 action 轉發到 /api/argoerp（用 X-Internal-Secret 繞過 cookie auth）
   const res = await fetch(`${baseUrl}/api/argoerp`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'Cookie': `bardshop-token=${adminToken}`,
+      'X-Internal-Secret': webhookSecret,
     },
     body: JSON.stringify({ action: action as AllowedAction }),
   })
