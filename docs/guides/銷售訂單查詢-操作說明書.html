@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>銷售訂單查詢 — 操作說明書</title>
+<style>
+  :root{
+    --indigo:#4f46e5; --cyan:#0891b2; --ink:#1f2937; --muted:#6b7280;
+    --line:#e5e7eb; --page:#eef2f7; --card:#ffffff;
+    --tip:#0f766e; --tip-bg:#ecfdf5; --tip-line:#5eead4;
+    --note:#b45309; --note-bg:#fffbeb; --note-line:#fcd34d;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; background:var(--page); color:var(--ink);
+    font-family:"Microsoft JhengHei","PingFang TC","Noto Sans TC",-apple-system,"Segoe UI",sans-serif;
+    line-height:1.75; font-size:16px;
+  }
+  .wrap{max-width:880px; margin:32px auto; padding:0 16px}
+  .card{background:var(--card); border:1px solid var(--line); border-radius:16px; overflow:hidden;
+        box-shadow:0 1px 3px rgba(0,0,0,.06)}
+  /* Header */
+  header{background:linear-gradient(135deg,var(--indigo),var(--cyan)); color:#fff; padding:28px 32px}
+  header h1{margin:0 0 6px; font-size:26px; letter-spacing:.5px}
+  header .sub{opacity:.92; font-size:15px}
+  .meta{display:flex; flex-wrap:wrap; gap:8px 18px; margin-top:16px; font-size:14px}
+  .meta span{background:rgba(255,255,255,.16); padding:4px 12px; border-radius:999px; white-space:nowrap}
+  /* Body */
+  .body{padding:8px 32px 32px}
+  h2{font-size:20px; margin:34px 0 12px; padding-left:12px; border-left:5px solid var(--indigo)}
+  h2 .num{color:var(--indigo); font-weight:800; margin-right:6px}
+  p{margin:10px 0}
+  ul{margin:10px 0; padding-left:22px}
+  li{margin:6px 0}
+  code{background:#f3f4f6; border:1px solid var(--line); border-radius:6px; padding:1px 7px;
+       font-family:"Consolas","Courier New",monospace; font-size:.92em}
+  /* Flow steps */
+  .flow{list-style:none; margin:18px 0; padding:0}
+  .flow li{position:relative; padding:0 0 18px 52px; margin:0}
+  .flow li:not(:last-child)::before{content:""; position:absolute; left:17px; top:34px; bottom:-2px;
+       width:2px; background:var(--line)}
+  .flow .n{position:absolute; left:0; top:0; width:36px; height:36px; border-radius:50%;
+       background:var(--indigo); color:#fff; font-weight:700; display:flex; align-items:center; justify-content:center}
+  .flow b{display:block; font-size:16.5px}
+  .flow small{color:var(--muted); font-size:14px}
+  /* Tables */
+  table{width:100%; border-collapse:collapse; margin:14px 0; font-size:15px}
+  th,td{border:1px solid var(--line); padding:9px 12px; text-align:left; vertical-align:top}
+  thead th{background:#f1f5f9; font-weight:700}
+  tbody tr:nth-child(even){background:#fafbfc}
+  .hl{color:var(--indigo); font-weight:700}
+  /* Callouts */
+  .callout{border-radius:12px; padding:14px 16px; margin:16px 0; border:1px solid; font-size:15px}
+  .callout b{display:inline-block; margin-right:4px}
+  .tip{background:var(--tip-bg); border-color:var(--tip-line); color:var(--tip)}
+  .note{background:var(--note-bg); border-color:var(--note-line); color:var(--note)}
+  /* FAQ */
+  .faq{margin:14px 0}
+  .faq .q{font-weight:700; margin:16px 0 4px; color:var(--ink)}
+  .faq .q::before{content:"Q"; display:inline-block; width:22px; height:22px; line-height:22px;
+       text-align:center; background:var(--cyan); color:#fff; border-radius:6px; font-size:13px; margin-right:8px}
+  .faq .a{margin:0 0 6px 30px; color:#374151}
+  /* Footer */
+  footer{padding:18px 32px; border-top:1px solid var(--line); color:var(--muted); font-size:13px;
+       display:flex; justify-content:space-between; flex-wrap:wrap; gap:8px}
+  @media (max-width:560px){
+    header,.body,footer{padding-left:20px; padding-right:20px}
+    body{font-size:15px}
+  }
+  @media print{
+    body{background:#fff}
+    .wrap{margin:0; max-width:none}
+    .card{border:none; box-shadow:none; border-radius:0}
+    header{-webkit-print-color-adjust:exact; print-color-adjust:exact}
+    h2{break-after:avoid}
+    table,.callout,.flow li{break-inside:avoid}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+<div class="card">
+
+  <header>
+    <h1>銷售訂單查詢 — 操作說明書</h1>
+    <div class="sub">查 ERP 銷售訂單明細 → 一鍵複製 → 貼進「出單表」，省去逐欄手打。</div>
+    <div class="meta">
+      <span>👤 對象：全體同仁</span>
+      <span>📍 位置：美編天地 → 銷售訂單查詢</span>
+    </div>
+  </header>
+
+  <div class="body">
+
+    <h2><span class="num">一、</span>整體流程（先看這個）</h2>
+    <ul class="flow">
+      <li><span class="n">1</span><b>（必要時）按「🔄 同步銷售訂單」</b><small>抓 ERP 最新資料；平常查得到就不用每次按。</small></li>
+      <li><span class="n">2</span><b>輸入訂單號碼 → 按「查詢」</b><small>完整或部分單號都可以，按 Enter 也行。</small></li>
+      <li><span class="n">3</span><b>勾選要的明細列</b><small>可逐列勾，或點表頭勾選框全選。</small></li>
+      <li><span class="n">4</span><b>按「複製 N 筆」</b><small>N＝你勾的筆數。</small></li>
+      <li><span class="n">5</span><b>到出單表，點 A 欄該列貼上（Ctrl+V）</b><small>欄位會自動對位。</small></li>
+      <li><span class="n">6</span><b>補上 R 欄「盤數」等要人工填的欄位</b><small>貼上不會覆蓋這些欄。</small></li>
+    </ul>
+
+    <h2><span class="num">二、</span>同步銷售訂單</h2>
+    <ul>
+      <li>右上角 <span class="hl">🔄 同步銷售訂單</span>：把 ERP 最新的銷售訂單抓進系統。</li>
+      <li><b>什麼時候按：</b>查不到剛開的單、或資料看起來是舊的，就先按一次同步。</li>
+      <li>會跳出進度視窗，通常 <b>30～120 秒</b>，請勿關閉視窗；完成後可按「重新載入查詢」。</li>
+    </ul>
+    <div class="callout tip"><b>放心：</b>同步只是用 ERP 最新資料覆寫本地畫面，<b>不會改到 ERP</b>。</div>
+
+    <h2><span class="num">三、</span>查詢（可輸入部分單號）</h2>
+    <p>在「訂單號碼」欄輸入後按 <b>查詢</b>（或直接按 Enter）。</p>
+    <ul>
+      <li><b>完整單號：</b>例如 <code>SO260603001</code> → 列出該單所有明細。</li>
+      <li><b>部分單號（新功能）：</b>例如只打 <code>0603</code> → 列出<b>所有單號含 0603</b> 的訂單，不分大小寫。適合「只記得一段」或「想一次撈某批」。</li>
+    </ul>
+    <div class="callout note"><b>筆數上限：</b>一次最多顯示 <b>500 筆</b>。若底部出現「已達 500 筆顯示上限，請輸入更完整的單號」，代表撈太多，多打幾個字縮小範圍即可。</div>
+    <p><b>查不到時：</b>① 確認單號沒打錯　② 先按一次「同步銷售訂單」再查。</p>
+
+    <h2><span class="num">四、</span>每一欄是什麼</h2>
+    <table>
+      <thead><tr><th>畫面欄位</th><th>內容</th><th>對應出單表</th></tr></thead>
+      <tbody>
+        <tr><td>訂單號</td><td>ERP 銷售訂單號（含 OPEN／UNSIGNED 狀態）</td><td>工單編號</td></tr>
+        <tr><td>序號</td><td>該訂單的明細行號</td><td>—</td></tr>
+        <tr><td>下單日</td><td>訂單開立日</td><td>—</td></tr>
+        <tr><td>交期</td><td>交付日期（<b style="color:#dc2626">逾期紅色</b>／未到期綠色）</td><td>交付日期</td></tr>
+        <tr><td><span class="hl">前置單號</span></td><td>即<b>打樣／追加單號</b></td><td>打樣單號</td></tr>
+        <tr><td>客戶名稱</td><td>客戶／供應商名</td><td>客戶/供應商名</td></tr>
+        <tr><td>業務</td><td>承辦業務</td><td>承辦人</td></tr>
+        <tr><td>料號</td><td>品項編碼</td><td>品項編碼</td></tr>
+        <tr><td>品名/規格</td><td>品名與規格描述</td><td>品名/規格</td></tr>
+        <tr><td>數量</td><td>訂購數量（含單位）</td><td>數量</td></tr>
+        <tr><td><span class="hl">出貨備註</span></td><td>ERP 備註2</td><td>出貨備註</td></tr>
+        <tr><td><span class="hl">PACKING</span></td><td>ERP 包裝欄；常含打樣／包裝／印刷指示</td><td>PACKING</td></tr>
+      </tbody>
+    </table>
+    <div class="callout tip"><b>小技巧：</b>滑鼠移到「品名/規格」「出貨備註」「PACKING」欄位上，會顯示完整內容（這幾欄畫面上會截斷）。</div>
+
+    <h2><span class="num">五、</span>複製到出單表（重點）</h2>
+    <ul>
+      <li><b>勾選：</b>點每列最左的勾選框；或點表頭勾選框<b>全選／全不選</b>（也可直接點整列切換）。</li>
+      <li>按 <b>複製 N 筆</b>，出現「已複製 N 筆！」即成功。</li>
+      <li>到出單表，<b>點 A 欄（工單編號）要貼的那一列</b>，按 <b>Ctrl+V</b>。</li>
+    </ul>
+    <p>貼上後欄位自動對位如下：</p>
+    <table>
+      <thead><tr><th>出單表欄</th><th>貼上的內容</th></tr></thead>
+      <tbody>
+        <tr><td>A 工單編號</td><td>訂單號</td></tr>
+        <tr><td>E 打樣單號</td><td>前置單號</td></tr>
+        <tr><td>H 客戶/供應商名</td><td>客戶名稱</td></tr>
+        <tr><td>J 承辦人</td><td>業務</td></tr>
+        <tr><td>L 品項編碼</td><td>料號</td></tr>
+        <tr><td>M 品名/規格</td><td>品名/規格</td></tr>
+        <tr><td>N 出貨備註</td><td>ERP 備註2</td></tr>
+        <tr><td>O PACKING</td><td>ERP 包裝欄</td></tr>
+        <tr><td>P 數量</td><td>數量</td></tr>
+        <tr><td>Q 交付日期</td><td>交期</td></tr>
+        <tr><td><b>R 盤數</b></td><td><b style="color:var(--tip)">不會貼入 → 維持你手填的內容</b></td></tr>
+      </tbody>
+    </table>
+    <div class="callout note"><b>注意：</b>B、C、D、F、G、I、K 欄為空值帶過，貼上不會覆蓋你原本填的內容；<b>R 盤數刻意不輸出</b>，避免清掉人工填的盤數。</div>
+
+    <h2><span class="num">六、</span>常見問題</h2>
+    <div class="faq">
+      <div class="q">「出貨備註」欄常常是「—」空白？</div>
+      <div class="a">出貨備註抓的是 ERP 的「備註2」。SO 類訂單的備註2 多半沒填，內容通常集中在 PACKING 欄。這是 ERP 來源資料本身就空，不是系統漏抓。若你的出貨指示其實打在別的欄位，請回報系統管理員調整。</div>
+
+      <div class="q">貼到出單表後欄位錯一格？</div>
+      <div class="a">新版已修正對位。若仍錯位，確認你是<b>貼在 A 欄</b>那一列（不是從別欄開始貼），且出單表欄位順序沒被改動。</div>
+
+      <div class="q">交期顯示紅色是什麼意思？</div>
+      <div class="a">紅色＝交期已過（逾期）；綠色＝未到期。方便一眼抓出趕件。</div>
+
+      <div class="q">複製後貼到 Excel 變成一格塞全部？</div>
+      <div class="a">請用 <b>Ctrl+V</b> 直接貼（系統已用 Tab 分隔分欄）；若用「選擇性貼上 → 純文字」可能不分欄。</div>
+
+      <div class="q">查詢結果的排序？</div>
+      <div class="a">先依訂單號、再依序號由小到大排列。</div>
+    </div>
+
+  </div>
+
+  <footer>
+    <span>美編天地 · 銷售訂單查詢 操作說明</span>
+    <span>有系統問題請聯絡系統管理員</span>
+  </footer>
+
+</div>
+</div>
+</body>
+</html>
