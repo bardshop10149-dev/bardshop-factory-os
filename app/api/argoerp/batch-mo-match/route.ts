@@ -30,11 +30,11 @@ interface DailySheet {
 export async function POST() {
   const supabase = getSupabaseAdminClient()
 
-  // 取得最近 7 天有資料的出單表
+  // 取得最近 14 天有資料的出單表
   const today = new Date()
-  const sevenDaysAgo = new Date(today)
-  sevenDaysAgo.setDate(today.getDate() - 7)
-  const fromDate = sevenDaysAgo.toISOString().slice(0, 10)
+  const fromDateObj = new Date(today)
+  fromDateObj.setDate(today.getDate() - 14)
+  const fromDate = fromDateObj.toISOString().slice(0, 10)
 
   const { data: sheets, error: sheetsErr } = await supabase
     .from('daily_order_sheets')
