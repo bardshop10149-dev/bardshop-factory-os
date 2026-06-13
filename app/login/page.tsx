@@ -11,6 +11,9 @@ export default function LoginPage() {
   const [formData, setFormData] = useState({ email: '', password: '' })
   const [rememberMe, setRememberMe] = useState(false)
   const [errorMsg, setErrorMsg] = useState('')
+  const [showPassword, setShowPassword] = useState(false)
+  const [forgotLoading, setForgotLoading] = useState(false)
+  const [forgotMsg, setForgotMsg] = useState('')
   const router = useRouter()
 
   useEffect(() => {
@@ -60,6 +63,27 @@ export default function LoginPage() {
     }
   }
 
+  const handleForgotPassword = async () => {
+    setForgotMsg(''); setErrorMsg('')
+    const email = formData.email.trim()
+    if (!email) { setErrorMsg('請先在上方輸入 Email，再點「忘記密碼」'); return }
+    setForgotLoading(true)
+    try {
+      const res = await fetch('/api/auth/forgot-password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email }),
+      })
+      const json = await res.json().catch(() => ({})) as { error?: string }
+      if (!res.ok) throw new Error(json.error || '寄送失敗')
+      setForgotMsg(`✅ 若「${email}」是已註冊帳號，重設密碼信已寄出，請至信箱收信。`)
+    } catch (err: unknown) {
+      setErrorMsg(err instanceof Error ? err.message : '寄送失敗')
+    } finally {
+      setForgotLoading(false)
+    }
+  }
+
   return (
     <div className="min-h-screen bg-[#050b14] text-slate-300 font-sans selection:bg-cyan-500 selection:text-white relative flex flex-col items-center justify-center overflow-hidden">
       
@@ -102,29 +126,59 @@ export default function LoginPage() {
 
             <div>
               <label className="block text-xs font-mono text-slate-500 uppercase tracking-wider mb-2">Password</label>
-              <input 
-                type="password" 
-                required
-                className="w-full bg-slate-950/50 border border-slate-700 text-white px-4 py-3 rounded-lg focus:outline-none focus:border-cyan-500 focus:shadow-[0_0_15px_rgba(6,182,212,0.3)] transition-all font-mono tracking-widest"
-                placeholder="••••••••"
-                value={formData.password}
-                onChange={e => setFormData({...formData, password: e.target.value})}
-              />
+              <div className="relative">
+                <input
+                  type={showPassword ? 'text' : 'password'}
+                  required
+                  className="w-full bg-slate-950/50 border border-slate-700 text-white px-4 py-3 pr-12 rounded-lg focus:outline-none focus:border-cyan-500 focus:shadow-[0_0_15px_rgba(6,182,212,0.3)] transition-all font-mono tracking-widest"
+                  placeholder="••••••••"
+                  value={formData.password}
+                  onChange={e => setFormData({...formData, password: e.target.value})}
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowPassword(v => !v)}
+                  aria-label={showPassword ? '隱藏密碼' : '顯示密碼'}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 hover:text-cyan-400 transition-colors"
+                >
+                  {showPassword ? (
+                    <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l3.59 3.59m0 0A9.953 9.953 0 0112 5c4.478 0 8.268 2.943 9.543 7a10.025 10.025 0 01-4.132 5.411m0 0L21 21" /></svg>
+                  ) : (
+                    <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" /></svg>
+                  )}
+                </button>
+              </div>
             </div>
 
-            <label className="flex items-center gap-2 text-sm text-slate-400 select-none cursor-pointer">
-              <input
-                type="checkbox"
-                checked={rememberMe}
-                onChange={e => setRememberMe(e.target.checked)}
-                className="h-4 w-4 rounded border-slate-600 bg-slate-900 text-cyan-500 focus:ring-cyan-500"
-              />
-              記住我
-            </label>
+            <div className="flex items-center justify-between">
+              <label className="flex items-center gap-2 text-sm text-slate-400 select-none cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={rememberMe}
+                  onChange={e => setRememberMe(e.target.checked)}
+                  className="h-4 w-4 rounded border-slate-600 bg-slate-900 text-cyan-500 focus:ring-cyan-500"
+                />
+                記住我
+              </label>
+              <button
+                type="button"
+                onClick={handleForgotPassword}
+                disabled={forgotLoading}
+                className="text-xs font-mono text-slate-400 hover:text-cyan-400 underline underline-offset-4 disabled:opacity-50"
+              >
+                {forgotLoading ? '寄送中…' : '忘記密碼？'}
+              </button>
+            </div>
 
             {errorMsg && (
               <div className="p-3 bg-red-900/20 border border-red-500/50 rounded text-red-400 text-xs text-center font-bold animate-pulse">
                 {errorMsg}
+              </div>
+            )}
+
+            {forgotMsg && (
+              <div className="p-3 bg-cyan-900/20 border border-cyan-500/40 rounded text-cyan-300 text-xs text-center">
+                {forgotMsg}
               </div>
             )}
 

@@ -16,7 +16,7 @@ const COMING_SOON = [
   { icon: '🎮', title: '我的點數', desc: '工作績效遊戲化' },
   { icon: '🔗', title: 'ERP 快速連結', desc: '以員工編碼直連' },
   { icon: '⭐', title: '打卡之星', desc: '出勤打卡' },
-  { icon: '🏖️', title: '請假申請', desc: '線上請假' },
+  { icon: '🕒', title: '線上打卡', desc: '上下班打卡' },
 ]
 
 export default function ProfilePage() {
