@@ -86,7 +86,7 @@ async function matchSheet(supabase: any, sheet: DailySheet): Promise<number> {
       .from('argoerp_mo_summary')
       .select('mo_number')
       .in('mo_number', rawLogMoNumbers)
-    const stillExists = new Set((summaryRows ?? []).map((r: { mo_number: string }) => r.mo_number))
+    const stillExists = new Set(((summaryRows ?? []) as { mo_number: string }[]).map(r => r.mo_number))
     activeMoNumbers = stillExists
   }
 
