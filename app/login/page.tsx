@@ -12,7 +12,6 @@ export default function LoginPage() {
   const [rememberMe, setRememberMe] = useState(false)
   const [errorMsg, setErrorMsg] = useState('')
   const [showPassword, setShowPassword] = useState(false)
-  const [forgotLoading, setForgotLoading] = useState(false)
   const [forgotMsg, setForgotMsg] = useState('')
   const router = useRouter()
 
@@ -63,25 +62,9 @@ export default function LoginPage() {
     }
   }
 
-  const handleForgotPassword = async () => {
-    setForgotMsg(''); setErrorMsg('')
-    const email = formData.email.trim()
-    if (!email) { setErrorMsg('請先在上方輸入 Email，再點「忘記密碼」'); return }
-    setForgotLoading(true)
-    try {
-      const res = await fetch('/api/auth/forgot-password', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email }),
-      })
-      const json = await res.json().catch(() => ({})) as { error?: string }
-      if (!res.ok) throw new Error(json.error || '寄送失敗')
-      setForgotMsg(`✅ 若「${email}」是已註冊帳號，重設密碼信已寄出，請至信箱收信。`)
-    } catch (err: unknown) {
-      setErrorMsg(err instanceof Error ? err.message : '寄送失敗')
-    } finally {
-      setForgotLoading(false)
-    }
+  const handleForgotPassword = () => {
+    setErrorMsg('')
+    setForgotMsg('🔑 忘記密碼請洽「系統管理員」協助重設——管理員可在後台直接幫你設定新密碼。')
   }
 
   return (
@@ -163,10 +146,9 @@ export default function LoginPage() {
               <button
                 type="button"
                 onClick={handleForgotPassword}
-                disabled={forgotLoading}
-                className="text-xs font-mono text-slate-400 hover:text-cyan-400 underline underline-offset-4 disabled:opacity-50"
+                className="text-xs font-mono text-slate-400 hover:text-cyan-400 underline underline-offset-4"
               >
-                {forgotLoading ? '寄送中…' : '忘記密碼？'}
+                忘記密碼？
               </button>
             </div>
 
