@@ -23,6 +23,9 @@ interface SoLine {
   hold_status: string | null
 }
 
+// 模糊查詢單次最多回傳筆數（防止輸入過短時撈回全表）
+const QUERY_LIMIT = 500
+
 // ─── 輔助 ─────────────────────────────────────────────
 function normalizeDate(d: string | null): string | null {
   if (!d) return null
@@ -40,8 +43,8 @@ function today() {
   return new Date().toISOString().slice(0, 10)
 }
 
-// Excel 欄位順序（Tab 分隔）
-// 工單編號 | (空) | 單據種類 | 簽收人員 | 打樣 | 附素材 | 前置單號 | 客戶/供應商名 | LINE暱稱 | 承辦人 | 開單人員 | 品項編碼 | 品名/規格 | 備註 | 數量 | 交付日期 | 盤數
+// Excel 欄位順序（Tab 分隔，對齊出單表 A~Q 欄；R 欄「盤數」為人工填寫，不輸出以免貼上時被清空）
+// A工單編號 | B(空) | C單據種類 | D簽收人員 | E打樣單號 | F打樣 | G附素材 | H客戶/供應商名 | I LINE暱稱 | J承辦人 | K開單人員 | L品項編碼 | M品名/規格 | N出貨備註 | O PACKING | P數量 | Q交付日期
 
 // 清洗 TSV 儲存格：移除換行/tab 避免 Excel 貼上時錯位
 function sanitizeCell(v: string | number | null | undefined): string {
@@ -60,7 +63,7 @@ function buildExcelRow(r: SoLine): string {
     '',                                    // (空)
     '',                                    // 單據種類
     '',                                    // 簽收人員
-    r.tpn_part_no ?? '',                   // 前置單號（E欄）
+    r.tpn_part_no ?? '',                   // 打樣單號＝前置單號（E欄）
     '',                                    // 打樣
     '',                                    // 附素材
     r.partner_name ?? '',                  // 客戶/供應商名
@@ -69,10 +72,10 @@ function buildExcelRow(r: SoLine): string {
     '',                                    // 開單人員
     r.mbp_part ?? '',                      // 品項編碼
     r.description ?? '',                   // 品名/規格
-    r.packing ?? '',                       // 備註
+    r.remark2 ?? '',                       // 出貨備註（N欄）
+    r.packing ?? '',                       // PACKING（O欄）
     r.order_qty_oru != null ? String(r.order_qty_oru) : '', // 數量
     fmtDate(r.duedate),                    // 交付日期
-    '',                                    // 盤數
   ]
   return cols.map(sanitizeCell).join('\t')
 }
@@ -151,7 +154,6 @@ export default function SoQueryPage() {
   const handleQuery = useCallback(async () => {
     const raw = queryInput.trim()
     if (!raw) return
-    const ids = [raw]
 
     setLoading(true)
     setFetchError(null)
@@ -159,12 +161,14 @@ export default function SoQueryPage() {
     setSelectedIds(new Set())
     setSearched(true)
 
+    // 局部比對（不分大小寫）：輸入部分單號即可列出所有可能的訂單
     const { data, error } = await supabase
       .from('erp_so_lines')
       .select('id,project_id,begin_date,sales_name,partner_name,tpn_part_no,line_no,mbp_part,duedate,order_qty_oru,unit_of_measure_oru,description,packing,remark2,hold_status')
-      .in('project_id', ids)
+      .ilike('project_id', `%${raw}%`)
       .order('project_id', { ascending: true })
       .order('line_no',    { ascending: true })
+      .limit(QUERY_LIMIT)
 
     setLoading(false)
     if (error) { setFetchError(error.message); return }
@@ -190,7 +194,7 @@ export default function SoQueryPage() {
     setTimeout(() => setCopyMsg(''), 3000)
   }, [rows, selectedIds])
 
-  const COLS = 12 // colSpan 數量（含勾選欄）
+  const COLS = 13 // colSpan 數量（含勾選欄）
 
   const allSelected = rows.length > 0 && rows.every(r => selectedIds.has(r.id))
   const toggleAll = () => {
@@ -240,7 +244,7 @@ export default function SoQueryPage() {
             value={queryInput}
             onChange={e => setQueryInput(e.target.value)}
             onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); void handleQuery() } }}
-            placeholder="例如：RO26050101"
+            placeholder="例如：RO26050101，或輸入部分單號如 0603"
             className="w-full rounded bg-slate-900 border border-slate-700 px-3 py-2 text-sm text-white placeholder-slate-600 focus:outline-none focus:border-cyan-600 transition-colors font-mono"
           />
         </div>
@@ -300,7 +304,8 @@ export default function SoQueryPage() {
               <th className="px-3 py-2.5 text-left whitespace-nowrap">料號</th>
               <th className="px-3 py-2.5 text-left whitespace-nowrap">品名/規格</th>
               <th className="px-3 py-2.5 text-right whitespace-nowrap">數量</th>
-              <th className="px-3 py-2.5 text-left whitespace-nowrap">商品備註</th>
+              <th className="px-3 py-2.5 text-left whitespace-nowrap">出貨備註</th>
+              <th className="px-3 py-2.5 text-left whitespace-nowrap">PACKING</th>
             </tr>
           </thead>
           <tbody>
@@ -361,6 +366,7 @@ export default function SoQueryPage() {
                   {r.order_qty_oru != null ? r.order_qty_oru.toLocaleString() : '—'}
                   {r.unit_of_measure_oru ? <span className="text-slate-500 ml-1 font-normal">{r.unit_of_measure_oru}</span> : null}
                 </td>
+                <td className="px-3 py-2 text-slate-400 max-w-[320px] truncate" title={r.remark2 ?? ''}>{r.remark2 ?? '—'}</td>
                 <td className="px-3 py-2 text-slate-400 max-w-[320px] truncate" title={r.packing ?? ''}>{r.packing ?? '—'}</td>
               </tr>
             ))}
@@ -372,6 +378,9 @@ export default function SoQueryPage() {
       {rows.length > 0 && (
         <div className="px-4 py-3 border-t border-slate-800/60 text-xs text-slate-600">
           共 {rows.length.toLocaleString()} 筆
+          {rows.length >= QUERY_LIMIT && (
+            <span className="text-amber-500 ml-2">已達 {QUERY_LIMIT} 筆顯示上限，請輸入更完整的單號</span>
+          )}
         </div>
       )}
 
