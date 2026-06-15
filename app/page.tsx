@@ -356,7 +356,11 @@ export default function HomePage() {
           </button>
         </div>
         {currentUser && (
-          <div className="bg-slate-900/50 border border-slate-700 rounded-lg px-3 py-2 backdrop-blur-sm flex items-center justify-between">
+          <div
+            onClick={() => router.push('/profile')}
+            title="個人中心"
+            className="cursor-pointer bg-slate-900/50 border border-slate-700 rounded-lg px-3 py-2 backdrop-blur-sm flex items-center justify-between hover:border-cyan-500/60 hover:bg-slate-800/60 transition-all"
+          >
             <div>
               <span className="text-sm font-bold text-white">{currentUser.real_name}</span>
               <span className="text-xs text-cyan-400 ml-2">{currentUser.department}</span>
@@ -385,7 +389,11 @@ export default function HomePage() {
           {time}
         </div>
         {currentUser && (
-          <div className="bg-slate-900/50 border border-slate-700 rounded-lg px-3 py-2 text-right backdrop-blur-sm min-w-[220px]">
+          <div
+            onClick={() => router.push('/profile')}
+            title="個人中心"
+            className="cursor-pointer bg-slate-900/50 border border-slate-700 rounded-lg px-3 py-2 text-right backdrop-blur-sm min-w-[220px] hover:border-cyan-500/60 hover:bg-slate-800/60 transition-all"
+          >
             <div className="text-sm font-bold text-white leading-tight">{currentUser.real_name}</div>
             <div className="text-xs text-cyan-400 leading-tight">{currentUser.department}</div>
             <div className="text-[11px] text-slate-400 font-mono leading-tight mt-1">{currentUser.email}</div>
