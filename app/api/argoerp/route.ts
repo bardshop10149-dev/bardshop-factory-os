@@ -172,6 +172,7 @@ function normalizeInventoryRows(rows: Record<string, unknown>[], mapping: Invent
       item_code: string
       item_name: string
       spec: string
+      unit_of_measure: string | null
       book_count: number
       physical_count: number
       qisheng_sichuan_total: number
@@ -182,15 +183,18 @@ function normalizeInventoryRows(rows: Record<string, unknown>[], mapping: Invent
       if (!itemCode) continue
       const existing = grouped.get(itemCode)
       const bookQty = toNumber(getRecordValue(row, mapping.bookCountField))
+      const rowUnit = mapping.unitField ? String(getRecordValue(row, mapping.unitField) ?? '').trim() || null : null
       if (existing) {
         existing.book_count += bookQty
         existing.physical_count += toNumber(getRecordValue(row, mapping.physicalCountField))
         existing.qisheng_sichuan_total += toNumber(getRecordValue(row, mapping.warehouseTotalField))
+        if (!existing.unit_of_measure && rowUnit) existing.unit_of_measure = rowUnit
       } else {
         grouped.set(itemCode, {
           item_code: itemCode,
           item_name: String(getRecordValue(row, mapping.itemNameField) ?? '').trim(),
           spec: String(getRecordValue(row, mapping.specField) ?? '').trim(),
+          unit_of_measure: rowUnit,
           book_count: bookQty,
           physical_count: toNumber(getRecordValue(row, mapping.physicalCountField)),
           qisheng_sichuan_total: toNumber(getRecordValue(row, mapping.warehouseTotalField)),
@@ -517,6 +521,36 @@ export async function POST(request: NextRequest) {
           apiResult: parsed,
           rawText,
         }, { status: 422 })
+      }
+
+      // 庫存單位補值：部分庫存表未開放 API 查詢單位（或查詢結果不含單位），
+      // 改以 mm_bom_part_units（同步自 MM_BOM_PART.UNIT_OF_MEASURE）依料號比對補上庫存單位。
+      // 已從庫存查詢取得單位者（unitField）優先保留，僅補空值。
+      try {
+        const supabaseAdminForUnit = getSupabaseAdminClient()
+        const itemCodes = [...new Set(normalizedRows.map((r) => r.item_code).filter(Boolean))]
+        const unitMap = new Map<string, string>()
+        const UNIT_BATCH = 300
+        for (let i = 0; i < itemCodes.length; i += UNIT_BATCH) {
+          const slice = itemCodes.slice(i, i + UNIT_BATCH)
+          const { data: unitData } = await supabaseAdminForUnit
+            .from('mm_bom_part_units')
+            .select('part_code, unit_of_measure')
+            .in('part_code', slice)
+          for (const u of unitData ?? []) {
+            const code = String(u.part_code ?? '').trim()
+            const unit = String(u.unit_of_measure ?? '').trim()
+            if (code && unit) unitMap.set(code, unit)
+          }
+        }
+        for (const r of normalizedRows) {
+          const rowWithUnit = r as { item_code: string; unit_of_measure?: string | null }
+          if (!rowWithUnit.unit_of_measure) {
+            rowWithUnit.unit_of_measure = unitMap.get(rowWithUnit.item_code) ?? null
+          }
+        }
+      } catch {
+        // 補單位失敗不影響庫存主資料同步
       }
 
       try {

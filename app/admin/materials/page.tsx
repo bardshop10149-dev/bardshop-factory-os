@@ -12,6 +12,7 @@ interface MaterialItem {
   item_code: string
   item_name: string
   spec: string
+  unit_of_measure: string | null
   physical_count: number
   book_count: number
   qisheng_sichuan_total: number
@@ -59,7 +60,7 @@ export default function MaterialsPage() {
 
     let query = supabase
       .from('material_inventory_list')
-      .select('id, sequence_no, item_code, item_name, spec, physical_count, book_count, qisheng_sichuan_total, updated_at', { count: 'exact' })
+      .select('id, sequence_no, item_code, item_name, spec, unit_of_measure, physical_count, book_count, qisheng_sichuan_total, updated_at', { count: 'exact' })
       .order('sequence_no', { ascending: true, nullsFirst: false })
       .order('id', { ascending: true })
       .range(from, to)
@@ -363,6 +364,7 @@ export default function MaterialsPage() {
                 <th className="p-3 text-left">品項編碼</th>
                 <th className="p-3 text-left">品項名稱</th>
                 <th className="p-3 text-left">規格</th>
+                <th className="p-3 text-left">單位</th>
                 <th className="p-3 text-right">盤點數量</th>
                 <th className="p-3 text-right">帳上數量</th>
                 <th className="p-3 text-right">啟盛【四川總倉】</th>
@@ -371,11 +373,11 @@ export default function MaterialsPage() {
             <tbody className="divide-y divide-slate-800">
               {loading ? (
                 <tr>
-                  <td colSpan={7} className="p-8 text-center text-slate-500">讀取中...</td>
+                  <td colSpan={8} className="p-8 text-center text-slate-500">讀取中...</td>
                 </tr>
               ) : rows.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="p-8 text-center text-slate-500">
+                  <td colSpan={8} className="p-8 text-center text-slate-500">
                     {totalCount === 0 ? '目前無資料，請先上傳 Excel' : '找不到符合關鍵字的資料'}
                   </td>
                 </tr>
@@ -386,6 +388,7 @@ export default function MaterialsPage() {
                     <td className="p-3 font-mono text-cyan-300">{row.item_code}</td>
                     <td className="p-3">{row.item_name}</td>
                     <td className="p-3">{row.spec}</td>
+                    <td className="p-3">{row.unit_of_measure ?? '-'}</td>
                     <td className="p-3 text-right font-mono">{row.physical_count}</td>
                     <td className="p-3 text-right font-mono">{row.book_count}</td>
                     <td className="p-3 text-right font-mono">{row.qisheng_sichuan_total}</td>
