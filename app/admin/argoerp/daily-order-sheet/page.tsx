@@ -424,6 +424,9 @@ export default function DailyOrderSheetPage() {
                 if (stored.po_status       !== undefined) base.po_status       = stored.po_status
                 if (stored.po_qty_erp      !== undefined) base.po_qty_erp      = stored.po_qty_erp
                 if (stored.po_confirmed    !== undefined) base.po_confirmed    = stored.po_confirmed
+                if (stored.pr_number       !== undefined) base.pr_number       = stored.pr_number
+                if (stored.pr_sub_no       !== undefined) base.pr_sub_no       = stored.pr_sub_no
+                if (stored.pr_status       !== undefined) base.pr_status       = stored.pr_status
                 if (stored.match_status    !== undefined) base.match_status    = stored.match_status
                 if (stored.match_line_no   !== undefined) base.match_line_no   = stored.match_line_no
                 if (stored.match_pdl_seq   !== undefined) base.match_pdl_seq   = stored.match_pdl_seq
