@@ -63,12 +63,36 @@ function fmtDate(d: Date): string {
   return `${d.getFullYear()}/${String(d.getMonth() + 1).padStart(2, '0')}/${String(d.getDate()).padStart(2, '0')}`
 }
 
+// 解析 YYYY/MM/DD、YYYY-MM-DD、YYYYMMDD 為 Date（本地時區），失敗回 null
+function parseYmd(s: string): Date | null {
+  const t = (s ?? '').trim()
+  if (!t) return null
+  let y: number, m: number, d: number
+  if (/^\d{8}$/.test(t)) { y = +t.slice(0, 4); m = +t.slice(4, 6); d = +t.slice(6, 8) }
+  else if (/^\d{4}[/-]\d{1,2}[/-]\d{1,2}/.test(t)) {
+    const p = t.slice(0, 10).split(/[/-]/); y = +p[0]; m = +p[1]; d = +p[2]
+  } else return null
+  const dt = new Date(y, m - 1, d)
+  return Number.isNaN(dt.getTime()) ? null : dt
+}
+
+// ARGO 規則：DUEDATE 必須晚於 APPLY_DATE。若交期為空或 <= 開立日，clamp 為開立日 + 1 天。
+function clampDueDate(deliveryDate: string, applyDate: string): string {
+  const apply = parseYmd(applyDate)
+  if (!apply) return (deliveryDate ?? '').trim()
+  const minDue = new Date(apply.getTime())
+  minDue.setDate(minDue.getDate() + 1)
+  const due = parseYmd(deliveryDate)
+  if (due && due.getTime() >= minDue.getTime()) return fmtDate(due)
+  return fmtDate(minDue)
+}
+
 function makeDefaultHeader(): PrHeader {
   return {
     apply_id: '',
     apply_date: fmtDate(new Date()),
     department: 'M1100',
-    hold_status: 'OPEN',
+    hold_status: 'UNSIGNED',
     currency: 'CNY',
   }
 }
@@ -295,7 +319,7 @@ export default function PrBatchExportOPage() {
         UNIT_OF_MEASURE_ORU: edit.uom || 'PCS',
         ORDER_QTY_ORU: row.quantity,
         CURRENCY: header.currency,
-        DUEDATE: row.delivery_date,
+        DUEDATE: clampDueDate(row.delivery_date, header.apply_date),
       }
     })
   }, [sourceRows, lineEdits, header])
@@ -340,6 +364,11 @@ export default function PrBatchExportOPage() {
     }
     if (!header.department.trim()) {
       alert('請填寫請購部門')
+      return
+    }
+    // ARGO 已開啟傳簽功能：匯入狀態僅可為 UNSIGNED / HOLD / CLOSE，OPEN 會被退回
+    if (header.hold_status === 'OPEN') {
+      alert('單據狀態「OPEN」會被 ArgoERP 退回（已開啟傳簽功能）。請改為 UNSIGNED 後再匯入。')
       return
     }
     if (!confirm(`確認匯入請購單 ${header.apply_id}（${payload.length} 筆明細）至 ArgoERP？`)) return
@@ -581,10 +610,10 @@ export default function PrBatchExportOPage() {
             </label>
             <label className="flex flex-col gap-1">請購單狀態
               <select value={header.hold_status} onChange={e => setH('hold_status', e.target.value as PrHeader['hold_status'])} className="px-2 py-1.5 rounded bg-slate-950 border border-slate-700">
-                <option value="OPEN">OPEN</option>
+                <option value="UNSIGNED">UNSIGNED（建議，待簽核）</option>
                 <option value="HOLD">HOLD</option>
                 <option value="CLOSE">CLOSE</option>
-                <option value="UNSIGNED">UNSIGNED</option>
+                <option value="OPEN">OPEN（已開啟傳簽功能時會被拒）</option>
               </select>
             </label>
             <label className="flex flex-col gap-1">幣別
