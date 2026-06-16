@@ -1060,37 +1060,81 @@ export default function DailyOrderSheetPage() {
 
   type PrCandidate = { doc_no: string; sub_no: string; item_code: string | null; ro: string; status: string | null; _used: boolean }
   // 對僅 factory==='O' 的列做請購單比對；rows 已是最新狀態（含採購比對結果）
+  // 比對優先序：
+  //   (a) 直接 SO 號比對：請購 extra.PROJECT_ID / MBP_LOT_NO 直接帶出單表 SO 號（委外 MPO 類請購常見，無 RO）
+  //   (b) RO 橋接比對：SO → erp_so_lines.tpn_part_no(RO) → 請購 extra.SO_PROJECT_ID(RO)
   const matchPrRowsByPool = (
     rows: SheetRow[],
     soToRoByItem: Map<string, string>,  // key: `${SO}|${item_code}` → RO
     soToRoAny: Map<string, string>,     // key: SO → 任一 RO（item 對不到時 fallback）
     roToPr: Map<string, PrCandidate[]>, // RO → 請購候選
+    soToPr: Map<string, PrCandidate[]>, // SO → 請購候選（直接 SO 號比對）
   ): SheetRow[] => {
+    const pickHit = (cands: PrCandidate[] | undefined, itemCode: string | null | undefined): PrCandidate | undefined => {
+      if (!cands || cands.length === 0) return undefined
+      // 優先：料號相符且未用；次：任一未用
+      let hit = cands.find(c => !c._used && (c.item_code ?? '') === (itemCode ?? ''))
+      if (!hit) hit = cands.find(c => !c._used)
+      return hit
+    }
     return rows.map(row => {
       if (row.factory !== 'O') return row
       const so = String(row.order_number ?? '').trim()
       if (!so) return { ...row, pr_number: null, pr_sub_no: null, pr_status: 'no_match' }
+
+      // (a) 直接 SO 號比對（優先）
+      const directHit = pickHit(soToPr.get(so), row.item_code)
+      if (directHit) {
+        directHit._used = true
+        return { ...row, pr_number: directHit.doc_no, pr_sub_no: directHit.sub_no, pr_status: 'matched' }
+      }
+
+      // (b) RO 橋接比對（後備）
       const ro = soToRoByItem.get(`${so}|${row.item_code}`) ?? soToRoAny.get(so) ?? null
-      if (!ro) return { ...row, pr_number: null, pr_sub_no: null, pr_status: 'no_match' }
-      const cands = roToPr.get(ro)
-      if (!cands || cands.length === 0) return { ...row, pr_number: null, pr_sub_no: null, pr_status: 'no_match' }
-      // 優先：同 RO 且料號相符且未用；次：同 RO 任一未用
-      let hit = cands.find(c => !c._used && (c.item_code ?? '') === row.item_code)
-      if (!hit) hit = cands.find(c => !c._used)
-      if (!hit) return { ...row, pr_number: null, pr_sub_no: null, pr_status: 'no_match' }
-      hit._used = true
-      return { ...row, pr_number: hit.doc_no, pr_sub_no: hit.sub_no, pr_status: 'matched' }
+      if (ro) {
+        const roHit = pickHit(roToPr.get(ro), row.item_code)
+        if (roHit) {
+          roHit._used = true
+          return { ...row, pr_number: roHit.doc_no, pr_sub_no: roHit.sub_no, pr_status: 'matched' }
+        }
+      }
+      return { ...row, pr_number: null, pr_sub_no: null, pr_status: 'no_match' }
     })
   }
 
-  // 依出單表 O 列建立 SO→RO→PR 對應並比對，回傳更新後 rows
+  // 依出單表 O 列建立 SO→請購 對應並比對，回傳更新後 rows
   const matchPrRows = async (rows: SheetRow[]): Promise<SheetRow[]> => {
     const oRows = rows.filter(r => r.factory === 'O')
     if (oRows.length === 0) return rows
     const soNos = [...new Set(oRows.map(r => String(r.order_number ?? '').trim()).filter(Boolean))]
     if (soNos.length === 0) return rows
 
-    // 1) SO → RO（透過 erp_so_lines.tpn_part_no）
+    // 1) 直接 SO 號比對：請購 extra.PROJECT_ID 或 MBP_LOT_NO 直接帶出單表 SO 號
+    //    （委外 MPO 類請購常將 SO 號存於 MBP_LOT_NO，且 SO_PROJECT_ID/RO 為空，無法走 RO 橋接）
+    const soToPr = new Map<string, PrCandidate[]>()
+    const pushSoPr = (so: string, r: { doc_no: string; sub_no: string; item_code: string | null; status: string | null }) => {
+      const key = so.trim()
+      if (!key) return
+      if (!soToPr.has(key)) soToPr.set(key, [])
+      const list = soToPr.get(key)!
+      // 去重：同 doc_no#sub_no 只留一筆
+      if (list.some(c => c.doc_no === r.doc_no && c.sub_no === r.sub_no)) return
+      list.push({ doc_no: r.doc_no, sub_no: r.sub_no, item_code: r.item_code, ro: '', status: r.status, _used: false })
+    }
+    for (const field of ['MBP_LOT_NO', 'PROJECT_ID'] as const) {
+      const { data: prDirect, error: prDirectErr } = await supabase
+        .from('erp_pj_sync')
+        .select('doc_no, sub_no, item_code, status, extra')
+        .eq('doc_type', '請購單號')
+        .in(`extra->>${field}`, soNos)
+      if (prDirectErr) throw prDirectErr
+      for (const r of prDirect ?? []) {
+        const so = String((r.extra as Record<string, unknown> | null)?.[field] ?? '').trim()
+        pushSoPr(so, r)
+      }
+    }
+
+    // 2) SO → RO（透過 erp_so_lines.tpn_part_no）
     const { data: soLines, error: soErr } = await supabase
       .from('erp_so_lines')
       .select('project_id, mbp_part, tpn_part_no')
@@ -1107,27 +1151,30 @@ export default function DailyOrderSheetPage() {
       if (!soToRoAny.has(so)) soToRoAny.set(so, ro)
     }
     const ros = [...new Set([...soToRoByItem.values(), ...soToRoAny.values()])]
-    if (ros.length === 0) {
-      // 全無 RO 可橋接 → O 列標 no_match
+
+    // 3) RO → 請購單（erp_pj_sync doc_type=請購單號，extra.SO_PROJECT_ID 為 RO）
+    const roToPr = new Map<string, PrCandidate[]>()
+    if (ros.length > 0) {
+      const { data: prRows, error: prErr } = await supabase
+        .from('erp_pj_sync')
+        .select('doc_no, sub_no, item_code, status, extra')
+        .eq('doc_type', '請購單號')
+        .in('extra->>SO_PROJECT_ID', ros)
+      if (prErr) throw prErr
+      for (const r of prRows ?? []) {
+        const ro = String((r.extra as Record<string, unknown> | null)?.SO_PROJECT_ID ?? '').trim().toUpperCase()
+        if (!ro) continue
+        if (!roToPr.has(ro)) roToPr.set(ro, [])
+        roToPr.get(ro)!.push({ doc_no: r.doc_no, sub_no: r.sub_no, item_code: r.item_code, ro, status: r.status, _used: false })
+      }
+    }
+
+    // 兩種比對來源皆無 → O 列標 no_match
+    if (soToPr.size === 0 && ros.length === 0) {
       return rows.map(r => r.factory === 'O' ? { ...r, pr_number: null, pr_sub_no: null, pr_status: 'no_match' } : r)
     }
 
-    // 2) RO → 請購單（erp_pj_sync doc_type=請購單號，extra.SO_PROJECT_ID 為 RO）
-    const { data: prRows, error: prErr } = await supabase
-      .from('erp_pj_sync')
-      .select('doc_no, sub_no, item_code, status, extra')
-      .eq('doc_type', '請購單號')
-      .in('extra->>SO_PROJECT_ID', ros)
-    if (prErr) throw prErr
-    const roToPr = new Map<string, PrCandidate[]>()
-    for (const r of prRows ?? []) {
-      const ro = String((r.extra as Record<string, unknown> | null)?.SO_PROJECT_ID ?? '').trim().toUpperCase()
-      if (!ro) continue
-      if (!roToPr.has(ro)) roToPr.set(ro, [])
-      roToPr.get(ro)!.push({ doc_no: r.doc_no, sub_no: r.sub_no, item_code: r.item_code, ro, status: r.status, _used: false })
-    }
-
-    return matchPrRowsByPool(rows, soToRoByItem, soToRoAny, roToPr)
+    return matchPrRowsByPool(rows, soToRoByItem, soToRoAny, roToPr, soToPr)
   }
 
   const runPoMatch = useCallback(async () => {
