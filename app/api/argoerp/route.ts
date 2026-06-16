@@ -81,6 +81,52 @@ function toNumber(value: unknown): number {
   return Number.isFinite(parsed) ? parsed : 0
 }
 
+// 交期規則：請購單／採購單匯入時，將交期往前推兩個「工作天」（跳過週六、週日）；
+// 若往前推兩個工作天後的日期小於今日，則維持原交期不變。
+// 支援格式：YYYYMMDD / YYYY/MM/DD / YYYY-MM-DD（含時間後綴），輸出維持與輸入相同的格式樣式。
+function shiftDueDateBackTwoWorkdays(raw: string | null | undefined): string | null {
+  if (raw == null) return null
+  const s = String(raw).trim()
+  if (!s) return null
+
+  // 解析成 Y/M/D 並記錄原始格式分隔樣式
+  let y: number, m: number, d: number
+  let style: 'compact' | 'slash' | 'dash'
+  if (/^\d{8}$/.test(s)) {
+    y = +s.slice(0, 4); m = +s.slice(4, 6); d = +s.slice(6, 8); style = 'compact'
+  } else if (/^\d{4}\/\d{2}\/\d{2}/.test(s)) {
+    y = +s.slice(0, 4); m = +s.slice(5, 7); d = +s.slice(8, 10); style = 'slash'
+  } else if (/^\d{4}-\d{2}-\d{2}/.test(s)) {
+    y = +s.slice(0, 4); m = +s.slice(5, 7); d = +s.slice(8, 10); style = 'dash'
+  } else {
+    return s // 非預期格式，原樣保留
+  }
+
+  const due = new Date(Date.UTC(y, m - 1, d))
+  if (Number.isNaN(due.getTime())) return s
+
+  // 往前推兩個工作天（跳過週六日）
+  const shifted = new Date(due.getTime())
+  let remaining = 2
+  while (remaining > 0) {
+    shifted.setUTCDate(shifted.getUTCDate() - 1)
+    const dow = shifted.getUTCDay() // 0=日, 6=六
+    if (dow !== 0 && dow !== 6) remaining--
+  }
+
+  // 若推算後日期 < 今日，維持原交期不變
+  const now = new Date()
+  const todayUTC = new Date(Date.UTC(now.getFullYear(), now.getMonth(), now.getDate()))
+  if (shifted.getTime() < todayUTC.getTime()) return s
+
+  const yy = shifted.getUTCFullYear()
+  const mm = String(shifted.getUTCMonth() + 1).padStart(2, '0')
+  const dd = String(shifted.getUTCDate()).padStart(2, '0')
+  if (style === 'compact') return `${yy}${mm}${dd}`
+  if (style === 'slash') return `${yy}/${mm}/${dd}`
+  return `${yy}-${mm}-${dd}`
+}
+
 function findObjectRows(value: unknown, seen = new Set<unknown>()): Record<string, unknown>[] {
   if (!value || typeof value !== 'object') return []
   if (seen.has(value)) return []
@@ -927,7 +973,7 @@ export async function POST(request: NextRequest) {
         unit:            String(getRecordValue(dtl, 'UNIT_OF_MEASURE_ORU') ?? '').trim() || null,
         status:          String(getRecordValue(hdr, 'HOLD_STATUS') ?? '').trim() || null,
         start_date:      String(getRecordValue(hdr, 'BEGIN_DATE') ?? '').trim() || null,
-        end_date:        String(getRecordValue(dtl, 'DUEDATE') ?? '').trim() || null,
+        end_date:        shiftDueDateBackTwoWorkdays(String(getRecordValue(dtl, 'DUEDATE') ?? '').trim() || null),
         customer_vendor: String(getRecordValue(hdr, 'TPN_PARTNER_ID') ?? '').trim() || null,
         remark:          String(getRecordValue(dtl, 'REMARK2') ?? '').trim() || null,
         extra: {
@@ -1080,7 +1126,7 @@ export async function POST(request: NextRequest) {
           unit:            String(getRecordValue(row, 'UNIT_OF_MEASURE_ORU') ?? '').trim() || null,
           status:          String(getRecordValue(row, 'HOLD_STATUS') ?? '').trim() || null,
           start_date:      String(getRecordValue(row, 'APPLY_DATE') ?? '').trim() || null,
-          end_date:        String(getRecordValue(row, 'DUEDATE') ?? '').trim() || null,
+          end_date:        shiftDueDateBackTwoWorkdays(String(getRecordValue(row, 'DUEDATE') ?? '').trim() || null),
           customer_vendor: String(getRecordValue(row, 'SEG_SEGMENT_NO_DEPARTMENT') ?? '').trim() || null,
           remark:          String(getRecordValue(row, 'CURRENCY') ?? '').trim() || null,
           extra: {
@@ -1245,7 +1291,7 @@ export async function POST(request: NextRequest) {
         unit:            String(getRecordValue(dtl, 'UNIT_OF_MEASURE_ORU') ?? '').trim() || null,
         status:          String(getRecordValue(hdr, 'HOLD_STATUS') ?? '').trim() || null,
         start_date:      String(getRecordValue(hdr, 'APPLY_DATE') ?? '').trim() || null,
-        end_date:        String(getRecordValue(dtl, 'DUEDATE') ?? '').trim() || null,
+        end_date:        shiftDueDateBackTwoWorkdays(String(getRecordValue(dtl, 'DUEDATE') ?? '').trim() || null),
         customer_vendor: String(getRecordValue(hdr, 'SEG_SEGMENT_NO_DEPARTMENT') ?? '').trim() || null,
         remark:          (getFirstNonEmptyRecordValue(hdr, ['CURRENCY']) ?? String(getRecordValue(dtl, 'CURRENCY') ?? '').trim()) || null,
         extra: {
