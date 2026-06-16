@@ -36,6 +36,7 @@ interface PrHeader {
   department: string
   hold_status: 'OPEN' | 'HOLD' | 'CLOSE' | 'UNSIGNED'
   currency: string
+  flow_type: string
 }
 
 interface LineEdit {
@@ -57,6 +58,7 @@ const ERP_KEYS = [
   'ORDER_QTY_ORU',
   'CURRENCY',
   'DUEDATE',
+  'FLOW_TYPE',
 ] as const
 
 function fmtDate(d: Date): string {
@@ -94,6 +96,7 @@ function makeDefaultHeader(): PrHeader {
     department: 'M1100',
     hold_status: 'UNSIGNED',
     currency: 'CNY',
+    flow_type: 'IVAR154-1',
   }
 }
 
@@ -320,6 +323,7 @@ export default function PrBatchExportOPage() {
         ORDER_QTY_ORU: row.quantity,
         CURRENCY: header.currency,
         DUEDATE: clampDueDate(row.delivery_date, header.apply_date),
+        FLOW_TYPE: header.flow_type.trim(),
       }
     })
   }, [sourceRows, lineEdits, header])
@@ -618,6 +622,9 @@ export default function PrBatchExportOPage() {
             </label>
             <label className="flex flex-col gap-1">幣別
               <input value={header.currency} onChange={e => setH('currency', e.target.value)} className="px-2 py-1.5 rounded bg-slate-950 border border-slate-700" />
+            </label>
+            <label className="flex flex-col gap-1">傳簽類別 FLOW_TYPE
+              <input value={header.flow_type} onChange={e => setH('flow_type', e.target.value)} placeholder="IVAR154-1" className="px-2 py-1.5 rounded bg-slate-950 border border-slate-700" />
             </label>
           </div>
         </section>

@@ -20,6 +20,7 @@ interface PrHeader {
   department: string
   hold_status: 'OPEN' | 'HOLD' | 'CLOSE' | 'UNSIGNED'
   currency: string
+  flow_type: string
 }
 
 // 一筆請購明細（帶入自 SO 或手動）
@@ -49,6 +50,7 @@ const ERP_KEYS = [
   'ORDER_QTY_ORU',
   'CURRENCY',
   'DUEDATE',
+  'FLOW_TYPE',
 ] as const
 
 function fmtDate(d: Date): string {
@@ -86,6 +88,7 @@ function makeDefaultHeader(): PrHeader {
     department: 'M1100',
     hold_status: 'UNSIGNED',
     currency: 'CNY',
+    flow_type: 'IVAR154-1',
   }
 }
 
@@ -274,6 +277,7 @@ export default function StandalonePrCreatePage() {
         ORDER_QTY_ORU: l.quantity.trim(),
         CURRENCY: header.currency,
         DUEDATE: clampDueDate(l.delivery_date, header.apply_date),
+        FLOW_TYPE: header.flow_type.trim(),
       }))
   }, [lines, header])
 
@@ -464,6 +468,15 @@ export default function StandalonePrCreatePage() {
                 value={header.currency}
                 onChange={e => setH('currency', e.target.value.toUpperCase())}
                 placeholder="CNY"
+                className="px-2 py-1.5 rounded-lg bg-slate-800 border border-slate-600 text-white text-sm focus:outline-none focus:border-cyan-500"
+              />
+            </label>
+            <label className="flex flex-col gap-1 text-xs text-slate-400">
+              傳簽類別 FLOW_TYPE
+              <input
+                value={header.flow_type}
+                onChange={e => setH('flow_type', e.target.value)}
+                placeholder="IVAR154-1"
                 className="px-2 py-1.5 rounded-lg bg-slate-800 border border-slate-600 text-white text-sm focus:outline-none focus:border-cyan-500"
               />
             </label>
