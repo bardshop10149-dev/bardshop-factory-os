@@ -801,8 +801,35 @@ export default function HomePage() {
             </span>
           </Link>
 
+          {/* ARGO 外掛區 (Cyan) — iframe 嵌入 bardshop-argo，SSO 不重登 */}
+          <Link href="/argo"
+            onMouseEnter={() => setIsHovered('none')}
+            onMouseLeave={() => setIsHovered('none')}
+            className={`
+              group relative order-13 h-40 md:h-60 lg:h-64 rounded-2xl border border-slate-700 bg-slate-900/40 backdrop-blur-sm
+              flex flex-col items-center justify-center text-center p-3 md:p-6 transition-all duration-500 cursor-pointer
+              hover:border-cyan-500 hover:bg-slate-800/60 hover:shadow-[0_0_30px_rgba(6,182,212,0.15)]
+            `}
+          >
+            <div className="absolute top-4 right-4 flex items-center gap-1.5 px-2 py-1 bg-cyan-500/10 rounded border border-cyan-500/20">
+              <span className="text-[10px] text-cyan-400 font-bold uppercase tracking-wider">ARGO Tool</span>
+            </div>
+            <div className="mb-3 md:mb-6 p-3 md:p-4 rounded-full bg-slate-800 group-hover:bg-cyan-900/50 text-slate-400 group-hover:text-cyan-400 transition-colors">
+              <svg className="w-7 h-7 md:w-10 md:h-10" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M13 10V3L4 14h7v7l9-11h-7z" />
+              </svg>
+            </div>
+            <h2 className="text-base md:text-xl font-bold text-white mb-1 md:mb-2 group-hover:text-cyan-400 transition-colors">ARGO 外掛區</h2>
+            <p className="text-slate-500 text-[10px] md:text-xs mb-3 md:mb-6 group-hover:text-slate-300 px-1 md:px-2 hidden md:block">
+              拍照繳庫／報工等 ARGO 工具。<br/>(ARGO Tool)
+            </p>
+            <span className="hidden md:inline-block px-4 py-2 rounded border border-slate-600 text-slate-300 text-xs font-mono group-hover:bg-cyan-600 group-hover:border-cyan-600 group-hover:text-white transition-all">
+              OPEN &rarr;
+            </span>
+          </Link>
+
         </div>
-        
+
         <div className="mt-4 md:mt-8 text-center opacity-40 hover:opacity-100 transition-opacity pb-4 md:pb-0">
            <p className="text-[10px] text-slate-500 uppercase tracking-[0.2em] mb-2">BARDSHOP INC. • INTERNAL USE ONLY</p>
            <div className="h-0.5 w-24 bg-gradient-to-r from-transparent via-slate-600 to-transparent mx-auto"></div>
