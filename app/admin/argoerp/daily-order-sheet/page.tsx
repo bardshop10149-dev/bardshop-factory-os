@@ -53,6 +53,11 @@ export interface SheetRow extends SourceRow {
   po_status?: 'matched' | 'no_match' | 'no_po' | 'qty_mismatch' | null
   po_qty_erp?: number | null  // ERP 採購單數量（僅 qty_mismatch 時有值，供人工判斷用）
   po_confirmed?: boolean      // 使用者已人工確認採購單，同步時不覆蓋
+  // 委外請購單比對結果（對應 erp_pj_sync doc_type=請購單號；為輔，採購單優先顯示）
+  // 比對鏈：出單表 order_number(SO) → erp_so_lines.tpn_part_no(RO) → 請購單 extra.SO_PROJECT_ID(RO)
+  pr_number?: string | null
+  pr_sub_no?: string | null
+  pr_status?: 'matched' | 'no_match' | null
   // 序號比對結果（對應 erp_so_lines）
   match_status?: MatchStatus | null
   match_line_no?: string | null
@@ -1041,6 +1046,90 @@ export default function DailyOrderSheetPage() {
     })
   }
 
+  // ---- 委外請購單比對（PR 為輔，採購單優先）----
+  // 比對鏈：出單表 order_number(SO) → erp_so_lines.tpn_part_no(RO) → erp_pj_sync 請購單 extra.SO_PROJECT_ID(RO)
+  const extractRo = (...candidates: Array<unknown>): string | null => {
+    for (const c of candidates) {
+      const s = String(c ?? '').trim()
+      if (!s) continue
+      const m = s.match(/RO\d{6,}/i)
+      if (m) return m[0].toUpperCase()
+    }
+    return null
+  }
+
+  type PrCandidate = { doc_no: string; sub_no: string; item_code: string | null; ro: string; status: string | null; _used: boolean }
+  // 對僅 factory==='O' 的列做請購單比對；rows 已是最新狀態（含採購比對結果）
+  const matchPrRowsByPool = (
+    rows: SheetRow[],
+    soToRoByItem: Map<string, string>,  // key: `${SO}|${item_code}` → RO
+    soToRoAny: Map<string, string>,     // key: SO → 任一 RO（item 對不到時 fallback）
+    roToPr: Map<string, PrCandidate[]>, // RO → 請購候選
+  ): SheetRow[] => {
+    return rows.map(row => {
+      if (row.factory !== 'O') return row
+      const so = String(row.order_number ?? '').trim()
+      if (!so) return { ...row, pr_number: null, pr_sub_no: null, pr_status: 'no_match' }
+      const ro = soToRoByItem.get(`${so}|${row.item_code}`) ?? soToRoAny.get(so) ?? null
+      if (!ro) return { ...row, pr_number: null, pr_sub_no: null, pr_status: 'no_match' }
+      const cands = roToPr.get(ro)
+      if (!cands || cands.length === 0) return { ...row, pr_number: null, pr_sub_no: null, pr_status: 'no_match' }
+      // 優先：同 RO 且料號相符且未用；次：同 RO 任一未用
+      let hit = cands.find(c => !c._used && (c.item_code ?? '') === row.item_code)
+      if (!hit) hit = cands.find(c => !c._used)
+      if (!hit) return { ...row, pr_number: null, pr_sub_no: null, pr_status: 'no_match' }
+      hit._used = true
+      return { ...row, pr_number: hit.doc_no, pr_sub_no: hit.sub_no, pr_status: 'matched' }
+    })
+  }
+
+  // 依出單表 O 列建立 SO→RO→PR 對應並比對，回傳更新後 rows
+  const matchPrRows = async (rows: SheetRow[]): Promise<SheetRow[]> => {
+    const oRows = rows.filter(r => r.factory === 'O')
+    if (oRows.length === 0) return rows
+    const soNos = [...new Set(oRows.map(r => String(r.order_number ?? '').trim()).filter(Boolean))]
+    if (soNos.length === 0) return rows
+
+    // 1) SO → RO（透過 erp_so_lines.tpn_part_no）
+    const { data: soLines, error: soErr } = await supabase
+      .from('erp_so_lines')
+      .select('project_id, mbp_part, tpn_part_no')
+      .in('project_id', soNos)
+    if (soErr) throw soErr
+    const soToRoByItem = new Map<string, string>()
+    const soToRoAny = new Map<string, string>()
+    for (const l of soLines ?? []) {
+      const ro = extractRo(l.tpn_part_no)
+      if (!ro) continue
+      const so = String(l.project_id ?? '').trim()
+      const item = String(l.mbp_part ?? '').trim()
+      if (item) { const k = `${so}|${item}`; if (!soToRoByItem.has(k)) soToRoByItem.set(k, ro) }
+      if (!soToRoAny.has(so)) soToRoAny.set(so, ro)
+    }
+    const ros = [...new Set([...soToRoByItem.values(), ...soToRoAny.values()])]
+    if (ros.length === 0) {
+      // 全無 RO 可橋接 → O 列標 no_match
+      return rows.map(r => r.factory === 'O' ? { ...r, pr_number: null, pr_sub_no: null, pr_status: 'no_match' } : r)
+    }
+
+    // 2) RO → 請購單（erp_pj_sync doc_type=請購單號，extra.SO_PROJECT_ID 為 RO）
+    const { data: prRows, error: prErr } = await supabase
+      .from('erp_pj_sync')
+      .select('doc_no, sub_no, item_code, status, extra')
+      .eq('doc_type', '請購單號')
+      .in('extra->>SO_PROJECT_ID', ros)
+    if (prErr) throw prErr
+    const roToPr = new Map<string, PrCandidate[]>()
+    for (const r of prRows ?? []) {
+      const ro = String((r.extra as Record<string, unknown> | null)?.SO_PROJECT_ID ?? '').trim().toUpperCase()
+      if (!ro) continue
+      if (!roToPr.has(ro)) roToPr.set(ro, [])
+      roToPr.get(ro)!.push({ doc_no: r.doc_no, sub_no: r.sub_no, item_code: r.item_code, ro, status: r.status, _used: false })
+    }
+
+    return matchPrRowsByPool(rows, soToRoByItem, soToRoAny, roToPr)
+  }
+
   const runPoMatch = useCallback(async () => {
     const cRows = sheetRows.filter(r => r.factory === 'C')
     const oRows = sheetRows.filter(r => r.factory === 'O')
@@ -1105,6 +1194,13 @@ export default function DailyOrderSheetPage() {
         }
       }
 
+      // ── 委外請購單比對（PR 為輔）──
+      try {
+        next = await matchPrRows(next)
+      } catch (prE) {
+        console.error('請購單比對失敗（不影響採購結果）：', prE)
+      }
+
       setSheetRows(next)
 
       // 立即儲存
@@ -1119,9 +1215,10 @@ export default function DailyOrderSheetPage() {
       const cNoMatch = next.filter(r => r.factory === 'C' && r.po_status === 'no_match').length
       const oMatched = next.filter(r => r.factory === 'O' && r.po_status === 'matched').length
       const oNoMatch = next.filter(r => r.factory === 'O' && r.po_status === 'no_match').length
+      const oPrMatched = next.filter(r => r.factory === 'O' && r.pr_status === 'matched').length
       const parts: string[] = []
       if (cRows.length > 0) parts.push(`常平 ${cMatched}/${cRows.length}${cNoMatch > 0 ? `（未配 ${cNoMatch}）` : ''}`)
-      if (oRows.length > 0) parts.push(`委外 ${oMatched}/${oRows.length}${oNoMatch > 0 ? `（未配 ${oNoMatch}）` : ''}`)
+      if (oRows.length > 0) parts.push(`委外 ${oMatched}/${oRows.length}${oNoMatch > 0 ? `（未配 ${oNoMatch}）` : ''}${oPrMatched > 0 ? `、請購 ${oPrMatched}` : ''}`)
       setSaveMsg(`✅ 採購單比對完成：${parts.join('　')}`)
       setTimeout(() => setSaveMsg(''), 6000)
     } catch (e) {
@@ -1463,6 +1560,18 @@ export default function DailyOrderSheetPage() {
         }
       }
 
+      // ── Step 3b: 委外請購單比對（PR 為輔，採購單優先）────
+      let oPrMatched = 0
+      if (hasORows) {
+        setSaveMsg('⏳ 全同步進行中：比對委外請購單…')
+        try {
+          currentRows = await matchPrRows(currentRows)
+          oPrMatched = currentRows.filter(r => r.factory === 'O' && r.pr_status === 'matched').length
+        } catch (prE) {
+          console.error('請購單比對失敗（不影響其他結果）：', prE)
+        }
+      }
+
       // ── 最終儲存（僅此一次）──────────────────────────────────
       setSheetRows(currentRows)
 
@@ -1495,6 +1604,7 @@ export default function DailyOrderSheetPage() {
         batchPrepCount > 0 ? `已批備料 ${batchPrepCount}` : null,
         hasCRows ? `常平採購單 ${poMatched}/${currentRows.filter(r => r.factory === 'C').length}` : null,
         hasORows ? `委外採購單 ${oPoMatched}/${currentRows.filter(r => r.factory === 'O').length}` : null,
+        hasORows && oPrMatched > 0 ? `委外請購單 ${oPrMatched}` : null,
       ].filter(Boolean).join('　')
       setSaveMsg(`✅ 全同步完成：${parts}`)
       setTimeout(() => setSaveMsg(''), 8000)
@@ -1712,6 +1822,15 @@ export default function DailyOrderSheetPage() {
         const sheetPoPoolO: Candidate[] = globalPoPoolO.map(c => ({ ...c, _used: false }))
         if (rows.some(r => r.factory === 'O')) {
           rows = matchPoRows(rows, sheetPoPoolO, 'O', sheetDate)
+        }
+
+        // Step C2: 委外請購單比對（PR 為輔，採購單優先）
+        if (rows.some(r => r.factory === 'O')) {
+          try {
+            rows = await matchPrRows(rows)
+          } catch (prE) {
+            console.error(`請購單比對失敗（${sheetDate}，不影響其他結果）：`, prE)
+          }
         }
 
         // Step D: 寫回 DB
@@ -2487,6 +2606,11 @@ export default function DailyOrderSheetPage() {
                                 <span className="text-violet-300">{row.mo_number}</span>
                               ) : (
                                 <span className="text-slate-600">—</span>
+                              )}
+                              {row.factory === 'O' && row.pr_status === 'matched' && row.pr_number && (
+                                <div className="mt-1 text-[10px] text-sky-400/80" title="同步區請購單（採購單優先，請購為輔）">
+                                  請購 {row.pr_number}{row.pr_sub_no && <span className="text-slate-500">#{row.pr_sub_no}</span>}
+                                </div>
                               )}
                             </td>
                             <td className="px-3 py-2">

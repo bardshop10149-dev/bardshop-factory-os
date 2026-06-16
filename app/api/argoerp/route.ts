@@ -979,6 +979,19 @@ export async function POST(request: NextRequest) {
       // ── 請購單同步（PJ_APPLYPROJECT + PJ_APPLYPROJECTDETAIL 兩段式，JS 端 JOIN）──────────────
       const prSyncedAt = new Date().toISOString()
 
+      // 解析委外請購的銷售訂單號（RO 號）：
+      //  - MP 開頭請購：RO 號乾淨地存在 PROJECT_ID / MBP_LOT_NO
+      //  - PR 開頭委外請購：RO 號夾在 DESCRIPTION 文字中（如 "RO25123140/0102山鷹"）
+      const extractSoNo = (...candidates: Array<unknown>): string | null => {
+        for (const c of candidates) {
+          const s = String(c ?? '').trim()
+          if (!s) continue
+          const m = s.match(/RO\d{6,}/i)
+          if (m) return m[0].toUpperCase()
+        }
+        return null
+      }
+
       async function persistPrSyncRows(prSyncRows: Array<Record<string, unknown>>) {
         const supabaseAdmin = getSupabaseAdminClient()
         const { error: clearError } = await supabaseAdmin.from('erp_pj_sync').delete().eq('doc_type', '請購單號')
@@ -1020,20 +1033,20 @@ export async function POST(request: NextRequest) {
       // Step 0: 優先嘗試聯表（部分環境只授權 PJ_APPLYPROJECT,PJ_APPLYPROJECTDETAIL）
       const prJoinedAttempts = [
         {
-          customColumn: 'APPLY_ID,LINE_NO,MBP_PART,MBP_VER,MBP_LOT_NO,ORDER_QTY_ORU,UNIT_OF_MEASURE_ORU,DUEDATE,APPLY_DATE,HOLD_STATUS,SEG_SEGMENT_NO_DEPARTMENT,REMARK,CURRENCY',
+          customColumn: 'APPLY_ID,LINE_NO,MBP_PART,MBP_VER,MBP_LOT_NO,PROJECT_ID,DESCRIPTION,ORDER_QTY_ORU,UNIT_OF_MEASURE_ORU,DUEDATE,APPLY_DATE,HOLD_STATUS,SEG_SEGMENT_NO_DEPARTMENT,REMARK,CURRENCY',
           showNull: 'N' as const,
         },
         {
-          customColumn: 'PROJECT_ID,LINE_NO,MBP_PART,MBP_VER,MBP_LOT_NO,ORDER_QTY_ORU,UNIT_OF_MEASURE_ORU,DUEDATE,APPLY_DATE,HOLD_STATUS,SEG_SEGMENT_NO_DEPARTMENT,REMARK,CURRENCY',
+          customColumn: 'PROJECT_ID,LINE_NO,MBP_PART,MBP_VER,MBP_LOT_NO,DESCRIPTION,ORDER_QTY_ORU,UNIT_OF_MEASURE_ORU,DUEDATE,APPLY_DATE,HOLD_STATUS,SEG_SEGMENT_NO_DEPARTMENT,REMARK,CURRENCY',
           showNull: 'N' as const,
         },
         { customColumn: null, showNull: 'N' as const },
         {
-          customColumn: 'APPLY_ID,LINE_NO,MBP_PART,MBP_VER,MBP_LOT_NO,ORDER_QTY_ORU,UNIT_OF_MEASURE_ORU,DUEDATE,APPLY_DATE,HOLD_STATUS,SEG_SEGMENT_NO_DEPARTMENT,REMARK,CURRENCY',
+          customColumn: 'APPLY_ID,LINE_NO,MBP_PART,MBP_VER,MBP_LOT_NO,PROJECT_ID,DESCRIPTION,ORDER_QTY_ORU,UNIT_OF_MEASURE_ORU,DUEDATE,APPLY_DATE,HOLD_STATUS,SEG_SEGMENT_NO_DEPARTMENT,REMARK,CURRENCY',
           showNull: 'Y' as const,
         },
         {
-          customColumn: 'PROJECT_ID,LINE_NO,MBP_PART,MBP_VER,MBP_LOT_NO,ORDER_QTY_ORU,UNIT_OF_MEASURE_ORU,DUEDATE,APPLY_DATE,HOLD_STATUS,SEG_SEGMENT_NO_DEPARTMENT,REMARK,CURRENCY',
+          customColumn: 'PROJECT_ID,LINE_NO,MBP_PART,MBP_VER,MBP_LOT_NO,DESCRIPTION,ORDER_QTY_ORU,UNIT_OF_MEASURE_ORU,DUEDATE,APPLY_DATE,HOLD_STATUS,SEG_SEGMENT_NO_DEPARTMENT,REMARK,CURRENCY',
           showNull: 'Y' as const,
         },
         { customColumn: null, showNull: 'Y' as const },
@@ -1073,6 +1086,14 @@ export async function POST(request: NextRequest) {
           extra: {
             MBP_VER:    String(getRecordValue(row, 'MBP_VER') ?? '').trim() || null,
             MBP_LOT_NO: String(getRecordValue(row, 'MBP_LOT_NO') ?? '').trim() || null,
+            PROJECT_ID: String(getRecordValue(row, 'PROJECT_ID') ?? '').trim() || null,
+            DTL_DESC:   String(getRecordValue(row, 'DESCRIPTION') ?? '').trim() || null,
+            // 正規化銷售訂單號（RO 號）：優先 PROJECT_ID > MBP_LOT_NO > DESCRIPTION 文字解析
+            SO_PROJECT_ID: extractSoNo(
+              getRecordValue(row, 'PROJECT_ID'),
+              getRecordValue(row, 'MBP_LOT_NO'),
+              getRecordValue(row, 'DESCRIPTION'),
+            ),
             HDR_REMARK: String(getRecordValue(row, 'REMARK') ?? '').trim() || null,
           },
           synced_at: prSyncedAt,
@@ -1111,7 +1132,9 @@ export async function POST(request: NextRequest) {
       let rawPrHdr = ''
       let prHdrOk = false
       for (const attemptConfig of prHeaderAttempts) {
-        const attempt = await runPrQuery('PJ_APPLYPROJECT', attemptConfig.customColumn, {}, attemptConfig.showNull)
+        // ARGO S_QUERY 至少需帶一個條件式，否則 WHERE 為空 → ORA-00936（遺漏表示式）。
+        // APPLY_ID IS NOT NULL 為恆真條件，可取得全部請購表頭。
+        const attempt = await runPrQuery('PJ_APPLYPROJECT', attemptConfig.customColumn, { APPLY_ID: 'IS NOT NULL' }, attemptConfig.showNull)
         parsedPrHdr = attempt.parsed
         rawPrHdr = attempt.rawText
         if (!attempt.res.ok || !isArgoSuccess(attempt.parsed)) continue
@@ -1144,14 +1167,14 @@ export async function POST(request: NextRequest) {
       }
 
       // Step 2: 查 PJ_APPLYPROJECTDETAIL（明細）
+      // 注意：明細表關聯表頭的欄位為 APJ_APPLY_ID（= 表頭 APPLY_ID），
+      // 並非 APPLY_ID / PJT_PROJECT_ID（這些在明細表不存在，會 ORA-00904）。
       const prDetailAttempts = [
-        { customColumn: 'APPLY_ID,LINE_NO,MBP_PART,MBP_VER,MBP_LOT_NO,ORDER_QTY_ORU,UNIT_OF_MEASURE_ORU,DUEDATE,CURRENCY', showNull: 'N' as const },
-        { customColumn: 'PJT_PROJECT_ID,LINE_NO,MBP_PART,MBP_VER,MBP_LOT_NO,ORDER_QTY_ORU,UNIT_OF_MEASURE_ORU,DUEDATE,CURRENCY', showNull: 'N' as const },
-        { customColumn: 'PROJECT_ID,LINE_NO,MBP_PART,MBP_VER,MBP_LOT_NO,ORDER_QTY_ORU,UNIT_OF_MEASURE_ORU,DUEDATE,CURRENCY', showNull: 'N' as const },
+        { customColumn: 'APJ_APPLY_ID,LINE_NO,MBP_PART,MBP_VER,MBP_LOT_NO,PROJECT_ID,DESCRIPTION,ORDER_QTY_ORU,UNIT_OF_MEASURE_ORU,DUEDATE,CURRENCY', showNull: 'N' as const },
+        { customColumn: 'APJ_APPLY_ID,LINE_NO,MBP_PART,MBP_VER,MBP_LOT_NO,PROJECT_ID,DESCRIPTION,ORDER_QTY_ORU,UNIT_OF_MEASURE_ORU,DUEDATE', showNull: 'N' as const },
         { customColumn: null, showNull: 'N' as const },
-        { customColumn: 'APPLY_ID,LINE_NO,MBP_PART,MBP_VER,MBP_LOT_NO,ORDER_QTY_ORU,UNIT_OF_MEASURE_ORU,DUEDATE,CURRENCY', showNull: 'Y' as const },
-        { customColumn: 'PJT_PROJECT_ID,LINE_NO,MBP_PART,MBP_VER,MBP_LOT_NO,ORDER_QTY_ORU,UNIT_OF_MEASURE_ORU,DUEDATE,CURRENCY', showNull: 'Y' as const },
-        { customColumn: 'PROJECT_ID,LINE_NO,MBP_PART,MBP_VER,MBP_LOT_NO,ORDER_QTY_ORU,UNIT_OF_MEASURE_ORU,DUEDATE,CURRENCY', showNull: 'Y' as const },
+        { customColumn: 'APJ_APPLY_ID,LINE_NO,MBP_PART,MBP_VER,MBP_LOT_NO,PROJECT_ID,DESCRIPTION,ORDER_QTY_ORU,UNIT_OF_MEASURE_ORU,DUEDATE,CURRENCY', showNull: 'Y' as const },
+        { customColumn: 'APJ_APPLY_ID,LINE_NO,MBP_PART,MBP_VER,MBP_LOT_NO,PROJECT_ID,DESCRIPTION,ORDER_QTY_ORU,UNIT_OF_MEASURE_ORU,DUEDATE', showNull: 'Y' as const },
         { customColumn: null, showNull: 'Y' as const },
       ]
 
@@ -1195,7 +1218,7 @@ export async function POST(request: NextRequest) {
       // 合併：去重 project_id + line_no，只保留有表頭的明細
       const prDedupe = new Map<string, { dtl: Record<string, unknown>; hdr: Record<string, unknown> }>()
       for (const dtl of prDtlRows) {
-        const pid = getFirstNonEmptyRecordValue(dtl, ['APPLY_ID', 'PJT_PROJECT_ID', 'PROJECT_ID']) ?? ''
+        const pid = getFirstNonEmptyRecordValue(dtl, ['APJ_APPLY_ID', 'APPLY_ID', 'PJT_PROJECT_ID', 'PROJECT_ID']) ?? ''
         const line = String(getRecordValue(dtl, 'LINE_NO') ?? '').trim()
         const hdr  = prHdrMap.get(pid)
         if (!hdr) continue
@@ -1228,6 +1251,14 @@ export async function POST(request: NextRequest) {
         extra: {
           MBP_VER:    String(getRecordValue(dtl, 'MBP_VER') ?? '').trim() || null,
           MBP_LOT_NO: String(getRecordValue(dtl, 'MBP_LOT_NO') ?? '').trim() || null,
+          PROJECT_ID: String(getRecordValue(dtl, 'PROJECT_ID') ?? '').trim() || null,
+          DTL_DESC:   String(getRecordValue(dtl, 'DESCRIPTION') ?? '').trim() || null,
+          // 正規化銷售訂單號（RO 號）：優先 PROJECT_ID > MBP_LOT_NO > DESCRIPTION 文字解析
+          SO_PROJECT_ID: extractSoNo(
+            getRecordValue(dtl, 'PROJECT_ID'),
+            getRecordValue(dtl, 'MBP_LOT_NO'),
+            getRecordValue(dtl, 'DESCRIPTION'),
+          ),
           HDR_REMARK: String(getRecordValue(hdr, 'REMARK') ?? '').trim() || null,
         },
         synced_at: prSyncedAt,
