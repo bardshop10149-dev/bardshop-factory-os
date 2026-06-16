@@ -27,6 +27,8 @@ interface MoRecord {
   machine?: string
   line_no_override?: string
   po_number?: string | null
+  pr_number?: string | null
+  pr_sub_no?: string | null
 }
 
 interface SoLine {
@@ -147,18 +149,27 @@ function divider(): Paragraph {
   })
 }
 
-// ── 每筆採購單 → 多個段落/表格陣列 ─────────────────────────
+// ── 每筆採購單／請購單 → 多個段落/表格陣列 ─────────────
 function buildPoSection(
   mo: MoRecord,
   soMap: Map<string, SoLine[]>,
   customerCodeMap: Map<string, string>,
   isLast: boolean,
+  variant: 'po' | 'pr' = 'po',
 ): (Paragraph | Table)[] {
+  const isPr = variant === 'pr'
+  const docNoLabel = isPr ? '請購單號' : '採購單號'
+  const cardTitle = isPr ? '請購單' : '採購單'
+  const cardTitleEn = isPr ? 'Purchase Requisition' : 'Purchase Order'
+  const infoTitle = isPr ? '請購資訊' : '採購資訊'
+  const qtyLabel = isPr ? '請購數量' : '採購數量'
+  const goodsLabel = isPr ? '請購貨號' : '採購貨號'
+  const noSourceText = isPr ? '（此請購單無來源訂單）' : '（此採購單無來源訂單）'
   const lineNo   = getLineNo(mo)
   const soLines  = soMap.get(mo.source_order ?? '') ?? []
   const so       = soLines.find(l => String(parseInt(String(l.line_no || '0'), 10)) === lineNo) ?? soLines[0] ?? null
   const factoryLabel = FACTORY_LABEL[mo.factory ?? ''] ?? mo.factory ?? '—'
-  const poNo     = mo.po_number || mo.mo_number
+  const poNo     = isPr ? (mo.pr_number || mo.mo_number) : (mo.po_number || mo.mo_number)
   const dueDate  = so?.duedate || mo.planned_end_date
   const dueDateStr = dueDate ? `${dueDate} ${dayOfWeekZh(dueDate)}` : '—'
 
@@ -173,10 +184,10 @@ function buildPoSection(
     rows: [
       new TableRow({
         children: [
-          // 左：採購單號
+          // 左：採購單號／請購單號
           new TableCell({
             children: [
-              new Paragraph({ children: [t('採購單號', { size: 16, color: '555555' })], spacing: { before: 0, after: 20 } }),
+              new Paragraph({ children: [t(docNoLabel, { size: 16, color: '555555' })], spacing: { before: 0, after: 20 } }),
               new Paragraph({
                 children: [t(poNo, { bold: true, size: 32 })],
                 shading: { type: ShadingType.SOLID, color: 'F0F0F0', fill: 'F0F0F0' },
@@ -198,12 +209,12 @@ function buildPoSection(
           new TableCell({
             children: [
               new Paragraph({
-                children: [t('採購單', { bold: true, size: 56 })],
+                children: [t(cardTitle, { bold: true, size: 56 })],
                 alignment: AlignmentType.CENTER,
                 spacing: { before: 40, after: 20 },
               }),
               new Paragraph({
-                children: [t('Purchase Order', { size: 20, color: '666666' })],
+                children: [t(cardTitleEn, { size: 20, color: '666666' })],
                 alignment: AlignmentType.CENTER,
                 spacing: { before: 0, after: 0 },
               }),
@@ -235,7 +246,7 @@ function buildPoSection(
   // ── 2. 採購資訊 + 交期資訊（4欄表格）───────────────────
   items.push(new Paragraph({
     children: [
-      t('採購資訊', { bold: true, size: 22, color: 'FFFFFF' }),
+      t(infoTitle, { bold: true, size: 22, color: 'FFFFFF' }),
       t('                                    ', { size: 22, color: 'FFFFFF' }),
       t('交期資訊', { bold: true, size: 22, color: 'FFFFFF' }),
     ],
@@ -261,7 +272,7 @@ function buildPoSection(
       new TableRow({
         height: { value: convertInchesToTwip(0.5), rule: 'atLeast' },
         children: [
-          labelCell('採購數量', { width: 1200 }),
+          labelCell(qtyLabel, { width: 1200 }),
           valueCell(mo.planned_qty || '—', { bold: true, size: 28 }),
           labelCell('廠別', { width: 1200 }),
           valueCell(factoryLabel, { size: 22 }),
@@ -285,7 +296,7 @@ function buildPoSection(
   const detailRows: TableRow[] = [
     new TableRow({
       children: [
-        labelCell('採購貨號', { width: 1200 }),
+        labelCell(goodsLabel, { width: 1200 }),
         valueCell(mo.product_code || '—', { size: 20 }),
       ],
     }),
@@ -456,7 +467,7 @@ function buildPoSection(
     items.push(linesTable)
   } else {
     items.push(new Paragraph({
-      children: [t('（此採購單無來源訂單）', { size: 18, color: '9CA3AF', italics: true })],
+      children: [t(noSourceText, { size: 18, color: '9CA3AF', italics: true })],
       spacing: { before: 60, after: 60 },
       indent: { left: 100 },
     }))
@@ -521,7 +532,7 @@ export async function exportPoToWord(
 
   const allChildren: (Paragraph | Table)[] = []
   poRecords.forEach((mo, idx) => {
-    const section = buildPoSection(mo, soMap, customerCodeMap, idx === poRecords.length - 1)
+    const section = buildPoSection(mo, soMap, customerCodeMap, idx === poRecords.length - 1, mo.factory === 'O' ? 'pr' : 'po')
     allChildren.push(...section)
   })
 

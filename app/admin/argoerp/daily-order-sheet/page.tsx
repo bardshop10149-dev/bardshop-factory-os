@@ -679,6 +679,8 @@ export default function DailyOrderSheetPage() {
       machine: r.mo_number ? (moMachines[r.mo_number] || '') : (rowMachines[r.row_key] || ''),
       line_no_override: r.match_line_no || undefined,
       po_number: r.po_number ?? undefined,
+      pr_number: r.pr_number ?? undefined,
+      pr_sub_no: r.pr_sub_no ?? undefined,
     }))
 
     sessionStorage.setItem('mo_print_selection', JSON.stringify(moRecords))

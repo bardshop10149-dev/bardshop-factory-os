@@ -128,6 +128,8 @@ interface MoRecord {
   machine?: string
   line_no_override?: string  // 直接指定行號（供每日出單表列印使用）
   po_number?: string | null   // ERP 採購單號（POC/POO 開頭）
+  pr_number?: string | null   // ERP 請購單號（委外 O 列印請購單時使用）
+  pr_sub_no?: string | null   // ERP 請購單項號
 }
 
 interface SoLine {
@@ -264,15 +266,25 @@ function InfoGrid({ rows }: {
   )
 }
 
-// ── 採購單卡片（常平 C / 委外 O）────────────────────────────
+// ── 採購單／請購單卡片（常平 C → 採購單；委外 O → 請購單）──────────
 function PoCard({
-  mo, soMap, soLineLookup, customerCodeMap,
+  mo, soMap, soLineLookup, customerCodeMap, variant = 'po',
 }: {
   mo: MoRecord
   soMap: Map<string, SoLine[]>
   soLineLookup: Map<string, SoLine>
   customerCodeMap: Map<string, string>
+  variant?: 'po' | 'pr'
 }) {
+  const isPr = variant === 'pr'
+  const docNo = isPr ? (mo.pr_number || mo.mo_number) : (mo.po_number || mo.mo_number)
+  const docNoLabel = isPr ? '請購單號' : '採購單號'
+  const cardTitle = isPr ? '請購單' : '採購單'
+  const cardTitleEn = isPr ? 'Purchase Requisition' : 'Purchase Order'
+  const infoTitle = isPr ? '請購資訊' : '採購資訊'
+  const qtyLabel = isPr ? '請購數量' : '採購數量'
+  const goodsLabel = isPr ? '請購貨號' : '採購貨號'
+  const noSourceText = isPr ? '（此請購單無來源訂單）' : '（此採購單無來源訂單）'
   const lineNo = getLineNo(mo)
   const soLines = soMap.get(mo.source_order ?? '') ?? []
   const so = soLineLookup.get(createSoLookupKey(mo.source_order ?? '', lineNo)) ?? soLines[0] ?? null
@@ -304,15 +316,15 @@ function PoCard({
         borderBottom: '2px solid #000',
         paddingBottom: '8px', marginBottom: '10px',
       }}>
-        {/* 左：採購單號 + 急件/打樣 */}
+        {/* 左：採購單號／請購單號 + 急件/打樣 */}
         <div>
-          <div style={{ fontSize: '11px', color: '#555', marginBottom: '3px', fontWeight: 600, letterSpacing: '1px' }}>採購單號</div>
+          <div style={{ fontSize: '11px', color: '#555', marginBottom: '3px', fontWeight: 600, letterSpacing: '1px' }}>{docNoLabel}</div>
           <div style={{
             fontSize: '22px', fontWeight: 'bold', letterSpacing: '1px',
             background: '#f0f0f0', padding: '3px 8px', border: '1px solid #555',
             display: 'inline-block', borderRadius: '3px', color: '#000',
           }}>
-            {mo.po_number || mo.mo_number}
+            {docNo}
           </div>
           <div style={{ marginTop: '6px', display: 'flex', gap: '6px' }}>
             {(['急件單', '打樣單'] as const).map(label => (
@@ -327,13 +339,13 @@ function PoCard({
           </div>
         </div>
 
-        {/* 中：採購單 大標題 */}
+        {/* 中：採購單／請購單 大標題 */}
         <div style={{ textAlign: 'center' }}>
           <div style={{ fontSize: '36px', fontWeight: 900, letterSpacing: '5px', color: '#000', WebkitTextStroke: '1px #000' }}>
-            採購單
+            {cardTitle}
           </div>
           <div style={{ fontSize: '14px', color: '#666', marginTop: '3px', letterSpacing: '1px' }}>
-            Purchase Order
+            {cardTitleEn}
           </div>
         </div>
 
@@ -350,9 +362,9 @@ function PoCard({
 
       {/* ── 採購資訊 + 交期資訊（左右並排）── */}
       <div className="mo-section" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px', marginBottom: '10px', alignItems: 'stretch' }}>
-        {/* 左：採購資訊 */}
+        {/* 左：採購資訊／請購資訊 */}
         <div>
-          <SectionTitle color="#e5e7eb">採購資訊</SectionTitle>
+          <SectionTitle color="#e5e7eb">{infoTitle}</SectionTitle>
           <table style={{ width: '100%', borderCollapse: 'collapse' }}>
             <tbody>
               <tr style={{ height: '76px' }}>
@@ -360,7 +372,7 @@ function PoCard({
                 <td style={{ ...valueTd, fontSize: '24px', fontWeight: 600, verticalAlign: 'middle' }}>{mo.source_order || '—'}</td>
               </tr>
               <tr style={{ height: '76px' }}>
-                <td style={{ ...labelTd, verticalAlign: 'middle' }}>採購數量</td>
+                <td style={{ ...labelTd, verticalAlign: 'middle' }}>{qtyLabel}</td>
                 <td style={{ ...valueTd, fontSize: '24px', fontWeight: 600, verticalAlign: 'middle' }}>{poQtyDisplay}</td>
               </tr>
             </tbody>
@@ -399,7 +411,7 @@ function PoCard({
         <table style={{ width: '100%', borderCollapse: 'collapse' }}>
           <tbody>
             <tr>
-              <td style={labelTd}>採購貨號</td>
+              <td style={labelTd}>{goodsLabel}</td>
               <td style={{ ...valueTd, fontSize: '13px' }}>{mo.product_code || '—'}</td>
             </tr>
             <tr>
@@ -532,7 +544,7 @@ function PoCard({
           </>
         ) : (
           <div style={{ padding: '8px 6px', color: '#9ca3af', fontSize: '11px', fontStyle: 'italic' }}>
-            （此採購單無來源訂單）
+            {noSourceText}
           </div>
         )}
       </div>
@@ -826,7 +838,7 @@ function MoPrintContent() {
         <span style={{ fontSize: '13px', color: '#94a3b8' }}>
           {isDemo
             ? <span>🎨 <strong style={{ color: '#fbbf24' }}>設計預覽模式</strong>（假資料，僅供格式調整）</span>
-            : <>列印預覽 — 共 <strong style={{ color: 'white' }}>{records.length}</strong> 張單據（製令 / 採購單）</>
+            : <>列印預覽 — 共 <strong style={{ color: 'white' }}>{records.length}</strong> 張單據（製令 / 採購單 / 請購單）</>
           }
         </span>
 
@@ -868,9 +880,9 @@ function MoPrintContent() {
       {/* ── 頁面容器 ───────────────────────────────────────── */}
       <div className="mo-pages-wrapper" style={{ background: '#64748b', padding: '24px 16px', minHeight: '100vh' }}>
         {visibleRecords.map((mo) => {
-          // 常平 C / 委外 O → 採購單格式
+          // 常平 C → 採購單格式；委外 O → 請購單格式
           if (mo.factory === 'C' || mo.factory === 'O') {
-            return <PoCard key={mo.mo_number} mo={mo} soMap={soMap} soLineLookup={soLineLookup} customerCodeMap={customerCodeMap} />
+            return <PoCard key={mo.mo_number} mo={mo} soMap={soMap} soLineLookup={soLineLookup} customerCodeMap={customerCodeMap} variant={mo.factory === 'O' ? 'pr' : 'po'} />
           }
 
           const lineNo = getLineNo(mo)
