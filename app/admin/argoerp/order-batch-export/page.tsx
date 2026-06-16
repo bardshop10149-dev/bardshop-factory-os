@@ -1245,11 +1245,18 @@ export default function OrderBatchExportPage() {
           ? (result.apiResult.RESULT as Record<string, unknown>[])
           : []
         if (argoResultRows.length > 0) {
-          // 以 SLIP_NO（= mo_number）為 key 收集錯誤訊息
+          // 製令（IFAF028）回報的單號欄位是 PROJECT_ID（= 我們送出的 mo_number），
+          // 採購單（IFAF044）則是 SLIP_NO。依介面挑主要欄位，並互為備援，
+          // 避免欄位名差異導致整批誤判為「未回報」失敗。
+          const getResultSlip = (row: Record<string, unknown>): string =>
+            interfaceId === 'IFAF028'
+              ? String(row.PROJECT_ID ?? row.SLIP_NO ?? row.MO_NO ?? '').trim()
+              : String(row.SLIP_NO ?? row.PROJECT_ID ?? row.MO_NO ?? '').trim()
+          // 以製令單號為 key 收集錯誤訊息
           const failedSlipErrors = new Map<string, string[]>()
           const seenSlips = new Set<string>()
           for (const row of argoResultRows) {
-            const slip = String(row.SLIP_NO ?? '').trim()
+            const slip = getResultSlip(row)
             if (!slip) continue
             seenSlips.add(slip)
             const flag = String(row.CHECK_FLAG ?? '').toUpperCase()
