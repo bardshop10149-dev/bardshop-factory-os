@@ -1155,10 +1155,15 @@ export default function DailyOrderSheetPage() {
   ): SheetRow[] => {
     const pickHit = (cands: PrCandidate[] | undefined, itemCode: string | null | undefined): PrCandidate | undefined => {
       if (!cands || cands.length === 0) return undefined
-      // 優先：料號相符且未用；次：任一未用
-      let hit = cands.find(c => !c._used && (c.item_code ?? '') === (itemCode ?? ''))
-      if (!hit) hit = cands.find(c => !c._used)
-      return hit
+      const myItem = (itemCode ?? '').trim()
+      // 優先：料號精準相符且未用
+      const exactHit = cands.find(c => !c._used && (c.item_code ?? '').trim() === myItem)
+      if (exactHit) return exactHit
+      // 次之：PR 本身沒有料號（整張請購，不限定品項）且未用
+      const blankItemHit = cands.find(c => !c._used && !(c.item_code ?? '').trim())
+      if (blankItemHit) return blankItemHit
+      // 料號不符且 PR 本身有明確料號 → 不配（避免誤配到不同品項）
+      return undefined
     }
     return rows.map(row => {
       if (row.factory !== 'O') return row
