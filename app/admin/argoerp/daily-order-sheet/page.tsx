@@ -746,11 +746,42 @@ export default function DailyOrderSheetPage() {
       }
       for (const arr of candidateMap.values()) arr.sort((a, b) => (Number(a.line_no) || 0) - (Number(b.line_no) || 0))
 
+      // ── 跨日期序號鎖定 ──────────────────────────────────────────────────────
+      // 查詢所有其他日期出單表中已配對的 (order_number, line_no)，
+      // 記錄是被哪個 row_key 佔用的。比對時同序號嚴禁分配給不同 row_key（不同列內容）。
+      // 同 row_key（同一筆來源列出現在多個日期）則允許沿用相同序號。
+      const claimedLineByOrder = new Map<string, Map<string, string>>() // order_number → Map<line_no, row_key>
+      try {
+        const { data: otherSheets } = await supabase
+          .from('daily_order_sheets')
+          .select('rows')
+          .neq('sheet_date', selectedDate)
+          .order('sheet_date', { ascending: false })
+          .limit(90)
+        for (const sheet of (otherSheets ?? [])) {
+          const rows = Array.isArray((sheet as { rows?: unknown }).rows)
+            ? ((sheet as { rows: Record<string, unknown>[] }).rows)
+            : []
+          for (const row of rows) {
+            const orderNo = String(row.order_number ?? '').trim()
+            const lineNo  = String(row.match_line_no ?? '').trim()
+            const rowKey  = String(row.row_key ?? '').trim()
+            if (!orderNo || !lineNo || !rowKey) continue
+            if (!claimedLineByOrder.has(orderNo)) claimedLineByOrder.set(orderNo, new Map())
+            const m = claimedLineByOrder.get(orderNo)!
+            if (!m.has(lineNo)) m.set(lineNo, rowKey) // 最新日期優先（desc 排序）
+          }
+        }
+      } catch (claimErr) {
+        console.warn('讀取跨日期序號鎖定失敗，略過鎖定：', claimErr)
+      }
+      // ─────────────────────────────────────────────────────────────────────────
+
       // 同一工單內同品號同數量有多筆時，用以下優先順序縮小到唯一候選：
       //   ① 品名/規格（item_name vs erp_so_lines.description）精準比對 ← 最可靠，優先
       //   ② RO 編號（is_sample vs tpn_part_no/remark）比對             ← 次之
-      //   ③ 剩餘未分配序號（同一次比對跑中的 usedSet）                  ← 兜底
-      // ⚠️ 不再依賴歷史出單表記錄：歷史優先曾因存了錯誤值而導致永遠選到舊序號。
+      //   ③ 跨日期未佔用的序號（claimedLineByOrder 鎖定）
+      //   ④ 本次跑中未分配序號（usedSet）                               ← 兜底
       const usedLineNosByKey = new Map<string, Set<string>>()
 
       const normalizeText = (v: string): string => v.replace(/\s+/g, '').trim()
@@ -784,7 +815,15 @@ export default function DailyOrderSheetPage() {
           }
         }
 
-        // ③ 兜底：取本次比對跑中尚未用過的最小序號
+        // ③ 跨日期鎖定過濾：排除被其他 row_key 佔用的序號
+        const claimedForOrder = claimedLineByOrder.get(src.order_number) ?? new Map<string, string>()
+        const crossDateAvail = narrowed.filter(c => {
+          const claimedBy = claimedForOrder.get(c.line_no)
+          return !claimedBy || claimedBy === src.row_key  // 未被佔用 OR 同一列內容可沿用
+        })
+        if (crossDateAvail.length > 0) narrowed = crossDateAvail
+
+        // ④ 兜底：取本次比對跑中尚未用過的最小序號
         const usedSet = usedLineNosByKey.get(key) ?? new Set<string>()
         usedLineNosByKey.set(key, usedSet)
         const candidate =
