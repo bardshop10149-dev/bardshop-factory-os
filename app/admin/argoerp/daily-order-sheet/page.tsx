@@ -725,17 +725,24 @@ export default function DailyOrderSheetPage() {
       const orderNumbers = [...new Set(sheetRows.map(r => r.order_number).filter(Boolean))]
       const { data: soLines, error } = await supabase
         .from('erp_so_lines')
-        .select('project_id, line_no, mbp_part, order_qty_oru, pdl_seq')
+        .select('project_id, line_no, mbp_part, order_qty_oru, pdl_seq, description, tpn_part_no, remark, remark2')
         .in('project_id', orderNumbers.length > 0 ? orderNumbers : ['__none__'])
       if (error) throw error
       const lines = soLines ?? []
       const soProjectIds = new Set(lines.map(l => l.project_id))
-      const candidateMap = new Map<string, Array<{ line_no: string; pdl_seq: number | null }>>()
+      const candidateMap = new Map<string, Array<{ line_no: string; pdl_seq: number | null; description: string; tpn_part_no: string; remark: string; remark2: string }>>()
       for (const line of lines) {
         const qty = Number(line.order_qty_oru ?? 0)
         const key = `${line.project_id}|${line.mbp_part ?? ''}|${qty}`
         if (!candidateMap.has(key)) candidateMap.set(key, [])
-        candidateMap.get(key)!.push({ line_no: String(line.line_no ?? ''), pdl_seq: line.pdl_seq != null ? Number(line.pdl_seq) : null })
+        candidateMap.get(key)!.push({
+          line_no: String(line.line_no ?? ''),
+          pdl_seq: line.pdl_seq != null ? Number(line.pdl_seq) : null,
+          description: String(line.description ?? '').trim(),
+          tpn_part_no: String(line.tpn_part_no ?? '').trim(),
+          remark: String(line.remark ?? '').trim(),
+          remark2: String(line.remark2 ?? '').trim(),
+        })
       }
       for (const arr of candidateMap.values()) arr.sort((a, b) => (Number(a.line_no) || 0) - (Number(b.line_no) || 0))
 
@@ -766,6 +773,8 @@ export default function DailyOrderSheetPage() {
 
       const usedLineNosByKey = new Map<string, Set<string>>()
 
+      const normalizeText = (v: string): string => v.replace(/\s+/g, '').trim()
+
       const next: SheetRow[] = sheetRows.map(src => {
         if (!src.order_number || !soProjectIds.has(src.order_number)) {
           return { ...src, match_status: 'no_order', match_line_no: null, match_pdl_seq: null, match_reason: '無對應來源單號' }
@@ -777,16 +786,32 @@ export default function DailyOrderSheetPage() {
           return { ...src, match_status: 'no_qty_match', match_line_no: null, match_pdl_seq: null, match_reason: '有來源單號但無對應數量' }
         }
 
+        let narrowed = candidates
+        // 優先用 RO 編號（來源欄位 is_sample）縮小候選，避免同品同量誤配。
+        const roRef = String(src.is_sample ?? '').trim()
+        if (roRef && candidates.length > 1) {
+          const byRo = candidates.filter(c => c.tpn_part_no === roRef || c.remark === roRef || c.remark2 === roRef)
+          if (byRo.length > 0) narrowed = byRo
+        }
+        // 若仍多筆，再用品名/規格文字（erp_so_lines.description）縮小。
+        if (narrowed.length > 1) {
+          const itemNameKey = normalizeText(String(src.item_name ?? ''))
+          if (itemNameKey) {
+            const byDesc = narrowed.filter(c => normalizeText(c.description) === itemNameKey)
+            if (byDesc.length > 0) narrowed = byDesc
+          }
+        }
+
         const usedSet = usedLineNosByKey.get(key) ?? new Set<string>()
         usedLineNosByKey.set(key, usedSet)
 
         const preferredLine = preferredLineByRowKey.get(src.row_key)
         let candidate =
           (preferredLine
-            ? candidates.find(c => c.line_no === preferredLine && !usedSet.has(c.line_no))
+            ? narrowed.find(c => c.line_no === preferredLine && !usedSet.has(c.line_no))
             : undefined)
-          ?? candidates.find(c => !usedSet.has(c.line_no))
-          ?? candidates[candidates.length - 1]
+          ?? narrowed.find(c => !usedSet.has(c.line_no))
+          ?? narrowed[narrowed.length - 1]
 
         usedSet.add(candidate.line_no)
         return { ...src, match_status: 'matched', match_line_no: candidate.line_no, match_pdl_seq: candidate.pdl_seq, match_reason: '' }
