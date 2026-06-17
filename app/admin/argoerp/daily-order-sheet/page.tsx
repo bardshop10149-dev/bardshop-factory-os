@@ -1497,19 +1497,52 @@ export default function DailyOrderSheetPage() {
       const orderNumbers = [...new Set(currentRows.map(r => r.order_number).filter(Boolean))]
       const { data: soLines, error: soErr } = await supabase
         .from('erp_so_lines')
-        .select('project_id, line_no, mbp_part, order_qty_oru, pdl_seq')
+        .select('project_id, line_no, mbp_part, order_qty_oru, pdl_seq, description, tpn_part_no, remark, remark2')
         .in('project_id', orderNumbers.length > 0 ? orderNumbers : ['__none__'])
       if (soErr) throw soErr
       const soProjectIds = new Set((soLines ?? []).map(l => l.project_id))
-      const candidateMap = new Map<string, Array<{ line_no: string; pdl_seq: number | null }>>()
+      const candidateMap = new Map<string, Array<{ line_no: string; pdl_seq: number | null; description: string; tpn_part_no: string; remark: string; remark2: string }>>()
       for (const line of (soLines ?? [])) {
         const qty = Number(line.order_qty_oru ?? 0)
         const key = `${line.project_id}|${line.mbp_part ?? ''}|${qty}`
         if (!candidateMap.has(key)) candidateMap.set(key, [])
-        candidateMap.get(key)!.push({ line_no: String(line.line_no ?? ''), pdl_seq: line.pdl_seq != null ? Number(line.pdl_seq) : null })
+        candidateMap.get(key)!.push({
+          line_no: String(line.line_no ?? ''),
+          pdl_seq: line.pdl_seq != null ? Number(line.pdl_seq) : null,
+          description: String(line.description ?? '').trim(),
+          tpn_part_no: String(line.tpn_part_no ?? '').trim(),
+          remark: String(line.remark ?? '').trim(),
+          remark2: String(line.remark2 ?? '').trim(),
+        })
       }
       for (const arr of candidateMap.values()) arr.sort((a, b) => (Number(a.line_no) || 0) - (Number(b.line_no) || 0))
-      const usageCounter = new Map<string, number>()
+
+      // 跨日期序號鎖定
+      const claimedLineByOrderAll = new Map<string, Map<string, string>>()
+      try {
+        const { data: otherSheetsAll } = await supabase
+          .from('daily_order_sheets')
+          .select('rows')
+          .neq('sheet_date', selectedDate)
+          .order('sheet_date', { ascending: false })
+          .limit(90)
+        for (const sheet of (otherSheetsAll ?? [])) {
+          const rows = Array.isArray((sheet as { rows?: unknown }).rows)
+            ? ((sheet as { rows: Record<string, unknown>[] }).rows) : []
+          for (const row of rows) {
+            const orderNo = String(row.order_number ?? '').trim()
+            const lineNo  = String(row.match_line_no ?? '').trim()
+            const rowKey  = String(row.row_key ?? '').trim()
+            if (!orderNo || !lineNo || !rowKey) continue
+            if (!claimedLineByOrderAll.has(orderNo)) claimedLineByOrderAll.set(orderNo, new Map())
+            const m = claimedLineByOrderAll.get(orderNo)!
+            if (!m.has(lineNo)) m.set(lineNo, rowKey)
+          }
+        }
+      } catch { /* 略過，不影響主流程 */ }
+
+      const normalizeTextAll = (v: string): string => v.replace(/\s+/g, '').trim()
+      const usedLineNosByKeyAll = new Map<string, Set<string>>()
       currentRows = currentRows.map(src => {
         if (!src.order_number || !soProjectIds.has(src.order_number)) {
           return { ...src, match_status: 'no_order', match_line_no: null, match_pdl_seq: null, match_reason: '無對應來源單號' }
@@ -1520,9 +1553,26 @@ export default function DailyOrderSheetPage() {
         if (candidates.length === 0) {
           return { ...src, match_status: 'no_qty_match', match_line_no: null, match_pdl_seq: null, match_reason: '有來源單號但無對應數量' }
         }
-        const used = usageCounter.get(key) ?? 0
-        const candidate = candidates[Math.min(used, candidates.length - 1)]
-        usageCounter.set(key, used + 1)
+        let narrowed = candidates
+        // ① 品名/規格比對
+        if (narrowed.length > 1) {
+          const k = normalizeTextAll(String(src.item_name ?? ''))
+          if (k) { const b = narrowed.filter(c => normalizeTextAll(c.description) === k); if (b.length > 0) narrowed = b }
+        }
+        // ② RO 編號比對
+        if (narrowed.length > 1) {
+          const roRef = String(src.is_sample ?? '').trim()
+          if (roRef) { const b = narrowed.filter(c => c.tpn_part_no === roRef || c.remark === roRef || c.remark2 === roRef); if (b.length > 0) narrowed = b }
+        }
+        // ③ 跨日期鎖定
+        const claimed = claimedLineByOrderAll.get(src.order_number) ?? new Map<string, string>()
+        const avail = narrowed.filter(c => { const by = claimed.get(c.line_no); return !by || by === src.row_key })
+        if (avail.length > 0) narrowed = avail
+        // ④ 兜底：本次跑中未用的最小序號
+        const usedSet = usedLineNosByKeyAll.get(key) ?? new Set<string>()
+        usedLineNosByKeyAll.set(key, usedSet)
+        const candidate = narrowed.find(c => !usedSet.has(c.line_no)) ?? narrowed[narrowed.length - 1]
+        usedSet.add(candidate.line_no)
         return { ...src, match_status: 'matched', match_line_no: candidate.line_no, match_pdl_seq: candidate.pdl_seq, match_reason: '' }
       })
       const serialMatched = currentRows.filter(r => r.match_status === 'matched').length
