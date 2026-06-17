@@ -738,7 +738,33 @@ export default function DailyOrderSheetPage() {
         candidateMap.get(key)!.push({ line_no: String(line.line_no ?? ''), pdl_seq: line.pdl_seq != null ? Number(line.pdl_seq) : null })
       }
       for (const arr of candidateMap.values()) arr.sort((a, b) => (Number(a.line_no) || 0) - (Number(b.line_no) || 0))
-      const usageCounter = new Map<string, number>()
+
+      // 讀取歷史出單表：同 row_key（同一筆來源內容）優先沿用先前已配到的序號，
+      // 避免同品號同數量多筆時每次重跑都被洗回最小序號。
+      const preferredLineByRowKey = new Map<string, string>()
+      try {
+        const { data: prevSheets } = await supabase
+          .from('daily_order_sheets')
+          .select('sheet_date, rows')
+          .lt('sheet_date', selectedDate)
+          .order('sheet_date', { ascending: false })
+          .limit(31)
+        for (const sheet of (prevSheets ?? [])) {
+          const prevRows = Array.isArray((sheet as { rows?: unknown }).rows)
+            ? ((sheet as { rows: Record<string, unknown>[] }).rows)
+            : []
+          for (const row of prevRows) {
+            const rowKey = String(row.row_key ?? '').trim()
+            const lineNo = String(row.match_line_no ?? '').trim()
+            if (!rowKey || !lineNo || preferredLineByRowKey.has(rowKey)) continue
+            preferredLineByRowKey.set(rowKey, lineNo)
+          }
+        }
+      } catch (historyErr) {
+        console.warn('讀取歷史序號比對失敗，改用即時分配：', historyErr)
+      }
+
+      const usedLineNosByKey = new Map<string, Set<string>>()
 
       const next: SheetRow[] = sheetRows.map(src => {
         if (!src.order_number || !soProjectIds.has(src.order_number)) {
@@ -750,9 +776,19 @@ export default function DailyOrderSheetPage() {
         if (candidates.length === 0) {
           return { ...src, match_status: 'no_qty_match', match_line_no: null, match_pdl_seq: null, match_reason: '有來源單號但無對應數量' }
         }
-        const used = usageCounter.get(key) ?? 0
-        const candidate = candidates[Math.min(used, candidates.length - 1)]
-        usageCounter.set(key, used + 1)
+
+        const usedSet = usedLineNosByKey.get(key) ?? new Set<string>()
+        usedLineNosByKey.set(key, usedSet)
+
+        const preferredLine = preferredLineByRowKey.get(src.row_key)
+        let candidate =
+          (preferredLine
+            ? candidates.find(c => c.line_no === preferredLine && !usedSet.has(c.line_no))
+            : undefined)
+          ?? candidates.find(c => !usedSet.has(c.line_no))
+          ?? candidates[candidates.length - 1]
+
+        usedSet.add(candidate.line_no)
         return { ...src, match_status: 'matched', match_line_no: candidate.line_no, match_pdl_seq: candidate.pdl_seq, match_reason: '' }
       })
       setSheetRows(next)
