@@ -746,31 +746,11 @@ export default function DailyOrderSheetPage() {
       }
       for (const arr of candidateMap.values()) arr.sort((a, b) => (Number(a.line_no) || 0) - (Number(b.line_no) || 0))
 
-      // 讀取歷史出單表：同 row_key（同一筆來源內容）優先沿用先前已配到的序號，
-      // 避免同品號同數量多筆時每次重跑都被洗回最小序號。
-      const preferredLineByRowKey = new Map<string, string>()
-      try {
-        const { data: prevSheets } = await supabase
-          .from('daily_order_sheets')
-          .select('sheet_date, rows')
-          .lt('sheet_date', selectedDate)
-          .order('sheet_date', { ascending: false })
-          .limit(31)
-        for (const sheet of (prevSheets ?? [])) {
-          const prevRows = Array.isArray((sheet as { rows?: unknown }).rows)
-            ? ((sheet as { rows: Record<string, unknown>[] }).rows)
-            : []
-          for (const row of prevRows) {
-            const rowKey = String(row.row_key ?? '').trim()
-            const lineNo = String(row.match_line_no ?? '').trim()
-            if (!rowKey || !lineNo || preferredLineByRowKey.has(rowKey)) continue
-            preferredLineByRowKey.set(rowKey, lineNo)
-          }
-        }
-      } catch (historyErr) {
-        console.warn('讀取歷史序號比對失敗，改用即時分配：', historyErr)
-      }
-
+      // 同一工單內同品號同數量有多筆時，用以下優先順序縮小到唯一候選：
+      //   ① 品名/規格（item_name vs erp_so_lines.description）精準比對 ← 最可靠，優先
+      //   ② RO 編號（is_sample vs tpn_part_no/remark）比對             ← 次之
+      //   ③ 剩餘未分配序號（同一次比對跑中的 usedSet）                  ← 兜底
+      // ⚠️ 不再依賴歷史出單表記錄：歷史優先曾因存了錯誤值而導致永遠選到舊序號。
       const usedLineNosByKey = new Map<string, Set<string>>()
 
       const normalizeText = (v: string): string => v.replace(/\s+/g, '').trim()
@@ -787,13 +767,7 @@ export default function DailyOrderSheetPage() {
         }
 
         let narrowed = candidates
-        // 優先用 RO 編號（來源欄位 is_sample）縮小候選，避免同品同量誤配。
-        const roRef = String(src.is_sample ?? '').trim()
-        if (roRef && candidates.length > 1) {
-          const byRo = candidates.filter(c => c.tpn_part_no === roRef || c.remark === roRef || c.remark2 === roRef)
-          if (byRo.length > 0) narrowed = byRo
-        }
-        // 若仍多筆，再用品名/規格文字（erp_so_lines.description）縮小。
+        // ① 品名/規格比對（最可靠：同工單同品號同數量但不同款式 → description 各自不同）
         if (narrowed.length > 1) {
           const itemNameKey = normalizeText(String(src.item_name ?? ''))
           if (itemNameKey) {
@@ -801,16 +775,20 @@ export default function DailyOrderSheetPage() {
             if (byDesc.length > 0) narrowed = byDesc
           }
         }
+        // ② 仍多筆時，用 RO 編號（is_sample vs tpn_part_no/remark）再縮小
+        if (narrowed.length > 1) {
+          const roRef = String(src.is_sample ?? '').trim()
+          if (roRef) {
+            const byRo = narrowed.filter(c => c.tpn_part_no === roRef || c.remark === roRef || c.remark2 === roRef)
+            if (byRo.length > 0) narrowed = byRo
+          }
+        }
 
+        // ③ 兜底：取本次比對跑中尚未用過的最小序號
         const usedSet = usedLineNosByKey.get(key) ?? new Set<string>()
         usedLineNosByKey.set(key, usedSet)
-
-        const preferredLine = preferredLineByRowKey.get(src.row_key)
-        let candidate =
-          (preferredLine
-            ? narrowed.find(c => c.line_no === preferredLine && !usedSet.has(c.line_no))
-            : undefined)
-          ?? narrowed.find(c => !usedSet.has(c.line_no))
+        const candidate =
+          narrowed.find(c => !usedSet.has(c.line_no))
           ?? narrowed[narrowed.length - 1]
 
         usedSet.add(candidate.line_no)
