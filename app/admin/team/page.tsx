@@ -77,6 +77,16 @@ export default function TeamPage() {
         { key: 'system_settings', label: '系統設定 (System Settings)' },
         { key: 'argo_db', label: 'ARGO資料庫 (ARGO Database)' },
       ]
+    },
+    {
+      title: '功能專區',
+      options: [
+        { key: 'design', label: '美編天地 (Design Studio)' },
+        { key: 'material', label: '發料/領料 (Material Dispatch)' },
+        { key: 'product_dev', label: '商品開發 (Product Dev)' },
+        { key: 'info_board', label: '業務資訊看板 (Info Board)' },
+        { key: 'argo_tool', label: 'ARGO 外掛區 (ARGO Tool)' },
+      ]
     }
   ]
 

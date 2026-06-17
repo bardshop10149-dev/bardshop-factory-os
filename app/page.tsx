@@ -289,6 +289,11 @@ export default function HomePage() {
   const canSystemSettings = hasFeaturePermission('system_settings')
   const canQa = hasFeaturePermission('qa')
   const canArgoDB = hasFeaturePermission('argo_db')
+  const canDesign = hasFeaturePermission('design')
+  const canMaterial = hasFeaturePermission('material')
+  const canArgoTool = hasFeaturePermission('argo_tool')
+  const canProductDev = hasFeaturePermission('product_dev')
+  const canInfoBoard = hasFeaturePermission('info_board')
 
   return (
     <div className="min-h-screen bg-[#050b14] text-slate-300 font-sans selection:bg-cyan-500 selection:text-white relative overflow-y-auto flex flex-col items-center justify-start md:justify-center py-4 md:py-0">
@@ -465,13 +470,14 @@ export default function HomePage() {
 
           {/* 2. 業務資訊看板 (Amber) */}
           <div
-            onClick={() => setShowInfoModal(true)}
+            onClick={hasFeaturePermission('info_board') ? () => setShowInfoModal(true) : guardFeatureAccess('info_board', '業務資訊看板')}
             onMouseEnter={() => setIsHovered('estimation')}
             onMouseLeave={() => setIsHovered('none')}
             className={`
               group relative order-3 h-40 md:h-60 lg:h-64 rounded-2xl border border-slate-700 bg-slate-900/40 backdrop-blur-sm 
               flex flex-col items-center justify-center text-center p-3 md:p-6 transition-all duration-500 cursor-pointer
               hover:border-amber-500 hover:bg-slate-800/60 hover:shadow-[0_0_30px_rgba(245,158,11,0.15)]
+              ${canInfoBoard ? '' : 'opacity-50 grayscale'}
               ${isHovered !== 'none' && isHovered !== 'estimation' ? 'opacity-50 scale-95 blur-[2px]' : 'opacity-100'}
             `}
           >
@@ -655,12 +661,14 @@ export default function HomePage() {
           {/* 9. 美編天地 (Pink) — CRM × 訂單交叉比對 */}
           <Link
             href="/design-studio"
+            onClick={guardFeatureAccess('design', '美編天地')}
             onMouseEnter={() => setIsHovered('design')}
             onMouseLeave={() => setIsHovered('none')}
             className={`
               group relative order-9 h-40 md:h-60 lg:h-64 rounded-2xl border border-slate-700 bg-slate-900/40 backdrop-blur-sm 
               flex flex-col items-center justify-center text-center p-3 md:p-6 transition-all duration-500 cursor-pointer
               hover:border-pink-500 hover:bg-slate-800/60 hover:shadow-[0_0_30px_rgba(236,72,153,0.15)]
+              ${canDesign ? '' : 'opacity-50 grayscale'}
               ${isHovered !== 'none' && isHovered !== 'design' ? 'opacity-50 scale-95 blur-[2px]' : 'opacity-100'}
             `}
           >
@@ -684,13 +692,14 @@ export default function HomePage() {
 
           {/* 10. 商品開發 (Green) */}
           <div
-            onClick={() => setShowProductDevModal(true)}
+            onClick={hasFeaturePermission('product_dev') ? () => setShowProductDevModal(true) : guardFeatureAccess('product_dev', '商品開發')}
             onMouseEnter={() => setIsHovered('product_dev')}
             onMouseLeave={() => setIsHovered('none')}
             className={`
               group relative order-10 h-40 md:h-60 lg:h-64 rounded-2xl border border-slate-700 bg-slate-900/40 backdrop-blur-sm 
               flex flex-col items-center justify-center text-center p-3 md:p-6 transition-all duration-500 cursor-pointer
               hover:border-green-500 hover:bg-slate-800/60 hover:shadow-[0_0_30px_rgba(34,197,94,0.15)]
+              ${canProductDev ? '' : 'opacity-50 grayscale'}
               ${isHovered !== 'none' && isHovered !== 'product_dev' ? 'opacity-50 scale-95 blur-[2px]' : 'opacity-100'}
             `}
           >
@@ -745,12 +754,14 @@ export default function HomePage() {
           {/* 11. 發料/領料專區 (Yellow) */}
           <Link
             href="/material-issue"
+            onClick={guardFeatureAccess('material', '發料 / 領料')}
             onMouseEnter={() => setIsHovered('dispensing')}
             onMouseLeave={() => setIsHovered('none')}
             className={`
               group relative order-11 h-40 md:h-60 lg:h-64 rounded-2xl border border-slate-700 bg-slate-900/40 backdrop-blur-sm 
               flex flex-col items-center justify-center text-center p-3 md:p-6 transition-all duration-500 cursor-pointer
               hover:border-yellow-500 hover:bg-slate-800/60 hover:shadow-[0_0_30px_rgba(234,179,8,0.15)]
+              ${canMaterial ? '' : 'opacity-50 grayscale'}
               ${isHovered !== 'none' && isHovered !== 'dispensing' ? 'opacity-50 scale-95 blur-[2px]' : 'opacity-100'}
             `}
           >
@@ -803,12 +814,14 @@ export default function HomePage() {
 
           {/* ARGO 外掛區 (Cyan) — iframe 嵌入 bardshop-argo，SSO 不重登 */}
           <Link href="/argo"
+            onClick={guardFeatureAccess('argo_tool', 'ARGO 外掛區')}
             onMouseEnter={() => setIsHovered('none')}
             onMouseLeave={() => setIsHovered('none')}
             className={`
               group relative order-13 h-40 md:h-60 lg:h-64 rounded-2xl border border-slate-700 bg-slate-900/40 backdrop-blur-sm
               flex flex-col items-center justify-center text-center p-3 md:p-6 transition-all duration-500 cursor-pointer
               hover:border-cyan-500 hover:bg-slate-800/60 hover:shadow-[0_0_30px_rgba(6,182,212,0.15)]
+              ${canArgoTool ? '' : 'opacity-50 grayscale'}
             `}
           >
             <div className="absolute top-4 right-4 flex items-center gap-1.5 px-2 py-1 bg-cyan-500/10 rounded border border-cyan-500/20">
