@@ -450,30 +450,52 @@ export default function GroupOrderExportPage() {
       let matched = 0
       let qtyMismatch = 0
       const newMismatchKeys = new Set<string>()
-      setManualMo(prev => {
-        const next = { ...prev }
-        for (const r of needMatch) {
-          if (next[r.row_key]) continue  // 已有值（步驟 0 已填）
-          const key = `${r.order_number.trim()}|${r.item_code.trim()}`
-          const hit = matchMap.get(key)
-          if (!hit) continue
-          next[r.row_key] = hit.project_id
-          matched++
-          // 數量比對（出單表的數量可能是日期偏移，只在明顯是數字時比）
-          const rowQty = Math.round(Number(r.quantity ?? 0))
-          const erpQty = Math.round(hit.erp_qty)
-          if (!isNaN(rowQty) && rowQty > 0 && rowQty !== erpQty) {
-            newMismatchKeys.add(r.row_key)
-            qtyMismatch++
-          }
+      const newlyMatched: Record<string, string> = {}
+
+      for (const r of needMatch) {
+        const key = `${r.order_number.trim()}|${r.item_code.trim()}`
+        const hit = matchMap.get(key)
+        if (!hit) continue
+        newlyMatched[r.row_key] = hit.project_id
+        matched++
+        // 數量比對（出單表的數量可能是日期偏移，只在明顯是數字時比）
+        const rowQty = Math.round(Number(r.quantity ?? 0))
+        const erpQty = Math.round(hit.erp_qty)
+        if (!isNaN(rowQty) && rowQty > 0 && rowQty !== erpQty) {
+          newMismatchKeys.add(r.row_key)
+          qtyMismatch++
         }
-        return next
-      })
+      }
+
+      setManualMo(prev => ({ ...prev, ...newlyMatched }))
       setMoQtyMismatch(prev => {
         const next = new Set(prev)
         for (const k of newMismatchKeys) next.add(k)
         return next
       })
+
+      // 自動儲存新比對到的製令單號（step1 新增的）
+      if (matched > 0) {
+        const byDate = new Map<string, Array<{ row_key: string; mo_number: string }>>()
+        for (const r of needMatch) {
+          const mo = newlyMatched[r.row_key]
+          if (!mo) continue
+          const arr = byDate.get(r.sheet_date) ?? []
+          arr.push({ row_key: r.row_key, mo_number: mo })
+          byDate.set(r.sheet_date, arr)
+        }
+        for (const [date, updates] of byDate) {
+          await fetch('/api/argoerp/daily-order-sheet', {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ sheet_date: date, updates }),
+          })
+        }
+        setRows(prev => prev.map(r => {
+          const mo = newlyMatched[r.row_key]
+          return mo ? { ...r, mo_number: mo } : r
+        }))
+      }
 
       const total = matched
       const prefilledNote = prefilled > 0 ? `（另從集單資料取回 ${prefilled} 筆）` : ''
@@ -488,7 +510,8 @@ export default function GroupOrderExportPage() {
         setAutoMatchMsg(`⚠ ERP 比對 ${needMatch.length} 筆無符合${prefilledNote}（需批號+品項均符合）｜${diagLines.join('｜')}`)
       } else {
         const mismatchNote = qtyMismatch > 0 ? `，其中 ${qtyMismatch} 筆數量不符（已標橘色警示）` : ''
-        setAutoMatchMsg(`✅ ERP 比對符合 ${total} 筆${prefilledNote}${mismatchNote}`)
+        const savedNote = ` 並已自動儲存`
+        setAutoMatchMsg(`✅ ERP 比對符合 ${total} 筆${prefilledNote}${mismatchNote}${savedNote}`)
       }
       setTimeout(() => setAutoMatchMsg(''), 12000)
     } catch (e) {
