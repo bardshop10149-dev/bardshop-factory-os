@@ -205,10 +205,14 @@ export default function GroupOrderExportPage() {
     const nextBiz = (d: Date) => { const x = new Date(d); x.setDate(x.getDate()+1); while(x.getDay()===0||x.getDay()===6) x.setDate(x.getDate()+1); return x }
 
     try {
-      // 每行都帶完整表頭欄位（ERP 要求），全部放進單一 DATA 陣列一次送出
+      // IFAF028 每筆 DATA 都對應一張獨立 MO（會 INSERT PJ_PROJECT）
+      // 多行時自動加 -L1/-L2/-L3 後綴，讓每行各自是不同 PROJECT_ID，避免 PK 衝突
+      const multiLine = validLines.length > 1
+      const moIds = validLines.map((_, i) => multiLine ? `${mo}-L${i + 1}` : mo)
+
       const payload: Record<string, string>[] = validLines.map((l, i) => {
-        const rec: Record<string, string> = { PROJECT_ID: mo }
-        // 表頭（每行都要帶）
+        const rec: Record<string, string> = { PROJECT_ID: moIds[i] }
+        // 表頭欄位
         rec['BEGIN_DATE'] = workarea.start_date
           ? workarea.start_date.replace(/-/g, '/')
           : fmtD(nextBiz(today))
@@ -217,8 +221,8 @@ export default function GroupOrderExportPage() {
         rec['PJT_SEG_SEGMENT_NO'] = workarea.cost_department || 'M1000'
         rec['MO_BEGIN_DATE'] = fmtD(today)
         rec['AUTO_PREPARE'] = 'N'
-        // 表身
-        rec['LINE_NO'] = String(i + 1)
+        // 表身（每張 MO 只有 1 行，LINE_NO 固定 1）
+        rec['LINE_NO'] = '1'
         rec['MBP_PART'] = l.item_code.trim()
         rec['MBP_VER'] = '1'
         if (l.order_number.trim()) {
@@ -250,7 +254,8 @@ export default function GroupOrderExportPage() {
       const argoRows: Record<string, unknown>[] = Array.isArray(res?.apiResult?.RESULT) ? res.apiResult.RESULT : []
       const failedRows = argoRows.filter((x: Record<string, unknown>) => String(x.CHECK_FLAG ?? '').toUpperCase() === 'N')
       if (failedRows.length === 0 && (resp.ok || argoRows.length > 0)) {
-        setWorkareaMsg(`✅ 全部 ${validLines.length} 行匯入成功`)
+        const moList = multiLine ? `（${moIds.join('、')}）` : `（${mo}）`
+        setWorkareaMsg(`✅ 全部 ${validLines.length} 筆匯入成功 ${moList}`)
       } else if (failedRows.length > 0) {
         const errSummary = failedRows.slice(0, 5)
           .map((x: Record<string, unknown>) => String(x.ERROR_CODE ?? x.ERROR ?? '').trim())
@@ -806,6 +811,9 @@ export default function GroupOrderExportPage() {
               </button>
               <span className="text-xs text-slate-500">
                 共 {workarea.lines.filter(l => l.item_code.trim()).length} 筆有效明細 / {workarea.lines.length} 行
+                {workarea.lines.filter(l => l.item_code.trim()).length > 1 && (
+                  <span className="ml-1 text-violet-400">（多行時自動加 -L1/-L2 後綴，各自一張 MO）</span>
+                )}
               </span>
               {workareaMsg && (
                 <span className={`text-xs px-3 py-1.5 rounded border ${
