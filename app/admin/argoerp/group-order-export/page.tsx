@@ -38,6 +38,45 @@ type PreviewGroup = {
   rows: Array<{ row: GroupRow; lineNo: number }>
 }
 
+// ==================== 多製品製令工作區型別 ====================
+interface MoDetailLine {
+  id: string          // 本地唯一 id（非 ERP）
+  item_code: string
+  item_name: string
+  note: string
+  order_number: string  // 批號 / 來源銷售訂單
+  quantity: string
+  delivery_date: string
+}
+
+interface MoWorkarea {
+  mo_number: string
+  department: string
+  cost_department: string
+  start_date: string      // BEGIN_DATE
+  end_date: string        // END_DATE
+  lines: MoDetailLine[]
+}
+
+const defaultWorkarea = (): MoWorkarea => ({
+  mo_number: '',
+  department: 'M1100',
+  cost_department: 'M1000',
+  start_date: '',
+  end_date: '',
+  lines: [],
+})
+
+const defaultLine = (): MoDetailLine => ({
+  id: Math.random().toString(36).slice(2),
+  item_code: '',
+  item_name: '',
+  note: '',
+  order_number: '',
+  quantity: '',
+  delivery_date: '',
+})
+
 // ==================== 工具函式 ====================
 function fmtDate(d: Date): string {
   return `${d.getFullYear()}/${String(d.getMonth() + 1).padStart(2, '0')}/${String(d.getDate()).padStart(2, '0')}`
@@ -119,6 +158,112 @@ export default function GroupOrderExportPage() {
   const [searchQuery, setSearchQuery] = useState('')
   const [batchMoInput, setBatchMoInput] = useState('')   // 批量指定製令單號
   const [importPreview, setImportPreview] = useState<PreviewGroup[] | null>(null)  // 預覽 Modal
+  const [forceReimport, setForceReimport] = useState(false) // 強制重新匯入已匯入的列
+
+  // ==================== 多製品製令工作區 ====================
+  const [workarea, setWorkarea] = useState<MoWorkarea>(defaultWorkarea)
+  const [workareaImporting, setWorkareaImporting] = useState(false)
+  const [workareaMsg, setWorkareaMsg] = useState('')
+  const [showWorkarea, setShowWorkarea] = useState(false)
+
+  const waSetLine = (id: string, field: keyof MoDetailLine, value: string) =>
+    setWorkarea(prev => ({ ...prev, lines: prev.lines.map(l => l.id === id ? { ...l, [field]: value } : l) }))
+
+  const waAddLine = () => setWorkarea(prev => ({ ...prev, lines: [...prev.lines, defaultLine()] }))
+
+  const waRemoveLine = (id: string) => setWorkarea(prev => ({ ...prev, lines: prev.lines.filter(l => l.id !== id) }))
+
+  // 從勾選集單列帶入工作區表身
+  const waImportFromSelected = () => {
+    const targets = displayRows.filter(r => selectedKeys.has(r.row_key) && r.mo_status !== '已匯入製令')
+    if (targets.length === 0) { alert('請先勾選集單列（未匯入的）'); return }
+    const newLines: MoDetailLine[] = targets.map(r => ({
+      id: Math.random().toString(36).slice(2),
+      item_code: r.item_code ?? '',
+      item_name: r.item_name ?? '',
+      note: r.note ?? '',
+      order_number: r.order_number ?? '',
+      quantity: r.quantity ?? '',
+      delivery_date: r.delivery_date ?? '',
+    }))
+    // 若表身為空直接取代，否則追加
+    setWorkarea(prev => ({
+      ...prev,
+      lines: prev.lines.length === 0 ? newLines : [...prev.lines, ...newLines],
+    }))
+    setShowWorkarea(true)
+  }
+
+  const handleWorkareaImport = useCallback(async () => {
+    const mo = workarea.mo_number.trim()
+    if (!mo) { setWorkareaMsg('❌ 請填入製令單號'); return }
+    const validLines = workarea.lines.filter(l => l.item_code.trim())
+    if (validLines.length === 0) { setWorkareaMsg('❌ 請至少填入一筆表身明細（生產貨號必填）'); return }
+
+    setWorkareaImporting(true)
+    setWorkareaMsg('')
+    const today = new Date()
+    const fmtD = (d: Date) => `${d.getFullYear()}/${String(d.getMonth()+1).padStart(2,'0')}/${String(d.getDate()).padStart(2,'0')}`
+    const nextBiz = (d: Date) => { const x = new Date(d); x.setDate(x.getDate()+1); while(x.getDay()===0||x.getDay()===6) x.setDate(x.getDate()+1); return x }
+
+    try {
+      let successCount = 0
+      const errors: string[] = []
+      for (let i = 0; i < validLines.length; i++) {
+        const l = validLines[i]
+        const isFirst = i === 0
+        const rec: Record<string, string> = { PROJECT_ID: mo }
+        if (isFirst) {
+          rec['BEGIN_DATE'] = workarea.start_date || fmtD(nextBiz(today))
+          if (workarea.end_date) rec['END_DATE'] = workarea.end_date
+          rec['HOLD_STATUS'] = 'OPEN'
+          rec['SEG_SEGMENT_NO_DEPARTMENT'] = workarea.department || 'M1100'
+          rec['PJT_SEG_SEGMENT_NO'] = workarea.cost_department || 'M1000'
+          rec['MO_BEGIN_DATE'] = fmtD(today)
+          rec['AUTO_PREPARE'] = 'N'
+        }
+        rec['LINE_NO'] = String(i + 1)
+        rec['MBP_PART'] = l.item_code.trim()
+        rec['MBP_VER'] = '1'
+        if (l.order_number.trim()) {
+          rec['MBP_LOT_NO'] = l.order_number.trim().slice(0, 30)
+          rec['PJT_PROJECT_ID_MO_SO'] = l.order_number.trim()
+        }
+        if (l.quantity.trim()) rec['ORDER_QTY'] = l.quantity.trim()
+        rec['BOM_LEVELS'] = '99'
+        rec['EQUIVALENT_RATIO'] = '1'
+        rec['EQUIVALENT_RATIO_M'] = '1'
+        const noteStr = [l.item_name, l.note].filter(Boolean).join(' ')
+        if (noteStr) rec['REMARK_LINE'] = noteStr
+        if (l.delivery_date) rec['END_DATE'] = l.delivery_date.replace(/-/g, '/')
+
+        const resp = await fetch('/api/argoerp', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'import', interfaceId: 'IFAF028', data: [rec] }),
+        })
+        const res = await resp.json()
+        const argoRows: Record<string, unknown>[] = Array.isArray(res?.apiResult?.RESULT) ? res.apiResult.RESULT : []
+        const hasN = argoRows.some((x: Record<string, unknown>) => String(x.CHECK_FLAG ?? '').toUpperCase() === 'N')
+        if (!resp.ok || hasN) {
+          const errMsg = argoRows.filter((x: Record<string, unknown>) => String(x.CHECK_FLAG ?? '').toUpperCase() === 'N')
+            .map((x: Record<string, unknown>) => String(x.ERROR_CODE ?? x.ERROR ?? '').trim()).join(' / ') || res?.error || `HTTP ${resp.status}`
+          errors.push(`LINE ${i+1} [${l.item_code}]: ${errMsg}`)
+        } else {
+          successCount++
+        }
+      }
+      if (errors.length === 0) {
+        setWorkareaMsg(`✅ 全部 ${successCount} 行匯入成功`)
+      } else {
+        setWorkareaMsg(`⚠ 成功 ${successCount}，失敗 ${errors.length}：${errors.join(' / ')}`)
+      }
+    } catch (e) {
+      setWorkareaMsg(`❌ ${e}`)
+    } finally {
+      setWorkareaImporting(false)
+    }
+  }, [workarea])
 
   // ---- 從 Supabase 載入所有含「集單」的列 ----
   const loadRows = useCallback(async () => {
@@ -271,7 +416,7 @@ export default function GroupOrderExportPage() {
 
   // ---- 預覽（建立分組，不呼叫 ERP）----
   const handleShowPreview = useCallback(() => {
-    const targets = getTargetRows(true).filter(r => r.mo_status !== '已匯入製令')
+    const targets = forceReimport ? getTargetRows(true) : getTargetRows(true).filter(r => r.mo_status !== '已匯入製令')
     if (targets.length === 0) {
       alert('⚠️ 沒有可匯入的列（請確認已填寫製令單號且尚未匯入）')
       return
@@ -288,11 +433,9 @@ export default function GroupOrderExportPage() {
     }
     setImportPreview(groups)
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [rows, selectedKeys, displayRows, manualMo])
-
-  // ---- 匯入 ERP 製令工單 ----
+  }, [rows, selectedKeys, displayRows, manualMo, forceReimport])
   const handleImport = useCallback(async () => {
-    const targets = getTargetRows(true).filter(r => r.mo_status !== '已匯入製令')
+    const targets = forceReimport ? getTargetRows(true) : getTargetRows(true).filter(r => r.mo_status !== '已匯入製令')
     if (targets.length === 0) {
       alert('⚠️ 沒有可匯入的列（請確認已填寫製令單號且尚未匯入）')
       return
@@ -404,7 +547,7 @@ export default function GroupOrderExportPage() {
       setImporting(false)
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [rows, selectedKeys, displayRows, manualMo])
+  }, [rows, selectedKeys, displayRows, manualMo, forceReimport])
 
   // ---- 列印（套用製令工單格式）----
   const handlePrint = useCallback(() => {
@@ -474,6 +617,19 @@ export default function GroupOrderExportPage() {
             >
               {importing ? '匯入中…' : '⬆ 匯入 ERP 製令工單'}
             </button>
+            <label className={`flex items-center gap-1.5 cursor-pointer px-3 py-1.5 rounded border text-xs font-medium select-none transition-colors ${
+              forceReimport
+                ? 'bg-red-900/60 border-red-600 text-red-300'
+                : 'bg-slate-800 border-slate-700 text-slate-400 hover:border-slate-500'
+            }`}>
+              <input
+                type="checkbox"
+                checked={forceReimport}
+                onChange={e => setForceReimport(e.target.checked)}
+                className="accent-red-500 cursor-pointer"
+              />
+              強制重新匯入
+            </label>
             <button
               onClick={handlePrint}
               disabled={loading || displayRows.length === 0}
@@ -481,10 +637,171 @@ export default function GroupOrderExportPage() {
             >
               🖨 套用製令格式列印{selectedKeys.size > 0 ? ` (${selectedKeys.size})` : ''}
             </button>
+            <button
+              onClick={() => setShowWorkarea(v => !v)}
+              className={`px-4 py-1.5 rounded text-xs font-semibold border transition-colors ${
+                showWorkarea
+                  ? 'bg-violet-700 border-violet-500 text-white'
+                  : 'bg-slate-800 border-slate-600 text-slate-300 hover:border-violet-500 hover:text-violet-300'
+              }`}
+            >
+              🗂 多製品製令工作區
+            </button>
           </div>
         </div>
 
-        {/* 訊息 */}
+        {/* ====== 多製品製令工作區 ====== */}
+        {showWorkarea && (
+          <div className="border border-violet-700/60 rounded-xl bg-violet-950/20 p-5 space-y-4">
+            <div className="flex items-center justify-between">
+              <h2 className="text-sm font-bold text-violet-200">🗂 多製品製令工作區（IFAF028）</h2>
+              <div className="flex items-center gap-2">
+                {selectedKeys.size > 0 && (
+                  <button
+                    onClick={waImportFromSelected}
+                    className="px-3 py-1.5 rounded bg-violet-800 hover:bg-violet-700 text-violet-100 text-xs font-semibold border border-violet-600"
+                  >
+                    ⬇ 帶入已勾選 {selectedKeys.size} 筆
+                  </button>
+                )}
+                <button
+                  onClick={() => { setWorkarea(defaultWorkarea()); setWorkareaMsg('') }}
+                  className="px-3 py-1.5 rounded bg-slate-700 hover:bg-slate-600 text-slate-300 text-xs border border-slate-600"
+                >
+                  清空
+                </button>
+              </div>
+            </div>
+
+            {/* 表頭 */}
+            <div className="bg-slate-900/60 border border-slate-700 rounded-lg p-4">
+              <div className="text-xs font-semibold text-slate-400 mb-3 uppercase tracking-wide">表頭（PJ_PROJECT）</div>
+              <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
+                <div className="lg:col-span-2">
+                  <label className="block text-[11px] text-slate-400 mb-1">＊製令單號 PROJECT_ID</label>
+                  <input value={workarea.mo_number} onChange={e => setWorkarea(p => ({...p, mo_number: e.target.value}))}
+                    placeholder="MOM2026…"
+                    className="w-full bg-slate-800 border border-violet-600/60 text-violet-200 text-xs rounded px-2 py-1.5 focus:outline-none focus:border-violet-400 font-mono placeholder-slate-600" />
+                </div>
+                <div>
+                  <label className="block text-[11px] text-slate-400 mb-1">部門 SEG_DEPT</label>
+                  <input value={workarea.department} onChange={e => setWorkarea(p => ({...p, department: e.target.value}))}
+                    className="w-full bg-slate-800 border border-slate-600 text-slate-200 text-xs rounded px-2 py-1.5 focus:outline-none focus:border-slate-400 font-mono" />
+                </div>
+                <div>
+                  <label className="block text-[11px] text-slate-400 mb-1">成本部門 PJT_SEG</label>
+                  <input value={workarea.cost_department} onChange={e => setWorkarea(p => ({...p, cost_department: e.target.value}))}
+                    className="w-full bg-slate-800 border border-slate-600 text-slate-200 text-xs rounded px-2 py-1.5 focus:outline-none focus:border-slate-400 font-mono" />
+                </div>
+                <div>
+                  <label className="block text-[11px] text-slate-400 mb-1">預計投產日 BEGIN_DATE</label>
+                  <input type="date" value={workarea.start_date} onChange={e => setWorkarea(p => ({...p, start_date: e.target.value}))}
+                    className="w-full bg-slate-800 border border-slate-600 text-slate-200 text-xs rounded px-2 py-1.5 focus:outline-none focus:border-slate-400" />
+                </div>
+                <div>
+                  <label className="block text-[11px] text-slate-400 mb-1">預計結案日 END_DATE</label>
+                  <input type="date" value={workarea.end_date} onChange={e => setWorkarea(p => ({...p, end_date: e.target.value}))}
+                    className="w-full bg-slate-800 border border-slate-600 text-slate-200 text-xs rounded px-2 py-1.5 focus:outline-none focus:border-slate-400" />
+                </div>
+              </div>
+            </div>
+
+            {/* 表身 */}
+            <div className="bg-slate-900/60 border border-slate-700 rounded-lg overflow-hidden">
+              <div className="px-4 py-2.5 border-b border-slate-700 flex items-center justify-between">
+                <span className="text-xs font-semibold text-slate-400 uppercase tracking-wide">表身明細（PJ_PROJECTDETAIL）</span>
+                <button onClick={waAddLine}
+                  className="px-3 py-1 rounded bg-slate-700 hover:bg-slate-600 text-slate-200 text-xs border border-slate-600">
+                  ＋ 新增行
+                </button>
+              </div>
+              {workarea.lines.length === 0 ? (
+                <div className="px-4 py-6 text-center text-slate-600 text-xs">尚無明細。按「新增行」或「帶入已勾選」來新增。</div>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-xs border-collapse">
+                    <thead>
+                      <tr className="bg-slate-800/60 text-slate-400 text-[11px]">
+                        <th className="px-2 py-2 text-center w-10">LINE</th>
+                        <th className="px-2 py-2 text-left min-w-[120px]">＊生產貨號 MBP_PART</th>
+                        <th className="px-2 py-2 text-left min-w-[160px]">品名 REMARK（前段）</th>
+                        <th className="px-2 py-2 text-left min-w-[120px]">備註 REMARK（後段）</th>
+                        <th className="px-2 py-2 text-left min-w-[120px]">批號/銷售訂單 MBP_LOT_NO</th>
+                        <th className="px-2 py-2 text-right w-24">數量 ORDER_QTY</th>
+                        <th className="px-2 py-2 text-left w-32">交付日 END_DATE</th>
+                        <th className="px-2 py-2 w-8"></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {workarea.lines.map((l, i) => (
+                        <tr key={l.id} className="border-t border-slate-800/60">
+                          <td className="px-2 py-1.5 text-center text-violet-400 font-mono font-bold">{i + 1}</td>
+                          <td className="px-2 py-1.5">
+                            <input value={l.item_code} onChange={e => waSetLine(l.id, 'item_code', e.target.value)}
+                              placeholder="P3CCADC-…"
+                              className="w-full bg-slate-800 border border-slate-600 text-purple-300 text-xs rounded px-2 py-1 focus:outline-none focus:border-purple-400 font-mono placeholder-slate-600" />
+                          </td>
+                          <td className="px-2 py-1.5">
+                            <input value={l.item_name} onChange={e => waSetLine(l.id, 'item_name', e.target.value)}
+                              placeholder="品名…"
+                              className="w-full bg-slate-800 border border-slate-600 text-slate-200 text-xs rounded px-2 py-1 focus:outline-none focus:border-slate-400 placeholder-slate-600" />
+                          </td>
+                          <td className="px-2 py-1.5">
+                            <input value={l.note} onChange={e => waSetLine(l.id, 'note', e.target.value)}
+                              placeholder="規格備註…"
+                              className="w-full bg-slate-800 border border-slate-600 text-slate-200 text-xs rounded px-2 py-1 focus:outline-none focus:border-slate-400 placeholder-slate-600" />
+                          </td>
+                          <td className="px-2 py-1.5">
+                            <input value={l.order_number} onChange={e => waSetLine(l.id, 'order_number', e.target.value)}
+                              placeholder="RO / SO…"
+                              className="w-full bg-slate-800 border border-slate-600 text-cyan-300 text-xs rounded px-2 py-1 focus:outline-none focus:border-cyan-400 font-mono placeholder-slate-600" />
+                          </td>
+                          <td className="px-2 py-1.5">
+                            <input type="number" value={l.quantity} onChange={e => waSetLine(l.id, 'quantity', e.target.value)}
+                              placeholder="0"
+                              className="w-full bg-slate-800 border border-slate-600 text-white text-xs rounded px-2 py-1 focus:outline-none focus:border-slate-400 text-right placeholder-slate-600" />
+                          </td>
+                          <td className="px-2 py-1.5">
+                            <input type="date" value={l.delivery_date} onChange={e => waSetLine(l.id, 'delivery_date', e.target.value)}
+                              className="w-full bg-slate-800 border border-slate-600 text-slate-200 text-xs rounded px-2 py-1 focus:outline-none focus:border-slate-400" />
+                          </td>
+                          <td className="px-2 py-1.5 text-center">
+                            <button onClick={() => waRemoveLine(l.id)}
+                              className="text-slate-600 hover:text-red-400 text-sm leading-none">✕</button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+
+            {/* 匯入按鈕 */}
+            <div className="flex items-center gap-3 flex-wrap">
+              <button
+                onClick={() => void handleWorkareaImport()}
+                disabled={workareaImporting || !workarea.mo_number.trim() || workarea.lines.filter(l => l.item_code.trim()).length === 0}
+                className="px-5 py-2 rounded-lg bg-violet-700 hover:bg-violet-600 disabled:opacity-40 text-white text-sm font-semibold flex items-center gap-2"
+              >
+                {workareaImporting
+                  ? <><svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"/></svg>匯入中…</>
+                  : '⬆ 送出匯入 ERP'
+                }
+              </button>
+              <span className="text-xs text-slate-500">
+                共 {workarea.lines.filter(l => l.item_code.trim()).length} 筆有效明細 / {workarea.lines.length} 行
+              </span>
+              {workareaMsg && (
+                <span className={`text-xs px-3 py-1.5 rounded border ${
+                  workareaMsg.startsWith('✅') ? 'bg-emerald-900/50 text-emerald-300 border-emerald-700/50'
+                  : workareaMsg.startsWith('⚠') ? 'bg-yellow-900/50 text-yellow-300 border-yellow-700/50'
+                  : 'bg-red-900/50 text-red-300 border-red-700/50'
+                }`}>{workareaMsg}</span>
+              )}
+            </div>
+          </div>
+        )}
         {saveMsg && (
           <div className={`px-4 py-2 rounded text-sm border ${
             saveMsg.startsWith('✅') ? 'bg-emerald-900/50 text-emerald-300 border-emerald-700/50'
@@ -661,20 +978,18 @@ export default function GroupOrderExportPage() {
                         <td className="px-3 py-2 whitespace-nowrap text-slate-300">{row.delivery_date}</td>
                         <td className="px-3 py-2 text-slate-400">{row.handler}</td>
                         <td className="px-3 py-2">
-                          {isImported ? (
-                            <div>
-                              <span className="font-mono text-emerald-400">{row.mo_number}</span>
-                              {isMulti && <div className="text-[10px] text-violet-400 mt-0.5">多製品 L{lineNo}/{moCountMap.get(currentMo)}</div>}
-                            </div>
-                          ) : (
-                            <input
-                              type="text"
-                              value={manualMo[row.row_key] ?? ''}
-                              onChange={e => setManualMo(prev => ({ ...prev, [row.row_key]: e.target.value }))}
-                              placeholder="MOT…"
-                              className="w-full bg-slate-800 border border-slate-600 text-slate-200 text-xs rounded px-2 py-1 focus:outline-none focus:border-cyan-500 font-mono placeholder-slate-600"
-                            />
-                          )}
+                          <input
+                            type="text"
+                            value={manualMo[row.row_key] ?? (isImported ? (row.mo_number ?? '') : '')}
+                            onChange={e => setManualMo(prev => ({ ...prev, [row.row_key]: e.target.value }))}
+                            placeholder="MOT…"
+                            className={`w-full border text-xs rounded px-2 py-1 focus:outline-none font-mono placeholder-slate-600 ${
+                              isImported
+                                ? 'bg-emerald-950/30 border-emerald-700/50 text-emerald-300 focus:border-emerald-400'
+                                : 'bg-slate-800 border-slate-600 text-slate-200 focus:border-cyan-500'
+                            }`}
+                          />
+                          {isMulti && <div className="text-[10px] text-violet-400 mt-0.5">多製品 L{lineNo}/{moCountMap.get(currentMo)}</div>}
                         </td>
                         <td className="px-3 py-2">
                           {isImported ? (
