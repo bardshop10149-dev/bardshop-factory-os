@@ -33,6 +33,11 @@ interface GroupRow {
 
 type PostSyncStep = { label: string; status: 'pending' | 'running' | 'done' | 'error' }
 
+type PreviewGroup = {
+  mo: string
+  rows: Array<{ row: GroupRow; lineNo: number }>
+}
+
 // ==================== 工具函式 ====================
 function fmtDate(d: Date): string {
   return `${d.getFullYear()}/${String(d.getMonth() + 1).padStart(2, '0')}/${String(d.getDate()).padStart(2, '0')}`
@@ -108,6 +113,7 @@ export default function GroupOrderExportPage() {
   const [filterStatus, setFilterStatus] = useState<'all' | 'pending' | 'imported'>('all')
   const [searchQuery, setSearchQuery] = useState('')
   const [batchMoInput, setBatchMoInput] = useState('')   // 批量指定製令單號
+  const [importPreview, setImportPreview] = useState<PreviewGroup[] | null>(null)  // 預覽 Modal
 
   // ---- 從 Supabase 載入所有含「集單」的列 ----
   const loadRows = useCallback(async () => {
@@ -257,6 +263,27 @@ export default function GroupOrderExportPage() {
       setPostSyncModal(prev => prev ? { ...prev, error: e instanceof Error ? e.message : String(e) } : null)
     }
   }, [loadRows])
+
+  // ---- 預覽（建立分組，不呼叫 ERP）----
+  const handleShowPreview = useCallback(() => {
+    const targets = getTargetRows(true).filter(r => r.mo_status !== '已匯入製令')
+    if (targets.length === 0) {
+      alert('⚠️ 沒有可匯入的列（請確認已填寫製令單號且尚未匯入）')
+      return
+    }
+    const moGroups = new Map<string, GroupRow[]>()
+    for (const r of targets) {
+      const mo = (manualMo[r.row_key] ?? '').trim()
+      if (!moGroups.has(mo)) moGroups.set(mo, [])
+      moGroups.get(mo)!.push(r)
+    }
+    const groups: PreviewGroup[] = []
+    for (const [mo, groupRows] of moGroups) {
+      groups.push({ mo, rows: groupRows.map((r, i) => ({ row: r, lineNo: i + 1 })) })
+    }
+    setImportPreview(groups)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rows, selectedKeys, displayRows, manualMo])
 
   // ---- 匯入 ERP 製令工單 ----
   const handleImport = useCallback(async () => {
@@ -456,7 +483,7 @@ export default function GroupOrderExportPage() {
               {saving ? '儲存中…' : '💾 儲存製令單號'}
             </button>
             <button
-              onClick={handleImport}
+              onClick={handleShowPreview}
               disabled={importing || saving || loading}
               className="px-4 py-1.5 rounded bg-cyan-700 hover:bg-cyan-600 text-white text-xs font-semibold disabled:opacity-50"
             >
@@ -754,6 +781,92 @@ export default function GroupOrderExportPage() {
                 </button>
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* ── 匯入預覽 Modal ── */}
+      {importPreview && (
+        <div className="fixed inset-0 bg-black/75 z-50 flex items-center justify-center p-4" onClick={() => setImportPreview(null)}>
+          <div className="bg-slate-900 border border-slate-700 rounded-xl w-full max-w-3xl max-h-[88vh] flex flex-col shadow-2xl" onClick={e => e.stopPropagation()}>
+            {/* Header */}
+            <div className="px-5 py-4 border-b border-slate-700 flex items-start justify-between">
+              <div>
+                <h2 className="text-base font-bold text-white">
+                  匯入預覽 — 集單多製品製令
+                </h2>
+                <p className="text-xs text-slate-400 mt-1 flex flex-wrap gap-2 items-center">
+                  共 <span className="text-violet-300 font-semibold">{importPreview.length}</span> 張製令・
+                  <span className="text-cyan-300 font-semibold">{importPreview.reduce((n, g) => n + g.rows.length, 0)}</span> 筆明細
+                  <span className="px-2 py-0.5 rounded text-[11px] bg-violet-900/60 text-violet-300">IFAF028 多製品格式</span>
+                </p>
+              </div>
+              <button onClick={() => setImportPreview(null)} className="text-slate-500 hover:text-white text-xl leading-none mt-0.5">✕</button>
+            </div>
+
+            {/* Body */}
+            <div className="overflow-y-auto flex-1 px-5 py-4 space-y-4">
+              {importPreview.map((group, gi) => (
+                <div key={group.mo} className="border border-violet-800/50 rounded-lg overflow-hidden">
+                  {/* MO 表頭 */}
+                  <div className="flex items-center gap-3 px-4 py-2.5 bg-violet-950/60 border-b border-violet-800/40">
+                    <span className="text-xs text-slate-400 font-medium">製令單號</span>
+                    <span className="font-mono text-violet-300 font-bold tracking-wide">{group.mo}</span>
+                    <span className="ml-auto text-xs text-slate-500">{group.rows.length} 筆明細（LINE {group.rows.map(r => r.lineNo).join(' / ')}）</span>
+                  </div>
+                  {/* 明細表 */}
+                  <table className="w-full text-xs border-collapse">
+                    <thead>
+                      <tr className="bg-slate-800/60 text-slate-400 text-[11px]">
+                        <th className="px-3 py-2 text-center w-10">LINE</th>
+                        <th className="px-3 py-2 text-left">品項編碼</th>
+                        <th className="px-3 py-2 text-left min-w-[160px]">品名規格</th>
+                        <th className="px-3 py-2 text-left">來源工單</th>
+                        <th className="px-3 py-2 text-left">客戶</th>
+                        <th className="px-3 py-2 text-right">數量</th>
+                        <th className="px-3 py-2 text-left">交付日</th>
+                        <th className="px-3 py-2 text-left">出單日</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {group.rows.map(({ row, lineNo }) => (
+                        <tr key={row.row_key} className="border-t border-slate-800/50 hover:bg-slate-800/30">
+                          <td className="px-3 py-2 text-center font-mono text-violet-400 font-bold">{lineNo}</td>
+                          <td className="px-3 py-2 font-mono text-purple-300">{row.item_code}</td>
+                          <td className="px-3 py-2 text-slate-300 max-w-[200px]">
+                            <div className="truncate">{row.item_name}</div>
+                            {row.note && <div className="text-slate-500 truncate">{row.note}</div>}
+                          </td>
+                          <td className="px-3 py-2 font-mono text-cyan-300">{row.order_number}</td>
+                          <td className="px-3 py-2 text-slate-400">{row.customer}</td>
+                          <td className="px-3 py-2 text-right text-white whitespace-nowrap">{row.quantity}</td>
+                          <td className="px-3 py-2 text-slate-300 whitespace-nowrap">{row.delivery_date}</td>
+                          <td className="px-3 py-2 text-slate-500 whitespace-nowrap">{row.sheet_date}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ))}
+            </div>
+
+            {/* Footer */}
+            <div className="px-5 py-4 border-t border-slate-700 flex items-center justify-end gap-3">
+              <button
+                onClick={() => setImportPreview(null)}
+                className="px-4 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 text-white text-sm transition-colors"
+              >
+                取消
+              </button>
+              <button
+                onClick={() => { setImportPreview(null); void handleImport() }}
+                disabled={importing}
+                className="px-5 py-2 rounded-lg bg-violet-700 hover:bg-violet-600 disabled:bg-slate-700 disabled:text-slate-400 text-white text-sm font-semibold transition-colors flex items-center gap-1.5"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>
+                確認匯入 ERP
+              </button>
+            </div>
           </div>
         </div>
       )}
