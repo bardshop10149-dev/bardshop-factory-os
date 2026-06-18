@@ -422,10 +422,14 @@ export default function GroupOrderExportPage() {
         // soOnlyMap 不限制 so/part 是否為空（用來診斷）
         if (so) {
           const arr = soOnlyMap.get(so) ?? []
-          if (!arr.includes(line.project_id)) arr.push(line.project_id)
-          soOnlyMap.set(so, arr)
+          // 只收 MOT / MOM 開頭的製令
+          const moId = line.project_id
+          if (/^MO[TM]/i.test(moId) && !arr.includes(moId)) arr.push(moId)
+          if (arr.length > 0) soOnlyMap.set(so, arr)
         }
         if (!so || !part) continue
+        // 只比對 MOT / MOM 開頭的製令
+        if (!/^MO[TM]/i.test(line.project_id)) continue
         const strictKey = `${so}|${part}|${qty}`
         const looseKey  = `${so}|${part}`
         const existing1 = matchMap.get(strictKey)
@@ -1131,9 +1135,7 @@ export default function GroupOrderExportPage() {
                             <span className={`font-mono text-xs ${
                               isImported ? 'text-emerald-300' : 'text-teal-300'
                             }`}>{currentMo}</span>
-                          ) : (
-                            <span className="text-slate-600 text-xs">— 未比對 —</span>
-                          )}
+                          ) : null}
                           {isMulti && <div className="text-[10px] text-violet-400 mt-0.5">多製品 L{lineNo}/{moCountMap.get(currentMo)}</div>}
                         </td>
                         <td className="px-3 py-2">
