@@ -157,6 +157,8 @@ export default function GroupOrderExportPage() {
   const [batchMoInput, setBatchMoInput] = useState('')   // 批量指定製令單號
   const [importPreview, setImportPreview] = useState<PreviewGroup[] | null>(null)  // 預覽 Modal
   const [forceReimport, setForceReimport] = useState(false) // 強制重新匯入已匯入的列
+  const [autoMatching, setAutoMatching] = useState(false)
+  const [autoMatchMsg, setAutoMatchMsg] = useState('')
 
   // ==================== 多製品製令工作區 ====================
   const [workarea, setWorkarea] = useState<MoWorkarea>(defaultWorkarea)
@@ -343,6 +345,89 @@ export default function GroupOrderExportPage() {
     if (requireMo) return base.filter(r => (manualMo[r.row_key] ?? '').trim() !== '')
     return base
   }
+
+  // ---- 自動比對製令單號（查 erp_mo_lines：批號=銷售單號 + 品項 + 數量）----
+  const handleAutoMatch = useCallback(async () => {
+    setAutoMatching(true)
+    setAutoMatchMsg('')
+    try {
+      // 收集所有待比對的銷售單號（order_number）
+      const targetRows = rows.filter(r => r.order_number?.trim())
+      if (targetRows.length === 0) { setAutoMatchMsg('ℹ️ 無可比對的集單列'); return }
+
+      const orderNumbers = [...new Set(targetRows.map(r => r.order_number.trim()))]
+
+      // 查 erp_mo_lines：批號（mbp_lot_no）= 銷售單號
+      const { data: moLines, error } = await supabase
+        .from('erp_mo_lines')
+        .select('project_id, mbp_lot_no, mbp_part, order_qty')
+        .in('mbp_lot_no', orderNumbers)
+      if (error) throw error
+
+      if (!moLines || moLines.length === 0) {
+        setAutoMatchMsg('⚠ ERP 同步區找不到符合的製令（確認已同步 ERP 資料）')
+        setTimeout(() => setAutoMatchMsg(''), 6000)
+        return
+      }
+
+      // 建比對 map：key = `批號|品項碼|數量`  value = project_id
+      // 若同 key 對應多筆（不同 MO），保留最新（最大 project_id 字串序）
+      const matchMap = new Map<string, string>()
+      for (const line of moLines) {
+        if (!line.mbp_lot_no || !line.mbp_part || !line.project_id) continue
+        const qty = String(Math.round(Number(line.order_qty ?? 0)))
+        const key = `${line.mbp_lot_no.trim()}|${line.mbp_part.trim()}|${qty}`
+        const existing = matchMap.get(key)
+        if (!existing || line.project_id > existing) matchMap.set(key, line.project_id)
+      }
+
+      // 也建一個寬鬆 map（只比對 批號+品項，忽略數量），備用
+      const loosMap = new Map<string, string>()
+      for (const line of moLines) {
+        if (!line.mbp_lot_no || !line.mbp_part || !line.project_id) continue
+        const key = `${line.mbp_lot_no.trim()}|${line.mbp_part.trim()}`
+        const existing = loosMap.get(key)
+        if (!existing || line.project_id > existing) loosMap.set(key, line.project_id)
+      }
+
+      let matched = 0
+      let looseMatched = 0
+      setManualMo(prev => {
+        const next = { ...prev }
+        for (const r of targetRows) {
+          // 跳過已匯入製令且已有製令號的列（不覆蓋）
+          if (r.mo_status === '已匯入製令' && next[r.row_key]) continue
+          const qty = String(Math.round(Number(r.quantity ?? 0)))
+          const strictKey = `${r.order_number.trim()}|${r.item_code.trim()}|${qty}`
+          const looseKey  = `${r.order_number.trim()}|${r.item_code.trim()}`
+          if (matchMap.has(strictKey)) {
+            next[r.row_key] = matchMap.get(strictKey)!
+            matched++
+          } else if (loosMap.has(looseKey)) {
+            next[r.row_key] = loosMap.get(looseKey)!
+            looseMatched++
+          }
+        }
+        return next
+      })
+
+      const total = matched + looseMatched
+      if (total === 0) {
+        setAutoMatchMsg(`⚠ 共比對 ${targetRows.length} 筆，無符合項目（批號+品項+數量均不符）`)
+      } else {
+        const parts: string[] = []
+        if (matched > 0) parts.push(`完全符合 ${matched} 筆`)
+        if (looseMatched > 0) parts.push(`寬鬆符合（忽略數量）${looseMatched} 筆`)
+        setAutoMatchMsg(`✅ 已比對 ${total} 筆：${parts.join('、')}（未覆蓋已匯入列）`)
+      }
+      setTimeout(() => setAutoMatchMsg(''), 8000)
+    } catch (e) {
+      setAutoMatchMsg(`❌ 比對失敗：${e instanceof Error ? e.message : String(e)}`)
+      setTimeout(() => setAutoMatchMsg(''), 8000)
+    } finally {
+      setAutoMatching(false)
+    }
+  }, [rows])
 
   // ---- 儲存製令單號至出單表（不匯入 ERP）----
   const handleSaveMo = useCallback(async () => {
@@ -624,6 +709,13 @@ export default function GroupOrderExportPage() {
               {loading ? '載入中…' : '🔄 重新載入'}
             </button>
             <button
+              onClick={() => void handleAutoMatch()}
+              disabled={autoMatching || loading}
+              className="px-4 py-1.5 rounded bg-teal-700 hover:bg-teal-600 text-white text-xs font-semibold disabled:opacity-50"
+            >
+              {autoMatching ? '比對中…' : '🔍 自動比對製令'}
+            </button>
+            <button
               onClick={handleSaveMo}
               disabled={saving || importing || loading}
               className="px-4 py-1.5 rounded bg-slate-600 hover:bg-slate-500 text-white text-xs font-semibold disabled:opacity-50"
@@ -832,6 +924,16 @@ export default function GroupOrderExportPage() {
             : 'bg-red-900/50 text-red-300 border-red-700/50'
           }`}>
             {saveMsg}
+          </div>
+        )}
+        {autoMatchMsg && (
+          <div className={`px-4 py-2 rounded text-sm border ${
+            autoMatchMsg.startsWith('✅') ? 'bg-teal-900/50 text-teal-300 border-teal-700/50'
+            : autoMatchMsg.startsWith('⚠') ? 'bg-yellow-900/50 text-yellow-300 border-yellow-700/50'
+            : autoMatchMsg.startsWith('ℹ️') ? 'bg-slate-800 text-slate-300 border-slate-700'
+            : 'bg-red-900/50 text-red-300 border-red-700/50'
+          }`}>
+            {autoMatchMsg}
           </div>
         )}
 
