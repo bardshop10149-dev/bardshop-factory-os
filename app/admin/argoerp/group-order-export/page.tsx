@@ -61,15 +61,20 @@ function truncateToBytes(text: string, maxBytes: number): string {
 }
 
 // 建立送往 ERP IFAF028 介面的 payload record（多製品製令：lineNo 為該 MO 下的第幾行，1-based）
-function buildErpRecord(row: GroupRow, moNumber: string, lineNo: number = 1): Record<string, string> {
+// isFirstLine=true 時送表頭欄位（BEGIN_DATE/END_DATE/HOLD_STATUS/部門）；後續行只送 PROJECT_ID + 表身欄位
+function buildErpRecord(row: GroupRow, moNumber: string, lineNo: number = 1, isFirstLine: boolean = true): Record<string, string> {
   const today = new Date()
   const rec: Record<string, string> = {}
   rec['PROJECT_ID'] = moNumber
-  rec['BEGIN_DATE'] = fmtDate(nextBizDay(today))
-  if (row.delivery_date) rec['END_DATE'] = row.delivery_date.replace(/\//g, '-')
-  rec['HOLD_STATUS'] = 'OPEN'
-  rec['SEG_SEGMENT_NO_DEPARTMENT'] = 'M1100'
-  rec['PJT_SEG_SEGMENT_NO'] = 'M1000'
+  // 表頭欄位：只在第一行送出，避免相同 PROJECT_ID 重複送表頭造成 ERP 衝突
+  if (isFirstLine) {
+    rec['BEGIN_DATE'] = fmtDate(nextBizDay(today))
+    if (row.delivery_date) rec['END_DATE'] = row.delivery_date.replace(/\//g, '-')
+    rec['HOLD_STATUS'] = 'OPEN'
+    rec['SEG_SEGMENT_NO_DEPARTMENT'] = 'M1100'
+    rec['PJT_SEG_SEGMENT_NO'] = 'M1000'
+  }
+  // 表身欄位：每行都送
   rec['LINE_NO'] = String(lineNo)
   if (row.item_code) rec['MBP_PART'] = row.item_code
   rec['MBP_VER'] = '1'
@@ -305,7 +310,7 @@ export default function GroupOrderExportPage() {
       const payload: Record<string, string>[] = []
       for (const [mo, groupRows] of moGroups) {
         groupRows.forEach((r, i) => {
-          payload.push(buildErpRecord(r, mo, i + 1))
+          payload.push(buildErpRecord(r, mo, i + 1, i === 0))
         })
       }
       const response = await fetch('/api/argoerp', {
@@ -324,6 +329,7 @@ export default function GroupOrderExportPage() {
       const failedRows: Array<{ row: GroupRow; error: string }> = []
 
       if (argoResults.length > 0) {
+        // 收集明確失敗的 SLIP_NO
         const failedSlips = new Map<string, string[]>()
         const seenSlips = new Set<string>()
         for (const r of argoResults) {
@@ -336,14 +342,20 @@ export default function GroupOrderExportPage() {
             failedSlips.get(slip)!.push(err)
           }
         }
-        for (const r of targets) {
-          const mo = (manualMo[r.row_key] ?? '').trim()
-          if (failedSlips.has(mo)) {
-            failedRows.push({ row: r, error: failedSlips.get(mo)!.join(' / ') })
-          } else if (seenSlips.has(mo)) {
-            successRows.push(r)
-          } else {
-            failedRows.push({ row: r, error: 'ARGO 未回報此筆狀態' })
+        const hasAnyExplicitFailure = failedSlips.size > 0
+        if (!hasAnyExplicitFailure) {
+          // ERP 有回傳結果且無任何 CHECK_FLAG=N → 全部成功
+          // （多製品製令 SLIP_NO 可能與 PROJECT_ID 不同，用有無明確失敗來判斷）
+          successRows = targets
+        } else {
+          // 有明確失敗：嘗試用 SLIP_NO 對應，對不到的也標成功（ERP 只回報失敗的）
+          for (const r of targets) {
+            const mo = (manualMo[r.row_key] ?? '').trim()
+            if (failedSlips.has(mo)) {
+              failedRows.push({ row: r, error: failedSlips.get(mo)!.join(' / ') })
+            } else {
+              successRows.push(r)
+            }
           }
         }
       } else if (isSuccess) {
