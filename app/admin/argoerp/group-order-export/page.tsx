@@ -99,23 +99,21 @@ function truncateToBytes(text: string, maxBytes: number): string {
   return dec.decode(bytes.slice(0, cut))
 }
 
-// 建立送往 ERP IFAF028 介面的 payload record（多製品製令：lineNo 為該 MO 下的第幾行，1-based）
-// isFirstLine=true 時送表頭欄位；後續行只送 PROJECT_ID + 表身欄位，避免覆蓋已建立的表頭
-function buildErpRecord(row: GroupRow, moNumber: string, lineNo: number = 1, isFirstLine: boolean = true): Record<string, string> {
+// 建立送往 ERP IFAF028 介面的 payload record（多製品製令）
+// ERP 要求：同一 PROJECT_ID 下每行都必須帶完整表頭欄位（開立日期/部門等），LINE_NO 不同即不蓋掉
+function buildErpRecord(row: GroupRow, moNumber: string, lineNo: number = 1): Record<string, string> {
   const today = new Date()
   const rec: Record<string, string> = {}
   rec['PROJECT_ID'] = moNumber
-  // 表頭欄位：只在第一行送出
-  if (isFirstLine) {
-    rec['BEGIN_DATE'] = fmtDate(nextBizDay(today))
-    if (row.delivery_date) rec['END_DATE'] = row.delivery_date.replace(/\//g, '-')
-    rec['HOLD_STATUS'] = 'OPEN'
-    rec['SEG_SEGMENT_NO_DEPARTMENT'] = 'M1100'
-    rec['PJT_SEG_SEGMENT_NO'] = 'M1000'
-    rec['MO_BEGIN_DATE'] = fmtDate(today)
-    rec['AUTO_PREPARE'] = 'N'
-  }
-  // 表身欄位：每行都送
+  // 表頭欄位：每行都要帶
+  rec['BEGIN_DATE'] = fmtDate(nextBizDay(today))
+  if (row.delivery_date) rec['END_DATE'] = row.delivery_date.replace(/\//g, '-')
+  rec['HOLD_STATUS'] = 'OPEN'
+  rec['SEG_SEGMENT_NO_DEPARTMENT'] = 'M1100'
+  rec['PJT_SEG_SEGMENT_NO'] = 'M1000'
+  rec['MO_BEGIN_DATE'] = fmtDate(today)
+  rec['AUTO_PREPARE'] = 'N'
+  // 表身欄位
   rec['LINE_NO'] = String(lineNo)
   if (row.item_code) rec['MBP_PART'] = row.item_code
   rec['MBP_VER'] = '1'
@@ -207,21 +205,19 @@ export default function GroupOrderExportPage() {
     const nextBiz = (d: Date) => { const x = new Date(d); x.setDate(x.getDate()+1); while(x.getDay()===0||x.getDay()===6) x.setDate(x.getDate()+1); return x }
 
     try {
-      let successCount = 0
-      const errors: string[] = []
-      for (let i = 0; i < validLines.length; i++) {
-        const l = validLines[i]
-        const isFirst = i === 0
+      // 每行都帶完整表頭欄位（ERP 要求），全部放進單一 DATA 陣列一次送出
+      const payload: Record<string, string>[] = validLines.map((l, i) => {
         const rec: Record<string, string> = { PROJECT_ID: mo }
-        if (isFirst) {
-          rec['BEGIN_DATE'] = workarea.start_date || fmtD(nextBiz(today))
-          if (workarea.end_date) rec['END_DATE'] = workarea.end_date
-          rec['HOLD_STATUS'] = 'OPEN'
-          rec['SEG_SEGMENT_NO_DEPARTMENT'] = workarea.department || 'M1100'
-          rec['PJT_SEG_SEGMENT_NO'] = workarea.cost_department || 'M1000'
-          rec['MO_BEGIN_DATE'] = fmtD(today)
-          rec['AUTO_PREPARE'] = 'N'
-        }
+        // 表頭（每行都要帶）
+        rec['BEGIN_DATE'] = workarea.start_date
+          ? workarea.start_date.replace(/-/g, '/')
+          : fmtD(nextBiz(today))
+        rec['HOLD_STATUS'] = 'OPEN'
+        rec['SEG_SEGMENT_NO_DEPARTMENT'] = workarea.department || 'M1100'
+        rec['PJT_SEG_SEGMENT_NO'] = workarea.cost_department || 'M1000'
+        rec['MO_BEGIN_DATE'] = fmtD(today)
+        rec['AUTO_PREPARE'] = 'N'
+        // 表身
         rec['LINE_NO'] = String(i + 1)
         rec['MBP_PART'] = l.item_code.trim()
         rec['MBP_VER'] = '1'
@@ -235,28 +231,33 @@ export default function GroupOrderExportPage() {
         rec['EQUIVALENT_RATIO_M'] = '1'
         const noteStr = [l.item_name, l.note].filter(Boolean).join(' ')
         if (noteStr) rec['REMARK_LINE'] = noteStr
-        if (l.delivery_date) rec['END_DATE'] = l.delivery_date.replace(/-/g, '/')
+        // 每行用自己的交付日（若有）覆蓋 END_DATE；否則用表頭結案日
+        const endDate = l.delivery_date
+          ? l.delivery_date.replace(/-/g, '/')
+          : workarea.end_date
+            ? workarea.end_date.replace(/-/g, '/')
+            : undefined
+        if (endDate) rec['END_DATE'] = endDate
+        return rec
+      })
 
-        const resp = await fetch('/api/argoerp', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ action: 'import', interfaceId: 'IFAF028', data: [rec] }),
-        })
-        const res = await resp.json()
-        const argoRows: Record<string, unknown>[] = Array.isArray(res?.apiResult?.RESULT) ? res.apiResult.RESULT : []
-        const hasN = argoRows.some((x: Record<string, unknown>) => String(x.CHECK_FLAG ?? '').toUpperCase() === 'N')
-        if (!resp.ok || hasN) {
-          const errMsg = argoRows.filter((x: Record<string, unknown>) => String(x.CHECK_FLAG ?? '').toUpperCase() === 'N')
-            .map((x: Record<string, unknown>) => String(x.ERROR_CODE ?? x.ERROR ?? '').trim()).join(' / ') || res?.error || `HTTP ${resp.status}`
-          errors.push(`LINE ${i+1} [${l.item_code}]: ${errMsg}`)
-        } else {
-          successCount++
-        }
-      }
-      if (errors.length === 0) {
-        setWorkareaMsg(`✅ 全部 ${successCount} 行匯入成功`)
+      const resp = await fetch('/api/argoerp', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'import', interfaceId: 'IFAF028', data: payload }),
+      })
+      const res = await resp.json()
+      const argoRows: Record<string, unknown>[] = Array.isArray(res?.apiResult?.RESULT) ? res.apiResult.RESULT : []
+      const failedRows = argoRows.filter((x: Record<string, unknown>) => String(x.CHECK_FLAG ?? '').toUpperCase() === 'N')
+      if (failedRows.length === 0 && (resp.ok || argoRows.length > 0)) {
+        setWorkareaMsg(`✅ 全部 ${validLines.length} 行匯入成功`)
+      } else if (failedRows.length > 0) {
+        const errSummary = failedRows.slice(0, 5)
+          .map((x: Record<string, unknown>) => String(x.ERROR_CODE ?? x.ERROR ?? '').trim())
+          .filter(Boolean).join(' / ')
+        setWorkareaMsg(`⚠ 成功 ${validLines.length - failedRows.length}，失敗 ${failedRows.length}：${errSummary}`)
       } else {
-        setWorkareaMsg(`⚠ 成功 ${successCount}，失敗 ${errors.length}：${errors.join(' / ')}`)
+        setWorkareaMsg(`❌ ${res?.error || `HTTP ${resp.status}`}`)
       }
     } catch (e) {
       setWorkareaMsg(`❌ ${e}`)
@@ -443,38 +444,52 @@ export default function GroupOrderExportPage() {
     setImporting(true)
     setSaveMsg('')
     try {
-      // 按 MO 號分組，同一 MO 下的列依序指定 LINE_NO（多製品製令格式）
+      // 按 MO 號分組，同一 MO 下的列依序指定 LINE_NO
+      // 每行都帶完整表頭欄位（ERP 要求），全部放進單一 DATA 陣列一次送出
       const moGroups = new Map<string, GroupRow[]>()
       for (const r of targets) {
         const mo = (manualMo[r.row_key] ?? '').trim()
         if (!moGroups.has(mo)) moGroups.set(mo, [])
         moGroups.get(mo)!.push(r)
       }
-
-      // 每個 LINE 獨立送一次 API，避免同一 call 裡多筆相同 PROJECT_ID 覆蓋
-      // LINE 1：帶表頭欄位（建立 MO）；LINE 2+：只帶表身欄位（追加明細行）
-      const lineResults: Array<{ row: GroupRow; ok: boolean; error?: string }> = []
+      const payload: Record<string, string>[] = []
       for (const [mo, groupRows] of moGroups) {
-        for (let i = 0; i < groupRows.length; i++) {
-          const r = groupRows[i]
-          const rec = buildErpRecord(r, mo, i + 1, i === 0)
-          const resp = await fetch('/api/argoerp', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ action: 'import', interfaceId: 'IFAF028', data: [rec] }),
-          })
-          const res = await resp.json()
-          const argoRows: Record<string, unknown>[] = Array.isArray(res?.apiResult?.RESULT)
-            ? (res.apiResult.RESULT as Record<string, unknown>[]) : []
-          const hasN = argoRows.some(x => String(x.CHECK_FLAG ?? '').toUpperCase() === 'N')
-          if (!resp.ok || hasN) {
-            const errMsg = argoRows.filter(x => String(x.CHECK_FLAG ?? '').toUpperCase() === 'N')
-              .map(x => String(x.ERROR_CODE ?? x.ERROR ?? '').trim()).join(' / ') || res?.error || `HTTP ${resp.status}`
-            lineResults.push({ row: r, ok: false, error: errMsg })
-          } else {
-            lineResults.push({ row: r, ok: true })
+        groupRows.forEach((r, i) => {
+          payload.push(buildErpRecord(r, mo, i + 1))
+        })
+      }
+      const response = await fetch('/api/argoerp', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'import', interfaceId: 'IFAF028', data: payload }),
+      })
+      const result = await response.json()
+      const argoResults: Record<string, unknown>[] = Array.isArray(result?.apiResult?.RESULT)
+        ? (result.apiResult.RESULT as Record<string, unknown>[]) : []
+      const hasN = argoResults.some(r => String(r.CHECK_FLAG ?? '').toUpperCase() === 'N')
+      const lineResults: Array<{ row: GroupRow; ok: boolean; error?: string }> = []
+      if (argoResults.length > 0 && !hasN) {
+        // 全部成功
+        for (const r of targets) lineResults.push({ row: r, ok: true })
+      } else if (hasN) {
+        // 有失敗：收集明確失敗的 PROJECT_ID
+        const failedMos = new Map<string, string[]>()
+        for (const r of argoResults) {
+          if (String(r.CHECK_FLAG ?? '').toUpperCase() === 'N') {
+            const slip = String(r.SLIP_NO ?? '').trim()
+            const err = String(r.ERROR_CODE ?? r.ERROR ?? '').trim()
+            if (slip) { if (!failedMos.has(slip)) failedMos.set(slip, []); failedMos.get(slip)!.push(err) }
           }
         }
+        for (const r of targets) {
+          const mo = (manualMo[r.row_key] ?? '').trim()
+          if (failedMos.has(mo)) lineResults.push({ row: r, ok: false, error: failedMos.get(mo)!.join(' / ') })
+          else lineResults.push({ row: r, ok: true })
+        }
+      } else if (result?.success === true) {
+        for (const r of targets) lineResults.push({ row: r, ok: true })
+      } else {
+        throw new Error(result?.error || result?.message || `HTTP ${response.status}`)
       }
 
       const successRows: GroupRow[] = lineResults.filter(x => x.ok).map(x => x.row)
