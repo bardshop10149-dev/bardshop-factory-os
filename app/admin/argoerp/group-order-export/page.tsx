@@ -374,12 +374,13 @@ export default function GroupOrderExportPage() {
     setAutoMatching(true)
     setAutoMatchMsg('')
     try {
-      // 步驟 0：先把 rows 裡已有 mo_number 的直接填回 manualMo（不需要查 ERP）
+      // 步驟 0：只把「已匯入製令」的 rows 直接填回 manualMo（這些已進 ERP，信任儲存值）
+      // 尚未匯入的列即使有 mo_number 也要重查 ERP，避免儲存了錯誤值
       let prefilled = 0
       setManualMo(prev => {
         const next = { ...prev }
         for (const r of rows) {
-          if (r.mo_number && !next[r.row_key]) {
+          if (r.mo_status === '已匯入製令' && r.mo_number && !next[r.row_key]) {
             next[r.row_key] = r.mo_number
             prefilled++
           }
@@ -387,11 +388,11 @@ export default function GroupOrderExportPage() {
         return next
       })
 
-      // 步驟 1：收集仍無製令號的列，嘗試從 erp_mo_lines 比對
-      const needMatch = rows.filter(r => r.order_number?.trim() && !r.mo_number)
+      // 步驟 1：所有有訂單號且「尚未匯入」的列都重新向 ERP 比對（不管是否已有 mo_number）
+      const needMatch = rows.filter(r => r.order_number?.trim() && r.mo_status !== '已匯入製令')
       if (needMatch.length === 0) {
         setAutoMatchMsg(prefilled > 0
-          ? `✅ 已從集單資料填入 ${prefilled} 筆製令單號（無需查 ERP）`
+          ? `✅ 已從集單資料填入 ${prefilled} 筆製令單號（均為已匯入製令）`
           : 'ℹ️ 所有列都已有製令單號')
         setTimeout(() => setAutoMatchMsg(''), 6000)
         return
