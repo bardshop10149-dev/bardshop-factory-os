@@ -374,26 +374,10 @@ export default function GroupOrderExportPage() {
     setAutoMatching(true)
     setAutoMatchMsg('')
     try {
-      // 步驟 0：只把「已匯入製令」的 rows 直接填回 manualMo（這些已進 ERP，信任儲存值）
-      // 尚未匯入的列即使有 mo_number 也要重查 ERP，避免儲存了錯誤值
-      let prefilled = 0
-      setManualMo(prev => {
-        const next = { ...prev }
-        for (const r of rows) {
-          if (r.mo_status === '已匯入製令' && r.mo_number && !next[r.row_key]) {
-            next[r.row_key] = r.mo_number
-            prefilled++
-          }
-        }
-        return next
-      })
-
-      // 步驟 1：所有有訂單號且「尚未匯入」的列都重新向 ERP 比對（不管是否已有 mo_number）
-      const needMatch = rows.filter(r => r.order_number?.trim() && r.mo_status !== '已匯入製令')
+      // 所有有訂單號的列（包含已匯入製令）都重查 ERP，以 ERP 結果為準
+      const needMatch = rows.filter(r => r.order_number?.trim())
       if (needMatch.length === 0) {
-        setAutoMatchMsg(prefilled > 0
-          ? `✅ 已從集單資料填入 ${prefilled} 筆製令單號（均為已匯入製令）`
-          : 'ℹ️ 所有列都已有製令單號')
+        setAutoMatchMsg('ℹ️ 沒有可比對的列（訂單號為空）')
         setTimeout(() => setAutoMatchMsg(''), 6000)
         return
       }
@@ -425,8 +409,8 @@ export default function GroupOrderExportPage() {
 
       if (moLines.length === 0) {
         const diagMsg = totalInTable === 0
-          ? `⚠ erp_mo_lines 尚無資料（請先到「ERP 同步」頁執行製令同步）${prefilled > 0 ? `（已從集單資料填入 ${prefilled} 筆）` : ''}`
-          : `⚠ ERP 同步區 ${totalInTable} 筆製令中，無 source_order 或 mbp_lot_no 符合集單訂單號（請確認已執行最新一次製令同步）${prefilled > 0 ? `，已從集單資料填入 ${prefilled} 筆` : ''}`
+          ? `⚠ erp_mo_lines 尚無資料（請先到「ERP 同步」頁執行製令同步）`
+          : `⚠ ERP 同步區 ${totalInTable} 筆製令中，無 source_order 或 mbp_lot_no 符合集單訂單號（請確認已執行最新一次製令同步）`
         setAutoMatchMsg(diagMsg)
         setTimeout(() => setAutoMatchMsg(''), 10000)
         return
@@ -517,7 +501,6 @@ export default function GroupOrderExportPage() {
       }
 
       const total = matched
-      const prefilledNote = prefilled > 0 ? `（另從集單資料取回 ${prefilled} 筆）` : ''
       const dupNote = dupSkipped > 0 ? `⚠ 另有 ${dupSkipped} 筆因 ERP 製令重複使用被跳過（同一 MO 僅允許對應一筆集單列）` : ''
       if (total === 0 && dupSkipped === 0) {
         // 診斷：取第一筆 erp_mo_lines 樣本 vs 第一筆集單列
@@ -527,12 +510,12 @@ export default function GroupOrderExportPage() {
           `ERP 樣本：so=${sampleMo?.source_order ?? '(null)'}  lot=${sampleMo?.mbp_lot_no ?? '(null)'}  part=${sampleMo?.mbp_part ?? '(null)'}`,
           `集單樣本：order=${sampleRow?.order_number}  item=${sampleRow?.item_code}`,
         ]
-        setAutoMatchMsg(`⚠ ERP 比對 ${needMatch.length} 筆無符合${prefilledNote}（需批號+品項均符合）｜${diagLines.join('｜')}`)
+        setAutoMatchMsg(`⚠ ERP 比對 ${needMatch.length} 筆無符合（需批號+品項均符合）｜${diagLines.join('｜')}`)
       } else {
         const mismatchNote = qtyMismatch > 0 ? `，其中 ${qtyMismatch} 筆數量不符（已標橘色警示）` : ''
         const clearNote = toClear.length > 0 ? `，已清除 ${toClear.length} 筆無效舊單號` : ''
         const savedNote = ` 並已自動儲存`
-        const msgs = [`✅ ERP 比對符合 ${total} 筆${prefilledNote}${mismatchNote}${clearNote}${savedNote}`]
+        const msgs = [`✅ ERP 比對符合 ${total} 筆${mismatchNote}${clearNote}${savedNote}`]
         if (dupNote) msgs.push(dupNote)
         setAutoMatchMsg(msgs.join('｜'))
       }
