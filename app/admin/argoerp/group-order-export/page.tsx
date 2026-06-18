@@ -449,13 +449,22 @@ export default function GroupOrderExportPage() {
 
       let matched = 0
       let qtyMismatch = 0
+      let dupSkipped = 0
       const newMismatchKeys = new Set<string>()
       const newlyMatched: Record<string, string> = {}
+      // 防止同一個 MO 被分配給多筆集單列（一個 MO 只能對應一筆）
+      const usedProjectIds = new Set<string>()
 
       for (const r of needMatch) {
         const key = `${r.order_number.trim()}|${r.item_code.trim()}`
         const hit = matchMap.get(key)
         if (!hit) continue
+        if (usedProjectIds.has(hit.project_id)) {
+          // 同一 MO 已被另一筆列使用，跳過並計數警告
+          dupSkipped++
+          continue
+        }
+        usedProjectIds.add(hit.project_id)
         newlyMatched[r.row_key] = hit.project_id
         matched++
         // 數量比對（出單表的數量可能是日期偏移，只在明顯是數字時比）
@@ -499,7 +508,8 @@ export default function GroupOrderExportPage() {
 
       const total = matched
       const prefilledNote = prefilled > 0 ? `（另從集單資料取回 ${prefilled} 筆）` : ''
-      if (total === 0) {
+      const dupNote = dupSkipped > 0 ? `⚠ 另有 ${dupSkipped} 筆因 ERP 製令重複使用被跳過（同一 MO 僅允許對應一筆集單列）` : ''
+      if (total === 0 && dupSkipped === 0) {
         // 診斷：取第一筆 erp_mo_lines 樣本 vs 第一筆集單列
         const sampleMo = moLines.find(l => /^MO[TM]/i.test(l.project_id ?? '')) ?? moLines[0]
         const sampleRow = needMatch[0]
@@ -510,8 +520,10 @@ export default function GroupOrderExportPage() {
         setAutoMatchMsg(`⚠ ERP 比對 ${needMatch.length} 筆無符合${prefilledNote}（需批號+品項均符合）｜${diagLines.join('｜')}`)
       } else {
         const mismatchNote = qtyMismatch > 0 ? `，其中 ${qtyMismatch} 筆數量不符（已標橘色警示）` : ''
-        const savedNote = ` 並已自動儲存`
-        setAutoMatchMsg(`✅ ERP 比對符合 ${total} 筆${prefilledNote}${mismatchNote}${savedNote}`)
+        const savedNote = total > 0 ? ` 並已自動儲存` : ''
+        const msgs = [`✅ ERP 比對符合 ${total} 筆${prefilledNote}${mismatchNote}${savedNote}`]
+        if (dupNote) msgs.push(dupNote)
+        setAutoMatchMsg(msgs.join('｜'))
       }
       setTimeout(() => setAutoMatchMsg(''), 12000)
     } catch (e) {
