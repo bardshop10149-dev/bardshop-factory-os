@@ -128,6 +128,25 @@ function buildErpRecord(row: GroupRow, moNumber: string, lineNo: number = 1): Re
   return rec
 }
 
+// 2026-06-18 前的出單表若在 packing 欄加入 code 後才儲存，會造成欄位錯位：
+// packing←quantity, quantity←delivery_date, delivery_date←plate_count, ...
+// 偵測方式：quantity 存了日期字串（如 "2026/7/1"）即判定為錯位，往回移一格還原。
+function fixPackingShift(row: GroupRow, sheetDate: string): GroupRow {
+  if (sheetDate >= '2026-06-18') return row
+  if (!row.quantity || !/^\d{4}[\/\-]/.test(row.quantity)) return row
+  return {
+    ...row,
+    packing:          '',
+    quantity:         row.packing         ?? '',
+    delivery_date:    row.quantity        ?? '',
+    plate_count:      row.delivery_date   ?? '',
+    upload_ro:        row.plate_count     ?? '',
+    order_status:     row.upload_ro       ?? '',
+    pm_note:          row.order_status    ?? '',
+    assigned_machine: row.pm_note         ?? '',
+  }
+}
+
 function FactoryBadge({ factory }: { factory: 'T' | 'C' | 'O' }) {
   const map: Record<string, string> = {
     T: 'bg-blue-900/40 text-blue-300',
@@ -159,6 +178,7 @@ export default function GroupOrderExportPage() {
   const [forceReimport, setForceReimport] = useState(false) // 強制重新匯入已匯入的列
   const [autoMatching, setAutoMatching] = useState(false)
   const [autoMatchMsg, setAutoMatchMsg] = useState('')
+  const [moQtyMismatch, setMoQtyMismatch] = useState<Set<string>>(new Set())
 
   // ==================== 多製品製令工作區 ====================
   const [workarea, setWorkarea] = useState<MoWorkarea>(defaultWorkarea)
@@ -287,9 +307,12 @@ export default function GroupOrderExportPage() {
       const allRows: GroupRow[] = []
       for (const sheet of (sheets ?? [])) {
         const sheetRows = Array.isArray(sheet.rows) ? (sheet.rows as GroupRow[]) : []
-        for (const row of sheetRows) {
-          if ((row.doc_type ?? '').includes('集單')) {
-            allRows.push({ ...row, sheet_date: sheet.sheet_date })
+        for (const rawRow of sheetRows) {
+          if ((rawRow.doc_type ?? '').includes('集單')) {
+            // 2026-06-18 前的資料若 quantity 欄存了日期字串，代表欄位因 packing 欄錯位，
+            // 需要把各欄往回移一格還原正確對應
+            const row = fixPackingShift({ ...rawRow, sheet_date: sheet.sheet_date }, sheet.sheet_date)
+            allRows.push(row)
           }
         }
       }
@@ -408,78 +431,64 @@ export default function GroupOrderExportPage() {
         return
       }
 
-      // 建比對 map（key = `來源訂單號|品項碼|數量整數`），優先完全符合，其次寬鬆（忽略數量）
-      // source_order 優先，其次 mbp_lot_no
-      const matchMap = new Map<string, string>()  // key → project_id
-      const loosMap  = new Map<string, string>()
-      // 也建只比對 SO 號的 map（最寬鬆，用來診斷）
-      const soOnlyMap = new Map<string, string[]>()
+      // 建比對 map：key = `來源訂單號|品項碼`（必須兩者都符合）
+      // 同時記錄 ERP 的數量，用來判斷是否數量不符
+      // source_order 優先，其次 mbp_lot_no；只接受 MOT/MOM 開頭的製令
+      const matchMap = new Map<string, { project_id: string; erp_qty: number }>()
       for (const line of moLines) {
-        const so  = (line.source_order ?? line.mbp_lot_no ?? '').trim()
+        const so   = (line.source_order ?? line.mbp_lot_no ?? '').trim()
         const part = (line.mbp_part ?? '').trim()
-        const qty  = String(Math.round(Number(line.order_qty ?? 0)))
-        if (!line.project_id) continue
-        // soOnlyMap 不限制 so/part 是否為空（用來診斷）
-        if (so) {
-          const arr = soOnlyMap.get(so) ?? []
-          // 只收 MOT / MOM 開頭的製令
-          const moId = line.project_id
-          if (/^MO[TM]/i.test(moId) && !arr.includes(moId)) arr.push(moId)
-          if (arr.length > 0) soOnlyMap.set(so, arr)
-        }
-        if (!so || !part) continue
-        // 只比對 MOT / MOM 開頭的製令
+        if (!so || !part || !line.project_id) continue
         if (!/^MO[TM]/i.test(line.project_id)) continue
-        const strictKey = `${so}|${part}|${qty}`
-        const looseKey  = `${so}|${part}`
-        const existing1 = matchMap.get(strictKey)
-        if (!existing1 || line.project_id > existing1) matchMap.set(strictKey, line.project_id)
-        const existing2 = loosMap.get(looseKey)
-        if (!existing2 || line.project_id > existing2) loosMap.set(looseKey, line.project_id)
+        const key = `${so}|${part}`
+        const existing = matchMap.get(key)
+        if (!existing || line.project_id > existing.project_id) {
+          matchMap.set(key, { project_id: line.project_id, erp_qty: Number(line.order_qty ?? 0) })
+        }
       }
 
       let matched = 0
-      let looseMatched = 0
-      let soOnlyMatched = 0
+      let qtyMismatch = 0
+      const newMismatchKeys = new Set<string>()
       setManualMo(prev => {
         const next = { ...prev }
         for (const r of needMatch) {
           if (next[r.row_key]) continue  // 已有值（步驟 0 已填）
-          const qty = String(Math.round(Number(r.quantity ?? 0)))
-          const strictKey = `${r.order_number.trim()}|${r.item_code.trim()}|${qty}`
-          const looseKey  = `${r.order_number.trim()}|${r.item_code.trim()}`
-          if (matchMap.has(strictKey)) {
-            next[r.row_key] = matchMap.get(strictKey)!
-            matched++
-          } else if (loosMap.has(looseKey)) {
-            next[r.row_key] = loosMap.get(looseKey)!
-            looseMatched++
-          } else if (soOnlyMap.has(r.order_number.trim())) {
-            // 最寬鬆：只要 SO 號對上就填入（品項碼和數量不管）
-            next[r.row_key] = soOnlyMap.get(r.order_number.trim())![0]
-            soOnlyMatched++
+          const key = `${r.order_number.trim()}|${r.item_code.trim()}`
+          const hit = matchMap.get(key)
+          if (!hit) continue
+          next[r.row_key] = hit.project_id
+          matched++
+          // 數量比對（出單表的數量可能是日期偏移，只在明顯是數字時比）
+          const rowQty = Math.round(Number(r.quantity ?? 0))
+          const erpQty = Math.round(hit.erp_qty)
+          if (!isNaN(rowQty) && rowQty > 0 && rowQty !== erpQty) {
+            newMismatchKeys.add(r.row_key)
+            qtyMismatch++
           }
         }
         return next
       })
+      setMoQtyMismatch(prev => {
+        const next = new Set(prev)
+        for (const k of newMismatchKeys) next.add(k)
+        return next
+      })
 
-      const total = matched + looseMatched + soOnlyMatched
+      const total = matched
       const prefilledNote = prefilled > 0 ? `（另從集單資料取回 ${prefilled} 筆）` : ''
       if (total === 0) {
         // 診斷：取第一筆 erp_mo_lines 樣本 vs 第一筆集單列
-        const sampleMo = moLines[0]
+        const sampleMo = moLines.find(l => /^MO[TM]/i.test(l.project_id ?? '')) ?? moLines[0]
         const sampleRow = needMatch[0]
         const diagLines = [
-          `ERP 樣本：so=${sampleMo?.source_order ?? '(null)'}  lot=${sampleMo?.mbp_lot_no ?? '(null)'}  part=${sampleMo?.mbp_part ?? '(null)'}  qty=${sampleMo?.order_qty ?? '(null)'}`,
-          `集單樣本：order=${sampleRow?.order_number}  item=${sampleRow?.item_code}  qty=${sampleRow?.quantity}`,
+          `ERP 樣本：so=${sampleMo?.source_order ?? '(null)'}  lot=${sampleMo?.mbp_lot_no ?? '(null)'}  part=${sampleMo?.mbp_part ?? '(null)'}`,
+          `集單樣本：order=${sampleRow?.order_number}  item=${sampleRow?.item_code}`,
         ]
-        setAutoMatchMsg(`⚠ ERP 比對 ${needMatch.length} 筆無符合${prefilledNote}（請確認已做最新製令同步）｜${diagLines.join('｜')}`)
+        setAutoMatchMsg(`⚠ ERP 比對 ${needMatch.length} 筆無符合${prefilledNote}（需批號+品項均符合）｜${diagLines.join('｜')}`)
       } else {
-        const parts: string[] = []
-        if (matched > 0) parts.push(`完全符合（SO+品項+數量）${matched} 筆`)
-        if (looseMatched > 0) parts.push(`忽略數量符合 ${looseMatched} 筆`)
-        if (soOnlyMatched > 0) parts.push(`僅 SO 號符合 ${soOnlyMatched} 筆`)
-        setAutoMatchMsg(`✅ ERP 比對 ${total} 筆${prefilledNote}：${parts.join('、')}`)
+        const mismatchNote = qtyMismatch > 0 ? `，其中 ${qtyMismatch} 筆數量不符（已標橘色警示）` : ''
+        setAutoMatchMsg(`✅ ERP 比對符合 ${total} 筆${prefilledNote}${mismatchNote}`)
       }
       setTimeout(() => setAutoMatchMsg(''), 12000)
     } catch (e) {
@@ -1132,9 +1141,14 @@ export default function GroupOrderExportPage() {
                         <td className="px-3 py-2 text-slate-400">{row.handler}</td>
                         <td className="px-3 py-2">
                           {currentMo ? (
-                            <span className={`font-mono text-xs ${
-                              isImported ? 'text-emerald-300' : 'text-teal-300'
-                            }`}>{currentMo}</span>
+                            <div>
+                              <span className={`font-mono text-xs ${
+                                isImported ? 'text-emerald-300' : 'text-teal-300'
+                              }`}>{currentMo}</span>
+                              {moQtyMismatch.has(row.row_key) && (
+                                <div className="text-[10px] text-amber-400 mt-0.5">⚠ 數量與 ERP 不符</div>
+                              )}
+                            </div>
                           ) : null}
                           {isMulti && <div className="text-[10px] text-violet-400 mt-0.5">多製品 L{lineNo}/{moCountMap.get(currentMo)}</div>}
                         </td>

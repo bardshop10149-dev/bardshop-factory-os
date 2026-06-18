@@ -157,6 +157,28 @@ function parseTSV(text: string): string[][] {
 // 2026-06-18 起出單表新增 PACKING 欄（cells[14]），舊日期無此欄，後面欄位需往前移一格
 const PACKING_COL_SINCE = '2026-06-18'
 
+// 若舊日期的 row 是在 packing 欄加入後才儲存（無 raw_text 可重新解析時），
+// quantity 欄會存到交付日字串 → 偵測並往回移一格還原
+function fixStoredPackingShift<T extends {
+  packing?: string; quantity?: string; delivery_date?: string
+  plate_count?: string; upload_ro?: string; order_status?: string
+  pm_note?: string; assigned_machine?: string
+}>(row: T, sheetDate: string): T {
+  if (sheetDate >= PACKING_COL_SINCE) return row
+  if (!row.quantity || !/^\d{4}[\/\-]/.test(row.quantity)) return row
+  return {
+    ...row,
+    packing:          '',
+    quantity:         row.packing         ?? '',
+    delivery_date:    row.quantity        ?? '',
+    plate_count:      row.delivery_date   ?? '',
+    upload_ro:        row.plate_count     ?? '',
+    order_status:     row.upload_ro       ?? '',
+    pm_note:          row.order_status    ?? '',
+    assigned_machine: row.pm_note         ?? '',
+  }
+}
+
 function parseSourceRows(text: string, sheetDate?: string): { rows: SourceRow[]; error: string } {
   const hasPackingCol = !sheetDate || sheetDate >= PACKING_COL_SINCE
   const rawRows = parseTSV(text.trim())
@@ -415,7 +437,8 @@ export default function DailyOrderSheetPage() {
 
         // 以 raw_text 重新解析確保所有廠別（T/C/O）都能正確還原，
         // 再以 row_key 對應，保留 DB 裡已有的 MO / 採購單 / 機台等富化資料
-        let finalRows: SheetRow[] = storedRows
+        // raw_text 無法取得時退用 storedRows，並對舊格式錯位資料做修正
+        let finalRows: SheetRow[] = storedRows.map(r => fixStoredPackingShift(r, date))
         if (rawTextStored.trim()) {
           const { rows: parsedRows } = parseSourceRows(rawTextStored, date)
           if (parsedRows.length > 0) {
