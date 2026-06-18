@@ -477,19 +477,27 @@ export default function GroupOrderExportPage() {
         }
       }
 
-      setManualMo(prev => ({ ...prev, ...newlyMatched }))
+      // 比對失敗的列（needMatch 中沒有命中的）→ 清除 state 和 DB 中的錯誤值
+      const toClear = needMatch.filter(r => !newlyMatched[r.row_key])
+
+      setManualMo(prev => {
+        const next = { ...prev, ...newlyMatched }
+        for (const r of toClear) delete next[r.row_key]
+        return next
+      })
       setMoQtyMismatch(prev => {
         const next = new Set(prev)
         for (const k of newMismatchKeys) next.add(k)
+        // 清除無比對結果列的 mismatch 標記
+        for (const r of toClear) next.delete(r.row_key)
         return next
       })
 
-      // 自動儲存新比對到的製令單號（step1 新增的）
-      if (matched > 0) {
+      // 儲存比對成功的 + 清除比對失敗的（只要 needMatch 有任何列都寫一次 DB）
+      if (needMatch.length > 0) {
         const byDate = new Map<string, Array<{ row_key: string; mo_number: string }>>()
         for (const r of needMatch) {
-          const mo = newlyMatched[r.row_key]
-          if (!mo) continue
+          const mo = newlyMatched[r.row_key] ?? ''  // 空字串 = 清除
           const arr = byDate.get(r.sheet_date) ?? []
           arr.push({ row_key: r.row_key, mo_number: mo })
           byDate.set(r.sheet_date, arr)
@@ -502,8 +510,9 @@ export default function GroupOrderExportPage() {
           })
         }
         setRows(prev => prev.map(r => {
-          const mo = newlyMatched[r.row_key]
-          return mo ? { ...r, mo_number: mo } : r
+          if (newlyMatched[r.row_key]) return { ...r, mo_number: newlyMatched[r.row_key] }
+          if (toClear.some(c => c.row_key === r.row_key)) return { ...r, mo_number: undefined }
+          return r
         }))
       }
 
@@ -521,8 +530,9 @@ export default function GroupOrderExportPage() {
         setAutoMatchMsg(`⚠ ERP 比對 ${needMatch.length} 筆無符合${prefilledNote}（需批號+品項均符合）｜${diagLines.join('｜')}`)
       } else {
         const mismatchNote = qtyMismatch > 0 ? `，其中 ${qtyMismatch} 筆數量不符（已標橘色警示）` : ''
-        const savedNote = total > 0 ? ` 並已自動儲存` : ''
-        const msgs = [`✅ ERP 比對符合 ${total} 筆${prefilledNote}${mismatchNote}${savedNote}`]
+        const clearNote = toClear.length > 0 ? `，已清除 ${toClear.length} 筆無效舊單號` : ''
+        const savedNote = ` 並已自動儲存`
+        const msgs = [`✅ ERP 比對符合 ${total} 筆${prefilledNote}${mismatchNote}${clearNote}${savedNote}`]
         if (dupNote) msgs.push(dupNote)
         setAutoMatchMsg(msgs.join('｜'))
       }
