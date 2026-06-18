@@ -154,7 +154,11 @@ function parseTSV(text: string): string[][] {
   return rows
 }
 
-function parseSourceRows(text: string): { rows: SourceRow[]; error: string } {
+// 2026-06-18 起出單表新增 PACKING 欄（cells[14]），舊日期無此欄，後面欄位需往前移一格
+const PACKING_COL_SINCE = '2026-06-18'
+
+function parseSourceRows(text: string, sheetDate?: string): { rows: SourceRow[]; error: string } {
+  const hasPackingCol = !sheetDate || sheetDate >= PACKING_COL_SINCE
   const rawRows = parseTSV(text.trim())
   if (rawRows.length === 0) return { rows: [], error: '未偵測到有效資料行' }
 
@@ -202,14 +206,15 @@ function parseSourceRows(text: string): { rows: SourceRow[]; error: string } {
       item_code: (cells[11] ?? '').trim(),
       item_name: (cells[12] ?? '').trim(),
       note: (cells[13] ?? '').trim(),
-      packing: (cells[14] ?? '').trim(),
-      quantity: (cells[15] ?? '').trim(),
-      delivery_date: (cells[16] ?? '').trim(),
-      plate_count: (cells[17] ?? '').trim(),
-      upload_ro: (cells[18] ?? '').trim(),
-      order_status: (cells[19] ?? '').trim(),
-      pm_note: (cells[20] ?? '').trim(),
-      assigned_machine: (cells[21] ?? '').trim(),
+      // PACKING 欄從 2026-06-18 起才有（舊資料往前移一格）
+      packing: hasPackingCol ? (cells[14] ?? '').trim() : '',
+      quantity: hasPackingCol ? (cells[15] ?? '').trim() : (cells[14] ?? '').trim(),
+      delivery_date: hasPackingCol ? (cells[16] ?? '').trim() : (cells[15] ?? '').trim(),
+      plate_count: hasPackingCol ? (cells[17] ?? '').trim() : (cells[16] ?? '').trim(),
+      upload_ro: hasPackingCol ? (cells[18] ?? '').trim() : (cells[17] ?? '').trim(),
+      order_status: hasPackingCol ? (cells[19] ?? '').trim() : (cells[18] ?? '').trim(),
+      pm_note: hasPackingCol ? (cells[20] ?? '').trim() : (cells[19] ?? '').trim(),
+      assigned_machine: hasPackingCol ? (cells[21] ?? '').trim() : (cells[20] ?? '').trim(),
     }
     if (row.order_number || row.item_code) parsed.push(row)
   }
@@ -412,7 +417,7 @@ export default function DailyOrderSheetPage() {
         // 再以 row_key 對應，保留 DB 裡已有的 MO / 採購單 / 機台等富化資料
         let finalRows: SheetRow[] = storedRows
         if (rawTextStored.trim()) {
-          const { rows: parsedRows } = parseSourceRows(rawTextStored)
+          const { rows: parsedRows } = parseSourceRows(rawTextStored, date)
           if (parsedRows.length > 0) {
             const enrichedMap = new Map(storedRows.map(r => [r.row_key, r]))
             finalRows = parsedRows.map(r => {
@@ -616,7 +621,7 @@ export default function DailyOrderSheetPage() {
   const handleParse = useCallback(() => {
     setParseError('')
     if (!rawText.trim()) { setParseError('請先貼上資料'); return }
-    const { rows, error } = parseSourceRows(rawText)
+    const { rows, error } = parseSourceRows(rawText, selectedDate)
     if (error) { setParseError(error); return }
 
     const sheetRowsNew: SheetRow[] = rows.map(r => ({
