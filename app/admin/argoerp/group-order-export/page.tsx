@@ -393,11 +393,20 @@ export default function GroupOrderExportPage() {
       // source_order 優先，其次 mbp_lot_no
       const matchMap = new Map<string, string>()  // key → project_id
       const loosMap  = new Map<string, string>()
+      // 也建只比對 SO 號的 map（最寬鬆，用來診斷）
+      const soOnlyMap = new Map<string, string[]>()
       for (const line of moLines) {
         const so  = (line.source_order ?? line.mbp_lot_no ?? '').trim()
         const part = (line.mbp_part ?? '').trim()
         const qty  = String(Math.round(Number(line.order_qty ?? 0)))
-        if (!so || !part || !line.project_id) continue
+        if (!line.project_id) continue
+        // soOnlyMap 不限制 so/part 是否為空（用來診斷）
+        if (so) {
+          const arr = soOnlyMap.get(so) ?? []
+          if (!arr.includes(line.project_id)) arr.push(line.project_id)
+          soOnlyMap.set(so, arr)
+        }
+        if (!so || !part) continue
         const strictKey = `${so}|${part}|${qty}`
         const looseKey  = `${so}|${part}`
         const existing1 = matchMap.get(strictKey)
@@ -408,6 +417,7 @@ export default function GroupOrderExportPage() {
 
       let matched = 0
       let looseMatched = 0
+      let soOnlyMatched = 0
       setManualMo(prev => {
         const next = { ...prev }
         for (const r of targetRows) {
@@ -422,21 +432,33 @@ export default function GroupOrderExportPage() {
           } else if (loosMap.has(looseKey)) {
             next[r.row_key] = loosMap.get(looseKey)!
             looseMatched++
+          } else if (soOnlyMap.has(r.order_number.trim())) {
+            // 最寬鬆：只要 SO 號對上就填入（品項碼和數量不管）
+            next[r.row_key] = soOnlyMap.get(r.order_number.trim())![0]
+            soOnlyMatched++
           }
         }
         return next
       })
 
-      const total = matched + looseMatched
+      const total = matched + looseMatched + soOnlyMatched
       if (total === 0) {
-        setAutoMatchMsg(`⚠ 共比對 ${targetRows.length} 筆，無符合項目（ERP 找到 ${moLines.length} 筆候選，但品項或數量不符）`)
+        // 診斷：取第一筆 erp_mo_lines 樣本 vs 第一筆集單列
+        const sampleMo = moLines[0]
+        const sampleRow = targetRows[0]
+        const diagLines = [
+          `ERP 樣本：so=${sampleMo?.source_order ?? '(null)'}  lot=${sampleMo?.mbp_lot_no ?? '(null)'}  part=${sampleMo?.mbp_part ?? '(null)'}  qty=${sampleMo?.order_qty ?? '(null)'}`,
+          `集單樣本：order=${sampleRow?.order_number}  item=${sampleRow?.item_code}  qty=${sampleRow?.quantity}`,
+        ]
+        setAutoMatchMsg(`⚠ 共比對 ${targetRows.length} 筆，無符合項目（${moLines.length} 筆候選）｜${diagLines.join('｜')}`)
       } else {
         const parts: string[] = []
-        if (matched > 0) parts.push(`完全符合 ${matched} 筆`)
-        if (looseMatched > 0) parts.push(`寬鬆符合（忽略數量）${looseMatched} 筆`)
+        if (matched > 0) parts.push(`完全符合（SO+品項+數量）${matched} 筆`)
+        if (looseMatched > 0) parts.push(`忽略數量符合 ${looseMatched} 筆`)
+        if (soOnlyMatched > 0) parts.push(`僅 SO 號符合 ${soOnlyMatched} 筆`)
         setAutoMatchMsg(`✅ 已比對 ${total} 筆：${parts.join('、')}（未覆蓋已匯入列）`)
       }
-      setTimeout(() => setAutoMatchMsg(''), 8000)
+      setTimeout(() => setAutoMatchMsg(''), 12000)
     } catch (e) {
       setAutoMatchMsg(`❌ 比對失敗：${e instanceof Error ? e.message : String(e)}`)
       setTimeout(() => setAutoMatchMsg(''), 8000)
