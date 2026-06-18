@@ -2104,7 +2104,9 @@ export default function DailyOrderSheetPage() {
     setEditFactoryIdx(null)
   }, [])
 
-  const factoryBadge = (f: 'T' | 'C' | 'O') => {
+  const factoryBadge = (f: 'T' | 'C' | 'O', docType?: string) => {
+    if ((docType ?? '').includes('集單'))
+      return <span className="px-1.5 py-0.5 rounded text-xs font-medium bg-violet-900/40 text-violet-300">集單</span>
     const m = { T: 'bg-blue-900/40 text-blue-300', C: 'bg-orange-900/40 text-orange-300', O: 'bg-purple-900/40 text-purple-300' }
     const l = { T: '台北', C: '常平', O: '委外' }
     return <span className={`px-1.5 py-0.5 rounded text-xs font-medium ${m[f]}`}>{l[f]}</span>
@@ -2687,7 +2689,7 @@ export default function DailyOrderSheetPage() {
                                   </div>
                                 ) : (
                                   <button onClick={() => setEditFactoryIdx(idx)}>
-                                    {factoryBadge(row.factory)}
+                                    {factoryBadge(row.factory, row.doc_type)}
                                   </button>
                                 )}
                               </div>
