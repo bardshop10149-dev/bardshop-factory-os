@@ -55,8 +55,8 @@ function truncateToBytes(text: string, maxBytes: number): string {
   return dec.decode(bytes.slice(0, cut))
 }
 
-// 建立送往 ERP IFAF028 介面的 payload record
-function buildErpRecord(row: GroupRow, moNumber: string): Record<string, string> {
+// 建立送往 ERP IFAF028 介面的 payload record（多製品製令：lineNo 為該 MO 下的第幾行，1-based）
+function buildErpRecord(row: GroupRow, moNumber: string, lineNo: number = 1): Record<string, string> {
   const today = new Date()
   const rec: Record<string, string> = {}
   rec['PROJECT_ID'] = moNumber
@@ -65,7 +65,7 @@ function buildErpRecord(row: GroupRow, moNumber: string): Record<string, string>
   rec['HOLD_STATUS'] = 'OPEN'
   rec['SEG_SEGMENT_NO_DEPARTMENT'] = 'M1100'
   rec['PJT_SEG_SEGMENT_NO'] = 'M1000'
-  rec['LINE_NO'] = '1'
+  rec['LINE_NO'] = String(lineNo)
   if (row.item_code) rec['MBP_PART'] = row.item_code
   rec['MBP_VER'] = '1'
   if (row.order_number) rec['MBP_LOT_NO'] = truncateToBytes(row.order_number, 30)
@@ -107,6 +107,7 @@ export default function GroupOrderExportPage() {
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set())
   const [filterStatus, setFilterStatus] = useState<'all' | 'pending' | 'imported'>('all')
   const [searchQuery, setSearchQuery] = useState('')
+  const [batchMoInput, setBatchMoInput] = useState('')   // 批量指定製令單號
 
   // ---- 從 Supabase 載入所有含「集單」的列 ----
   const loadRows = useCallback(async () => {
@@ -267,7 +268,19 @@ export default function GroupOrderExportPage() {
     setImporting(true)
     setSaveMsg('')
     try {
-      const payload = targets.map(r => buildErpRecord(r, (manualMo[r.row_key] ?? '').trim()))
+      // 按 MO 號分組，同一 MO 下的列依序指定 LINE_NO（多製品製令格式）
+      const moGroups = new Map<string, GroupRow[]>()
+      for (const r of targets) {
+        const mo = (manualMo[r.row_key] ?? '').trim()
+        if (!moGroups.has(mo)) moGroups.set(mo, [])
+        moGroups.get(mo)!.push(r)
+      }
+      const payload: Record<string, string>[] = []
+      for (const [mo, groupRows] of moGroups) {
+        groupRows.forEach((r, i) => {
+          payload.push(buildErpRecord(r, mo, i + 1))
+        })
+      }
       const response = await fetch('/api/argoerp', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -504,6 +517,39 @@ export default function GroupOrderExportPage() {
           )}
         </div>
 
+        {/* 批量指定製令單號（有勾選時才顯示）*/}
+        {selectedKeys.size > 0 && (
+          <div className="flex items-center gap-2 px-3 py-2.5 bg-violet-950/40 border border-violet-700/50 rounded-lg">
+            <span className="text-xs text-violet-300 font-semibold whitespace-nowrap">
+              批量指定製令（已選 {selectedKeys.size} 筆）：
+            </span>
+            <input
+              type="text"
+              value={batchMoInput}
+              onChange={e => setBatchMoInput(e.target.value)}
+              placeholder="輸入同一張多製品製令單號…"
+              className="flex-1 max-w-[220px] bg-slate-800 border border-violet-600/60 text-slate-200 text-xs rounded px-2 py-1.5 focus:outline-none focus:border-violet-400 font-mono placeholder-slate-500"
+            />
+            <button
+              onClick={() => {
+                const mo = batchMoInput.trim()
+                if (!mo) return
+                setManualMo(prev => {
+                  const next = { ...prev }
+                  for (const key of selectedKeys) next[key] = mo
+                  return next
+                })
+                setBatchMoInput('')
+              }}
+              disabled={!batchMoInput.trim()}
+              className="px-3 py-1.5 rounded bg-violet-700 hover:bg-violet-600 disabled:opacity-40 text-white text-xs font-semibold whitespace-nowrap"
+            >
+              套用至已選
+            </button>
+            <span className="text-xs text-slate-500">（同一 MO 下多筆 = 多製品製令，LINE_NO 自動遞增）</span>
+          </div>
+        )}
+
         {/* 表格 */}
         {loading ? (
           <div className="text-center py-20 text-slate-500 text-sm">載入中…</div>
@@ -532,64 +578,107 @@ export default function GroupOrderExportPage() {
                 </tr>
               </thead>
               <tbody>
-                {displayRows.map((row, idx) => {
-                  const isImported = row.mo_status === '已匯入製令'
-                  const hasMo = !!(manualMo[row.row_key] ?? '').trim()
-                  return (
-                    <tr
-                      key={row.row_key}
-                      className={`border-b border-slate-800/60 transition-colors ${
-                        isImported ? 'bg-emerald-950/20' : hasMo ? 'bg-cyan-950/10' : 'hover:bg-slate-900/50'
-                      }`}
-                    >
-                      <td className="px-2 py-2 text-center">
-                        <input
-                          type="checkbox"
-                          checked={selectedKeys.has(row.row_key)}
-                          onChange={() => setSelectedKeys(prev => {
-                            const next = new Set(prev)
-                            next.has(row.row_key) ? next.delete(row.row_key) : next.add(row.row_key)
-                            return next
-                          })}
-                          className="accent-cyan-500 cursor-pointer"
-                        />
-                      </td>
-                      <td className="px-3 py-2 text-slate-600">{idx + 1}</td>
-                      <td className="px-3 py-2 whitespace-nowrap"><div className="font-mono text-slate-500 text-[11px]">{row.sheet_date}</div><div className="font-mono text-cyan-300">{row.order_number}</div></td>
-                      <td className="px-3 py-2 text-slate-300">{row.customer}</td>
-                      <td className="px-3 py-2">
-                        <div className="text-purple-300 font-mono">{row.item_code}</div>
-                        {row.item_name && <div className="text-slate-400 mt-0.5">{row.item_name}</div>}
-                      </td>
-                      <td className="px-3 py-2 text-slate-400 max-w-[160px] truncate" title={row.note}>{row.note}</td>
-                      <td className="px-3 py-2 text-right text-white whitespace-nowrap">{row.quantity}</td>
-                      <td className="px-3 py-2 whitespace-nowrap text-slate-300">{row.delivery_date}</td>
-                      <td className="px-3 py-2 text-slate-400">{row.handler}</td>
-                      <td className="px-3 py-2">
-                        {isImported ? (
-                          <span className="font-mono text-emerald-400">{row.mo_number}</span>
-                        ) : (
+                {(() => {
+                  // 預先計算 MO 分組（只計有填製令且多筆的 MO）
+                  const moLineMap = new Map<string, number>() // row_key → LINE_NO within its MO
+                  const moCountMap = new Map<string, number>() // mo → total count
+                  for (const r of displayRows) {
+                    const mo = (manualMo[r.row_key] ?? r.mo_number ?? '').trim()
+                    if (!mo) continue
+                    moCountMap.set(mo, (moCountMap.get(mo) ?? 0) + 1)
+                  }
+                  const moLineCounter = new Map<string, number>()
+                  for (const r of displayRows) {
+                    const mo = (manualMo[r.row_key] ?? r.mo_number ?? '').trim()
+                    if (!mo || (moCountMap.get(mo) ?? 0) <= 1) continue
+                    const next = (moLineCounter.get(mo) ?? 0) + 1
+                    moLineCounter.set(mo, next)
+                    moLineMap.set(r.row_key, next)
+                  }
+                  // 為每個多筆 MO 指定顏色
+                  const moColorMap = new Map<string, string>()
+                  const colorPalette = ['border-l-violet-500', 'border-l-cyan-500', 'border-l-amber-500', 'border-l-rose-500', 'border-l-teal-500']
+                  let colorIdx = 0
+                  for (const mo of moCountMap.keys()) {
+                    if ((moCountMap.get(mo) ?? 0) > 1) {
+                      moColorMap.set(mo, colorPalette[colorIdx % colorPalette.length])
+                      colorIdx++
+                    }
+                  }
+
+                  return displayRows.map((row, idx) => {
+                    const isImported = row.mo_status === '已匯入製令'
+                    const hasMo = !!(manualMo[row.row_key] ?? '').trim()
+                    const currentMo = (manualMo[row.row_key] ?? row.mo_number ?? '').trim()
+                    const lineNo = moLineMap.get(row.row_key)
+                    const isMulti = lineNo !== undefined
+                    const borderColor = isMulti ? moColorMap.get(currentMo) ?? '' : ''
+                    return (
+                      <tr
+                        key={row.row_key}
+                        className={`border-b border-slate-800/60 transition-colors border-l-2 ${borderColor} ${
+                          isImported ? 'bg-emerald-950/20' : isMulti ? 'bg-violet-950/10' : hasMo ? 'bg-cyan-950/10' : 'hover:bg-slate-900/50'
+                        }`}
+                      >
+                        <td className="px-2 py-2 text-center">
                           <input
-                            type="text"
-                            value={manualMo[row.row_key] ?? ''}
-                            onChange={e => setManualMo(prev => ({ ...prev, [row.row_key]: e.target.value }))}
-                            placeholder="MOT…"
-                            className="w-full bg-slate-800 border border-slate-600 text-slate-200 text-xs rounded px-2 py-1 focus:outline-none focus:border-cyan-500 font-mono placeholder-slate-600"
+                            type="checkbox"
+                            checked={selectedKeys.has(row.row_key)}
+                            onChange={() => setSelectedKeys(prev => {
+                              const next = new Set(prev)
+                              next.has(row.row_key) ? next.delete(row.row_key) : next.add(row.row_key)
+                              return next
+                            })}
+                            className="accent-cyan-500 cursor-pointer"
                           />
-                        )}
-                      </td>
-                      <td className="px-3 py-2">
-                        {isImported ? (
-                          <span className="px-2 py-0.5 rounded text-xs bg-emerald-900/50 text-emerald-300 border border-emerald-700/50 whitespace-nowrap">已匯入製令</span>
-                        ) : hasMo ? (
-                          <span className="px-2 py-0.5 rounded text-xs bg-cyan-900/50 text-cyan-300 border border-cyan-700/50 whitespace-nowrap">待匯入</span>
-                        ) : (
-                          <span className="text-slate-600 text-xs">— —</span>
-                        )}
-                      </td>
-                    </tr>
-                  )
-                })}
+                        </td>
+                        <td className="px-3 py-2 text-slate-600">
+                          <div>{idx + 1}</div>
+                          {isMulti && (
+                            <div className="text-[10px] text-violet-400 font-mono mt-0.5">L{lineNo}</div>
+                          )}
+                        </td>
+                        <td className="px-3 py-2 whitespace-nowrap"><div className="font-mono text-slate-500 text-[11px]">{row.sheet_date}</div><div className="font-mono text-cyan-300">{row.order_number}</div></td>
+                        <td className="px-3 py-2 text-slate-300">{row.customer}</td>
+                        <td className="px-3 py-2">
+                          <div className="text-purple-300 font-mono">{row.item_code}</div>
+                          {row.item_name && <div className="text-slate-400 mt-0.5">{row.item_name}</div>}
+                        </td>
+                        <td className="px-3 py-2 text-slate-400 max-w-[160px] truncate" title={row.note}>{row.note}</td>
+                        <td className="px-3 py-2 text-right text-white whitespace-nowrap">{row.quantity}</td>
+                        <td className="px-3 py-2 whitespace-nowrap text-slate-300">{row.delivery_date}</td>
+                        <td className="px-3 py-2 text-slate-400">{row.handler}</td>
+                        <td className="px-3 py-2">
+                          {isImported ? (
+                            <div>
+                              <span className="font-mono text-emerald-400">{row.mo_number}</span>
+                              {isMulti && <div className="text-[10px] text-violet-400 mt-0.5">多製品 L{lineNo}/{moCountMap.get(currentMo)}</div>}
+                            </div>
+                          ) : (
+                            <input
+                              type="text"
+                              value={manualMo[row.row_key] ?? ''}
+                              onChange={e => setManualMo(prev => ({ ...prev, [row.row_key]: e.target.value }))}
+                              placeholder="MOT…"
+                              className="w-full bg-slate-800 border border-slate-600 text-slate-200 text-xs rounded px-2 py-1 focus:outline-none focus:border-cyan-500 font-mono placeholder-slate-600"
+                            />
+                          )}
+                        </td>
+                        <td className="px-3 py-2">
+                          {isImported ? (
+                            <span className="px-2 py-0.5 rounded text-xs bg-emerald-900/50 text-emerald-300 border border-emerald-700/50 whitespace-nowrap">已匯入製令</span>
+                          ) : isMulti ? (
+                            <span className="px-2 py-0.5 rounded text-xs bg-violet-900/50 text-violet-300 border border-violet-700/50 whitespace-nowrap">多製品 待匯入</span>
+                          ) : hasMo ? (
+                            <span className="px-2 py-0.5 rounded text-xs bg-cyan-900/50 text-cyan-300 border border-cyan-700/50 whitespace-nowrap">待匯入</span>
+                          ) : (
+                            <span className="text-slate-600 text-xs">— —</span>
+                          )}
+                        </td>
+                      </tr>
+                    )
+                  })
+                })()}
               </tbody>
             </table>
           </div>
