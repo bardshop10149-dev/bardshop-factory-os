@@ -754,7 +754,7 @@ export default function GroupOrderExportPage() {
           <div>
             <h1 className="text-xl font-bold text-white">集合單 ➜ 製令工單</h1>
             <p className="text-xs text-slate-400 mt-0.5">
-              顯示所有出單表中單據種類含「集單」的項目，不限日期。手動填入製令單號後可匯入 ERP。
+              顯示所有出單表中單據種類含「集單」的項目，不限日期。按「自動比對製令」填入製令單號後可匯入 ERP。
             </p>
           </div>
           <div className="flex flex-wrap gap-2 items-center">
@@ -1028,39 +1028,6 @@ export default function GroupOrderExportPage() {
           )}
         </div>
 
-        {/* 批量指定製令單號（有勾選時才顯示）*/}
-        {selectedKeys.size > 0 && (
-          <div className="flex items-center gap-2 px-3 py-2.5 bg-violet-950/40 border border-violet-700/50 rounded-lg">
-            <span className="text-xs text-violet-300 font-semibold whitespace-nowrap">
-              批量指定製令（已選 {selectedKeys.size} 筆）：
-            </span>
-            <input
-              type="text"
-              value={batchMoInput}
-              onChange={e => setBatchMoInput(e.target.value)}
-              placeholder="輸入同一張多製品製令單號…"
-              className="flex-1 max-w-[220px] bg-slate-800 border border-violet-600/60 text-slate-200 text-xs rounded px-2 py-1.5 focus:outline-none focus:border-violet-400 font-mono placeholder-slate-500"
-            />
-            <button
-              onClick={() => {
-                const mo = batchMoInput.trim()
-                if (!mo) return
-                setManualMo(prev => {
-                  const next = { ...prev }
-                  for (const key of selectedKeys) next[key] = mo
-                  return next
-                })
-                setBatchMoInput('')
-              }}
-              disabled={!batchMoInput.trim()}
-              className="px-3 py-1.5 rounded bg-violet-700 hover:bg-violet-600 disabled:opacity-40 text-white text-xs font-semibold whitespace-nowrap"
-            >
-              套用至已選
-            </button>
-            <span className="text-xs text-slate-500">（同一 MO 下多筆 = 多製品製令，LINE_NO 自動遞增）</span>
-          </div>
-        )}
-
         {/* 表格 */}
         {loading ? (
           <div className="text-center py-20 text-slate-500 text-sm">載入中…</div>
@@ -1084,7 +1051,7 @@ export default function GroupOrderExportPage() {
                   <th className="px-3 py-2 border-b border-slate-800 text-right">數量</th>
                   <th className="px-3 py-2 border-b border-slate-800 whitespace-nowrap">交付日</th>
                   <th className="px-3 py-2 border-b border-slate-800">承辦人</th>
-                  <th className="px-3 py-2 border-b border-slate-800 text-cyan-300 min-w-[160px]">製令單號（手動填入）</th>
+                  <th className="px-3 py-2 border-b border-slate-800 text-teal-300 min-w-[160px]">製令單號（自動比對）</th>
                   <th className="px-3 py-2 border-b border-slate-800 w-24">狀態</th>
                 </tr>
               </thead>
@@ -1160,17 +1127,13 @@ export default function GroupOrderExportPage() {
                         <td className="px-3 py-2 whitespace-nowrap text-slate-300">{row.delivery_date}</td>
                         <td className="px-3 py-2 text-slate-400">{row.handler}</td>
                         <td className="px-3 py-2">
-                          <input
-                            type="text"
-                            value={manualMo[row.row_key] ?? (isImported ? (row.mo_number ?? '') : '')}
-                            onChange={e => setManualMo(prev => ({ ...prev, [row.row_key]: e.target.value }))}
-                            placeholder="MOT…"
-                            className={`w-full border text-xs rounded px-2 py-1 focus:outline-none font-mono placeholder-slate-600 ${
-                              isImported
-                                ? 'bg-emerald-950/30 border-emerald-700/50 text-emerald-300 focus:border-emerald-400'
-                                : 'bg-slate-800 border-slate-600 text-slate-200 focus:border-cyan-500'
-                            }`}
-                          />
+                          {currentMo ? (
+                            <span className={`font-mono text-xs ${
+                              isImported ? 'text-emerald-300' : 'text-teal-300'
+                            }`}>{currentMo}</span>
+                          ) : (
+                            <span className="text-slate-600 text-xs">— 未比對 —</span>
+                          )}
                           {isMulti && <div className="text-[10px] text-violet-400 mt-0.5">多製品 L{lineNo}/{moCountMap.get(currentMo)}</div>}
                         </td>
                         <td className="px-3 py-2">
@@ -1195,7 +1158,7 @@ export default function GroupOrderExportPage() {
 
         {/* 說明 */}
         <div className="text-xs text-slate-600 space-y-1 pt-2">
-          <p>・「儲存製令單號」：僅將手動輸入的製令單號存回出單表資料庫，不呼叫 ERP API（適合補登已在 ERP 建立的製令）。</p>
+          <p>・「儲存製令單號」：將自動比對結果存回出單表資料庫，不呼叫 ERP API（適合補登已在 ERP 建立的製令）。</p>
           <p>・「匯入 ERP 製令工單」：呼叫 IFAF028 介面將製令送入 ERP，成功後自動更新出單表狀態為「已匯入製令」。</p>
           <p>・「套用製令格式列印」：沿用製令列印版型；有勾選時只列印勾選列，未勾選時列印目前篩選結果。</p>
           <p>・若僅勾選部分列，操作只影響勾選的列；未勾選時則操作全部顯示中的列。</p>
