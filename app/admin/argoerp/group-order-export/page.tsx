@@ -173,10 +173,10 @@ export default function GroupOrderExportPage() {
 
   const waRemoveLine = (id: string) => setWorkarea(prev => ({ ...prev, lines: prev.lines.filter(l => l.id !== id) }))
 
-  // 從勾選集單列帶入工作區表身
+  // 從勾選集單列帶入工作區表身（包含已匯入的列）
   const waImportFromSelected = () => {
-    const targets = displayRows.filter(r => selectedKeys.has(r.row_key) && r.mo_status !== '已匯入製令')
-    if (targets.length === 0) { alert('請先勾選集單列（未匯入的）'); return }
+    const targets = displayRows.filter(r => selectedKeys.has(r.row_key))
+    if (targets.length === 0) { alert('請先勾選集單列'); return }
     const newLines: MoDetailLine[] = targets.map(r => ({
       id: Math.random().toString(36).slice(2),
       item_code: r.item_code ?? '',
