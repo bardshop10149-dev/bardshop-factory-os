@@ -32,6 +32,7 @@ interface SourceRow {
   item_code: string
   item_name: string
   note: string
+  packing: string
   quantity: string
   delivery_date: string
   plate_count: string
@@ -201,13 +202,14 @@ function parseSourceRows(text: string): { rows: SourceRow[]; error: string } {
       item_code: (cells[11] ?? '').trim(),
       item_name: (cells[12] ?? '').trim(),
       note: (cells[13] ?? '').trim(),
-      quantity: (cells[14] ?? '').trim(),
-      delivery_date: (cells[15] ?? '').trim(),
-      plate_count: (cells[16] ?? '').trim(),
-      upload_ro: (cells[17] ?? '').trim(),
-      order_status: (cells[18] ?? '').trim(),
-      pm_note: (cells[19] ?? '').trim(),
-      assigned_machine: (cells[20] ?? '').trim(),
+      packing: (cells[14] ?? '').trim(),
+      quantity: (cells[15] ?? '').trim(),
+      delivery_date: (cells[16] ?? '').trim(),
+      plate_count: (cells[17] ?? '').trim(),
+      upload_ro: (cells[18] ?? '').trim(),
+      order_status: (cells[19] ?? '').trim(),
+      pm_note: (cells[20] ?? '').trim(),
+      assigned_machine: (cells[21] ?? '').trim(),
     }
     if (row.order_number || row.item_code) parsed.push(row)
   }
@@ -328,7 +330,7 @@ export default function DailyOrderSheetPage() {
   const [soModalId, setSoModalId] = useState<string | null>(null)
   const [poModalId, setPoModalId] = useState<string | null>(null)
   const [searchQuery, setSearchQuery] = useState('')
-  const [activeFactory, setActiveFactory] = useState<'ALL' | 'T' | 'C' | 'O'>('ALL')
+  const [activeFactory, setActiveFactory] = useState<'ALL' | 'T' | 'C' | 'O' | 'G'>('ALL')
   const [globalSearch, setGlobalSearch] = useState('')
   const [globalSearching, setGlobalSearching] = useState(false)
   const [globalResults, setGlobalResults] = useState<{ sheet_date: string; rows: SheetRow[] }[] | null>(null)
@@ -2113,8 +2115,13 @@ export default function DailyOrderSheetPage() {
 
   // 與表格中相同的篩選條件，確保全選只選當前顯示的列
   const visibleRows = sheetRows.filter(r => {
-    if ((r.doc_type ?? '').includes('集單')) return false
-    if (activeFactory !== 'ALL' && r.factory !== activeFactory) return false
+    const isJidan = (r.doc_type ?? '').includes('集單')
+    if (activeFactory === 'G') {
+      if (!isJidan) return false
+    } else if (activeFactory !== 'ALL') {
+      if (isJidan) return false
+      if (r.factory !== activeFactory) return false
+    }
     if (!searchQuery.trim()) return true
     const q = searchQuery.trim().toLowerCase()
     return (r.order_number?.toLowerCase().includes(q)) || (r.mo_number?.toLowerCase().includes(q)) || (r.po_number?.toLowerCase().includes(q))
@@ -2500,7 +2507,7 @@ export default function DailyOrderSheetPage() {
                     ／尚未轉單：<span className="text-slate-400">{sheetRows.filter(r => !r.mo_status).length}</span>
                     {sheetRows.some(r => (r.doc_type ?? '').includes('集單')) && (
                       <span className="ml-2 text-violet-400">
-                        ／集單隱藏：{sheetRows.filter(r => (r.doc_type ?? '').includes('集單')).length}（<a href="/admin/argoerp/group-order-export" className="underline hover:text-violet-200">前往集合單頁面</a>）
+                        ／集單：{sheetRows.filter(r => (r.doc_type ?? '').includes('集單')).length}
                       </span>
                     )}
                   </span>
@@ -2519,20 +2526,26 @@ export default function DailyOrderSheetPage() {
             {/* 廠別快速標籤 */}
             {!loading && sheetRows.length > 0 && (
               <div className="mb-3 flex items-center gap-1 flex-wrap">
-                {(['ALL', 'T', 'C', 'O'] as const).map(f => {
-                  const count = f === 'ALL' ? sheetRows.length : sheetRows.filter(r => r.factory === f).length
+                {(['ALL', 'T', 'C', 'O', 'G'] as const).map(f => {
+                  const count = f === 'ALL'
+                    ? sheetRows.length
+                    : f === 'G'
+                    ? sheetRows.filter(r => (r.doc_type ?? '').includes('集單')).length
+                    : sheetRows.filter(r => r.factory === f && !(r.doc_type ?? '').includes('集單')).length
                   if (f !== 'ALL' && count === 0) return null
-                  const label = f === 'ALL' ? '全部' : f === 'T' ? '四川廠' : f === 'C' ? '常平廠' : '委外'
+                  const label = f === 'ALL' ? '全部' : f === 'T' ? '台北' : f === 'C' ? '常平' : f === 'O' ? '委外' : '集單'
                   const colors = f === 'ALL'
                     ? 'bg-slate-700 text-slate-200 border-slate-600'
                     : f === 'T' ? 'bg-cyan-900/60 text-cyan-200 border-cyan-700/60'
                     : f === 'C' ? 'bg-orange-900/60 text-orange-200 border-orange-700/60'
-                    : 'bg-purple-900/60 text-purple-200 border-purple-700/60'
+                    : f === 'O' ? 'bg-purple-900/60 text-purple-200 border-purple-700/60'
+                    : 'bg-violet-900/60 text-violet-200 border-violet-700/60'
                   const activeColors = f === 'ALL'
                     ? 'bg-slate-500 text-white border-slate-400'
                     : f === 'T' ? 'bg-cyan-700 text-white border-cyan-500'
                     : f === 'C' ? 'bg-orange-700 text-white border-orange-500'
-                    : 'bg-purple-700 text-white border-purple-500'
+                    : f === 'O' ? 'bg-purple-700 text-white border-purple-500'
+                    : 'bg-violet-700 text-white border-violet-500'
                   return (
                     <button
                       key={f}
