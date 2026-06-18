@@ -351,11 +351,30 @@ export default function GroupOrderExportPage() {
     setAutoMatching(true)
     setAutoMatchMsg('')
     try {
-      // 收集所有待比對的銷售單號（order_number）
-      const targetRows = rows.filter(r => r.order_number?.trim())
-      if (targetRows.length === 0) { setAutoMatchMsg('ℹ️ 無可比對的集單列'); return }
+      // 步驟 0：先把 rows 裡已有 mo_number 的直接填回 manualMo（不需要查 ERP）
+      let prefilled = 0
+      setManualMo(prev => {
+        const next = { ...prev }
+        for (const r of rows) {
+          if (r.mo_number && !next[r.row_key]) {
+            next[r.row_key] = r.mo_number
+            prefilled++
+          }
+        }
+        return next
+      })
 
-      const orderNumbers = [...new Set(targetRows.map(r => r.order_number.trim()))]
+      // 步驟 1：收集仍無製令號的列，嘗試從 erp_mo_lines 比對
+      const needMatch = rows.filter(r => r.order_number?.trim() && !r.mo_number)
+      if (needMatch.length === 0) {
+        setAutoMatchMsg(prefilled > 0
+          ? `✅ 已從集單資料填入 ${prefilled} 筆製令單號（無需查 ERP）`
+          : 'ℹ️ 所有列都已有製令單號')
+        setTimeout(() => setAutoMatchMsg(''), 6000)
+        return
+      }
+
+      const orderNumbers = [...new Set(needMatch.map(r => r.order_number.trim()))]
 
       // 同時查兩個欄位：
       //   source_order = PJT_PROJECT_ID_MO_SO（我們送 IFAF028 時填的 SO 號）
@@ -382,10 +401,10 @@ export default function GroupOrderExportPage() {
 
       if (moLines.length === 0) {
         const diagMsg = totalInTable === 0
-          ? '⚠ erp_mo_lines 尚無資料（請先到「ERP 同步」頁執行製令同步）'
-          : `⚠ 共比對 ${targetRows.length} 筆，無符合項目（erp_mo_lines 共 ${totalInTable} 筆，source_order 與 mbp_lot_no 均無符合）`
+          ? `⚠ erp_mo_lines 尚無資料（請先到「ERP 同步」頁執行製令同步）${prefilled > 0 ? `（已從集單資料填入 ${prefilled} 筆）` : ''}`
+          : `⚠ ERP 同步區 ${totalInTable} 筆製令中，無 source_order 或 mbp_lot_no 符合集單訂單號（請確認已執行最新一次製令同步）${prefilled > 0 ? `，已從集單資料填入 ${prefilled} 筆` : ''}`
         setAutoMatchMsg(diagMsg)
-        setTimeout(() => setAutoMatchMsg(''), 8000)
+        setTimeout(() => setAutoMatchMsg(''), 10000)
         return
       }
 
@@ -420,9 +439,8 @@ export default function GroupOrderExportPage() {
       let soOnlyMatched = 0
       setManualMo(prev => {
         const next = { ...prev }
-        for (const r of targetRows) {
-          // 跳過已匯入製令且已有製令號的列（不覆蓋）
-          if (r.mo_status === '已匯入製令' && next[r.row_key]) continue
+        for (const r of needMatch) {
+          if (next[r.row_key]) continue  // 已有值（步驟 0 已填）
           const qty = String(Math.round(Number(r.quantity ?? 0)))
           const strictKey = `${r.order_number.trim()}|${r.item_code.trim()}|${qty}`
           const looseKey  = `${r.order_number.trim()}|${r.item_code.trim()}`
@@ -442,21 +460,22 @@ export default function GroupOrderExportPage() {
       })
 
       const total = matched + looseMatched + soOnlyMatched
+      const prefilledNote = prefilled > 0 ? `（另從集單資料取回 ${prefilled} 筆）` : ''
       if (total === 0) {
         // 診斷：取第一筆 erp_mo_lines 樣本 vs 第一筆集單列
         const sampleMo = moLines[0]
-        const sampleRow = targetRows[0]
+        const sampleRow = needMatch[0]
         const diagLines = [
           `ERP 樣本：so=${sampleMo?.source_order ?? '(null)'}  lot=${sampleMo?.mbp_lot_no ?? '(null)'}  part=${sampleMo?.mbp_part ?? '(null)'}  qty=${sampleMo?.order_qty ?? '(null)'}`,
           `集單樣本：order=${sampleRow?.order_number}  item=${sampleRow?.item_code}  qty=${sampleRow?.quantity}`,
         ]
-        setAutoMatchMsg(`⚠ 共比對 ${targetRows.length} 筆，無符合項目（${moLines.length} 筆候選）｜${diagLines.join('｜')}`)
+        setAutoMatchMsg(`⚠ ERP 比對 ${needMatch.length} 筆無符合${prefilledNote}（請確認已做最新製令同步）｜${diagLines.join('｜')}`)
       } else {
         const parts: string[] = []
         if (matched > 0) parts.push(`完全符合（SO+品項+數量）${matched} 筆`)
         if (looseMatched > 0) parts.push(`忽略數量符合 ${looseMatched} 筆`)
         if (soOnlyMatched > 0) parts.push(`僅 SO 號符合 ${soOnlyMatched} 筆`)
-        setAutoMatchMsg(`✅ 已比對 ${total} 筆：${parts.join('、')}（未覆蓋已匯入列）`)
+        setAutoMatchMsg(`✅ ERP 比對 ${total} 筆${prefilledNote}：${parts.join('、')}`)
       }
       setTimeout(() => setAutoMatchMsg(''), 12000)
     } catch (e) {
