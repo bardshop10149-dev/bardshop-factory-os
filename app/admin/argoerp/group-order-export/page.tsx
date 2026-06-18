@@ -357,37 +357,53 @@ export default function GroupOrderExportPage() {
 
       const orderNumbers = [...new Set(targetRows.map(r => r.order_number.trim()))]
 
-      // 查 erp_mo_lines：批號（mbp_lot_no）= 銷售單號
-      const { data: moLines, error } = await supabase
-        .from('erp_mo_lines')
-        .select('project_id, mbp_lot_no, mbp_part, order_qty')
-        .in('mbp_lot_no', orderNumbers)
-      if (error) throw error
+      // 同時查兩個欄位：
+      //   source_order = PJT_PROJECT_ID_MO_SO（我們送 IFAF028 時填的 SO 號）
+      //   mbp_lot_no   = MBP_LOT_NO（批號，也會填 SO 號）
+      const [res1, res2, resCount] = await Promise.all([
+        supabase.from('erp_mo_lines')
+          .select('project_id, source_order, mbp_lot_no, mbp_part, order_qty')
+          .in('source_order', orderNumbers),
+        supabase.from('erp_mo_lines')
+          .select('project_id, source_order, mbp_lot_no, mbp_part, order_qty')
+          .in('mbp_lot_no', orderNumbers),
+        supabase.from('erp_mo_lines').select('project_id', { count: 'exact', head: true }),
+      ])
+      if (res1.error) throw res1.error
+      if (res2.error) throw res2.error
 
-      if (!moLines || moLines.length === 0) {
-        setAutoMatchMsg('⚠ ERP 同步區找不到符合的製令（確認已同步 ERP 資料）')
-        setTimeout(() => setAutoMatchMsg(''), 6000)
+      const totalInTable = resCount.count ?? 0
+      const moLines = [
+        ...(res1.data ?? []),
+        ...(res2.data ?? []).filter(r2 =>
+          !(res1.data ?? []).some(r1 => r1.project_id === r2.project_id)
+        ),
+      ]
+
+      if (moLines.length === 0) {
+        const diagMsg = totalInTable === 0
+          ? '⚠ erp_mo_lines 尚無資料（請先到「ERP 同步」頁執行製令同步）'
+          : `⚠ 共比對 ${targetRows.length} 筆，無符合項目（erp_mo_lines 共 ${totalInTable} 筆，source_order 與 mbp_lot_no 均無符合）`
+        setAutoMatchMsg(diagMsg)
+        setTimeout(() => setAutoMatchMsg(''), 8000)
         return
       }
 
-      // 建比對 map：key = `批號|品項碼|數量`  value = project_id
-      // 若同 key 對應多筆（不同 MO），保留最新（最大 project_id 字串序）
-      const matchMap = new Map<string, string>()
+      // 建比對 map（key = `來源訂單號|品項碼|數量整數`），優先完全符合，其次寬鬆（忽略數量）
+      // source_order 優先，其次 mbp_lot_no
+      const matchMap = new Map<string, string>()  // key → project_id
+      const loosMap  = new Map<string, string>()
       for (const line of moLines) {
-        if (!line.mbp_lot_no || !line.mbp_part || !line.project_id) continue
-        const qty = String(Math.round(Number(line.order_qty ?? 0)))
-        const key = `${line.mbp_lot_no.trim()}|${line.mbp_part.trim()}|${qty}`
-        const existing = matchMap.get(key)
-        if (!existing || line.project_id > existing) matchMap.set(key, line.project_id)
-      }
-
-      // 也建一個寬鬆 map（只比對 批號+品項，忽略數量），備用
-      const loosMap = new Map<string, string>()
-      for (const line of moLines) {
-        if (!line.mbp_lot_no || !line.mbp_part || !line.project_id) continue
-        const key = `${line.mbp_lot_no.trim()}|${line.mbp_part.trim()}`
-        const existing = loosMap.get(key)
-        if (!existing || line.project_id > existing) loosMap.set(key, line.project_id)
+        const so  = (line.source_order ?? line.mbp_lot_no ?? '').trim()
+        const part = (line.mbp_part ?? '').trim()
+        const qty  = String(Math.round(Number(line.order_qty ?? 0)))
+        if (!so || !part || !line.project_id) continue
+        const strictKey = `${so}|${part}|${qty}`
+        const looseKey  = `${so}|${part}`
+        const existing1 = matchMap.get(strictKey)
+        if (!existing1 || line.project_id > existing1) matchMap.set(strictKey, line.project_id)
+        const existing2 = loosMap.get(looseKey)
+        if (!existing2 || line.project_id > existing2) loosMap.set(looseKey, line.project_id)
       }
 
       let matched = 0
@@ -413,7 +429,7 @@ export default function GroupOrderExportPage() {
 
       const total = matched + looseMatched
       if (total === 0) {
-        setAutoMatchMsg(`⚠ 共比對 ${targetRows.length} 筆，無符合項目（批號+品項+數量均不符）`)
+        setAutoMatchMsg(`⚠ 共比對 ${targetRows.length} 筆，無符合項目（ERP 找到 ${moLines.length} 筆候選，但品項或數量不符）`)
       } else {
         const parts: string[] = []
         if (matched > 0) parts.push(`完全符合 ${matched} 筆`)
