@@ -134,16 +134,16 @@ function buildErpRecord(row: GroupRow, moNumber: string, lineNo: number = 1): Re
 function fixPackingShift(row: GroupRow, sheetDate: string): GroupRow {
   if (sheetDate >= '2026-06-18') return row
   if (!row.quantity || !/^\d{4}[\/\-]/.test(row.quantity)) return row
+  // packing 欄位存在於 JSONB 資料中但不在 TypeScript 型別，用 unknown 轉型取值
+  const raw = row as unknown as Record<string, string>
   return {
     ...row,
-    packing:          '',
-    quantity:         row.packing         ?? '',
+    quantity:         raw['packing']      ?? '',
     delivery_date:    row.quantity        ?? '',
     plate_count:      row.delivery_date   ?? '',
     upload_ro:        row.plate_count     ?? '',
     order_status:     row.upload_ro       ?? '',
     pm_note:          row.order_status    ?? '',
-    assigned_machine: row.pm_note         ?? '',
   }
 }
 
