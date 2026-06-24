@@ -104,7 +104,15 @@ export async function POST(request: NextRequest) {
     const supabase = getSupabaseAdminClient()
     const { data, error } = await supabase
       .from(TABLE)
-      .upsert({ sheet_date, raw_text, rows, updated_at: new Date().toISOString() }, { onConflict: 'sheet_date' })
+      .upsert({
+        sheet_date,
+        raw_text,
+        rows,
+        updated_at: new Date().toISOString(),
+        updated_by: guard.member.email,
+        updated_by_name: guard.member.realName ?? guard.member.email,
+        last_action: 'save',
+      }, { onConflict: 'sheet_date' })
       .select()
       .single()
     if (error) throw error
@@ -180,7 +188,13 @@ export async function PATCH(request: NextRequest) {
 
     const { error: updateError } = await supabase
       .from(TABLE)
-      .update({ rows: updatedRows, updated_at: new Date().toISOString() })
+      .update({
+        rows: updatedRows,
+        updated_at: new Date().toISOString(),
+        updated_by: guard.member.email,
+        updated_by_name: guard.member.realName ?? guard.member.email,
+        last_action: 'patch',
+      })
       .eq('sheet_date', sheet_date)
     if (updateError) throw updateError
 

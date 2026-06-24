@@ -575,7 +575,9 @@ export default function DailyOrderSheetPage() {
             }).catch(() => {})
           }
 
-          setMoMachines(map)
+          // 用 merge 方式更新：DB 值填補空缺，但保留使用者已手動改過的選擇
+          // { ...map, ...prev }：prev（使用者最新狀態）覆蓋 map（DB 值）
+          setMoMachines(prev => ({ ...map, ...prev }))
         }
       })
       .catch(() => {})
