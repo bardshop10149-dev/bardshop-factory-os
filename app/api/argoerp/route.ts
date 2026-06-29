@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 
 import { formatSupabaseAdminError, getSupabaseAdminClient } from '../../../lib/supabaseAdmin'
 import { guardAuth, guardPermission } from '@/lib/requireAuth'
+import { reconcileTable } from '@/lib/erpSyncReconcile'
 
 const API_BASE = process.env.ARGOERP_API_BASE!
 const USERNAME = process.env.ARGOERP_USERNAME!
@@ -1925,17 +1926,19 @@ export async function POST(request: NextRequest) {
         })
         .filter((r): r is NonNullable<typeof r> => Boolean(r))
 
+      // 增量比對更新（取代整批 delete+insert）：只寫變動列、刪除消失列、記 log。
+      // erp_customers 已有 partner_id unique index（20260511_erp_customers.sql），可直接 upsert。
+      let recon
       try {
         const supabaseAdmin = getSupabaseAdminClient()
-        const { error: clearError } = await supabaseAdmin.from('erp_customers').delete().neq('id', 0)
-        if (clearError) throw clearError
-
-        const batchSize = 500
-        for (let i = 0; i < customerRows.length; i += batchSize) {
-          const chunk = customerRows.slice(i, i + batchSize)
-          const { error: insertError } = await supabaseAdmin.from('erp_customers').insert(chunk)
-          if (insertError) throw insertError
-        }
+        recon = await reconcileTable(supabaseAdmin, {
+          table: 'erp_customers',
+          keyCols: ['partner_id'],
+          onConflict: 'partner_id',
+          compareCols: ['cname', 'full_cname'],
+          rows: customerRows,
+          action: 'sync_customer',
+        })
       } catch (err) {
         const message = err instanceof Error ? formatSupabaseAdminError(err.message) : '寫入 erp_customers 失敗'
         return NextResponse.json({ status: 'error', error: message }, { status: 500 })
@@ -1945,6 +1948,10 @@ export async function POST(request: NextRequest) {
         status: 'ok',
         syncedCount: customerRows.length,
         skippedCount: queryRows.length - customerRows.length,
+        inserted: recon.inserted,
+        updated: recon.updated,
+        deleted: recon.deleted,
+        unchanged: recon.unchanged,
       })
     }
 
