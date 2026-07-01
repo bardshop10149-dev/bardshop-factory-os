@@ -110,16 +110,19 @@ export default function UploadPage() {
         addLog('📖 讀取檔案：品項對途程...')
         const text = await files.itemRoutes.text()
         const raw = parseCSV(text)
+        // 以 item_code 去重（同一品號取最後一筆），避免違反唯一鍵限制
+        const itemRouteMap = new Map<string, ItemRouteInsert>()
         raw
           .filter((row) => (row['品項編碼'] || row['品號']) && row['途程名稱'])
           .forEach((row) => {
             const itemCode = (row['品項編碼'] || row['品號'] || '').toUpperCase()
-            dataItemRoutes.push({
+            itemRouteMap.set(itemCode, {
               item_code: itemCode,
               route_id: row['途程名稱'],
               item_name: row['品項名稱'] ? row['品項名稱'].trim() : undefined
             })
           })
+        dataItemRoutes.push(...itemRouteMap.values())
       }
 
       // B. 解析：途程對工序
