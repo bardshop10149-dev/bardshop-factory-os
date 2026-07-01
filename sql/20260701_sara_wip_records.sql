@@ -36,3 +36,13 @@ CREATE INDEX IF NOT EXISTS sara_wip_records_mo_nbr_idx         ON public.sara_wi
 CREATE INDEX IF NOT EXISTS sara_wip_records_doc_nbr_idx        ON public.sara_wip_records (doc_nbr);
 CREATE INDEX IF NOT EXISTS sara_wip_records_workcenter_idx     ON public.sara_wip_records (workcenter_name);
 CREATE INDEX IF NOT EXISTS sara_wip_records_real_end_time_idx  ON public.sara_wip_records (real_end_time DESC);
+
+-- RLS：允許已登入使用者完整操作（此為後台管理工具，無需列級權限控管）
+ALTER TABLE public.sara_wip_records ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "authenticated_all" ON public.sara_wip_records;
+CREATE POLICY "authenticated_all" ON public.sara_wip_records
+  FOR ALL
+  TO authenticated
+  USING (true)
+  WITH CHECK (true);
