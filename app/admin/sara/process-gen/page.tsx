@@ -401,6 +401,10 @@ export default function ProcessGenPage() {
     setNoRouteRows(prev => [...prev, ...newInputRows])
     setSelectedReroute({})
   }, [selectedReroute, inputRows, noRouteRows])
+
+  // ── 套用臨時途程至単一無途程訂單 ─────────────────────────────────────
+
+  const handleApplyTempRoute = useCallback(async (row: InputRow) => {
     const key  = rowKey(row)
     const raw  = (noRouteCodes[key] ?? '').trim()
     const mode = noRouteModes[key] ?? 'item'
