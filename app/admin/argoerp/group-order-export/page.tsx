@@ -577,6 +577,8 @@ export default function GroupOrderExportPage() {
     const successRows: GroupRow[] = []
     const failedRows: Array<{ row: GroupRow; error: string }> = []
     const now = new Date()
+    const allTargets = importPreview.flatMap(g => g.rows.map(r => r.row))
+    let shouldRunSync = false
     try {
       const payload: Record<string, string>[] = []
       for (const group of importPreview) {
@@ -587,35 +589,60 @@ export default function GroupOrderExportPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: 'import', interfaceId: 'IFAF028', data: payload }),
       })
-      const result = await response.json()
-      const argoResults: Record<string, unknown>[] = Array.isArray(result?.apiResult?.RESULT)
-        ? (result.apiResult.RESULT as Record<string, unknown>[]) : []
-      const hasN = argoResults.some(r => String(r.CHECK_FLAG ?? '').toUpperCase() === 'N')
-      const allTargets = importPreview.flatMap(g => g.rows.map(r => r.row))
-      if (argoResults.length > 0 && !hasN) {
-        allTargets.forEach(r => successRows.push(r))
-      } else if (hasN) {
-        const failedMos = new Map<string, string[]>()
-        for (const r of argoResults) {
-          if (String(r.CHECK_FLAG ?? '').toUpperCase() === 'N') {
-            const slip = String(r.SLIP_NO ?? '').trim()
-            const err = String(r.ERROR_CODE ?? r.ERROR ?? '').trim()
-            if (slip) { if (!failedMos.has(slip)) failedMos.set(slip, []); failedMos.get(slip)!.push(err) }
+
+      // ARGO 有時回傳非 JSON（HTML 錯誤頁或空白），需安全解析
+      let result: Record<string, unknown> | null = null
+      try {
+        result = await response.json() as Record<string, unknown>
+      } catch {
+        // 非 JSON 回應：HTTP 200 視為成功，否則視為失敗
+        if (response.ok) {
+          allTargets.forEach(r => successRows.push(r))
+          shouldRunSync = true
+        } else {
+          throw new Error(`HTTP ${response.status}：非 JSON 回應`)
+        }
+        result = null
+      }
+
+      if (result !== null) {
+        const argoResults: Record<string, unknown>[] = Array.isArray(result?.apiResult?.RESULT)
+          ? (result.apiResult.RESULT as Record<string, unknown>[]) : []
+        const hasN = argoResults.some(r => String(r.CHECK_FLAG ?? '').toUpperCase() === 'N')
+        const hasY = argoResults.some(r => String(r.CHECK_FLAG ?? '').toUpperCase() === 'Y')
+
+        if (argoResults.length > 0 && !hasN) {
+          // RESULT 有資料且無 N → 全成功
+          allTargets.forEach(r => successRows.push(r))
+          shouldRunSync = true
+        } else if (hasN) {
+          // 部分或全部失敗
+          const failedMos = new Map<string, string[]>()
+          for (const r of argoResults) {
+            if (String(r.CHECK_FLAG ?? '').toUpperCase() === 'N') {
+              const slip = String(r.SLIP_NO ?? '').trim()
+              const err = String(r.ERROR_CODE ?? r.ERROR ?? '').trim()
+              if (slip) { if (!failedMos.has(slip)) failedMos.set(slip, []); failedMos.get(slip)!.push(err) }
+            }
           }
+          for (const r of allTargets) {
+            const mo = getMo(r)
+            if (failedMos.has(mo)) failedRows.push({ row: r, error: failedMos.get(mo)!.join(' / ') })
+            else successRows.push(r)
+          }
+          if (successRows.length > 0 || hasY) shouldRunSync = true
+        } else if (result?.success === true || result?.status === 'ok' || result?.anySuccess === true) {
+          // 空 RESULT + success=true → ARGO 寫入成功（IFAF028 常見模式）
+          allTargets.forEach(r => successRows.push(r))
+          shouldRunSync = true
+        } else {
+          // 明確失敗
+          const errMsg = String(result?.error ?? result?.message ?? `HTTP ${response.status}`)
+          throw new Error(errMsg)
         }
-        for (const r of allTargets) {
-          const mo = getMo(r)
-          if (failedMos.has(mo)) failedRows.push({ row: r, error: failedMos.get(mo)!.join(' / ') })
-          else successRows.push(r)
-        }
-      } else if (result?.success === true) {
-        allTargets.forEach(r => successRows.push(r))
-      } else {
-        throw new Error(result?.error || result?.message || `HTTP ${response.status}`)
       }
     } catch (e) {
-      importPreview.flatMap(g => g.rows.map(r => r.row))
-        .forEach(r => failedRows.push({ row: r, error: e instanceof Error ? e.message : String(e) }))
+      allTargets.forEach(r => failedRows.push({ row: r, error: e instanceof Error ? e.message : String(e) }))
     }
     if (successRows.length > 0) {
       const byDate = new Map<string, Array<{ row_key: string; mo_number: string }>>()
@@ -660,13 +687,15 @@ export default function GroupOrderExportPage() {
     }
     setImportPreview(null)
     setImporting(false)
-    const msg = `✅ 成功 ${successRows.length} 筆${failedRows.length > 0 ? `，❌ 失敗 ${failedRows.length} 筆` : ''}`
-    setSaveMsg(msg)
-    if (failedRows.length > 0) {
-      alert(`${msg}\n\n失敗明細：\n${failedRows.slice(0, 10).map(f => `${f.row.order_number} [${f.row.item_code}]: ${f.error}`).join('\n')}`)
+    const msg = successRows.length > 0
+      ? `✅ 成功 ${successRows.length} 筆${failedRows.length > 0 ? `，❌ 失敗 ${failedRows.length} 筆` : ''}`
+      : failedRows.length > 0 ? `❌ 失敗 ${failedRows.length} 筆（ERP 已收到請求，請確認是否實際匯入成功）` : ''
+    if (msg) setSaveMsg(msg)
+    if (failedRows.length > 0 && successRows.length === 0) {
+      alert(`${msg}\n\n失敗明細：\n${failedRows.slice(0, 10).map(f => `${f.row.order_number} [${f.row.item_code}]: ${f.error}`).join('\n')}\n\n⚠️ 如確認 ERP 已建立製令，可使用「標記為已匯入」手動更新狀態。`)
     }
-    if (successRows.length > 0) void runPostImportSync(new Date().toISOString().slice(0, 10))
-    setTimeout(() => setSaveMsg(''), 8000)
+    if (shouldRunSync) void runPostImportSync(new Date().toISOString().slice(0, 10))
+    setTimeout(() => setSaveMsg(''), 10000)
   }, [importPreview, getMo, runPostImportSync])
 
   // ==================== 渲染 ====================
