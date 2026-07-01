@@ -109,10 +109,11 @@ export default function UploadPage() {
         const text = await files.itemRoutes.text()
         const raw = parseCSV(text)
         raw
-          .filter((row) => row['品項編碼'] && row['途程名稱'])
+          .filter((row) => (row['品項編碼'] || row['品號']) && row['途程名稱'])
           .forEach((row) => {
+            const itemCode = (row['品項編碼'] || row['品號'] || '').toUpperCase()
             dataItemRoutes.push({
-              item_code: row['品項編碼'].toUpperCase(),
+              item_code: itemCode,
               route_id: row['途程名稱'],
               item_name: row['品項名稱'] ? row['品項名稱'].trim() : undefined
             })
