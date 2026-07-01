@@ -21,6 +21,8 @@ interface SaraWipRow {
   work_order: string
   mo_nbr: string | null
   doc_nbr: string | null
+  product_name: string | null
+  product_subname: string | null
   product_description: string | null
   workcenter_name: string | null
   job_name: string | null
@@ -28,6 +30,7 @@ interface SaraWipRow {
   status: string | null
   wip_qty: number | null
   real_end_time: string | null
+  report_resources: string | null
   username: string | null
 }
 
@@ -421,7 +424,7 @@ export default function DailyOrderSheetPage() {
         .order('entry_no', { ascending: true }),
       supabase
         .from('sara_wip_records')
-        .select('work_order, mo_nbr, doc_nbr, product_description, workcenter_name, job_name, job_sequence, status, wip_qty, real_end_time, username')
+        .select('work_order, mo_nbr, doc_nbr, product_name, product_subname, product_description, workcenter_name, job_name, job_sequence, status, wip_qty, real_end_time, report_resources, username')
         .eq('workcenter_name', '印刷站2F')
         .or(`mo_nbr.eq.${q},doc_nbr.eq.${q}`)
         .order('real_end_time', { ascending: false }),
@@ -3190,32 +3193,27 @@ export default function DailyOrderSheetPage() {
                       <table className="w-full text-xs">
                         <thead className="bg-slate-800/90">
                           <tr className="border-b border-slate-700">
-                            <th className="px-3 py-2.5 text-left text-slate-300 whitespace-nowrap">製令單號</th>
-                            <th className="px-3 py-2.5 text-left text-slate-300 whitespace-nowrap">製程</th>
-                            <th className="px-3 py-2.5 text-left text-slate-300 max-w-[200px]">規格</th>
+                            <th className="px-3 py-2.5 text-left text-slate-300 whitespace-nowrap">站點</th>
+                            <th className="px-3 py-2.5 text-left text-slate-300 whitespace-nowrap">製程名稱</th>
+                            <th className="px-3 py-2.5 text-left text-slate-300 whitespace-nowrap">生產料號</th>
+                            <th className="px-3 py-2.5 text-left text-slate-300 whitespace-nowrap">品名</th>
+                            <th className="px-3 py-2.5 text-left text-slate-300 whitespace-nowrap">來源單號</th>
                             <th className="px-3 py-2.5 text-right text-slate-300 whitespace-nowrap">回報數量</th>
-                            <th className="px-3 py-2.5 text-left text-slate-300 whitespace-nowrap">狀態</th>
-                            <th className="px-3 py-2.5 text-left text-slate-300 whitespace-nowrap">報工結束</th>
-                            <th className="px-3 py-2.5 text-left text-slate-300 whitespace-nowrap">人員</th>
+                            <th className="px-3 py-2.5 text-left text-slate-300 whitespace-nowrap">報工資源</th>
                           </tr>
                         </thead>
                         <tbody>
                           {legacyModal.saraWipRows.map((r, i) => (
                             <tr key={r.work_order} className={`border-b border-slate-800/40 ${i % 2 === 0 ? 'bg-slate-900/40' : ''}`}>
-                              <td className="px-3 py-2 font-mono text-cyan-300 whitespace-nowrap">{r.mo_nbr ?? '—'}</td>
+                              <td className="px-3 py-2 text-slate-300 whitespace-nowrap">{r.workcenter_name ?? '—'}</td>
                               <td className="px-3 py-2 text-slate-300 whitespace-nowrap">{r.job_name ?? '—'}</td>
-                              <td className="px-3 py-2 text-slate-200 max-w-[200px] truncate" title={r.product_description ?? ''}>{r.product_description ?? '—'}</td>
+                              <td className="px-3 py-2 font-mono text-slate-400 whitespace-nowrap">{r.product_name ?? '—'}</td>
+                              <td className="px-3 py-2 text-slate-200 max-w-[160px] truncate" title={r.product_subname ?? r.product_description ?? ''}>{r.product_subname || r.product_description || '—'}</td>
+                              <td className="px-3 py-2 font-mono text-amber-300/80 whitespace-nowrap">{r.doc_nbr ?? '—'}</td>
                               <td className="px-3 py-2 text-right font-mono text-emerald-300 whitespace-nowrap">
                                 {r.wip_qty != null ? r.wip_qty.toLocaleString() : '—'}
                               </td>
-                              <td className="px-3 py-2 whitespace-nowrap">
-                                {r.status === 'finished' ? <span className="text-emerald-400">完成</span>
-                                  : r.status === 'running' ? <span className="text-yellow-400">進行中</span>
-                                  : r.status === 'pause'   ? <span className="text-amber-400">暫停</span>
-                                  : <span className="text-slate-400">{r.status}</span>}
-                              </td>
-                              <td className="px-3 py-2 text-slate-400 whitespace-nowrap">{r.real_end_time?.slice(0, 16) ?? '—'}</td>
-                              <td className="px-3 py-2 text-slate-400 max-w-[100px] truncate" title={r.username ?? ''}>{r.username ?? '—'}</td>
+                              <td className="px-3 py-2 text-slate-400 max-w-[140px] truncate" title={r.report_resources ?? ''}>{r.report_resources ?? '—'}</td>
                             </tr>
                           ))}
                         </tbody>
