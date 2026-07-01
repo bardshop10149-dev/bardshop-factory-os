@@ -191,7 +191,7 @@ export default function SaraWipRecordsPage() {
         const { error } = await supabase
           .from('sara_wip_records')
           .upsert(chunk, { onConflict: 'work_order' })
-        if (error) throw error
+        if (error) throw new Error(error.message ?? error.details ?? JSON.stringify(error))
         upserted += chunk.length
       }
 
@@ -200,7 +200,8 @@ export default function SaraWipRecordsPage() {
       setPreview([])
       if (tab === 'view') void fetchRecords()
     } catch (e) {
-      setImportMsg(`❌ 匯入失敗：${e instanceof Error ? e.message : String(e)}`)
+      const msg = e instanceof Error ? e.message : (e as { message?: string })?.message ?? JSON.stringify(e)
+      setImportMsg(`❌ 匯入失敗：${msg}`)
     } finally {
       setImporting(false)
     }
