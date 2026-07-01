@@ -16,6 +16,21 @@ interface LegacyReceiptRow {
   good_qty: number
 }
 
+// ===== 塔台報工紀錄比對 =====
+interface SaraWipRow {
+  work_order: string
+  mo_nbr: string | null
+  doc_nbr: string | null
+  product_description: string | null
+  workcenter_name: string | null
+  job_name: string | null
+  job_sequence: number | null
+  status: string | null
+  wip_qty: number | null
+  real_end_time: string | null
+  username: string | null
+}
+
 // ===== 型別定義（與 order-batch-export 一致）=====
 interface SourceRow {
   order_number: string
@@ -362,7 +377,7 @@ export default function DailyOrderSheetPage() {
   const [globalSearching, setGlobalSearching] = useState(false)
   const [globalResults, setGlobalResults] = useState<{ sheet_date: string; rows: SheetRow[] }[] | null>(null)
   const [sampleRefInputs, setSampleRefInputs] = useState<Record<string, string>>({})
-  const [legacyModal, setLegacyModal] = useState<{ query: string; rows: LegacyReceiptRow[]; loading: boolean } | null>(null)
+  const [legacyModal, setLegacyModal] = useState<{ query: string; rows: LegacyReceiptRow[]; saraWipRows: SaraWipRow[]; loading: boolean } | null>(null)
 
   // ---- 常平廠訂單（C01510 採購單）----
   const fetchCOrders = useCallback(async () => {
@@ -392,22 +407,31 @@ export default function DailyOrderSheetPage() {
     if (activeMainTab === 'c-orders') fetchCOrders()
   }, [activeMainTab, fetchCOrders])
 
-  // ---- 舊系統入庫紀錄比對 ----
+  // ---- 舊系統入庫紀錄比對 + 塔台報工紀錄比對 ----
   const handleLegacyLookup = useCallback(async (orderNo: string) => {
     const q = orderNo.trim()
     if (!q) return
-    setLegacyModal({ query: q, rows: [], loading: true })
-    const { data, error } = await supabase
-      .from('legacy_inventory_receipts')
-      .select('entry_no, entry_date, order_number, source_location, handler_name, item_name, good_qty')
-      .eq('order_number', q)
-      .order('entry_date', { ascending: true })
-      .order('entry_no', { ascending: true })
-    if (error || !data) {
-      setLegacyModal({ query: q, rows: [], loading: false })
-    } else {
-      setLegacyModal({ query: q, rows: data as LegacyReceiptRow[], loading: false })
-    }
+    setLegacyModal({ query: q, rows: [], saraWipRows: [], loading: true })
+    const [legacyRes, saraWipRes] = await Promise.all([
+      supabase
+        .from('legacy_inventory_receipts')
+        .select('entry_no, entry_date, order_number, source_location, handler_name, item_name, good_qty')
+        .eq('order_number', q)
+        .order('entry_date', { ascending: true })
+        .order('entry_no', { ascending: true }),
+      supabase
+        .from('sara_wip_records')
+        .select('work_order, mo_nbr, doc_nbr, product_description, workcenter_name, job_name, job_sequence, status, wip_qty, real_end_time, username')
+        .eq('workcenter_name', '印刷站2F')
+        .or(`mo_nbr.eq.${q},doc_nbr.eq.${q}`)
+        .order('real_end_time', { ascending: false }),
+    ])
+    setLegacyModal({
+      query: q,
+      rows: legacyRes.error || !legacyRes.data ? [] : (legacyRes.data as LegacyReceiptRow[]),
+      saraWipRows: saraWipRes.error || !saraWipRes.data ? [] : (saraWipRes.data as SaraWipRow[]),
+      loading: false,
+    })
   }, [])
 
   // ---- 讀取所有日期清單 ----
@@ -3091,60 +3115,123 @@ export default function DailyOrderSheetPage() {
       <SoOrderModal projectId={soModalId} onClose={() => setSoModalId(null)} />
       <PoOrderModal docNo={poModalId} onClose={() => setPoModalId(null)} />
 
-      {/* 舊系統入庫比對 Modal */}
+      {/* 入庫比對 + 塔台報工 Modal */}
       {legacyModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm" onClick={() => setLegacyModal(null)}>
           <div className="bg-slate-900 border border-slate-700 rounded-xl shadow-2xl w-full max-w-4xl max-h-[85vh] flex flex-col" onClick={e => e.stopPropagation()}>
             {/* Header */}
             <div className="px-5 py-4 border-b border-slate-700 flex items-center justify-between shrink-0">
               <div>
-                <h2 className="text-white font-semibold">舊系統入庫比對</h2>
+                <h2 className="text-white font-semibold">入庫比對</h2>
                 <p className="text-slate-400 text-sm mt-0.5">訂貨單號：<span className="font-mono text-amber-300">{legacyModal.query}</span></p>
               </div>
               <button onClick={() => setLegacyModal(null)} className="text-slate-500 hover:text-white transition-colors text-xl leading-none">✕</button>
             </div>
 
             {/* Body */}
-            <div className="overflow-y-auto flex-1">
+            <div className="overflow-y-auto flex-1 divide-y divide-slate-800">
               {legacyModal.loading ? (
                 <div className="py-16 text-center text-slate-400 text-sm">比對中…</div>
-              ) : legacyModal.rows.length === 0 ? (
-                <div className="py-16 text-center space-y-2">
-                  <p className="text-slate-400 text-sm">舊系統入庫紀錄中未找到訂貨單號 <span className="font-mono text-amber-300">{legacyModal.query}</span></p>
-                  <p className="text-slate-600 text-xs">請確認已匯入舊系統入庫紀錄，且單號格式一致</p>
-                </div>
               ) : (
-                <table className="w-full text-xs">
-                  <thead className="sticky top-0 bg-slate-800/90">
-                    <tr className="border-b border-slate-700">
-                      <th className="px-3 py-2.5 text-left text-slate-300 whitespace-nowrap">日期-號碼</th>
-                      <th className="px-3 py-2.5 text-left text-slate-300 whitespace-nowrap">訂貨單號</th>
-                      <th className="px-3 py-2.5 text-left text-slate-300 whitespace-nowrap">出庫工廠</th>
-                      <th className="px-3 py-2.5 text-left text-slate-300 whitespace-nowrap">承辦人</th>
-                      <th className="px-3 py-2.5 text-left text-slate-300 whitespace-nowrap">品項名[規格]</th>
-                      <th className="px-3 py-2.5 text-right text-slate-300 whitespace-nowrap">良品數</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {legacyModal.rows.map((r, i) => (
-                      <tr key={i} className={`border-b border-slate-800/40 ${i % 2 === 0 ? 'bg-slate-900/40' : ''}`}>
-                        <td className="px-3 py-2 font-mono text-cyan-300 whitespace-nowrap">{r.entry_no}</td>
-                        <td className="px-3 py-2 font-mono text-amber-300/80 whitespace-nowrap">{r.order_number}</td>
-                        <td className="px-3 py-2 text-slate-300 whitespace-nowrap">{r.source_location}</td>
-                        <td className="px-3 py-2 text-slate-400 whitespace-nowrap">{r.handler_name}</td>
-                        <td className="px-3 py-2 text-slate-200 max-w-[320px] truncate" title={r.item_name}>{r.item_name}</td>
-                        <td className="px-3 py-2 text-right font-mono text-emerald-300 whitespace-nowrap">{r.good_qty.toLocaleString()}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+                <>
+                  {/* ── 舊系統入庫紀錄 ── */}
+                  <div>
+                    <div className="px-4 py-2 bg-slate-800/50 text-xs font-semibold text-slate-300 uppercase tracking-wide">
+                      舊系統入庫紀錄
+                      {legacyModal.rows.length > 0 && (
+                        <span className="ml-2 font-normal text-slate-400 normal-case">共 {legacyModal.rows.length} 筆</span>
+                      )}
+                    </div>
+                    {legacyModal.rows.length === 0 ? (
+                      <div className="py-6 text-center space-y-1">
+                        <p className="text-slate-500 text-xs">未找到舊系統入庫紀錄</p>
+                      </div>
+                    ) : (
+                      <table className="w-full text-xs">
+                        <thead className="bg-slate-800/90">
+                          <tr className="border-b border-slate-700">
+                            <th className="px-3 py-2.5 text-left text-slate-300 whitespace-nowrap">日期-號碼</th>
+                            <th className="px-3 py-2.5 text-left text-slate-300 whitespace-nowrap">訂貨單號</th>
+                            <th className="px-3 py-2.5 text-left text-slate-300 whitespace-nowrap">出庫工廠</th>
+                            <th className="px-3 py-2.5 text-left text-slate-300 whitespace-nowrap">承辦人</th>
+                            <th className="px-3 py-2.5 text-left text-slate-300 whitespace-nowrap">品項名[規格]</th>
+                            <th className="px-3 py-2.5 text-right text-slate-300 whitespace-nowrap">良品數</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {legacyModal.rows.map((r, i) => (
+                            <tr key={i} className={`border-b border-slate-800/40 ${i % 2 === 0 ? 'bg-slate-900/40' : ''}`}>
+                              <td className="px-3 py-2 font-mono text-cyan-300 whitespace-nowrap">{r.entry_no}</td>
+                              <td className="px-3 py-2 font-mono text-amber-300/80 whitespace-nowrap">{r.order_number}</td>
+                              <td className="px-3 py-2 text-slate-300 whitespace-nowrap">{r.source_location}</td>
+                              <td className="px-3 py-2 text-slate-400 whitespace-nowrap">{r.handler_name}</td>
+                              <td className="px-3 py-2 text-slate-200 max-w-[320px] truncate" title={r.item_name}>{r.item_name}</td>
+                              <td className="px-3 py-2 text-right font-mono text-emerald-300 whitespace-nowrap">{r.good_qty.toLocaleString()}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    )}
+                  </div>
+
+                  {/* ── 塔台報工紀錄（印刷站2F）── */}
+                  <div>
+                    <div className="px-4 py-2 bg-slate-800/50 text-xs font-semibold text-slate-300 uppercase tracking-wide">
+                      塔台報工紀錄（印刷站2F）
+                      {legacyModal.saraWipRows.length > 0 && (
+                        <span className="ml-2 font-normal text-slate-400 normal-case">共 {legacyModal.saraWipRows.length} 筆</span>
+                      )}
+                    </div>
+                    {legacyModal.saraWipRows.length === 0 ? (
+                      <div className="py-6 text-center space-y-1">
+                        <p className="text-slate-500 text-xs">未找到印刷站2F報工紀錄</p>
+                      </div>
+                    ) : (
+                      <table className="w-full text-xs">
+                        <thead className="bg-slate-800/90">
+                          <tr className="border-b border-slate-700">
+                            <th className="px-3 py-2.5 text-left text-slate-300 whitespace-nowrap">製令單號</th>
+                            <th className="px-3 py-2.5 text-left text-slate-300 whitespace-nowrap">製程</th>
+                            <th className="px-3 py-2.5 text-left text-slate-300 max-w-[200px]">規格</th>
+                            <th className="px-3 py-2.5 text-right text-slate-300 whitespace-nowrap">回報數量</th>
+                            <th className="px-3 py-2.5 text-left text-slate-300 whitespace-nowrap">狀態</th>
+                            <th className="px-3 py-2.5 text-left text-slate-300 whitespace-nowrap">報工結束</th>
+                            <th className="px-3 py-2.5 text-left text-slate-300 whitespace-nowrap">人員</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {legacyModal.saraWipRows.map((r, i) => (
+                            <tr key={r.work_order} className={`border-b border-slate-800/40 ${i % 2 === 0 ? 'bg-slate-900/40' : ''}`}>
+                              <td className="px-3 py-2 font-mono text-cyan-300 whitespace-nowrap">{r.mo_nbr ?? '—'}</td>
+                              <td className="px-3 py-2 text-slate-300 whitespace-nowrap">{r.job_name ?? '—'}</td>
+                              <td className="px-3 py-2 text-slate-200 max-w-[200px] truncate" title={r.product_description ?? ''}>{r.product_description ?? '—'}</td>
+                              <td className="px-3 py-2 text-right font-mono text-emerald-300 whitespace-nowrap">
+                                {r.wip_qty != null ? r.wip_qty.toLocaleString() : '—'}
+                              </td>
+                              <td className="px-3 py-2 whitespace-nowrap">
+                                {r.status === 'finished' ? <span className="text-emerald-400">完成</span>
+                                  : r.status === 'running' ? <span className="text-yellow-400">進行中</span>
+                                  : r.status === 'pause'   ? <span className="text-amber-400">暫停</span>
+                                  : <span className="text-slate-400">{r.status}</span>}
+                              </td>
+                              <td className="px-3 py-2 text-slate-400 whitespace-nowrap">{r.real_end_time?.slice(0, 16) ?? '—'}</td>
+                              <td className="px-3 py-2 text-slate-400 max-w-[100px] truncate" title={r.username ?? ''}>{r.username ?? '—'}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    )}
+                  </div>
+                </>
               )}
             </div>
 
             {/* Footer */}
-            {!legacyModal.loading && legacyModal.rows.length > 0 && (
+            {!legacyModal.loading && (
               <div className="px-5 py-3 border-t border-slate-700 shrink-0 flex items-center justify-between">
-                <span className="text-slate-400 text-xs">共 {legacyModal.rows.length} 筆入庫紀錄</span>
+                <span className="text-slate-400 text-xs">
+                  入庫 {legacyModal.rows.length} 筆・報工 {legacyModal.saraWipRows.length} 筆
+                </span>
                 <button onClick={() => setLegacyModal(null)} className="px-4 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-200 text-sm transition-colors">關閉</button>
               </div>
             )}
