@@ -23,6 +23,7 @@ interface WipRecord {
   real_end_time: string | null
   report_resources: string
   username: string
+  site_label?: string | null
 }
 
 // ===== CSV 解析 =====
@@ -123,6 +124,15 @@ const STATUS_COLOR: Record<string, string> = {
   pause:    'text-amber-400',
 }
 
+const SITE_OPTIONS = ['台北', '常平', '委外'] as const
+type SiteLabel = typeof SITE_OPTIONS[number]
+
+const SITE_BADGE: Record<SiteLabel, string> = {
+  '台北': 'bg-sky-800/60 text-sky-300 border border-sky-700/40',
+  '常平': 'bg-violet-800/60 text-violet-300 border border-violet-700/40',
+  '委外': 'bg-orange-800/60 text-orange-300 border border-orange-700/40',
+}
+
 // ===== 主元件 =====
 export default function SaraWipRecordsPage() {
   const [tab, setTab] = useState<'upload' | 'view'>('view')
@@ -132,12 +142,14 @@ export default function SaraWipRecordsPage() {
   const [preview, setPreview] = useState<WipRecord[]>([])
   const [importing, setImporting] = useState(false)
   const [importMsg, setImportMsg] = useState('')
+  const [importSiteLabel, setImportSiteLabel] = useState<SiteLabel>('台北')
 
   // --- 瀏覽狀態 ---
   const [records, setRecords] = useState<WipRecord[]>([])
   const [loading, setLoading] = useState(false)
   const [wcFilter, setWcFilter] = useState('印刷站2F')
   const [statusFilter, setStatusFilter] = useState<string>('all')
+  const [siteFilter, setSiteFilter] = useState<string>('all')
   const [search, setSearch] = useState('')
   const [page, setPage] = useState(0)
   const PAGE_SIZE = 50
@@ -187,6 +199,7 @@ export default function SaraWipRecordsPage() {
         real_end_time:       r.real_end_time || null,
         report_resources:    r.report_resources || null,
         username:            r.username || null,
+        site_label:          importSiteLabel,
       }))
 
       const CHUNK = 200
@@ -210,7 +223,7 @@ export default function SaraWipRecordsPage() {
     } finally {
       setImporting(false)
     }
-  }, [preview, tab])
+  }, [preview, tab, importSiteLabel])
 
   // --- 讀取紀錄 ---
   const fetchRecords = useCallback(async () => {
@@ -218,12 +231,13 @@ export default function SaraWipRecordsPage() {
     try {
       let query = supabase
         .from('sara_wip_records')
-        .select('id_list,work_order,mo_nbr,product_name,product_subname,product_description,lot_nbr,doc_nbr,workcenter_name,job_name,job_sequence,status,source_type,wip_qty,real_start_time,real_end_time,report_resources,username')
+        .select('id_list,work_order,mo_nbr,product_name,product_subname,product_description,lot_nbr,doc_nbr,workcenter_name,job_name,job_sequence,status,source_type,wip_qty,real_start_time,real_end_time,report_resources,username,site_label')
         .order('real_end_time', { ascending: false })
         .limit(500)
 
       if (wcFilter) query = query.eq('workcenter_name', wcFilter)
       if (statusFilter !== 'all') query = query.eq('status', statusFilter)
+      if (siteFilter !== 'all') query = query.eq('site_label', siteFilter)
       if (search.trim()) {
         const q = search.trim()
         query = query.or(`mo_nbr.ilike.%${q}%,doc_nbr.ilike.%${q}%,product_description.ilike.%${q}%,username.ilike.%${q}%`)
@@ -238,7 +252,7 @@ export default function SaraWipRecordsPage() {
     } finally {
       setLoading(false)
     }
-  }, [wcFilter, statusFilter, search])
+  }, [wcFilter, statusFilter, siteFilter, search])
 
   const pageRecords = records.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE)
   const totalPages = Math.ceil(records.length / PAGE_SIZE)
@@ -276,6 +290,23 @@ export default function SaraWipRecordsPage() {
                 從 SARA 系統匯出 <span className="font-mono text-amber-300">wip_record__*.csv</span>，
                 以 <span className="text-cyan-300">work_order</span> 作為唯一鍵，重複匯入會自動更新。
               </p>
+              <div className="flex items-center gap-3">
+                <label className="text-sm text-slate-400 whitespace-nowrap">廠區標籤</label>
+                {SITE_OPTIONS.map(s => (
+                  <button
+                    key={s}
+                    onClick={() => setImportSiteLabel(s)}
+                    className={`px-3 py-1 rounded-full text-xs font-semibold transition-all ${
+                      importSiteLabel === s
+                        ? SITE_BADGE[s] + ' ring-2 ring-offset-1 ring-offset-slate-900 ring-current'
+                        : 'bg-slate-800 text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    {s}
+                  </button>
+                ))}
+                <span className="text-slate-500 text-xs">此次匯入的所有紀錄將標記為「{importSiteLabel}」</span>
+              </div>
               <input
                 type="file"
                 accept=".csv"
@@ -287,6 +318,7 @@ export default function SaraWipRecordsPage() {
                 <div className="space-y-3">
                   <div className="flex items-center gap-3">
                     <span className="text-slate-300 text-sm">解析到 <span className="font-mono text-cyan-300">{preview.length}</span> 筆資料</span>
+                    <span className={`px-2.5 py-0.5 rounded-full text-xs font-semibold ${SITE_BADGE[importSiteLabel]}`}>{importSiteLabel}</span>
                     <button
                       onClick={() => void handleImport()}
                       disabled={importing}
@@ -349,6 +381,17 @@ export default function SaraWipRecordsPage() {
           <div className="space-y-3">
             {/* 篩選列 */}
             <div className="flex flex-wrap items-center gap-2">
+              <div className="flex items-center gap-2">
+                <label className="text-slate-400 text-sm whitespace-nowrap">廠區</label>
+                <select
+                  value={siteFilter}
+                  onChange={e => setSiteFilter(e.target.value)}
+                  className="px-2 py-1.5 rounded bg-slate-800 border border-slate-700 text-slate-200 text-sm focus:outline-none"
+                >
+                  <option value="all">全部</option>
+                  {SITE_OPTIONS.map(s => <option key={s} value={s}>{s}</option>)}
+                </select>
+              </div>
               <div className="flex items-center gap-2">
                 <label className="text-slate-400 text-sm whitespace-nowrap">站點</label>
                 <input
@@ -427,6 +470,7 @@ export default function SaraWipRecordsPage() {
                       <th className="px-3 py-2.5 text-right text-slate-300 whitespace-nowrap">數量</th>
                       <th className="px-3 py-2.5 text-left text-slate-300 whitespace-nowrap">狀態</th>
                       <th className="px-3 py-2.5 text-left text-slate-300 whitespace-nowrap">報工結束</th>
+                      <th className="px-3 py-2.5 text-left text-slate-300 whitespace-nowrap">廠區</th>
                       <th className="px-3 py-2.5 text-left text-slate-300 whitespace-nowrap">人員</th>
                     </tr>
                   </thead>
@@ -446,6 +490,11 @@ export default function SaraWipRecordsPage() {
                           <span className={STATUS_COLOR[r.status] ?? 'text-slate-400'}>{STATUS_LABEL[r.status] ?? r.status}</span>
                         </td>
                         <td className="px-3 py-2 text-slate-400 whitespace-nowrap">{r.real_end_time?.slice(0, 16) ?? '—'}</td>
+                        <td className="px-3 py-2 whitespace-nowrap">
+                          {r.site_label
+                            ? <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold ${SITE_BADGE[r.site_label as SiteLabel] ?? 'bg-slate-700 text-slate-300'}`}>{r.site_label}</span>
+                            : <span className="text-slate-600">—</span>}
+                        </td>
                         <td className="px-3 py-2 text-slate-400 max-w-[120px] truncate" title={r.username}>{r.username}</td>
                       </tr>
                     ))}

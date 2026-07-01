@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS public.sara_wip_records (
   real_end_time       timestamptz,                 -- 報工結束
   report_resources    text,                        -- 報工資源
   username            text,                        -- 報工人員
+  site_label          text,                        -- 廠區標籤（台北 / 常平 / 委外）
   imported_at         timestamptz DEFAULT now(),   -- 匯入時間
 
   UNIQUE(work_order)
@@ -30,12 +31,19 @@ COMMENT ON TABLE  public.sara_wip_records IS '塔台 SARA 報工紀錄（CSV 匯
 COMMENT ON COLUMN public.sara_wip_records.work_order      IS 'SARA 工作單 UUID，唯一鍵';
 COMMENT ON COLUMN public.sara_wip_records.doc_nbr         IS '來源單號（即訂貨單號，用於比對每日出單表）';
 COMMENT ON COLUMN public.sara_wip_records.workcenter_name IS '站點，比對時以 印刷站2F 篩選';
+COMMENT ON COLUMN public.sara_wip_records.site_label      IS '廠區標籤（台北 / 常平 / 委外），匯入時手動指定或由 workcenter_name 推導';
 
 -- 建立常用查詢索引
 CREATE INDEX IF NOT EXISTS sara_wip_records_mo_nbr_idx         ON public.sara_wip_records (mo_nbr);
 CREATE INDEX IF NOT EXISTS sara_wip_records_doc_nbr_idx        ON public.sara_wip_records (doc_nbr);
 CREATE INDEX IF NOT EXISTS sara_wip_records_workcenter_idx     ON public.sara_wip_records (workcenter_name);
+CREATE INDEX IF NOT EXISTS sara_wip_records_site_label_idx     ON public.sara_wip_records (site_label);
 CREATE INDEX IF NOT EXISTS sara_wip_records_real_end_time_idx  ON public.sara_wip_records (real_end_time DESC);
 
 -- RLS：此為後台管理工具，與其他同類表一致，停用 RLS
 ALTER TABLE public.sara_wip_records DISABLE ROW LEVEL SECURITY;
+
+-- 若表格已存在（先前已建立），補加 site_label 欄位（冪等）
+ALTER TABLE public.sara_wip_records
+  ADD COLUMN IF NOT EXISTS site_label text;
+COMMENT ON COLUMN public.sara_wip_records.site_label IS '廠區標籤（台北 / 常平 / 委外），匯入時手動指定';
