@@ -12,6 +12,8 @@ interface InputRow {
   quantity: number
   due: string
   pan_count: number
+  mo_number?: string   // 製令單號（MOT...）
+  customer?: string    // 客戶名稱
 }
 
 interface SaraRow {
@@ -33,6 +35,7 @@ interface SaraRow {
   time_unit: string
   bom: string
   mat_req_qty: string
+  customer?: string
   _noRoute?: boolean
 }
 
@@ -126,6 +129,12 @@ export default function ProcessGenPage() {
   const [dlDone, setDlDone]         = useState(false)
   const [isDragOver, setIsDragOver] = useState(false)
 
+  // No-route override state
+  const [noRouteRows, setNoRouteRows]         = useState<InputRow[]>([])
+  const [noRouteCode, setNoRouteCode]         = useState('')
+  const [noRouteApplying, setNoRouteApplying] = useState(false)
+  const [noRouteApplyWarn, setNoRouteApplyWarn] = useState('')
+
   // Single lookup state
   const [itemCode, setItemCode]         = useState('')
   const [quantity, setQuantity]         = useState('1')
@@ -214,6 +223,8 @@ export default function ProcessGenPage() {
           quantity:     qty,
           due:          String(r.delivery_date ?? '').trim(),
           pan_count:    pan,
+          mo_number:    String(r.mo_number ?? '').trim() || undefined,
+          customer:     String(r.customer  ?? '').trim() || undefined,
         })
       }
       if (!parsed.length) {
@@ -221,6 +232,8 @@ export default function ProcessGenPage() {
         return
       }
       setInputRows(parsed)
+      setNoRouteRows([])
+      setSaraRows([])
       setFileName(`出單表 ${sheetDate}（${parsed.length} 筆）`)
     } catch (e) {
       setSheetLoadError(`載入失敗：${e instanceof Error ? e.message : String(e)}`)
@@ -236,6 +249,8 @@ export default function ProcessGenPage() {
     setGenerating(true)
     setGenWarns([])
     setSaraRows([])
+    setNoRouteRows([])
+    setNoRouteApplyWarn('')
     const warns: string[] = []
     const today = fmtToday()
 
@@ -279,16 +294,19 @@ export default function ProcessGenPage() {
 
       // 4. 產生輸出列
       const out: SaraRow[] = []
+      const noRoute: InputRow[] = []
       for (const row of inputRows) {
         const routeId = irMap.get(row.item_code)
         if (!routeId) {
+          noRoute.push(row)
           out.push({
-            order_number: row.order_number, mfg_order_number: row.order_number,
+            order_number: row.order_number, mfg_order_number: row.mo_number || row.order_number,
             product_name: row.item_code, product_desc: row.item_spec,
             lot_number: '', prod_qty: row.quantity, due: row.due,
             priority: '', earliest_start: today,
             job_seq: '', workcenter: '', job_name: '', job_qty: row.quantity,
             outsourcing: '', est_time: 0, time_unit: '分鐘', bom: '', mat_req_qty: '',
+            customer: row.customer,
             _noRoute: true,
           })
           continue
@@ -302,17 +320,19 @@ export default function ProcessGenPage() {
           const jobQty  = (row.pan_count > 0 && !isPackagingStation(station)) ? row.pan_count : row.quantity
           const est     = Math.round(std * jobQty * 10) / 10
           out.push({
-            order_number: row.order_number, mfg_order_number: row.order_number,
+            order_number: row.order_number, mfg_order_number: row.mo_number || row.order_number,
             product_name: row.item_code, product_desc: row.item_spec,
             lot_number: '', prod_qty: row.quantity, due: row.due,
             priority: '', earliest_start: today,
             job_seq: op.sequence, workcenter: station, job_name: op.op_name,
             job_qty: jobQty, outsourcing: '', est_time: est, time_unit: '分鐘',
             bom: '', mat_req_qty: '',
+            customer: row.customer,
           })
         }
       }
       setSaraRows(out)
+      setNoRouteRows(noRoute)
       setGenWarns(warns)
     } catch (e) {
       setGenWarns([`錯誤：${e instanceof Error ? e.message : String(e)}`])
@@ -321,18 +341,77 @@ export default function ProcessGenPage() {
     }
   }, [inputRows])
 
+  // ── 套用臨時途程至無途程訂單 ─────────────────────────────────────
+
+  const handleApplyTempRoute = useCallback(async () => {
+    const code = noRouteCode.trim().toUpperCase()
+    if (!code || !noRouteRows.length) return
+    setNoRouteApplying(true)
+    setNoRouteApplyWarn('')
+    const today = fmtToday()
+    try {
+      const { data: irData, error: irErr } = await supabase
+        .from('item_routes').select('route_id').eq('item_code', code).limit(1).single()
+      if (irErr || !irData) throw new Error(`找不到品號 ${code} 的途程（item_routes 無資料）`)
+
+      type SOp = { sequence: number; op_name: string }
+      const { data: roData } = await supabase
+        .from('route_operations').select('sequence,op_name')
+        .eq('route_id', (irData as { route_id: string }).route_id).order('sequence')
+      const ops = (roData ?? []) as SOp[]
+      if (!ops.length) throw new Error(`途程 ${(irData as { route_id: string }).route_id} 無工序資料`)
+
+      type OtRow = { op_name: string; station: string; std_time_min: number }
+      const { data: otData } = await supabase
+        .from('operation_times').select('op_name,station,std_time_min')
+        .in('op_name', ops.map(o => o.op_name))
+      const otMap = new Map<string, { station: string; std_time_min: number }>(
+        ((otData ?? []) as OtRow[]).map(r => [r.op_name, { station: r.station ?? '', std_time_min: Number(r.std_time_min ?? 0) }])
+      )
+
+      const newRows: SaraRow[] = []
+      for (const row of noRouteRows) {
+        for (const op of ops) {
+          const ot      = otMap.get(op.op_name)
+          const station = ot?.station ?? ''
+          const std     = ot?.std_time_min ?? 0
+          const jobQty  = (row.pan_count > 0 && !isPackagingStation(station)) ? row.pan_count : row.quantity
+          const est     = Math.round(std * jobQty * 10) / 10
+          newRows.push({
+            order_number: row.order_number, mfg_order_number: row.mo_number || row.order_number,
+            product_name: row.item_code, product_desc: row.item_spec,
+            lot_number: '', prod_qty: row.quantity, due: row.due,
+            priority: '', earliest_start: today,
+            job_seq: op.sequence, workcenter: station, job_name: op.op_name,
+            job_qty: jobQty, outsourcing: '', est_time: est, time_unit: '分鐘',
+            bom: '', mat_req_qty: '',
+            customer: row.customer,
+          })
+        }
+      }
+      // 移除 _noRoute 佔位列，補入產生的列
+      setSaraRows(prev => [...prev.filter(r => !r._noRoute), ...newRows])
+      setNoRouteRows([])
+      setNoRouteCode('')
+    } catch (e) {
+      setNoRouteApplyWarn(e instanceof Error ? e.message : String(e))
+    } finally {
+      setNoRouteApplying(false)
+    }
+  }, [noRouteCode, noRouteRows])
+
   // ── 下載 SARA CSV ─────────────────────────────────────────────
 
   const handleDownload = useCallback(() => {
     const rows = saraRows.filter(r => !r._noRoute)
     if (!rows.length) return
-    const h1 = 'Order Number,Manufacturing Order Number,Product Name,Product Description,Lot Number,Production Quantity,Due,Priority Level,Earliest Start Time,Job Sequence,Workcenter,Job Name,Job Quantity,Out Sourcing,Est. Time,Time Unit,BOM Components,Material Required Quantity'
-    const h2 = '訂單編號,(必填)工單編號,(必填)品號,規格,生產批號,(必填)生產需求數量,(必填)需求日,排程優先等級(1-99),最早可開始時間,(必填)工序,(必填)站點,(必填)製程名稱,製程數量,製程委外,(必填)預估工時,工時單位,BOM元件品號,物料需求數量'
+    const h1 = 'Order Number,Manufacturing Order Number,Product Name,Product Description,Lot Number,Production Quantity,Due,Priority Level,Earliest Start Time,Job Sequence,Workcenter,Job Name,Job Quantity,Out Sourcing,Est. Time,Time Unit,BOM Components,Material Required Quantity,customer_id'
+    const h2 = '訂單編號,(必填)工單編號,(必填)品號,規格,生產批號,(必填)生產需求數量,(必填)需求日,排程優先等級(1-99),最早可開始時間,(必填)工序,(必填)站點,(必填)製程名稱,製程數量,製程委外,(必填)預估工時,工時單位,BOM元件品號,物料需求數量,客戶名稱'
     const data = rows.map(r =>
       [r.order_number, r.mfg_order_number, r.product_name, r.product_desc,
        r.lot_number, r.prod_qty, r.due, r.priority, r.earliest_start,
        r.job_seq, r.workcenter, r.job_name, r.job_qty, r.outsourcing,
-       r.est_time, r.time_unit, r.bom, r.mat_req_qty].map(escCsv).join(',')
+       r.est_time, r.time_unit, r.bom, r.mat_req_qty, r.customer ?? ''].map(escCsv).join(',')
     )
     const csv = [h1, h2, ...data].join('\r\n')
     const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' })
@@ -519,7 +598,7 @@ export default function ProcessGenPage() {
                 </span>
                 {noRouteCount > 0 && (
                   <span className="text-xs bg-red-900/30 px-3 py-1 rounded-lg border border-red-700/40 text-red-300">
-                    ⚠ {noRouteCount} 筆品號無途程（已排除於 CSV）
+                    ⚠ {noRouteCount} 筆品號無途程（見下方）
                   </span>
                 )}
                 <button onClick={handleDownload}
@@ -528,12 +607,13 @@ export default function ProcessGenPage() {
                 </button>
               </div>
 
-              {/* 預覽表 */}
+              {/* 預覽表（僅有途程的列）*/}
               <div className="overflow-x-auto rounded-xl border border-slate-800 max-h-[450px] overflow-y-auto">
                 <table className="w-full text-xs text-left border-collapse min-w-max">
                   <thead className="sticky top-0 bg-slate-900 z-10">
                     <tr className="text-slate-400 text-[10px] uppercase">
                       <th className="px-2 py-2 border-b border-slate-800">訂單</th>
+                      <th className="px-2 py-2 border-b border-slate-800">製令號</th>
                       <th className="px-2 py-2 border-b border-slate-800">品號</th>
                       <th className="px-2 py-2 border-b border-slate-800 text-right">生產量</th>
                       <th className="px-2 py-2 border-b border-slate-800">交期</th>
@@ -545,15 +625,14 @@ export default function ProcessGenPage() {
                     </tr>
                   </thead>
                   <tbody>
-                    {saraRows.slice(0, 600).map((r, i) => (
-                      <tr key={i} className={`border-b border-slate-800/40 ${r._noRoute ? 'bg-red-950/20' : 'hover:bg-slate-900/50'}`}>
+                    {saraRows.filter(r => !r._noRoute).slice(0, 600).map((r, i) => (
+                      <tr key={i} className="border-b border-slate-800/40 hover:bg-slate-900/50">
                         <td className="px-2 py-1.5 font-mono text-slate-300 whitespace-nowrap">{r.order_number}</td>
+                        <td className="px-2 py-1.5 font-mono text-cyan-300/70 whitespace-nowrap text-[10px]">{r.mfg_order_number !== r.order_number ? r.mfg_order_number : '—'}</td>
                         <td className="px-2 py-1.5 font-mono text-slate-200 whitespace-nowrap">{r.product_name}</td>
                         <td className="px-2 py-1.5 text-right text-white font-mono">{r.prod_qty}</td>
                         <td className="px-2 py-1.5 text-slate-400 whitespace-nowrap">{r.due}</td>
-                        <td className="px-2 py-1.5 text-center text-slate-400 font-mono">
-                          {r._noRoute ? <span className="text-red-400 text-[10px]">無途程</span> : r.job_seq}
-                        </td>
+                        <td className="px-2 py-1.5 text-center text-slate-400 font-mono">{r.job_seq}</td>
                         <td className="px-2 py-1.5 text-cyan-300 whitespace-nowrap">{r.workcenter}</td>
                         <td className="px-2 py-1.5 text-emerald-300 whitespace-nowrap">{r.job_name}</td>
                         <td className="px-2 py-1.5 text-right font-mono">{r.job_qty || '—'}</td>
@@ -564,11 +643,68 @@ export default function ProcessGenPage() {
                     ))}
                   </tbody>
                 </table>
-                {saraRows.length > 600 && (
+                {successCount > 600 && (
                   <p className="text-center text-xs text-slate-500 py-2">
                     僅顯示前 600 列，下載 CSV 包含全部 {successCount} 工序列
                   </p>
                 )}
+              </div>
+            </div>
+          )}
+
+          {/* 無途程訂單 ── 套用臨時料號 */}
+          {noRouteRows.length > 0 && (
+            <div className="bg-amber-950/20 border border-amber-700/40 rounded-xl p-4 space-y-3">
+              <div className="flex items-center gap-2">
+                <span className="text-amber-300 font-semibold text-sm">⚠ {noRouteRows.length} 筆訂單無對應途程</span>
+                <span className="text-slate-500 text-xs">輸入已有途程的料號以套用臨時途程，套用後會納入匯出</span>
+              </div>
+
+              {/* 無途程訂單列表 */}
+              <div className="overflow-x-auto rounded-lg border border-amber-700/20 max-h-48 overflow-y-auto">
+                <table className="w-full text-xs">
+                  <thead className="bg-amber-900/20 sticky top-0">
+                    <tr className="text-amber-300/70 text-[10px] uppercase">
+                      <th className="px-2 py-1.5 text-left">訂單</th>
+                      <th className="px-2 py-1.5 text-left">品號</th>
+                      <th className="px-2 py-1.5 text-left max-w-[180px]">品名/規格</th>
+                      <th className="px-2 py-1.5 text-right">數量</th>
+                      <th className="px-2 py-1.5 text-left">交期</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {noRouteRows.map((r, i) => (
+                      <tr key={i} className="border-t border-amber-700/10">
+                        <td className="px-2 py-1 font-mono text-slate-300 whitespace-nowrap">{r.order_number}</td>
+                        <td className="px-2 py-1 font-mono text-amber-300/80 whitespace-nowrap">{r.item_code}</td>
+                        <td className="px-2 py-1 text-slate-400 max-w-[180px] truncate" title={r.item_spec}>{r.item_spec || '—'}</td>
+                        <td className="px-2 py-1 text-right font-mono text-white">{r.quantity}</td>
+                        <td className="px-2 py-1 text-slate-400 whitespace-nowrap">{r.due || '—'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              {/* 套用臨時途程 */}
+              <div className="flex flex-wrap items-center gap-2">
+                <label className="text-xs text-slate-400 whitespace-nowrap">套用料號途程</label>
+                <input
+                  type="text"
+                  value={noRouteCode}
+                  onChange={e => setNoRouteCode(e.target.value.toUpperCase())}
+                  onKeyDown={e => e.key === 'Enter' && void handleApplyTempRoute()}
+                  placeholder="輸入已有途程的料號…"
+                  className="w-52 px-2 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-slate-100 text-sm focus:outline-none focus:border-emerald-500 font-mono"
+                />
+                <button
+                  onClick={() => void handleApplyTempRoute()}
+                  disabled={noRouteApplying || !noRouteCode.trim()}
+                  className="px-4 py-1.5 rounded-lg bg-emerald-700 hover:bg-emerald-600 disabled:opacity-40 text-white text-sm font-medium transition-colors"
+                >
+                  {noRouteApplying ? '套用中…' : '套用途程 → 納入匯出'}
+                </button>
+                {noRouteApplyWarn && <span className="text-red-400 text-xs">{noRouteApplyWarn}</span>}
               </div>
             </div>
           )}
