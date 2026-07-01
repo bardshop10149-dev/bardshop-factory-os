@@ -129,15 +129,15 @@ type SiteLabel = typeof SITE_OPTIONS[number]
 
 const SITE_BADGE: Record<SiteLabel, string> = {
   '台北': 'bg-sky-800/60 text-sky-300 border border-sky-700/40',
-  '常平': 'bg-violet-800/60 text-violet-300 border border-violet-700/40',
-  '委外': 'bg-orange-800/60 text-orange-300 border border-orange-700/40',
+  '常平': 'bg-orange-800/60 text-orange-300 border border-orange-700/40',
+  '委外': 'bg-violet-800/60 text-violet-300 border border-violet-700/40',
 }
 
 /** 各廠區對應的製令/採購/請購單號標籤與前綴 */
 const SITE_REF: Record<SiteLabel, { label: string; prefix: string; color: string }> = {
   '台北': { label: '製令號',   prefix: 'MOT', color: 'text-cyan-300' },
-  '常平': { label: '採購單號', prefix: 'POC', color: 'text-violet-300' },
-  '委外': { label: '請購單號', prefix: 'MPO', color: 'text-orange-300' },
+  '常平': { label: '採購單號', prefix: 'POC', color: 'text-orange-300' },
+  '委外': { label: '請購單號', prefix: 'MPO', color: 'text-violet-300' },
 }
 
 function refLabel(siteFilter: string): string {

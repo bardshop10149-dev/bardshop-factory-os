@@ -112,8 +112,8 @@ function escCsv(v: string | number): string {
 const FACTORY_LABEL: Record<string, string> = { T: '台北', C: '常平', O: '委外' }
 const FACTORY_BADGE: Record<string, string> = {
   T: 'bg-sky-800/70 text-sky-300 border border-sky-700/50',
-  C: 'bg-violet-800/70 text-violet-300 border border-violet-700/50',
-  O: 'bg-orange-800/70 text-orange-300 border border-orange-700/50',
+  C: 'bg-orange-800/70 text-orange-300 border border-orange-700/50',
+  O: 'bg-violet-800/70 text-violet-300 border border-violet-700/50',
 }
 
 // ── 頁面 ─────────────────────────────────────────────────────────
@@ -143,6 +143,8 @@ export default function ProcessGenPage() {
   const [noRouteCodes, setNoRouteCodes]           = useState<Record<string, string>>({})  // key = rowKey()
   const [noRouteApplying, setNoRouteApplying]     = useState<Record<string, boolean>>({})
   const [noRouteApplyWarns, setNoRouteApplyWarns] = useState<Record<string, string>>({})
+  const [noRouteModes, setNoRouteModes]           = useState<Record<string, 'item' | 'route'>>({})  // 'item'=品號, 'route'=途程名稱
+  const [selectedReroute, setSelectedReroute]     = useState<Record<string, boolean>>({})   // key = order|item
 
   // Single lookup state
   const [itemCode, setItemCode]         = useState('')
@@ -269,6 +271,8 @@ export default function ProcessGenPage() {
     setNoRouteCodes({})
     setNoRouteApplying({})
     setNoRouteApplyWarns({})
+    setNoRouteModes({})
+    setSelectedReroute({})
     const warns: string[] = []
     const today = fmtToday()
 
@@ -364,25 +368,64 @@ export default function ProcessGenPage() {
   // ── 套用臨時途程至単一無途程訂單 ─────────────────────────────────────
 
   const rowKey = (r: InputRow) => `${r.order_number}||${r.item_code}||${r.quantity}`
+  const rerouteKey = (r: { order_number: string; product_name: string }) => `${r.order_number}|${r.product_name}`
 
-  const handleApplyTempRoute = useCallback(async (row: InputRow) => {
+  // ── 將已有途程的列移回無途程區（修改途程） ─────────────────────────
+
+  const handleMoveToNoRoute = useCallback(() => {
+    const groupKeys = new Set(Object.entries(selectedReroute).filter(([, v]) => v).map(([k]) => k))
+    if (!groupKeys.size) return
+    const today = fmtToday()
+    const newInputRows: InputRow[] = []
+    const placeholders: SaraRow[] = []
+    for (const gk of groupKeys) {
+      const [orderNum, itemCode] = gk.split('|')
+      const orig = inputRows.find(r => r.order_number === orderNum && r.item_code === itemCode)
+      if (!orig) continue
+      if (noRouteRows.some(r => r.order_number === orderNum && r.item_code === itemCode)) continue
+      newInputRows.push(orig)
+      placeholders.push({
+        order_number: orig.order_number, mfg_order_number: orig.mo_number || orig.order_number,
+        product_name: orig.item_code, product_desc: orig.item_spec,
+        lot_number: '', prod_qty: orig.quantity, due: orig.due,
+        priority: '', earliest_start: today,
+        job_seq: '', workcenter: '', job_name: '', job_qty: orig.quantity,
+        outsourcing: '', est_time: 0, time_unit: '分鐘', bom: '', mat_req_qty: '',
+        customer: orig.customer, factory: orig.factory, _noRoute: true,
+      })
+    }
+    setSaraRows(prev => [
+      ...prev.filter(r => !groupKeys.has(rerouteKey(r))),
+      ...placeholders,
+    ])
+    setNoRouteRows(prev => [...prev, ...newInputRows])
+    setSelectedReroute({})
+  }, [selectedReroute, inputRows, noRouteRows])
     const key  = rowKey(row)
-    const code = (noRouteCodes[key] ?? '').trim().toUpperCase()
+    const raw  = (noRouteCodes[key] ?? '').trim()
+    const mode = noRouteModes[key] ?? 'item'
+    const code = mode === 'item' ? raw.toUpperCase() : raw
     if (!code) return
     setNoRouteApplying(prev => ({ ...prev, [key]: true }))
     setNoRouteApplyWarns(prev => ({ ...prev, [key]: '' }))
     const today = fmtToday()
     try {
-      const { data: irData, error: irErr } = await supabase
-        .from('item_routes').select('route_id').eq('item_code', code).limit(1).single()
-      if (irErr || !irData) throw new Error(`找不到品號 ${code} 的途程`)
+      let routeId: string
+      if (mode === 'route') {
+        routeId = code   // 直接指定途程名稱（route_id）
+      } else {
+        const { data: irData, error: irErr } = await supabase
+          .from('item_routes').select('route_id').eq('item_code', code).limit(1).single()
+        if (irErr || !irData) throw new Error(`找不到品號 ${code} 的途程`)
+        routeId = (irData as { route_id: string }).route_id
+      }
 
       type SOp = { sequence: number; op_name: string }
       const { data: roData } = await supabase
         .from('route_operations').select('sequence,op_name')
-        .eq('route_id', (irData as { route_id: string }).route_id).order('sequence')
+        .eq('route_id', routeId).order('sequence')
       const ops = (roData ?? []) as SOp[]
-      if (!ops.length) throw new Error(`途程 ${(irData as { route_id: string }).route_id} 無工序資料`)
+      if (!ops.length) throw new Error(`途程「${routeId}」無工序資料`)
 
       type OtRow = { op_name: string; station: string; std_time_min: number }
       const { data: otData } = await supabase
@@ -407,6 +450,7 @@ export default function ProcessGenPage() {
           job_qty: jobQty, outsourcing: '', est_time: est, time_unit: '分鐘',
           bom: '', mat_req_qty: '',
           customer: row.customer,
+          factory: row.factory,
         }
       })
 
@@ -422,7 +466,7 @@ export default function ProcessGenPage() {
     } finally {
       setNoRouteApplying(prev => ({ ...prev, [key]: false }))
     }
-  }, [noRouteCodes, noRouteRows])
+  }, [noRouteCodes, noRouteModes, noRouteRows])
 
   // ── 下載 SARA CSV ─────────────────────────────────────────────
 
@@ -625,6 +669,14 @@ export default function ProcessGenPage() {
                     ⚠ {noRouteCount} 筆品號無途程（見下方）
                   </span>
                 )}
+                {Object.values(selectedReroute).some(Boolean) && (
+                  <button
+                    onClick={handleMoveToNoRoute}
+                    className="px-3 py-1.5 rounded-lg bg-amber-700 hover:bg-amber-600 text-white text-xs font-semibold"
+                  >
+                    ✓ {Object.values(selectedReroute).filter(Boolean).length} 筆→移至無途程區
+                  </button>
+                )}
                 <button onClick={handleDownload}
                   className="px-4 py-2 rounded-lg bg-cyan-700 hover:bg-cyan-600 text-white text-sm font-semibold">
                   {dlDone ? '✅ 已下載' : '⬇ 下載 SARA CSV'}
@@ -636,6 +688,7 @@ export default function ProcessGenPage() {
                 <table className="w-full text-xs text-left border-collapse min-w-max">
                   <thead className="sticky top-0 bg-slate-900 z-10">
                     <tr className="text-slate-400 text-[10px] uppercase">
+                      <th className="px-2 py-2 border-b border-slate-800 text-amber-400/70 w-6">✓</th>
                       <th className="px-2 py-2 border-b border-slate-800">廠區</th>
                       <th className="px-2 py-2 border-b border-slate-800">訂單</th>
                       <th className="px-2 py-2 border-b border-slate-800">製令號</th>
@@ -652,6 +705,14 @@ export default function ProcessGenPage() {
                   <tbody>
                     {saraRows.filter(r => !r._noRoute).slice(0, 600).map((r, i) => (
                       <tr key={i} className="border-b border-slate-800/40 hover:bg-slate-900/50">
+                        <td className="px-2 py-1.5 text-center">
+                          <input
+                            type="checkbox"
+                            checked={selectedReroute[rerouteKey(r)] ?? false}
+                            onChange={e => setSelectedReroute(prev => ({ ...prev, [rerouteKey(r)]: e.target.checked }))}
+                            className="accent-amber-400 cursor-pointer"
+                          />
+                        </td>
                         <td className="px-2 py-1.5 whitespace-nowrap">
                           {r.factory
                             ? <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${FACTORY_BADGE[r.factory] ?? ''}`}>{FACTORY_LABEL[r.factory]}</span>
@@ -699,7 +760,7 @@ export default function ProcessGenPage() {
                       <th className="px-2 py-1.5 text-left whitespace-nowrap">品號</th>
                       <th className="px-2 py-1.5 text-left">品名/規格</th>
                       <th className="px-2 py-1.5 text-right whitespace-nowrap">數量</th>
-                      <th className="px-2 py-1.5 text-left whitespace-nowrap">套用料號途程</th>
+                      <th className="px-2 py-1.5 text-left whitespace-nowrap">指定方式 · 途程</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -720,23 +781,41 @@ export default function ProcessGenPage() {
                           <td className="px-2 py-1.5 text-slate-400 max-w-[200px] truncate" title={r.item_spec}>{r.item_spec || '—'}</td>
                           <td className="px-2 py-1.5 text-right font-mono text-white whitespace-nowrap">{r.quantity}</td>
                           <td className="px-2 py-1.5">
-                            <div className="flex items-center gap-1.5 flex-wrap">
-                              <input
-                                type="text"
-                                value={code}
-                                onChange={e => setNoRouteCodes(prev => ({ ...prev, [key]: e.target.value.toUpperCase() }))}
-                                onKeyDown={e => e.key === 'Enter' && void handleApplyTempRoute(r)}
-                                placeholder="已有途程的料號…"
-                                className="w-44 px-2 py-1 rounded bg-slate-800 border border-slate-700 text-slate-100 text-xs focus:outline-none focus:border-emerald-500 font-mono"
-                              />
-                              <button
-                                onClick={() => void handleApplyTempRoute(r)}
-                                disabled={applying || !code.trim()}
-                                className="px-3 py-1 rounded bg-emerald-700 hover:bg-emerald-600 disabled:opacity-40 text-white text-xs font-medium transition-colors whitespace-nowrap"
-                              >
-                                {applying ? '套用中…' : '套用 →'}
-                              </button>
-                              {warn && <span className="text-red-400 text-[10px]">{warn}</span>}
+                            <div className="space-y-1">
+                              {/* 模式切換 */}
+                              <div className="flex gap-1">
+                                {(['item', 'route'] as const).map(m => (
+                                  <button key={m}
+                                    onClick={() => setNoRouteModes(prev => ({ ...prev, [key]: m }))}
+                                    className={`px-1.5 py-0.5 rounded text-[9px] font-medium transition-colors ${
+                                      (noRouteModes[key] ?? 'item') === m
+                                        ? m === 'item' ? 'bg-emerald-800 text-emerald-200' : 'bg-cyan-800 text-cyan-200'
+                                        : 'bg-slate-700 text-slate-500 hover:text-slate-300'
+                                    }`}
+                                  >
+                                    {m === 'item' ? '品號' : '途程名稱'}
+                                  </button>
+                                ))}
+                              </div>
+                              {/* 輸入框 + 按鈕 */}
+                              <div className="flex items-center gap-1.5 flex-wrap">
+                                <input
+                                  type="text"
+                                  value={code}
+                                  onChange={e => setNoRouteCodes(prev => ({ ...prev, [key]: e.target.value }))}
+                                  onKeyDown={e => e.key === 'Enter' && void handleApplyTempRoute(r)}
+                                  placeholder={(noRouteModes[key] ?? 'item') === 'item' ? '已有途程的料號…' : '途程名稱，如：常平一般壓克力製程'}
+                                  className="w-52 px-2 py-1 rounded bg-slate-800 border border-slate-700 text-slate-100 text-xs focus:outline-none focus:border-emerald-500 font-mono"
+                                />
+                                <button
+                                  onClick={() => void handleApplyTempRoute(r)}
+                                  disabled={applying || !code.trim()}
+                                  className="px-3 py-1 rounded bg-emerald-700 hover:bg-emerald-600 disabled:opacity-40 text-white text-xs font-medium transition-colors whitespace-nowrap"
+                                >
+                                  {applying ? '套用中…' : '套用 →'}
+                                </button>
+                                {warn && <span className="text-red-400 text-[10px]">{warn}</span>}
+                              </div>
                             </div>
                           </td>
                         </tr>
