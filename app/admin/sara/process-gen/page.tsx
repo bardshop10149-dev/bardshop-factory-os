@@ -12,8 +12,9 @@ interface InputRow {
   quantity: number
   due: string
   pan_count: number
-  mo_number?: string   // 製令單號（MOT...）
-  customer?: string    // 客戶名稱
+  mo_number?: string            // 製令單號（MOT...）
+  customer?: string             // 客戶名稱
+  factory?: 'T' | 'C' | 'O'   // 廠區：T=台北 C=常平 O=委外（僅預覽，不匯出）
 }
 
 interface SaraRow {
@@ -36,6 +37,7 @@ interface SaraRow {
   bom: string
   mat_req_qty: string
   customer?: string
+  factory?: 'T' | 'C' | 'O'   // 廠區（僅預覽，不匯出）
   _noRoute?: boolean
 }
 
@@ -105,6 +107,13 @@ function fmtToday(): string {
 function escCsv(v: string | number): string {
   const s = String(v ?? '')
   return /[,"\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s
+}
+
+const FACTORY_LABEL: Record<string, string> = { T: '台北', C: '常平', O: '委外' }
+const FACTORY_BADGE: Record<string, string> = {
+  T: 'bg-sky-800/70 text-sky-300 border border-sky-700/50',
+  C: 'bg-violet-800/70 text-violet-300 border border-violet-700/50',
+  O: 'bg-orange-800/70 text-orange-300 border border-orange-700/50',
 }
 
 // ── 頁面 ─────────────────────────────────────────────────────────
@@ -225,6 +234,7 @@ export default function ProcessGenPage() {
           pan_count:    pan,
           mo_number:    String(r.mo_number ?? '').trim() || undefined,
           customer:     String(r.customer  ?? '').trim() || undefined,
+          factory:      ((['T', 'C', 'O'].includes(String(r.factory ?? ''))) ? String(r.factory) : undefined) as 'T'|'C'|'O'|undefined,
         })
       }
       if (!parsed.length) {
@@ -309,6 +319,7 @@ export default function ProcessGenPage() {
             job_seq: '', workcenter: '', job_name: '', job_qty: row.quantity,
             outsourcing: '', est_time: 0, time_unit: '分鐘', bom: '', mat_req_qty: '',
             customer: row.customer,
+            factory: row.factory,
             _noRoute: true,
           })
           continue
@@ -330,6 +341,7 @@ export default function ProcessGenPage() {
             job_qty: jobQty, outsourcing: '', est_time: est, time_unit: '分鐘',
             bom: '', mat_req_qty: '',
             customer: row.customer,
+            factory: row.factory,
           })
         }
       }
@@ -618,6 +630,7 @@ export default function ProcessGenPage() {
                 <table className="w-full text-xs text-left border-collapse min-w-max">
                   <thead className="sticky top-0 bg-slate-900 z-10">
                     <tr className="text-slate-400 text-[10px] uppercase">
+                      <th className="px-2 py-2 border-b border-slate-800">廠區</th>
                       <th className="px-2 py-2 border-b border-slate-800">訂單</th>
                       <th className="px-2 py-2 border-b border-slate-800">製令號</th>
                       <th className="px-2 py-2 border-b border-slate-800">品號</th>
@@ -633,6 +646,11 @@ export default function ProcessGenPage() {
                   <tbody>
                     {saraRows.filter(r => !r._noRoute).slice(0, 600).map((r, i) => (
                       <tr key={i} className="border-b border-slate-800/40 hover:bg-slate-900/50">
+                        <td className="px-2 py-1.5 whitespace-nowrap">
+                          {r.factory
+                            ? <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${FACTORY_BADGE[r.factory] ?? ''}`}>{FACTORY_LABEL[r.factory]}</span>
+                            : <span className="text-slate-700">—</span>}
+                        </td>
                         <td className="px-2 py-1.5 font-mono text-slate-300 whitespace-nowrap">{r.order_number}</td>
                         <td className="px-2 py-1.5 font-mono text-cyan-300/70 whitespace-nowrap text-[10px]">{r.mfg_order_number !== r.order_number ? r.mfg_order_number : '—'}</td>
                         <td className="px-2 py-1.5 font-mono text-slate-200 whitespace-nowrap">{r.product_name}</td>
@@ -670,6 +688,7 @@ export default function ProcessGenPage() {
                 <table className="w-full text-xs">
                   <thead className="bg-amber-900/20 sticky top-0">
                     <tr className="text-amber-300/70 text-[10px] uppercase">
+                      <th className="px-2 py-1.5 text-left whitespace-nowrap">廠區</th>
                       <th className="px-2 py-1.5 text-left whitespace-nowrap">訂單</th>
                       <th className="px-2 py-1.5 text-left whitespace-nowrap">品號</th>
                       <th className="px-2 py-1.5 text-left">品名/規格</th>
@@ -685,6 +704,11 @@ export default function ProcessGenPage() {
                       const code = noRouteCodes[key] ?? ''
                       return (
                         <tr key={key} className="border-t border-amber-700/10">
+                          <td className="px-2 py-1.5 whitespace-nowrap">
+                            {r.factory
+                              ? <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${FACTORY_BADGE[r.factory] ?? ''}`}>{FACTORY_LABEL[r.factory]}</span>
+                              : <span className="text-slate-700">—</span>}
+                          </td>
                           <td className="px-2 py-1.5 font-mono text-slate-300 whitespace-nowrap">{r.order_number}</td>
                           <td className="px-2 py-1.5 font-mono text-amber-300/80 whitespace-nowrap">{r.item_code}</td>
                           <td className="px-2 py-1.5 text-slate-400 max-w-[200px] truncate" title={r.item_spec}>{r.item_spec || '—'}</td>
