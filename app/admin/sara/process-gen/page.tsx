@@ -225,6 +225,12 @@ export default function ProcessGenPage() {
         const qty  = parseFloat(String(r.quantity   ?? '').replace(/,/g, '')) || 0
         if (qty <= 0) continue
         const pan  = parseFloat(String(r.plate_count ?? '').replace(/,/g, '')) || 0
+        const factory = (['T', 'C', 'O'].includes(String(r.factory ?? ''))) ? String(r.factory) as 'T'|'C'|'O' : undefined
+        // 依廠區選擇對應單號：台北=製令號MOT / 常平=採購單號POC / 委外=請購單號MPO
+        const refNumber =
+          factory === 'C' ? String(r.po_number ?? '').trim() || undefined :
+          factory === 'O' ? String(r.pr_number ?? '').trim() || undefined :
+                            String(r.mo_number ?? '').trim() || undefined
         parsed.push({
           order_number: order,
           item_code:    item,
@@ -232,9 +238,9 @@ export default function ProcessGenPage() {
           quantity:     qty,
           due:          String(r.delivery_date ?? '').trim(),
           pan_count:    pan,
-          mo_number:    String(r.mo_number ?? '').trim() || undefined,
+          mo_number:    refNumber,
           customer:     String(r.customer  ?? '').trim() || undefined,
-          factory:      ((['T', 'C', 'O'].includes(String(r.factory ?? ''))) ? String(r.factory) : undefined) as 'T'|'C'|'O'|undefined,
+          factory,
         })
       }
       if (!parsed.length) {
