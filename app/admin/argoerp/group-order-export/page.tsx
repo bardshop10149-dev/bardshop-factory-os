@@ -606,8 +606,9 @@ export default function GroupOrderExportPage() {
       }
 
       if (result !== null) {
-        const argoResults: Record<string, unknown>[] = Array.isArray(result?.apiResult?.RESULT)
-          ? (result.apiResult.RESULT as Record<string, unknown>[]) : []
+        const apiResult = (result?.apiResult ?? {}) as Record<string, unknown>
+        const argoResults: Record<string, unknown>[] = Array.isArray(apiResult.RESULT)
+          ? (apiResult.RESULT as Record<string, unknown>[]) : []
         const hasN = argoResults.some(r => String(r.CHECK_FLAG ?? '').toUpperCase() === 'N')
         const hasY = argoResults.some(r => String(r.CHECK_FLAG ?? '').toUpperCase() === 'Y')
 
