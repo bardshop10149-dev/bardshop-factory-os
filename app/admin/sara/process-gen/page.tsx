@@ -111,7 +111,14 @@ export default function ProcessGenPage() {
   const [activeTab, setActiveTab] = useState<'batch' | 'single'>('batch')
 
   // Batch state
-  const [fileName, setFileName]     = useState('')
+  const [dataSource, setDataSource]   = useState<'csv' | 'sheet'>('sheet')
+  const [fileName, setFileName]       = useState('')
+  const [sheetDate, setSheetDate]     = useState(() => {
+    const d = new Date()
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+  })
+  const [sheetLoading, setSheetLoading]     = useState(false)
+  const [sheetLoadError, setSheetLoadError] = useState('')
   const [inputRows, setInputRows]   = useState<InputRow[]>([])
   const [saraRows, setSaraRows]     = useState<SaraRow[]>([])
   const [genWarns, setGenWarns]     = useState<string[]>([])
@@ -175,6 +182,52 @@ export default function ProcessGenPage() {
     }
     reader.readAsText(file, 'UTF-8')
   }, [])
+
+  // ── 從出單表載入 ────────────────────────────────────────────────
+
+  const handleLoadFromSheet = useCallback(async () => {
+    if (!sheetDate) return
+    setSheetLoading(true)
+    setSheetLoadError('')
+    setInputRows([])
+    setSaraRows([])
+    setGenWarns([])
+    try {
+      const res = await fetch(`/api/argoerp/daily-order-sheet?date=${sheetDate}`)
+      const json = await res.json() as { success: boolean; sheet?: { rows?: Record<string, unknown>[] } }
+      if (!json.success || !json.sheet?.rows?.length) {
+        setSheetLoadError(`找不到 ${sheetDate} 的出單資料，請確認日期正確`)
+        return
+      }
+      const parsed: InputRow[] = []
+      for (const r of json.sheet.rows) {
+        const order = String(r.order_number ?? '').trim()
+        const item  = String(r.item_code   ?? '').trim()
+        if (!order || !item) continue
+        const qty  = parseFloat(String(r.quantity   ?? '').replace(/,/g, '')) || 0
+        if (qty <= 0) continue
+        const pan  = parseFloat(String(r.plate_count ?? '').replace(/,/g, '')) || 0
+        parsed.push({
+          order_number: order,
+          item_code:    item,
+          item_spec:    String(r.item_name ?? r.note ?? '').trim(),
+          quantity:     qty,
+          due:          String(r.delivery_date ?? '').trim(),
+          pan_count:    pan,
+        })
+      }
+      if (!parsed.length) {
+        setSheetLoadError(`${sheetDate} 出單表無有效品項資料`)
+        return
+      }
+      setInputRows(parsed)
+      setFileName(`出單表 ${sheetDate}（${parsed.length} 筆）`)
+    } catch (e) {
+      setSheetLoadError(`載入失敗：${e instanceof Error ? e.message : String(e)}`)
+    } finally {
+      setSheetLoading(false)
+    }
+  }, [sheetDate])
 
   // ── 批量產生 SARA ──────────────────────────────────────────────
 
@@ -375,20 +428,61 @@ export default function ProcessGenPage() {
       {activeTab === 'batch' && (
         <div className="space-y-4">
 
-          {/* 上傳區 */}
-          <div
-            onDragOver={e => { e.preventDefault(); setIsDragOver(true) }}
-            onDragLeave={() => setIsDragOver(false)}
-            onDrop={e => { e.preventDefault(); setIsDragOver(false); const f = e.dataTransfer.files[0]; if (f) handleFile(f) }}
-            onClick={() => fileRef.current?.click()}
-            className={`border-2 border-dashed rounded-xl p-8 text-center cursor-pointer transition-colors ${isDragOver ? 'border-emerald-400 bg-emerald-950/20' : 'border-slate-700 hover:border-emerald-600'}`}
-          >
-            <input ref={fileRef} type="file" accept=".csv" className="hidden"
-              onChange={e => { const f = e.target.files?.[0]; if (f) handleFile(f); e.target.value = '' }} />
-            <p className="text-slate-400 text-sm">拖曳 CSV 或點此上傳</p>
-            <p className="text-xs text-slate-600 mt-1">每日出單表格式（0630C.csv 等）</p>
-            {fileName && <p className="mt-2 text-emerald-400 text-sm font-mono">📄 {fileName}</p>}
+          {/* 資料來源切換 */}
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-slate-400 whitespace-nowrap">資料來源</span>
+            <div className="flex gap-1 bg-slate-900 p-1 rounded-lg border border-slate-800">
+              {(['sheet', 'csv'] as const).map(src => (
+                <button key={src} onClick={() => { setDataSource(src); setInputRows([]); setSaraRows([]); setGenWarns([]); setSheetLoadError('') }}
+                  className={`px-3 py-1 rounded text-xs font-medium transition-colors ${dataSource === src ? 'bg-emerald-700 text-white' : 'text-slate-400 hover:text-slate-200'}`}>
+                  {src === 'sheet' ? '📅 從出單表載入' : '📂 CSV 上傳'}
+                </button>
+              ))}
+            </div>
           </div>
+
+          {/* 從出單表載入 */}
+          {dataSource === 'sheet' && (
+            <div className="flex flex-wrap items-center gap-3 bg-slate-900 border border-slate-800 rounded-xl px-4 py-3">
+              <label className="text-xs text-slate-400 whitespace-nowrap">出單表日期</label>
+              <input
+                type="date"
+                value={sheetDate}
+                onChange={e => { setSheetDate(e.target.value); setInputRows([]); setSaraRows([]); setSheetLoadError('') }}
+                className="bg-slate-800 border border-slate-700 text-slate-100 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:border-emerald-500"
+              />
+              <button
+                onClick={() => void handleLoadFromSheet()}
+                disabled={sheetLoading || !sheetDate}
+                className="px-4 py-1.5 rounded-lg bg-emerald-700 hover:bg-emerald-600 disabled:opacity-50 text-white text-sm font-medium transition-colors"
+              >
+                {sheetLoading ? '⏳ 載入中…' : '載入'}
+              </button>
+              {inputRows.length > 0 && (
+                <span className="text-emerald-400 text-sm">✓ 已載入 {inputRows.length} 筆</span>
+              )}
+              {sheetLoadError && (
+                <span className="text-red-400 text-sm">{sheetLoadError}</span>
+              )}
+            </div>
+          )}
+
+          {/* CSV 上傳 */}
+          {dataSource === 'csv' && (
+            <div
+              onDragOver={e => { e.preventDefault(); setIsDragOver(true) }}
+              onDragLeave={() => setIsDragOver(false)}
+              onDrop={e => { e.preventDefault(); setIsDragOver(false); const f = e.dataTransfer.files[0]; if (f) handleFile(f) }}
+              onClick={() => fileRef.current?.click()}
+              className={`border-2 border-dashed rounded-xl p-8 text-center cursor-pointer transition-colors ${isDragOver ? 'border-emerald-400 bg-emerald-950/20' : 'border-slate-700 hover:border-emerald-600'}`}
+            >
+              <input ref={fileRef} type="file" accept=".csv" className="hidden"
+                onChange={e => { const f = e.target.files?.[0]; if (f) handleFile(f); e.target.value = '' }} />
+              <p className="text-slate-400 text-sm">拖曳 CSV 或點此上傳</p>
+              <p className="text-xs text-slate-600 mt-1">每日出單表格式（0630C.csv 等）</p>
+              {fileName && <p className="mt-2 text-emerald-400 text-sm font-mono">📄 {fileName}</p>}
+            </div>
+          )}
 
           {/* 解析摘要 + 產生按鈕 */}
           {inputRows.length > 0 && (
