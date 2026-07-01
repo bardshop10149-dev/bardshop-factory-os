@@ -133,6 +133,18 @@ const SITE_BADGE: Record<SiteLabel, string> = {
   '委外': 'bg-orange-800/60 text-orange-300 border border-orange-700/40',
 }
 
+/** 各廠區對應的製令/採購/請購單號標籤與前綴 */
+const SITE_REF: Record<SiteLabel, { label: string; prefix: string; color: string }> = {
+  '台北': { label: '製令號',   prefix: 'MOT', color: 'text-cyan-300' },
+  '常平': { label: '採購單號', prefix: 'POC', color: 'text-violet-300' },
+  '委外': { label: '請購單號', prefix: 'MPO', color: 'text-orange-300' },
+}
+
+function refLabel(siteFilter: string): string {
+  if (siteFilter in SITE_REF) return SITE_REF[siteFilter as SiteLabel].label
+  return '製令/採購/請購號'
+}
+
 // ===== 主元件 =====
 export default function SaraWipRecordsPage() {
   const [tab, setTab] = useState<'upload' | 'view'>('view')
@@ -333,7 +345,7 @@ export default function SaraWipRecordsPage() {
                     <table className="w-full text-xs">
                       <thead className="bg-slate-800 text-slate-300">
                         <tr>
-                          <th className="px-3 py-2 text-left whitespace-nowrap">製令單號</th>
+                          <th className="px-3 py-2 text-left whitespace-nowrap">{refLabel(importSiteLabel)}</th>
                           <th className="px-3 py-2 text-left whitespace-nowrap">來源單號</th>
                           <th className="px-3 py-2 text-left whitespace-nowrap">站點</th>
                           <th className="px-3 py-2 text-left whitespace-nowrap">製程</th>
@@ -461,7 +473,7 @@ export default function SaraWipRecordsPage() {
                 <table className="w-full text-xs">
                   <thead className="bg-slate-800/90 sticky top-0">
                     <tr className="border-b border-slate-700">
-                      <th className="px-3 py-2.5 text-left text-slate-300 whitespace-nowrap">製令單號</th>
+                      <th className="px-3 py-2.5 text-left text-slate-300 whitespace-nowrap">{refLabel(siteFilter)}</th>
                       <th className="px-3 py-2.5 text-left text-slate-300 whitespace-nowrap">來源單號</th>
                       <th className="px-3 py-2.5 text-left text-slate-300 whitespace-nowrap">料號</th>
                       <th className="px-3 py-2.5 text-left text-slate-300 max-w-[200px]">規格</th>
@@ -477,7 +489,17 @@ export default function SaraWipRecordsPage() {
                   <tbody>
                     {pageRecords.map((r, i) => (
                       <tr key={r.work_order} className={`border-b border-slate-800/50 ${i % 2 === 0 ? '' : 'bg-slate-800/20'}`}>
-                        <td className="px-3 py-2 font-mono text-cyan-300 whitespace-nowrap">{r.mo_nbr || '—'}</td>
+                        <td className="px-3 py-2 whitespace-nowrap">
+                          {(() => {
+                            const ref = r.site_label ? SITE_REF[r.site_label as SiteLabel] : null
+                            return (
+                              <span className={`font-mono ${ref?.color ?? 'text-cyan-300'}`}>
+                                {ref && <span className="text-[9px] opacity-60 mr-1">{ref.prefix}</span>}
+                                {r.mo_nbr || '—'}
+                              </span>
+                            )
+                          })()}
+                        </td>
                         <td className="px-3 py-2 font-mono text-amber-300/80 whitespace-nowrap">{r.doc_nbr || '—'}</td>
                         <td className="px-3 py-2 text-slate-400 whitespace-nowrap">{r.product_name || '—'}</td>
                         <td className="px-3 py-2 text-slate-200 max-w-[200px] truncate" title={r.product_description || ''}>{r.product_description || '—'}</td>
