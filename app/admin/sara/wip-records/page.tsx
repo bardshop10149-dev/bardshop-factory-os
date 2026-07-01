@@ -163,7 +163,12 @@ export default function SaraWipRecordsPage() {
     setImporting(true)
     setImportMsg('')
     try {
-      const payload = preview.map(r => ({
+      // 以 work_order 去重（CSV 可能含重複行，後者覆蓋前者）
+      const seen = new Map<string, typeof preview[0]>()
+      for (const r of preview) seen.set(r.work_order, r)
+      const deduped = Array.from(seen.values())
+
+      const payload = deduped.map(r => ({
         id_list:             r.id_list || null,
         work_order:          r.work_order,
         mo_nbr:              r.mo_nbr || null,
@@ -195,7 +200,7 @@ export default function SaraWipRecordsPage() {
         upserted += chunk.length
       }
 
-      setImportMsg(`✅ 匯入完成：共 ${upserted} 筆（已存在的會更新）`)
+      setImportMsg(`✅ 匯入完成：共 ${upserted} 筆（去重後，重複的已更新）`)
       setFile(null)
       setPreview([])
       if (tab === 'view') void fetchRecords()
