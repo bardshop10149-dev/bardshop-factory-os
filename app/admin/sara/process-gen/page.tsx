@@ -130,10 +130,10 @@ export default function ProcessGenPage() {
   const [isDragOver, setIsDragOver] = useState(false)
 
   // No-route override state
-  const [noRouteRows, setNoRouteRows]         = useState<InputRow[]>([])
-  const [noRouteCode, setNoRouteCode]         = useState('')
-  const [noRouteApplying, setNoRouteApplying] = useState(false)
-  const [noRouteApplyWarn, setNoRouteApplyWarn] = useState('')
+  const [noRouteRows, setNoRouteRows]             = useState<InputRow[]>([])
+  const [noRouteCodes, setNoRouteCodes]           = useState<Record<string, string>>({})  // key = rowKey()
+  const [noRouteApplying, setNoRouteApplying]     = useState<Record<string, boolean>>({})
+  const [noRouteApplyWarns, setNoRouteApplyWarns] = useState<Record<string, string>>({})
 
   // Single lookup state
   const [itemCode, setItemCode]         = useState('')
@@ -250,7 +250,9 @@ export default function ProcessGenPage() {
     setGenWarns([])
     setSaraRows([])
     setNoRouteRows([])
-    setNoRouteApplyWarn('')
+    setNoRouteCodes({})
+    setNoRouteApplying({})
+    setNoRouteApplyWarns({})
     const warns: string[] = []
     const today = fmtToday()
 
@@ -341,18 +343,21 @@ export default function ProcessGenPage() {
     }
   }, [inputRows])
 
-  // ── 套用臨時途程至無途程訂單 ─────────────────────────────────────
+  // ── 套用臨時途程至単一無途程訂單 ─────────────────────────────────────
 
-  const handleApplyTempRoute = useCallback(async () => {
-    const code = noRouteCode.trim().toUpperCase()
-    if (!code || !noRouteRows.length) return
-    setNoRouteApplying(true)
-    setNoRouteApplyWarn('')
+  const rowKey = (r: InputRow) => `${r.order_number}||${r.item_code}||${r.quantity}`
+
+  const handleApplyTempRoute = useCallback(async (row: InputRow) => {
+    const key  = rowKey(row)
+    const code = (noRouteCodes[key] ?? '').trim().toUpperCase()
+    if (!code) return
+    setNoRouteApplying(prev => ({ ...prev, [key]: true }))
+    setNoRouteApplyWarns(prev => ({ ...prev, [key]: '' }))
     const today = fmtToday()
     try {
       const { data: irData, error: irErr } = await supabase
         .from('item_routes').select('route_id').eq('item_code', code).limit(1).single()
-      if (irErr || !irData) throw new Error(`找不到品號 ${code} 的途程（item_routes 無資料）`)
+      if (irErr || !irData) throw new Error(`找不到品號 ${code} 的途程`)
 
       type SOp = { sequence: number; op_name: string }
       const { data: roData } = await supabase
@@ -369,36 +374,37 @@ export default function ProcessGenPage() {
         ((otData ?? []) as OtRow[]).map(r => [r.op_name, { station: r.station ?? '', std_time_min: Number(r.std_time_min ?? 0) }])
       )
 
-      const newRows: SaraRow[] = []
-      for (const row of noRouteRows) {
-        for (const op of ops) {
-          const ot      = otMap.get(op.op_name)
-          const station = ot?.station ?? ''
-          const std     = ot?.std_time_min ?? 0
-          const jobQty  = (row.pan_count > 0 && !isPackagingStation(station)) ? row.pan_count : row.quantity
-          const est     = Math.round(std * jobQty * 10) / 10
-          newRows.push({
-            order_number: row.order_number, mfg_order_number: row.mo_number || row.order_number,
-            product_name: row.item_code, product_desc: row.item_spec,
-            lot_number: '', prod_qty: row.quantity, due: row.due,
-            priority: '', earliest_start: today,
-            job_seq: op.sequence, workcenter: station, job_name: op.op_name,
-            job_qty: jobQty, outsourcing: '', est_time: est, time_unit: '分鐘',
-            bom: '', mat_req_qty: '',
-            customer: row.customer,
-          })
+      const newRows: SaraRow[] = ops.map(op => {
+        const ot      = otMap.get(op.op_name)
+        const station = ot?.station ?? ''
+        const std     = ot?.std_time_min ?? 0
+        const jobQty  = (row.pan_count > 0 && !isPackagingStation(station)) ? row.pan_count : row.quantity
+        const est     = Math.round(std * jobQty * 10) / 10
+        return {
+          order_number: row.order_number, mfg_order_number: row.mo_number || row.order_number,
+          product_name: row.item_code, product_desc: row.item_spec,
+          lot_number: '', prod_qty: row.quantity, due: row.due,
+          priority: '', earliest_start: today,
+          job_seq: op.sequence, workcenter: station, job_name: op.op_name,
+          job_qty: jobQty, outsourcing: '', est_time: est, time_unit: '分鐘',
+          bom: '', mat_req_qty: '',
+          customer: row.customer,
         }
-      }
-      // 移除 _noRoute 佔位列，補入產生的列
-      setSaraRows(prev => [...prev.filter(r => !r._noRoute), ...newRows])
-      setNoRouteRows([])
-      setNoRouteCode('')
+      })
+
+      // 從 saraRows 移除此行的 _noRoute 佔位，加入新產生列
+      setSaraRows(prev => [
+        ...prev.filter(r => !(r._noRoute && r.order_number === row.order_number && r.product_name === row.item_code)),
+        ...newRows,
+      ])
+      setNoRouteRows(prev => prev.filter(r => rowKey(r) !== key))
+      setNoRouteCodes(prev => { const n = { ...prev }; delete n[key]; return n })
     } catch (e) {
-      setNoRouteApplyWarn(e instanceof Error ? e.message : String(e))
+      setNoRouteApplyWarns(prev => ({ ...prev, [key]: e instanceof Error ? e.message : String(e) }))
     } finally {
-      setNoRouteApplying(false)
+      setNoRouteApplying(prev => ({ ...prev, [key]: false }))
     }
-  }, [noRouteCode, noRouteRows])
+  }, [noRouteCodes, noRouteRows])
 
   // ── 下載 SARA CSV ─────────────────────────────────────────────
 
@@ -652,59 +658,62 @@ export default function ProcessGenPage() {
             </div>
           )}
 
-          {/* 無途程訂單 ── 套用臨時料號 */}
+          {/* 無途程訂單 ── 每列獨立套用臨時料號 */}
           {noRouteRows.length > 0 && (
             <div className="bg-amber-950/20 border border-amber-700/40 rounded-xl p-4 space-y-3">
               <div className="flex items-center gap-2">
                 <span className="text-amber-300 font-semibold text-sm">⚠ {noRouteRows.length} 筆訂單無對應途程</span>
-                <span className="text-slate-500 text-xs">輸入已有途程的料號以套用臨時途程，套用後會納入匯出</span>
+                <span className="text-slate-500 text-xs">每筆可套用不同料號的途程，套用後納入匯出</span>
               </div>
 
-              {/* 無途程訂單列表 */}
-              <div className="overflow-x-auto rounded-lg border border-amber-700/20 max-h-48 overflow-y-auto">
+              <div className="overflow-x-auto rounded-lg border border-amber-700/20">
                 <table className="w-full text-xs">
                   <thead className="bg-amber-900/20 sticky top-0">
                     <tr className="text-amber-300/70 text-[10px] uppercase">
-                      <th className="px-2 py-1.5 text-left">訂單</th>
-                      <th className="px-2 py-1.5 text-left">品號</th>
-                      <th className="px-2 py-1.5 text-left max-w-[180px]">品名/規格</th>
-                      <th className="px-2 py-1.5 text-right">數量</th>
-                      <th className="px-2 py-1.5 text-left">交期</th>
+                      <th className="px-2 py-1.5 text-left whitespace-nowrap">訂單</th>
+                      <th className="px-2 py-1.5 text-left whitespace-nowrap">品號</th>
+                      <th className="px-2 py-1.5 text-left">品名/規格</th>
+                      <th className="px-2 py-1.5 text-right whitespace-nowrap">數量</th>
+                      <th className="px-2 py-1.5 text-left whitespace-nowrap">套用料號途程</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {noRouteRows.map((r, i) => (
-                      <tr key={i} className="border-t border-amber-700/10">
-                        <td className="px-2 py-1 font-mono text-slate-300 whitespace-nowrap">{r.order_number}</td>
-                        <td className="px-2 py-1 font-mono text-amber-300/80 whitespace-nowrap">{r.item_code}</td>
-                        <td className="px-2 py-1 text-slate-400 max-w-[180px] truncate" title={r.item_spec}>{r.item_spec || '—'}</td>
-                        <td className="px-2 py-1 text-right font-mono text-white">{r.quantity}</td>
-                        <td className="px-2 py-1 text-slate-400 whitespace-nowrap">{r.due || '—'}</td>
-                      </tr>
-                    ))}
+                    {noRouteRows.map((r) => {
+                      const key = rowKey(r)
+                      const applying = noRouteApplying[key] ?? false
+                      const warn = noRouteApplyWarns[key] ?? ''
+                      const code = noRouteCodes[key] ?? ''
+                      return (
+                        <tr key={key} className="border-t border-amber-700/10">
+                          <td className="px-2 py-1.5 font-mono text-slate-300 whitespace-nowrap">{r.order_number}</td>
+                          <td className="px-2 py-1.5 font-mono text-amber-300/80 whitespace-nowrap">{r.item_code}</td>
+                          <td className="px-2 py-1.5 text-slate-400 max-w-[200px] truncate" title={r.item_spec}>{r.item_spec || '—'}</td>
+                          <td className="px-2 py-1.5 text-right font-mono text-white whitespace-nowrap">{r.quantity}</td>
+                          <td className="px-2 py-1.5">
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              <input
+                                type="text"
+                                value={code}
+                                onChange={e => setNoRouteCodes(prev => ({ ...prev, [key]: e.target.value.toUpperCase() }))}
+                                onKeyDown={e => e.key === 'Enter' && void handleApplyTempRoute(r)}
+                                placeholder="已有途程的料號…"
+                                className="w-44 px-2 py-1 rounded bg-slate-800 border border-slate-700 text-slate-100 text-xs focus:outline-none focus:border-emerald-500 font-mono"
+                              />
+                              <button
+                                onClick={() => void handleApplyTempRoute(r)}
+                                disabled={applying || !code.trim()}
+                                className="px-3 py-1 rounded bg-emerald-700 hover:bg-emerald-600 disabled:opacity-40 text-white text-xs font-medium transition-colors whitespace-nowrap"
+                              >
+                                {applying ? '套用中…' : '套用 →'}
+                              </button>
+                              {warn && <span className="text-red-400 text-[10px]">{warn}</span>}
+                            </div>
+                          </td>
+                        </tr>
+                      )
+                    })}
                   </tbody>
                 </table>
-              </div>
-
-              {/* 套用臨時途程 */}
-              <div className="flex flex-wrap items-center gap-2">
-                <label className="text-xs text-slate-400 whitespace-nowrap">套用料號途程</label>
-                <input
-                  type="text"
-                  value={noRouteCode}
-                  onChange={e => setNoRouteCode(e.target.value.toUpperCase())}
-                  onKeyDown={e => e.key === 'Enter' && void handleApplyTempRoute()}
-                  placeholder="輸入已有途程的料號…"
-                  className="w-52 px-2 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-slate-100 text-sm focus:outline-none focus:border-emerald-500 font-mono"
-                />
-                <button
-                  onClick={() => void handleApplyTempRoute()}
-                  disabled={noRouteApplying || !noRouteCode.trim()}
-                  className="px-4 py-1.5 rounded-lg bg-emerald-700 hover:bg-emerald-600 disabled:opacity-40 text-white text-sm font-medium transition-colors"
-                >
-                  {noRouteApplying ? '套用中…' : '套用途程 → 納入匯出'}
-                </button>
-                {noRouteApplyWarn && <span className="text-red-400 text-xs">{noRouteApplyWarn}</span>}
               </div>
             </div>
           )}
