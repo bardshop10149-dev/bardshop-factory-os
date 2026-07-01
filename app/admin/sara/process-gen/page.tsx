@@ -584,14 +584,6 @@ export default function ProcessGenPage() {
 }
 
 
-  const handleGenerate = useCallback(async () => {
-    const code = itemCode.trim().toUpperCase()
-    const qty = parseFloat(quantity) || 1
-    if (!code) { setError('請輸入品項編碼'); return }
-    setLoading(true)
-    setError('')
-    setResult(null)
-
     try {
       // 1. 品項 → 途程
       const { data: irData, error: irErr } = await supabase
