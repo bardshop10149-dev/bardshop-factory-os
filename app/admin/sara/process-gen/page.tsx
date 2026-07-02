@@ -98,6 +98,16 @@ function detectCols(header: string[]): Record<string, number> {
 // ── 輔助函式 ─────────────────────────────────────────────────────
 
 const isPackagingStation = (s: string) => s.includes('包裝站')
+const isTransitStation   = (s: string) => s.includes('轉運')
+
+// 工時計算：轉運站固定qty=1；計算結果不足10分鐘時補至10分鐘（std_time有值時）
+function calcEst(std: number, qty: number, panCount: number, station: string): number {
+  if (std === 0) return 0
+  const isPacking = isPackagingStation(station)
+  const isTransit = isTransitStation(station)
+  const effQty    = isTransit ? 1 : (panCount > 0 && !isPacking) ? panCount : qty
+  return Math.max(10, Math.round(std * effQty * 10) / 10)
+}
 
 function fmtToday(): string {
   const d = new Date()
@@ -133,8 +143,9 @@ export default function ProcessGenPage() {
   const [sheetLoadError, setSheetLoadError] = useState('')
   const [inputRows, setInputRows]   = useState<InputRow[]>([])
   const [saraRows, setSaraRows]     = useState<SaraRow[]>([])
-  const [genWarns, setGenWarns]     = useState<string[]>([])
-  const [generating, setGenerating] = useState(false)
+  const [genWarns, setGenWarns]         = useState<string[]>([])
+  const [confirmWarns, setConfirmWarns] = useState<string[]>([])
+  const [generating, setGenerating]     = useState(false)
   const [dlDone, setDlDone]         = useState(false)
   const [isDragOver, setIsDragOver] = useState(false)
 
@@ -212,6 +223,7 @@ export default function ProcessGenPage() {
     setInputRows([])
     setSaraRows([])
     setGenWarns([])
+    setConfirmWarns([])
     try {
       const res = await fetch(`/api/argoerp/daily-order-sheet?date=${sheetDate}`)
       const json = await res.json() as { success: boolean; sheet?: { rows?: Record<string, unknown>[] } }
@@ -266,6 +278,7 @@ export default function ProcessGenPage() {
     if (!inputRows.length) return
     setGenerating(true)
     setGenWarns([])
+    setConfirmWarns([])
     setSaraRows([])
     setNoRouteRows([])
     setNoRouteCodes({})
@@ -274,6 +287,7 @@ export default function ProcessGenPage() {
     setNoRouteModes({})
     setSelectedReroute({})
     const warns: string[] = []
+    const confirms: string[] = []
     const today = fmtToday()
 
     try {
@@ -287,6 +301,16 @@ export default function ProcessGenPage() {
 
       const missing = uniqueItems.filter(c => !irMap.has(c))
       if (missing.length) warns.push(`${missing.length} 個品號無途程（item_routes）：${missing.slice(0, 6).join('、')}${missing.length > 6 ? '…' : ''}`)
+
+      // 廠區與途程相符性確認（規則 4/5/6）
+      const fakeKo = inputRows.filter(r => r.factory === 'T' && r.item_spec.includes('仿柯'))
+      if (fakeKo.length) confirms.push(`廠區為台北但品名規格含「仿柯」，請確認是否應改為委外（${fakeKo.length} 筆）：${fakeKo.slice(0, 3).map(r => r.item_code).join('、')}${fakeKo.length > 3 ? '…' : ''}`)
+      const CP_ROUTE = '常平一般壓克力製程'
+      const cpMis = inputRows.filter(r => r.factory === 'C' && irMap.has(r.item_code) && irMap.get(r.item_code) !== CP_ROUTE)
+      if (cpMis.length) confirms.push(`廠區為常平但套用途程非「${CP_ROUTE}」，請確認（${cpMis.length} 筆）：${cpMis.slice(0, 3).map(r => r.item_code).join('、')}${cpMis.length > 3 ? '…' : ''}`)
+      const O_ROUTES = new Set(['委外/7天回', '委外/9天回', '委外/11天回'])
+      const ouMis = inputRows.filter(r => r.factory === 'O' && irMap.has(r.item_code) && !O_ROUTES.has(irMap.get(r.item_code)!))
+      if (ouMis.length) confirms.push(`廠區為委外但套用途程非標準委外途程（委外/7天回、9天回、11天回），請確認（${ouMis.length} 筆）：${ouMis.slice(0, 3).map(r => r.item_code).join('、')}${ouMis.length > 3 ? '…' : ''}`)
 
       // 2. route_operations
       const uniqueRoutes = [...new Set([...irMap.values()])]
@@ -339,9 +363,9 @@ export default function ProcessGenPage() {
           const ot      = otMap.get(op.op_name)
           const station = ot?.station ?? ''
           const std     = ot?.std_time_min ?? 0
-          // 包裝站 → 生產數量；其他站點 → 盤數（盤數為 0 時使用生產數量）
+          // 包裝站→生產數量；轉運站→固定1；其他站點→盤數（盤數為0時用生產數量）；最低10分鐘
           const jobQty  = (row.pan_count > 0 && !isPackagingStation(station)) ? row.pan_count : row.quantity
-          const est     = Math.round(std * jobQty * 10) / 10
+          const est     = calcEst(std, row.quantity, row.pan_count, station)
           out.push({
             order_number: row.order_number, mfg_order_number: row.mo_number || row.order_number,
             product_name: row.item_code, product_desc: row.item_spec,
@@ -358,6 +382,7 @@ export default function ProcessGenPage() {
       setSaraRows(out)
       setNoRouteRows(noRoute)
       setGenWarns(warns)
+      setConfirmWarns(confirms)
     } catch (e) {
       setGenWarns([`錯誤：${e instanceof Error ? e.message : String(e)}`])
     } finally {
@@ -444,7 +469,7 @@ export default function ProcessGenPage() {
         const station = ot?.station ?? ''
         const std     = ot?.std_time_min ?? 0
         const jobQty  = (row.pan_count > 0 && !isPackagingStation(station)) ? row.pan_count : row.quantity
-        const est     = Math.round(std * jobQty * 10) / 10
+        const est     = calcEst(std, row.quantity, row.pan_count, station)
         return {
           order_number: row.order_number, mfg_order_number: row.mo_number || row.order_number,
           product_name: row.item_code, product_desc: row.item_spec,
@@ -457,6 +482,16 @@ export default function ProcessGenPage() {
           factory: row.factory,
         }
       })
+
+      // 廠區途程確認警告（規則 4/5/6）
+      const applyConfirms: string[] = []
+      if (row.factory === 'T' && row.item_spec.includes('仿柯'))
+        applyConfirms.push(`【${row.item_code}】廠區台北但品名規格含「仿柯」，請確認`)
+      if (row.factory === 'C' && routeId !== '常平一般壓克力製程')
+        applyConfirms.push(`【${row.item_code}】廠區常平但途程非「常平一般壓克力製程」（套用：${routeId}），請確認`)
+      if (row.factory === 'O' && !new Set(['委外/7天回', '委外/9天回', '委外/11天回']).has(routeId))
+        applyConfirms.push(`【${row.item_code}】廠區委外但途程非標準委外途程（套用：${routeId}），請確認`)
+      if (applyConfirms.length) setConfirmWarns(prev => [...prev, ...applyConfirms])
 
       // 從 saraRows 移除此行的 _noRoute 佔位，加入新產生列
       setSaraRows(prev => [
@@ -529,7 +564,7 @@ export default function ProcessGenPage() {
         const ot  = otM.get(op.op_name)
         if (!ot) warns.push(`工序「${op.op_name}」無生產時間`)
         const std = ot?.std_time_min ?? 0
-        return { job_sequence: op.sequence, workcenter: ot?.station ?? '', job_name: op.op_name, job_quantity: qty, est_time: Math.round(std * qty * 10) / 10 }
+        return { job_sequence: op.sequence, workcenter: ot?.station ?? '', job_name: op.op_name, job_quantity: qty, est_time: calcEst(std, qty, 0, ot?.station ?? '') }
       })
       setSingleRows(result); setSingleWarns(warns)
     } catch (e) {
@@ -584,7 +619,7 @@ export default function ProcessGenPage() {
             <span className="text-xs text-slate-400 whitespace-nowrap">資料來源</span>
             <div className="flex gap-1 bg-slate-900 p-1 rounded-lg border border-slate-800">
               {(['sheet', 'csv'] as const).map(src => (
-                <button key={src} onClick={() => { setDataSource(src); setInputRows([]); setSaraRows([]); setGenWarns([]); setSheetLoadError('') }}
+                <button key={src} onClick={() => { setDataSource(src); setInputRows([]); setSaraRows([]); setGenWarns([]); setConfirmWarns([]); setSheetLoadError('') }}
                   className={`px-3 py-1 rounded text-xs font-medium transition-colors ${dataSource === src ? 'bg-emerald-700 text-white' : 'text-slate-400 hover:text-slate-200'}`}>
                   {src === 'sheet' ? '📅 從出單表載入' : '📂 CSV 上傳'}
                 </button>
@@ -654,7 +689,15 @@ export default function ProcessGenPage() {
             </div>
           )}
 
-          {/* 警告 */}
+          {/* 確認警告（廠區/途程不符） */}
+          {confirmWarns.length > 0 && (
+            <div className="px-4 py-2 bg-red-950/40 border border-red-600/50 rounded-lg space-y-0.5">
+              <div className="text-red-400 text-xs font-semibold mb-1">🔴 請確認以下異常</div>
+              {confirmWarns.map((w, i) => <div key={i} className="text-red-300 text-xs">・{w}</div>)}
+            </div>
+          )}
+
+          {/* 一般警告 */}
           {genWarns.length > 0 && (
             <div className="px-4 py-2 bg-amber-950/40 border border-amber-700/40 rounded-lg space-y-0.5">
               {genWarns.map((w, i) => <div key={i} className="text-amber-300 text-xs">⚠ {w}</div>)}
@@ -697,6 +740,7 @@ export default function ProcessGenPage() {
                       <th className="px-2 py-2 border-b border-slate-800">訂單</th>
                       <th className="px-2 py-2 border-b border-slate-800">製令號</th>
                       <th className="px-2 py-2 border-b border-slate-800">品號</th>
+                      <th className="px-2 py-2 border-b border-slate-800">品名規格</th>
                       <th className="px-2 py-2 border-b border-slate-800 text-right">生產量</th>
                       <th className="px-2 py-2 border-b border-slate-800">交期</th>
                       <th className="px-2 py-2 border-b border-slate-800 text-center">工序</th>
@@ -725,6 +769,7 @@ export default function ProcessGenPage() {
                         <td className="px-2 py-1.5 font-mono text-slate-300 whitespace-nowrap">{r.order_number}</td>
                         <td className="px-2 py-1.5 font-mono text-cyan-300/70 whitespace-nowrap text-[10px]">{r.mfg_order_number !== r.order_number ? r.mfg_order_number : '—'}</td>
                         <td className="px-2 py-1.5 font-mono text-slate-200 whitespace-nowrap">{r.product_name}</td>
+                        <td className="px-2 py-1.5 text-slate-400 max-w-[160px] truncate text-[10px]" title={r.product_desc}>{r.product_desc || <span className="text-slate-700">—</span>}</td>
                         <td className="px-2 py-1.5 text-right text-white font-mono">{r.prod_qty}</td>
                         <td className="px-2 py-1.5 text-slate-400 whitespace-nowrap">{r.due}</td>
                         <td className="px-2 py-1.5 text-center text-slate-400 font-mono">{r.job_seq}</td>
