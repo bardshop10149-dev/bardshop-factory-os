@@ -106,7 +106,7 @@ export default function PoBatchExportCPage() {
   const [header, setHeader]         = useState<PoHeader>(makeDefaultHeader)
   const [headerOpen, setHeaderOpen] = useState(true)
 
-  const [availDates, setAvailDates]       = useState<{ sheet_date: string; row_count: number }[]>([])
+  const [availDates, setAvailDates]       = useState<{ sheet_date: string; row_count: number; pending_c_count?: number }[]>([])
   const [datesLoading, setDatesLoading]   = useState(false)
   const [pickerDate, setPickerDate]       = useState('')
   const [loadedDate, setLoadedDate]       = useState<string | null>(null)
@@ -513,7 +513,9 @@ export default function PoBatchExportCPage() {
                 >
                   <option value="">選擇出單日期…</option>
                   {availDates.map(s => (
-                    <option key={s.sheet_date} value={s.sheet_date}>{s.sheet_date}（{s.row_count} 筆）</option>
+                    <option key={s.sheet_date} value={s.sheet_date}>
+                      {s.sheet_date}（{s.pending_c_count != null ? (s.pending_c_count > 0 ? `待處理 ${s.pending_c_count} 筆` : '已完成') : `${s.row_count} 筆`}）
+                    </option>
                   ))}
                 </select>
                 <button

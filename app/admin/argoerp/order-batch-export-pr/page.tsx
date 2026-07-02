@@ -119,7 +119,7 @@ export default function PrBatchExportOPage() {
   const [lineEdits, setLineEdits] = useState<LineEdit[]>([])
   const [header, setHeader] = useState<PrHeader>(makeDefaultHeader)
 
-  const [availDates, setAvailDates] = useState<{ sheet_date: string; row_count: number }[]>([])
+  const [availDates, setAvailDates] = useState<{ sheet_date: string; row_count: number; pending_pr_count?: number }[]>([])
   const [pickerDate, setPickerDate] = useState('')
   const [loadedDate, setLoadedDate] = useState<string | null>(null)
   const [activeTab, setActiveTab] = useState<'pending' | 'imported'>('pending')
@@ -582,7 +582,9 @@ export default function PrBatchExportOPage() {
             >
               <option value="">選擇日期</option>
               {availDates.map(d => (
-                <option key={d.sheet_date} value={d.sheet_date}>{d.sheet_date}（{d.row_count} 筆）</option>
+                <option key={d.sheet_date} value={d.sheet_date}>
+                  {d.sheet_date}（{d.pending_pr_count != null ? (d.pending_pr_count > 0 ? `待處理 ${d.pending_pr_count} 筆` : '已完成') : `${d.row_count} 筆`}）
+                </option>
               ))}
             </select>
             <button

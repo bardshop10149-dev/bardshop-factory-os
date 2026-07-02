@@ -37,6 +37,7 @@ interface SaraWipRow {
 // ===== 型別定義（與 order-batch-export 一致）=====
 interface SourceRow {
   order_number: string
+  line_no_input: string   // B欄：貼入時直接填寫的序號（空字串 = 無填入，需比對）
   doc_type: string
   factory: 'T' | 'C' | 'O'
   receiver: string
@@ -197,10 +198,10 @@ function fixStoredPackingShift<T extends {
   }
 }
 
-function parseSourceRows(text: string, sheetDate?: string): { rows: SourceRow[]; error: string } {
+function parseSourceRows(text: string, sheetDate?: string): { rows: SourceRow[]; error: string; duplicateWarnings: string[] } {
   const hasPackingCol = !sheetDate || sheetDate >= PACKING_COL_SINCE
   const rawRows = parseTSV(text.trim())
-  if (rawRows.length === 0) return { rows: [], error: '未偵測到有效資料行' }
+  if (rawRows.length === 0) return { rows: [], error: '未偵測到有效資料行', duplicateWarnings: [] }
 
   // 合併因儲存格內換行而被切分的延續行：
   // 若某行第一格為空白，代表上一筆資料的儲存格值含有 \n，
@@ -233,6 +234,7 @@ function parseSourceRows(text: string, sheetDate?: string): { rows: SourceRow[];
     const docType = (cells[2] ?? '').trim()
     const row: SourceRow = {
       order_number: (cells[0] ?? '').trim(),
+      line_no_input: (cells[1] ?? '').trim(),
       doc_type: docType,
       factory: detectFactory(docType),
       receiver: (cells[3] ?? '').trim(),
@@ -259,8 +261,20 @@ function parseSourceRows(text: string, sheetDate?: string): { rows: SourceRow[];
     if (row.order_number || row.item_code) parsed.push(row)
   }
 
-  if (parsed.length === 0) return { rows: [], error: '未解析到有效資料，請確認資料是從 Excel 以 Tab 分隔複製' }
-  return { rows: parsed, error: '' }
+  if (parsed.length === 0) return { rows: [], error: '未解析到有效資料，請確認資料是從 Excel 以 Tab 分隔複製', duplicateWarnings: [] }
+
+  // 重複訂單號+序號偵測
+  const seenDupKeys = new Set<string>()
+  const duplicateWarnings: string[] = []
+  for (const row of parsed) {
+    if (!row.line_no_input) continue
+    const dupKey = `${row.order_number}|${row.line_no_input}`
+    if (seenDupKeys.has(dupKey)) {
+      duplicateWarnings.push(`${row.order_number} 序號 ${row.line_no_input}`)
+    }
+    seenDupKeys.add(dupKey)
+  }
+  return { rows: parsed, error: '', duplicateWarnings }
 }
 
 function encodeTsvCell(v: string): string {
@@ -335,6 +349,7 @@ export default function DailyOrderSheetPage() {
   const [currentRawText, setCurrentRawText] = useState('')   // stored raw_text for this date
   const [showPasteArea, setShowPasteArea] = useState(false)
   const [parseError, setParseError] = useState('')
+  const [parseWarnings, setParseWarnings] = useState<string[]>([])
   const [loading, setLoading] = useState(false)
   const [saving, setSaving] = useState(false)
   const [saveMsg, setSaveMsg] = useState('')
@@ -672,14 +687,19 @@ export default function DailyOrderSheetPage() {
   // ---- 解析貼上資料 ----
   const handleParse = useCallback(() => {
     setParseError('')
+    setParseWarnings([])
     if (!rawText.trim()) { setParseError('請先貼上資料'); return }
-    const { rows, error } = parseSourceRows(rawText, selectedDate)
+    const { rows, error, duplicateWarnings } = parseSourceRows(rawText, selectedDate)
     if (error) { setParseError(error); return }
 
     const sheetRowsNew: SheetRow[] = rows.map(r => ({
       ...r,
       row_key: createRowKey(r),
       mo_status: null,
+      // 若原始資料已填入序號（B欄），直接預填 match_line_no，無需比對
+      ...(r.line_no_input
+        ? { match_line_no: r.line_no_input, match_status: 'matched' as MatchStatus, match_reason: '原始資料直接填入' }
+        : {}),
     }))
 
     // 保留已有狀態（相同 row_key 的保留舊狀態）
@@ -691,7 +711,10 @@ export default function DailyOrderSheetPage() {
     setSheetRows(merged)
     setShowPasteArea(false)
     setParseError('')
-  }, [rawText, sheetRows])
+    if (duplicateWarnings.length > 0) {
+      setParseWarnings(duplicateWarnings)
+    }
+  }, [rawText, sheetRows, selectedDate])
 
   // ---- 儲存至 Supabase ----
   const handleSave = useCallback(async () => {
@@ -846,6 +869,9 @@ export default function DailyOrderSheetPage() {
       const normalizeText = (v: string): string => v.replace(/\s+/g, '').trim()
 
       const next: SheetRow[] = sheetRows.map(src => {
+        // 原始資料已有序號（B欄直接填入）→ 跳過比對，保留現有值
+        if (src.line_no_input) return src
+
         if (!src.order_number || !soProjectIds.has(src.order_number)) {
           return { ...src, match_status: 'no_order', match_line_no: null, match_pdl_seq: null, match_reason: '無對應來源單號' }
         }
@@ -2377,24 +2403,44 @@ export default function DailyOrderSheetPage() {
 
           {/* ===== 每日出單表分頁 ===== */}
           {activeMainTab === 'daily' && (<>
-          {/* 水平日期列 */}
-          {availableSheets.length > 0 && (
-            <div className="mb-4 flex gap-2 flex-wrap">
-              {availableSheets.map(s => (
-                <button
-                  key={s.sheet_date}
-                  onClick={() => setSelectedDate(s.sheet_date)}
-                  className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors border ${
-                    s.sheet_date === selectedDate
-                      ? 'bg-cyan-700 text-white border-cyan-600'
-                      : 'bg-slate-900 text-slate-300 border-slate-700 hover:bg-slate-800'
-                  }`}
-                >
-                  {s.sheet_date} <span className="opacity-60">{s.row_count}筆</span>
-                </button>
-              ))}
-            </div>
-          )}
+          {/* 水平日期列：顯示最近 10 天，超過 10 天以下拉選單呈現 */}
+          {availableSheets.length > 0 && (() => {
+            const recentSheets = availableSheets.slice(0, 10)
+            const olderSheets = availableSheets.slice(10)
+            return (
+              <div className="mb-4 flex gap-2 flex-wrap items-center">
+                {recentSheets.map(s => (
+                  <button
+                    key={s.sheet_date}
+                    onClick={() => setSelectedDate(s.sheet_date)}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors border ${
+                      s.sheet_date === selectedDate
+                        ? 'bg-cyan-700 text-white border-cyan-600'
+                        : 'bg-slate-900 text-slate-300 border-slate-700 hover:bg-slate-800'
+                    }`}
+                  >
+                    {s.sheet_date} <span className="opacity-60">{s.row_count}筆</span>
+                  </button>
+                ))}
+                {olderSheets.length > 0 && (
+                  <select
+                    value={olderSheets.some(s => s.sheet_date === selectedDate) ? selectedDate : ''}
+                    onChange={e => { if (e.target.value) setSelectedDate(e.target.value) }}
+                    className={`px-2 py-1.5 rounded-lg text-xs font-medium transition-colors border focus:outline-none focus:border-cyan-500 ${
+                      olderSheets.some(s => s.sheet_date === selectedDate)
+                        ? 'bg-cyan-700 text-white border-cyan-600'
+                        : 'bg-slate-900 text-slate-400 border-slate-700 hover:bg-slate-800'
+                    }`}
+                  >
+                    <option value="">更早的日期…</option>
+                    {olderSheets.map(s => (
+                      <option key={s.sheet_date} value={s.sheet_date}>{s.sheet_date}（{s.row_count}筆）</option>
+                    ))}
+                  </select>
+                )}
+              </div>
+            )
+          })()}
 
           {/* 跨日期搜尋結果 */}
           {(globalResults !== null) && (
@@ -2517,6 +2563,14 @@ export default function DailyOrderSheetPage() {
                 )}
                 {parseError && (
                   <p className="mt-2 text-red-400 text-sm">{parseError}</p>
+                )}
+                {parseWarnings.length > 0 && (
+                  <div className="mt-2 p-3 rounded-lg bg-amber-900/30 border border-amber-700/50">
+                    <p className="text-amber-300 text-sm font-semibold mb-1">⚠ 發現重複的訂單號＋序號組合（{parseWarnings.length} 筆），請確認來源資料：</p>
+                    <ul className="text-amber-400 text-xs space-y-0.5">
+                      {parseWarnings.map((w, i) => <li key={i}>• {w}</li>)}
+                    </ul>
+                  </div>
                 )}
                 <div className="mt-3 flex gap-2 flex-wrap">
                   <button

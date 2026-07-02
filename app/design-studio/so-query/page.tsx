@@ -44,7 +44,7 @@ function today() {
 }
 
 // Excel 欄位順序（Tab 分隔，對齊出單表 A~Q 欄；R 欄「盤數」為人工填寫，不輸出以免貼上時被清空）
-// A工單編號 | B(空) | C單據種類 | D簽收人員 | E打樣單號 | F打樣 | G附素材 | H客戶/供應商名 | I LINE暱稱 | J承辦人 | K開單人員 | L品項編碼 | M品名/規格 | N出貨備註 | O PACKING | P數量 | Q交付日期
+// A工單編號 | B序號 | C單據種類 | D簽收人員 | E打樣單號 | F打樣 | G附素材 | H客戶/供應商名 | I LINE暱稱 | J承辦人 | K開單人員 | L品項編碼 | M品名/規格 | N出貨備註 | O PACKING | P數量 | Q交付日期
 
 // 清洗 TSV 儲存格：移除換行/tab 避免 Excel 貼上時錯位
 function sanitizeCell(v: string | number | null | undefined): string {
@@ -60,7 +60,7 @@ function sanitizeCell(v: string | number | null | undefined): string {
 function buildExcelRow(r: SoLine): string {
   const cols = [
     r.project_id,                          // 工單編號
-    '',                                    // (空)
+    r.line_no,                             // 序號（B欄）
     '',                                    // 單據種類
     '',                                    // 簽收人員
     r.tpn_part_no ?? '',                   // 打樣單號＝前置單號（E欄）
