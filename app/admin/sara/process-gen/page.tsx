@@ -145,6 +145,7 @@ export default function ProcessGenPage() {
   const [saraRows, setSaraRows]     = useState<SaraRow[]>([])
   const [genWarns, setGenWarns]         = useState<string[]>([])
   const [confirmWarns, setConfirmWarns] = useState<string[]>([])
+  const [flaggedItems, setFlaggedItems] = useState<Set<string>>(new Set())
   const [generating, setGenerating]     = useState(false)
   const [dlDone, setDlDone]         = useState(false)
   const [isDragOver, setIsDragOver] = useState(false)
@@ -224,6 +225,7 @@ export default function ProcessGenPage() {
     setSaraRows([])
     setGenWarns([])
     setConfirmWarns([])
+    setFlaggedItems(new Set())
     try {
       const res = await fetch(`/api/argoerp/daily-order-sheet?date=${sheetDate}`)
       const json = await res.json() as { success: boolean; sheet?: { rows?: Record<string, unknown>[] } }
@@ -279,6 +281,7 @@ export default function ProcessGenPage() {
     setGenerating(true)
     setGenWarns([])
     setConfirmWarns([])
+    setFlaggedItems(new Set())
     setSaraRows([])
     setNoRouteRows([])
     setNoRouteCodes({})
@@ -311,6 +314,13 @@ export default function ProcessGenPage() {
       const O_ROUTES = new Set(['委外/7天回', '委外/9天回', '委外/11天回'])
       const ouMis = inputRows.filter(r => r.factory === 'O' && irMap.has(r.item_code) && !O_ROUTES.has(irMap.get(r.item_code)!))
       if (ouMis.length) confirms.push(`廠區為委外但套用途程非標準委外途程（委外/7天回、9天回、11天回），請確認（${ouMis.length} 筆）：${ouMis.slice(0, 3).map(r => r.item_code).join('、')}${ouMis.length > 3 ? '…' : ''}`)
+
+      // 標記問題列（供預覽區上色）
+      const flagged = new Set<string>()
+      fakeKo.forEach(r => flagged.add(`${r.order_number}|${r.item_code}`))
+      cpMis.forEach(r => flagged.add(`${r.order_number}|${r.item_code}`))
+      ouMis.forEach(r => flagged.add(`${r.order_number}|${r.item_code}`))
+      setFlaggedItems(flagged)
 
       // 2. route_operations
       const uniqueRoutes = [...new Set([...irMap.values()])]
@@ -491,7 +501,10 @@ export default function ProcessGenPage() {
         applyConfirms.push(`【${row.item_code}】廠區常平但途程非「常平一般壓克力製程」（套用：${routeId}），請確認`)
       if (row.factory === 'O' && !new Set(['委外/7天回', '委外/9天回', '委外/11天回']).has(routeId))
         applyConfirms.push(`【${row.item_code}】廠區委外但途程非標準委外途程（套用：${routeId}），請確認`)
-      if (applyConfirms.length) setConfirmWarns(prev => [...prev, ...applyConfirms])
+      if (applyConfirms.length) {
+        setConfirmWarns(prev => [...prev, ...applyConfirms])
+        setFlaggedItems(prev => new Set([...prev, `${row.order_number}|${row.item_code}`]))
+      }
 
       // 從 saraRows 移除此行的 _noRoute 佔位，加入新產生列
       setSaraRows(prev => [
@@ -619,7 +632,7 @@ export default function ProcessGenPage() {
             <span className="text-xs text-slate-400 whitespace-nowrap">資料來源</span>
             <div className="flex gap-1 bg-slate-900 p-1 rounded-lg border border-slate-800">
               {(['sheet', 'csv'] as const).map(src => (
-                <button key={src} onClick={() => { setDataSource(src); setInputRows([]); setSaraRows([]); setGenWarns([]); setConfirmWarns([]); setSheetLoadError('') }}
+                <button key={src} onClick={() => { setDataSource(src); setInputRows([]); setSaraRows([]); setGenWarns([]); setConfirmWarns([]); setFlaggedItems(new Set()); setSheetLoadError('') }}
                   className={`px-3 py-1 rounded text-xs font-medium transition-colors ${dataSource === src ? 'bg-emerald-700 text-white' : 'text-slate-400 hover:text-slate-200'}`}>
                   {src === 'sheet' ? '📅 從出單表載入' : '📂 CSV 上傳'}
                 </button>
@@ -752,7 +765,7 @@ export default function ProcessGenPage() {
                   </thead>
                   <tbody>
                     {saraRows.filter(r => !r._noRoute).slice(0, 600).map((r, i) => (
-                      <tr key={i} className="border-b border-slate-800/40 hover:bg-slate-900/50">
+                      <tr key={i} className={`border-b border-slate-800/40 hover:bg-slate-900/50 ${flaggedItems.has(`${r.order_number}|${r.product_name}`) ? 'bg-red-950/25 border-red-900/30' : ''}`}>
                         <td className="px-2 py-1.5 text-center">
                           <input
                             type="checkbox"
