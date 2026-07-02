@@ -704,9 +704,9 @@ export default function ProcessGenPage() {
 
           {/* 確認警告（廠區/途程不符） */}
           {confirmWarns.length > 0 && (
-            <div className="px-4 py-2 bg-red-950/40 border border-red-600/50 rounded-lg space-y-0.5">
-              <div className="text-red-400 text-xs font-semibold mb-1">🔴 請確認以下異常</div>
-              {confirmWarns.map((w, i) => <div key={i} className="text-red-300 text-xs">・{w}</div>)}
+            <div className="px-4 py-3 bg-red-600/25 border-2 border-red-500/80 rounded-lg space-y-0.5 shadow-lg shadow-red-900/40">
+              <div className="text-red-200 text-xs font-bold mb-1">🔴 請確認以下異常</div>
+              {confirmWarns.map((w, i) => <div key={i} className="text-red-100 text-xs">・{w}</div>)}
             </div>
           )}
 
@@ -725,7 +725,7 @@ export default function ProcessGenPage() {
                   輸出 <span className="text-emerald-300 font-bold">{successCount}</span> 工序列
                 </span>
                 {noRouteCount > 0 && (
-                  <span className="text-xs bg-red-900/30 px-3 py-1 rounded-lg border border-red-700/40 text-red-300">
+                  <span className="text-xs bg-red-600/30 px-3 py-1.5 rounded-lg border-2 border-red-500/70 text-red-100 font-semibold shadow shadow-red-900/40">
                     ⚠ {noRouteCount} 筆品號無途程（見下方）
                   </span>
                 )}
@@ -765,7 +765,7 @@ export default function ProcessGenPage() {
                   </thead>
                   <tbody>
                     {saraRows.filter(r => !r._noRoute).slice(0, 600).map((r, i) => (
-                      <tr key={i} className={`border-b border-slate-800/40 hover:bg-slate-900/50 ${flaggedItems.has(`${r.order_number}|${r.product_name}`) ? 'bg-red-950/25 border-red-900/30' : ''}`}>
+                      <tr key={i} className={`border-b border-slate-800/40 hover:bg-slate-900/50 ${flaggedItems.has(`${r.order_number}|${r.product_name}`) ? 'bg-red-600/20 border-l-2 border-l-red-500' : ''}`}>
                         <td className="px-2 py-1.5 text-center">
                           <input
                             type="checkbox"
@@ -807,9 +807,9 @@ export default function ProcessGenPage() {
 
           {/* 無途程訂單 ── 每列獨立套用臨時料號 */}
           {noRouteRows.length > 0 && (
-            <div className="bg-amber-950/20 border border-amber-700/40 rounded-xl p-4 space-y-3">
+            <div className="bg-amber-600/15 border-2 border-amber-500/60 rounded-xl p-4 space-y-3 shadow shadow-amber-900/30">
               <div className="flex items-center gap-2">
-                <span className="text-amber-300 font-semibold text-sm">⚠ {noRouteRows.length} 筆訂單無對應途程</span>
+                <span className="text-amber-200 font-bold text-sm">⚠ {noRouteRows.length} 筆訂單無對應途程</span>
                 <span className="text-slate-500 text-xs">每筆可套用不同料號的途程，套用後納入匯出</span>
               </div>
 
