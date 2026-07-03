@@ -458,6 +458,7 @@ export default function ProcessGenPage() {
         outsourcing: '', est_time: 0, time_unit: '分鐘', bom: '', mat_req_qty: '',
         customer: orig.customer, factory: orig.factory, _noRoute: true,
       })
+    }
     setSaraRows(prev => [
       ...prev.filter(r => !groupKeys.has(rerouteKey(r))),
       ...placeholders,
