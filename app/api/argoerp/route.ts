@@ -354,7 +354,7 @@ export async function POST(request: NextRequest) {
   try {
     const body = await request.json()
     const { action, data, interfaceId } = body as {
-      action: 'import' | 'query' | 'sync_inventory' | 'sync_customer' | 'fetch_po_pdl_links' | 'explore_so_columns' | 'test_so_detail' | 'test_po_detail' | 'sync_so' | 'sync_mo' | 'sync_pj' | 'sync_po' | 'sync_pr' | 'sync_bom_units' | 'sync_bom_structure' | 'sync_material_prep'
+      action: 'import' | 'query' | 'sync_inventory' | 'sync_customer' | 'sync_vendor' | 'fetch_po_pdl_links' | 'explore_so_columns' | 'test_so_detail' | 'test_po_detail' | 'sync_so' | 'sync_mo' | 'sync_pj' | 'sync_po' | 'sync_pr' | 'sync_bom_units' | 'sync_bom_structure' | 'sync_material_prep'
       data?: Record<string, unknown>[]
       interfaceId?: string
     }
@@ -936,7 +936,7 @@ export async function POST(request: NextRequest) {
         SEGMENT,
         TABLE: 'PJ_PROJECT',
         SHOWNULLCOLUMN: 'N',
-        CUSTOMCOLUMN: 'PROJECT_ID,BEGIN_DATE,HOLD_STATUS,TPN_PARTNER_ID,SALES_ID,PAYMENT_TERM,PAYMENT_MODE,CURRENCY,EXCHANGE_RATE,TAX_RATE,SEG_SEGMENT_NO,PO_TYPE,MODIFY_VER',
+        CUSTOMCOLUMN: 'PROJECT_ID,BEGIN_DATE,HOLD_STATUS,TPN_PARTNER_ID,SALES_ID,SALES_NAME,PAYMENT_TERM,PAYMENT_MODE,CURRENCY,EXCHANGE_RATE,TAX_RATE,SEG_SEGMENT_NO,PO_TYPE,MODIFY_VER',
         PJT_TYPE: "= 'PO'",
       })
       const poHdrRes = await fetch(`${API_BASE}/S_QUERY`, {
@@ -1020,6 +1020,7 @@ export async function POST(request: NextRequest) {
           TPN_PART_NO:    String(getRecordValue(dtl, 'TPN_PART_NO') ?? '').trim() || null,
           PACKING:        String(getRecordValue(dtl, 'PACKING') ?? '').trim() || null,
           SALES_ID:       String(getRecordValue(hdr, 'SALES_ID') ?? '').trim() || null,
+          SALES_NAME:     String(getRecordValue(hdr, 'SALES_NAME') ?? '').trim() || null,
           PAYMENT_TERM:   String(getRecordValue(hdr, 'PAYMENT_TERM') ?? '').trim() || null,
           PAYMENT_MODE:   String(getRecordValue(hdr, 'PAYMENT_MODE') ?? '').trim() || null,
           CURRENCY:       String(getRecordValue(hdr, 'CURRENCY') ?? '').trim() || null,
@@ -1948,6 +1949,89 @@ export async function POST(request: NextRequest) {
         status: 'ok',
         syncedCount: customerRows.length,
         skippedCount: queryRows.length - customerRows.length,
+        inserted: recon.inserted,
+        updated: recon.updated,
+        deleted: recon.deleted,
+        unchanged: recon.unchanged,
+      })
+    }
+
+    if (action === 'sync_vendor') {
+      // ── 供應商主檔同步（與 sync_customer 同模式，改抓 VENDOR='Y' 寫 erp_vendors）──
+      // erp_vendors 為 service_role 專用（供應商資料不可外流），僅採購 API 讀取。
+      const sparam = JSON.stringify({
+        APIKEY1: keys.APIKEY1,
+        APIKEY2: keys.APIKEY2,
+        APIKEY3: keys.APIKEY3,
+        SEGMENT,
+        TABLE: 'GL_TRADINGPARTNER',
+        SHOWNULLCOLUMN: 'N',
+        CUSTOMCOLUMN: 'PARTNER_ID,CNAME,FULL_CNAME',
+        VENDOR: "= 'Y'",
+      })
+
+      const res = await fetch(`${API_BASE}/S_QUERY`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sparam }),
+      })
+
+      const { rawText, parsed } = await readApiResponse(res)
+      const error = extractApiError(parsed)
+      const success = res.ok && isArgoSuccess(parsed)
+
+      if (!success) {
+        return NextResponse.json({
+          status: 'error',
+          error: error || 'ARGO GL_TRADINGPARTNER query failed',
+          rawText,
+        }, { status: 502 })
+      }
+
+      const queryRows = findObjectRows(parsed)
+      if (queryRows.length === 0) {
+        return NextResponse.json({
+          status: 'error',
+          error: 'ARGO 查詢成功，但找不到供應商資料列，請確認 VENDOR=Y 及欄位設定。',
+          rawText,
+        }, { status: 422 })
+      }
+
+      const syncedAt = new Date().toISOString()
+      const vendorRows = queryRows
+        .map((row) => {
+          const partnerId = String(getRecordValue(row, 'PARTNER_ID') ?? '').trim()
+          if (!partnerId) return null
+          return {
+            partner_id: partnerId,
+            cname:      String(getRecordValue(row, 'CNAME')      ?? '').trim(),
+            full_cname: String(getRecordValue(row, 'FULL_CNAME') ?? '').trim() || null,
+            synced_at:  syncedAt,
+          }
+        })
+        .filter((r): r is NonNullable<typeof r> => Boolean(r))
+
+      // 增量比對更新：erp_vendors 有 partner_id unique index（20260703_purchasing_tracking.sql）
+      let recon
+      try {
+        const supabaseAdmin = getSupabaseAdminClient()
+        recon = await reconcileTable(supabaseAdmin, {
+          table: 'erp_vendors',
+          keyCols: ['partner_id'],
+          onConflict: 'partner_id',
+          compareCols: ['cname', 'full_cname'],
+          rows: vendorRows,
+          action: 'sync_vendor',
+        })
+      } catch (err) {
+        const message = err instanceof Error ? formatSupabaseAdminError(err.message) : '寫入 erp_vendors 失敗'
+        return NextResponse.json({ status: 'error', error: message }, { status: 500 })
+      }
+
+      return NextResponse.json({
+        status: 'ok',
+        syncedCount: vendorRows.length,
+        skippedCount: queryRows.length - vendorRows.length,
         inserted: recon.inserted,
         updated: recon.updated,
         deleted: recon.deleted,

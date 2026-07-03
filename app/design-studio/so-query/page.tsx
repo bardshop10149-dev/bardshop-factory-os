@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import Link from 'next/link'
 import { supabase } from '../../../lib/supabaseClient'
+import type { PublicPoLine } from '../../../lib/purchasing/types'
 
 // ─── 型別 ─────────────────────────────────────────────
 interface SoLine {
@@ -95,6 +96,29 @@ export default function SoQueryPage() {
   const [syncElapsed, setSyncElapsed] = useState(0)
   const [syncResult, setSyncResult] = useState<{ ok: boolean; text: string } | null>(null)
   const syncStartRef = useRef<number>(0)
+
+  // 採購進度 modal（跨區資訊：僅進度/貨運/交期，不含供應商與付款）
+  const [poModalSo, setPoModalSo] = useState<string | null>(null)
+  const [poLines, setPoLines] = useState<PublicPoLine[]>([])
+  const [poLoading, setPoLoading] = useState(false)
+  const [poError, setPoError] = useState<string | null>(null)
+
+  const openPoModal = useCallback(async (soNo: string) => {
+    setPoModalSo(soNo)
+    setPoLines([])
+    setPoError(null)
+    setPoLoading(true)
+    try {
+      const res = await fetch(`/api/purchasing/po-public?so=${encodeURIComponent(soNo)}`)
+      const json = await res.json().catch(() => ({}))
+      if (!res.ok || !json.success) throw new Error(json.error || `HTTP ${res.status}`)
+      setPoLines(json.lines as PublicPoLine[])
+    } catch (e) {
+      setPoError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setPoLoading(false)
+    }
+  }, [])
 
   // 同步進行中的階段提示（依據經過時間推測）
   useEffect(() => {
@@ -194,7 +218,7 @@ export default function SoQueryPage() {
     setTimeout(() => setCopyMsg(''), 3000)
   }, [rows, selectedIds])
 
-  const COLS = 13 // colSpan 數量（含勾選欄）
+  const COLS = 14 // colSpan 數量（含勾選欄與採購欄）
 
   const allSelected = rows.length > 0 && rows.every(r => selectedIds.has(r.id))
   const toggleAll = () => {
@@ -306,6 +330,7 @@ export default function SoQueryPage() {
               <th className="px-3 py-2.5 text-right whitespace-nowrap">數量</th>
               <th className="px-3 py-2.5 text-left whitespace-nowrap">出貨備註</th>
               <th className="px-3 py-2.5 text-left whitespace-nowrap">PACKING</th>
+              <th className="px-3 py-2.5 text-left whitespace-nowrap">採購</th>
             </tr>
           </thead>
           <tbody>
@@ -368,6 +393,14 @@ export default function SoQueryPage() {
                 </td>
                 <td className="px-3 py-2 text-slate-400 max-w-[320px] truncate" title={r.remark2 ?? ''}>{r.remark2 ?? '—'}</td>
                 <td className="px-3 py-2 text-slate-400 max-w-[320px] truncate" title={r.packing ?? ''}>{r.packing ?? '—'}</td>
+                <td className="px-3 py-2 whitespace-nowrap" onClick={e => e.stopPropagation()}>
+                  <button
+                    type="button"
+                    onClick={() => void openPoModal(r.project_id)}
+                    title="查看此訂單後續採購單的執行進度 / 出貨方式 / 預計出貨日"
+                    className="text-[10px] px-2 py-0.5 rounded bg-indigo-900/60 hover:bg-indigo-800 border border-indigo-700/50 text-indigo-300 font-semibold transition-colors"
+                  >採購進度</button>
+                </td>
               </tr>
             ))}
           </tbody>
@@ -434,6 +467,74 @@ export default function SoQueryPage() {
                   </button>
                 </div>
               </>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ─── 採購進度 Modal（跨區資訊，不含供應商與付款） ─── */}
+      {poModalSo && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm" onClick={() => setPoModalSo(null)}>
+          <div className="w-[720px] max-w-[94vw] max-h-[80vh] overflow-y-auto rounded-2xl bg-slate-900 border border-slate-700 shadow-2xl p-6" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center gap-3 mb-4">
+              <h3 className="text-lg font-semibold">採購執行進度</h3>
+              <span className="font-mono text-sm text-cyan-300">{poModalSo}</span>
+              <button
+                onClick={() => setPoModalSo(null)}
+                className="ml-auto px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-xs"
+              >關閉</button>
+            </div>
+
+            {poLoading && <p className="text-sm text-slate-500 py-6 text-center">載入中…</p>}
+            {poError && <p className="text-sm text-rose-300 py-4">⚠ {poError}</p>}
+            {!poLoading && !poError && poLines.length === 0 && (
+              <p className="text-sm text-slate-500 py-6 text-center">此訂單無進行中採購單。</p>
+            )}
+            {!poLoading && poLines.length > 0 && (
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs min-w-[640px]">
+                  <thead>
+                    <tr className="border-b border-slate-700 text-slate-400">
+                      <th className="px-2 py-2 text-left whitespace-nowrap">採購單號</th>
+                      <th className="px-2 py-2 text-left whitespace-nowrap">序</th>
+                      <th className="px-2 py-2 text-left whitespace-nowrap">料號</th>
+                      <th className="px-2 py-2 text-right whitespace-nowrap">數量</th>
+                      <th className="px-2 py-2 text-left whitespace-nowrap">交期</th>
+                      <th className="px-2 py-2 text-left whitespace-nowrap">進度</th>
+                      <th className="px-2 py-2 text-left whitespace-nowrap">出貨方式</th>
+                      <th className="px-2 py-2 text-left whitespace-nowrap">預計出貨日</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {poLines.map(l => (
+                      <tr key={`${l.doc_no}|${l.sub_no}`} className="border-b border-slate-800/60 last:border-0">
+                        <td className="px-2 py-2 font-mono text-cyan-300 whitespace-nowrap">
+                          {l.doc_no}
+                          {l.po_status && l.po_status !== 'OPEN' && (
+                            <span className="ml-1.5 text-[10px] px-1 py-0.5 rounded bg-slate-800 text-slate-400 border border-slate-600">{l.po_status}</span>
+                          )}
+                        </td>
+                        <td className="px-2 py-2 text-slate-500">{l.sub_no}</td>
+                        <td className="px-2 py-2 font-mono text-slate-300 whitespace-nowrap">{l.item_code ?? '—'}</td>
+                        <td className="px-2 py-2 text-right text-white whitespace-nowrap">
+                          {l.qty != null ? l.qty.toLocaleString() : '—'}
+                          {l.unit ? <span className="text-slate-500 ml-1">{l.unit}</span> : null}
+                        </td>
+                        <td className="px-2 py-2 text-slate-300 whitespace-nowrap">{l.due_date ?? '—'}</td>
+                        <td className="px-2 py-2 whitespace-nowrap">
+                          <span className={`text-[10px] px-1.5 py-0.5 rounded font-semibold border ${
+                            l.progress === '已出貨'
+                              ? 'bg-emerald-900/60 text-emerald-400 border-emerald-700/50'
+                              : 'bg-amber-900/60 text-amber-400 border-amber-700/50'
+                          }`}>{l.progress}</span>
+                        </td>
+                        <td className="px-2 py-2 text-slate-300 whitespace-nowrap">{l.ship_method ?? '—'}</td>
+                        <td className="px-2 py-2 text-slate-300 whitespace-nowrap">{l.expected_ship_date ?? '—'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             )}
           </div>
         </div>
