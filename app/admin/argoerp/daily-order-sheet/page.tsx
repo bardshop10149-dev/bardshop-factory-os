@@ -453,6 +453,14 @@ export default function DailyOrderSheetPage() {
   const [legacyModal, setLegacyModal] = useState<{ query: string; rows: LegacyReceiptRow[]; saraWipRows: SaraWipRow[]; loading: boolean } | null>(null)
   const [dueDateModal, setDueDateModal] = useState<DueDateAnomaly[] | null>(null)
   const [dueDateCopied, setDueDateCopied] = useState(false)
+  // ---- 交期閾值設定（從 Supabase app_settings 載入）----
+  const DUE_THRESHOLD_DEFAULTS: Record<string, number> = { T: 4, C: 5, O: 5 }
+  const [dueDateThresholds, setDueDateThresholds] = useState<Record<string, number>>(DUE_THRESHOLD_DEFAULTS)
+  const [dueDateThresholdsLoaded, setDueDateThresholdsLoaded] = useState(false)
+  const [showThresholdModal, setShowThresholdModal] = useState(false)
+  const [thresholdInput, setThresholdInput] = useState<Record<string, string>>({})
+  const [thresholdSaving, setThresholdSaving] = useState(false)
+  const [thresholdMsg, setThresholdMsg] = useState('')
 
   // ---- 常平廠訂單（C01510 採購單）----
   const fetchCOrders = useCallback(async () => {
@@ -591,6 +599,21 @@ export default function DailyOrderSheetPage() {
 
   useEffect(() => { loadSheetList() }, [loadSheetList])
   useEffect(() => { loadSheet(selectedDate) }, [selectedDate, loadSheet])
+
+  // ---- 載入交期閾值設定 ----
+  useEffect(() => {
+    supabase
+      .from('app_settings')
+      .select('value')
+      .eq('key', 'due_date_thresholds')
+      .single()
+      .then(({ data }) => {
+        if (data?.value && typeof data.value === 'object') {
+          setDueDateThresholds(data.value as Record<string, number>)
+        }
+        setDueDateThresholdsLoaded(true)
+      })
+  }, [])
 
   useEffect(() => {
     if (!rawText.trim()) {
@@ -1517,7 +1540,7 @@ export default function DailyOrderSheetPage() {
     const anomalies: DueDateAnomaly[] = []
     for (const row of sheetRows) {
       const factoryKey = row.factory ?? ''
-      const threshold = DUE_THRESHOLD[factoryKey]
+      const threshold = dueDateThresholds[factoryKey]
       if (threshold === undefined) continue
       if (!row.delivery_date) continue
       const dueDate = parseDeliveryDate(row.delivery_date)
@@ -1545,7 +1568,25 @@ export default function DailyOrderSheetPage() {
     }
     setDueDateCopied(false)
     setDueDateModal(anomalies)
-  }, [sheetRows, selectedDate])
+  }, [sheetRows, selectedDate, dueDateThresholds])
+
+  // ---- 儲存交期閾值設定 ----
+  const handleSaveThresholds = useCallback(async () => {
+    setThresholdSaving(true)
+    setThresholdMsg('')
+    const newVal: Record<string, number> = {}
+    for (const [k, v] of Object.entries(thresholdInput)) {
+      const n = parseInt(v, 10)
+      if (isNaN(n) || n < 1) { setThresholdMsg(`❌ ${k} 廠別天數必須為正整數`); setThresholdSaving(false); return }
+      newVal[k] = n
+    }
+    const { error } = await supabase.from('app_settings').upsert({ key: 'due_date_thresholds', value: newVal })
+    if (error) { setThresholdMsg(`❌ 儲存失敗：${error.message}`); setThresholdSaving(false); return }
+    setDueDateThresholds(newVal)
+    setThresholdMsg('✅ 已儲存')
+    setThresholdSaving(false)
+    setTimeout(() => { setThresholdMsg(''); setShowThresholdModal(false) }, 1200)
+  }, [thresholdInput])
 
   const handleExportSheetCsv = useCallback(() => {
     if (sheetRows.length === 0) {
@@ -2396,6 +2437,19 @@ export default function DailyOrderSheetPage() {
                   title="檢查目前出單表各廠別訂單是否滿足工作天數要求"
                 >
                   📅 交期檢查
+                </button>
+                <button
+                  onClick={() => {
+                    const init: Record<string, string> = {}
+                    for (const [k, v] of Object.entries(dueDateThresholds)) init[k] = String(v)
+                    setThresholdInput(init)
+                    setThresholdMsg('')
+                    setShowThresholdModal(true)
+                  }}
+                  className="px-3 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-300 text-sm font-medium transition-colors"
+                  title="設定各廠別交期檢查工作天數"
+                >
+                  ⚙️
                 </button>
                 <button
                   onClick={() => void handleSaveMachines()}
@@ -3289,6 +3343,55 @@ export default function DailyOrderSheetPage() {
               >
                 關閉
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 交期閾值設定 Modal */}
+      {showThresholdModal && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
+          onClick={() => setShowThresholdModal(false)}
+        >
+          <div
+            className="bg-slate-900 border border-slate-700 rounded-2xl shadow-2xl w-full max-w-sm"
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="px-5 py-4 border-b border-slate-700 flex items-center justify-between">
+              <h2 className="text-lg font-bold text-white">⚙️ 交期檢查天數設定</h2>
+              <button onClick={() => setShowThresholdModal(false)} className="text-slate-500 hover:text-white text-xl leading-none">✕</button>
+            </div>
+            <div className="px-5 py-4 space-y-3">
+              <p className="text-slate-400 text-sm">設定各廠別最低所需工作天數（以出單表日期為 day 0）</p>
+              {Object.entries(thresholdInput).map(([k, v]) => (
+                <div key={k} className="flex items-center gap-3">
+                  <span className="w-20 text-sm font-medium text-slate-300">
+                    {k === 'T' ? '台北廠 (T)' : k === 'C' ? '常平廠 (C)' : k === 'O' ? '委外 (O)' : k}
+                  </span>
+                  <input
+                    type="number"
+                    min={1}
+                    max={30}
+                    value={v}
+                    onChange={e => setThresholdInput(prev => ({ ...prev, [k]: e.target.value }))}
+                    className="w-20 px-3 py-1.5 bg-slate-800 border border-slate-600 rounded-lg text-white text-sm focus:outline-none focus:border-rose-500"
+                  />
+                  <span className="text-slate-500 text-sm">工作天</span>
+                </div>
+              ))}
+              {thresholdMsg && <p className={`text-sm ${thresholdMsg.startsWith('✅') ? 'text-green-400' : 'text-red-400'}`}>{thresholdMsg}</p>}
+            </div>
+            <div className="px-5 py-4 border-t border-slate-700 flex justify-end gap-2">
+              <button
+                onClick={() => setShowThresholdModal(false)}
+                className="px-4 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-300 text-sm transition-colors"
+              >取消</button>
+              <button
+                onClick={() => void handleSaveThresholds()}
+                disabled={thresholdSaving}
+                className="px-4 py-2 rounded-lg bg-rose-700 hover:bg-rose-600 disabled:bg-slate-700 text-white text-sm font-medium transition-colors"
+              >{thresholdSaving ? '儲存中…' : '儲存'}</button>
             </div>
           </div>
         </div>
