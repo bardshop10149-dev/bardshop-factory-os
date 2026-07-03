@@ -312,6 +312,61 @@ const STATUS_LABELS: Record<string, { label: string; cls: string }> = {
   '暫緩區': { label: '暫緩區', cls: 'bg-amber-900/50 text-amber-300 border-amber-700/50' },
 }
 
+// ── 交期檢查工具函式 ──────────────────────────────────────────────────────────
+
+/** 解析日期字串（支援 YYYY/M/D、YYYY-MM-DD、YYYYMMDD），回傳 Date 或 null */
+function parseDeliveryDate(s: string): Date | null {
+  const t = (s ?? '').trim()
+  if (!t) return null
+  let y: number, m: number, d: number
+  if (/^\d{8}$/.test(t)) {
+    y = +t.slice(0, 4); m = +t.slice(4, 6); d = +t.slice(6, 8)
+  } else {
+    const parts = t.slice(0, 10).split(/[\/\-]/)
+    if (parts.length < 3) return null
+    y = +parts[0]; m = +parts[1]; d = +parts[2]
+  }
+  if (!y || !m || !d) return null
+  const dt = new Date(y, m - 1, d)
+  return isNaN(dt.getTime()) ? null : dt
+}
+
+/**
+ * 從「出單表日期」（day 0）開始，計算到 to 有幾個工作天（週一～週五）。
+ * from 本身是 day 0，所以從 from+1 起算。
+ * 如果 to <= from，回傳 0。
+ */
+function countWorkingDaysFrom(from: Date, to: Date): number {
+  const start = new Date(from)
+  start.setHours(0, 0, 0, 0)
+  const end = new Date(to)
+  end.setHours(0, 0, 0, 0)
+  if (end <= start) return 0
+  let count = 0
+  const cur = new Date(start)
+  cur.setDate(cur.getDate() + 1) // day 1
+  while (cur <= end) {
+    const dow = cur.getDay()
+    if (dow !== 0 && dow !== 6) count++
+    cur.setDate(cur.getDate() + 1)
+  }
+  return count
+}
+
+const FACTORY_LABEL_ZH: Record<string, string> = { T: '台北', C: '常平', O: '委外' }
+const DUE_THRESHOLD: Record<string, number> = { T: 4, C: 5, O: 5 }
+
+interface DueDateAnomaly {
+  order_number: string
+  factory: string
+  customer: string
+  item_code: string
+  item_name: string
+  quantity: string
+  delivery_date: string
+  reason: string
+}
+
 type OutsourcePrefix = 'MOT' | 'POC' | 'POO' | 'MPO'
 
 function getOutsourcePrefix(docNo?: string | null): OutsourcePrefix | null {
@@ -396,6 +451,8 @@ export default function DailyOrderSheetPage() {
   const [globalResults, setGlobalResults] = useState<{ sheet_date: string; rows: SheetRow[] }[] | null>(null)
   const [sampleRefInputs, setSampleRefInputs] = useState<Record<string, string>>({})
   const [legacyModal, setLegacyModal] = useState<{ query: string; rows: LegacyReceiptRow[]; saraWipRows: SaraWipRow[]; loading: boolean } | null>(null)
+  const [dueDateModal, setDueDateModal] = useState<DueDateAnomaly[] | null>(null)
+  const [dueDateCopied, setDueDateCopied] = useState(false)
 
   // ---- 常平廠訂單（C01510 採購單）----
   const fetchCOrders = useCallback(async () => {
@@ -1451,6 +1508,45 @@ export default function DailyOrderSheetPage() {
   const [exportingMissing, setExportingMissing] = useState(false)
   const [exportingSheetCsv, setExportingSheetCsv] = useState(false)
 
+  // ---- 交期檢查 ----
+  const handleDueDateCheck = useCallback(() => {
+    // 以出單表日期（selectedDate）為 day 0，而非執行當天
+    const sheetDateObj = selectedDate ? new Date(selectedDate) : new Date()
+    sheetDateObj.setHours(0, 0, 0, 0)
+
+    const anomalies: DueDateAnomaly[] = []
+    for (const row of sheetRows) {
+      const factoryKey = row.factory ?? ''
+      const threshold = DUE_THRESHOLD[factoryKey]
+      if (threshold === undefined) continue
+      if (!row.delivery_date) continue
+      const dueDate = parseDeliveryDate(row.delivery_date)
+      if (!dueDate) continue
+      const workDays = countWorkingDaysFrom(sheetDateObj, dueDate)
+      if (workDays < threshold) {
+        const factoryLabel = FACTORY_LABEL_ZH[factoryKey] ?? factoryKey
+        const reason = `${factoryLabel}訂單交期不足${threshold}工作天`
+        const dueStr = `${dueDate.getFullYear()}/${dueDate.getMonth() + 1}/${dueDate.getDate()}`
+        anomalies.push({
+          order_number: row.order_number ?? '',
+          factory: factoryKey,
+          customer: row.customer ?? '',
+          item_code: row.item_code ?? '',
+          item_name: row.item_name ?? '',
+          quantity: row.quantity != null ? String(row.quantity) : '',
+          delivery_date: dueStr,
+          reason,
+        })
+      }
+    }
+    if (anomalies.length === 0) {
+      alert('✅ 所有訂單交期正常')
+      return
+    }
+    setDueDateCopied(false)
+    setDueDateModal(anomalies)
+  }, [sheetRows, selectedDate])
+
   const handleExportSheetCsv = useCallback(() => {
     if (sheetRows.length === 0) {
       setSaveMsg('❌ 沒有可匯出的資料')
@@ -2282,17 +2378,6 @@ export default function DailyOrderSheetPage() {
                   </svg>
                   {batchSyncing ? (batchProgress ? `比對中 ${batchProgress}` : '比對中…') : '🔁 全日期批次比對'}
                 </button>
-                <button
-                  onClick={() => void handleMissingExport()}
-                  disabled={exportingMissing || batchSyncing}
-                  className="px-4 py-2 rounded-lg bg-orange-900/60 border border-orange-700/50 hover:bg-orange-800 disabled:bg-slate-700 disabled:text-slate-500 disabled:border-slate-600 text-orange-200 text-sm font-medium transition-colors flex items-center gap-1.5"
-                  title="掃描所有日期的出單表，匯出未比對到製令且未比對到採購單的漏單"
-                >
-                  <svg className="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/>
-                  </svg>
-                  {exportingMissing ? '檢測中…' : '⚠ 漏單檢測'}
-                </button>
               </>
             )}
             {hasData && (
@@ -2306,6 +2391,13 @@ export default function DailyOrderSheetPage() {
                   {syncingAll ? '全同步中…' : '⚡ 一鍵全同步'}
                 </button>
                 <button
+                  onClick={handleDueDateCheck}
+                  className="px-4 py-2 rounded-lg bg-rose-700 hover:bg-rose-600 text-white text-sm font-medium transition-colors"
+                  title="檢查目前出單表各廠別訂單是否滿足工作天數要求"
+                >
+                  📅 交期檢查
+                </button>
+                <button
                   onClick={() => void handleSaveMachines()}
                   disabled={savingMachine || !machineChanged}
                   className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
@@ -2316,12 +2408,6 @@ export default function DailyOrderSheetPage() {
                   title="將目前所有機台選擇儲存至 Supabase，並重新讀回確認"
                 >
                   {savingMachine ? '儲存中…' : `🖥 儲存機台分配${machineChanged ? ' *' : ''}`}
-                </button>
-                <button
-                  onClick={() => { setShowPasteArea(v => !v); setRawText('') }}
-                  className="px-4 py-2 rounded-lg bg-cyan-700 hover:bg-cyan-600 text-white text-sm font-medium transition-colors"
-                >
-                  {showPasteArea ? '收合貼上區' : '🔄 重新貼上取代'}
                 </button>
                 <button
                   onClick={handleExportSheetCsv}
@@ -2345,25 +2431,6 @@ export default function DailyOrderSheetPage() {
                 >
                   <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2zm8-12V5a2 2 0 00-2-2H9a2 2 0 00-2 2v4h10z" /></svg>
                   列印{selectedKeys.size > 0 ? ` (${selectedKeys.size})` : ''}
-                </button>
-                <button
-                  onClick={() => {
-                    if (selectedKeys.size === 0) return
-                    if (!confirm(`確定刪除已勾選的 ${selectedKeys.size} 筆資料？`)) return
-                    setSheetRows(prev => prev.filter((r, i) => !selectedKeys.has(r.row_key || String(i))))
-                    setSelectedKeys(new Set())
-                  }}
-                  disabled={selectedKeys.size === 0}
-                  className="px-4 py-2 rounded-lg bg-red-900/40 border border-red-700/50 text-red-300 hover:bg-red-800 hover:text-white disabled:bg-slate-800 disabled:text-slate-600 disabled:border-slate-700 text-sm transition-colors"
-                >
-                  🗑 刪除選取列{selectedKeys.size > 0 ? ` (${selectedKeys.size})` : ''}
-                </button>
-                <button
-                  onClick={handleDelete}
-                  disabled={saving}
-                  className="px-4 py-2 rounded-lg bg-red-900/60 border border-red-700/50 text-red-300 hover:bg-red-800 hover:text-white text-sm transition-colors"
-                >
-                  🗑 刪除此日出單表
                 </button>
               </>
             )}
@@ -3171,6 +3238,61 @@ export default function DailyOrderSheetPage() {
       </div>
       <SoOrderModal projectId={soModalId} onClose={() => setSoModalId(null)} />
       <PoOrderModal docNo={poModalId} onClose={() => setPoModalId(null)} />
+
+      {/* 交期檢查 Modal */}
+      {dueDateModal && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
+          onClick={() => setDueDateModal(null)}
+        >
+          <div
+            className="bg-slate-900 border border-red-700/50 rounded-2xl shadow-2xl w-full max-w-2xl flex flex-col max-h-[80vh]"
+            onClick={e => e.stopPropagation()}
+          >
+            {/* Header */}
+            <div className="px-5 py-4 border-b border-slate-700 flex items-center justify-between shrink-0">
+              <h2 className="text-lg font-bold text-red-300">⚠ 交期異常（{dueDateModal.length} 筆）</h2>
+              <button
+                onClick={() => setDueDateModal(null)}
+                className="text-slate-500 hover:text-white transition-colors text-xl leading-none"
+              >✕</button>
+            </div>
+
+            {/* Body */}
+            <div className="overflow-y-auto flex-1 p-4">
+              <div className="bg-slate-950 rounded-lg p-3 font-mono text-xs text-slate-300 whitespace-pre-wrap leading-relaxed">
+                {dueDateModal.map(a =>
+                  `訂單號:${a.order_number}(${FACTORY_LABEL_ZH[a.factory] ?? a.factory})\n客戶:${a.customer}\n交期:${a.delivery_date} 數量:${a.quantity}\n品項:${a.item_code}\n異常原因:${a.reason}`
+                ).join('\n\n')}
+              </div>
+            </div>
+
+            {/* Footer */}
+            <div className="px-5 py-3 border-t border-slate-700 shrink-0 flex items-center gap-3">
+              <button
+                onClick={() => {
+                  const text = dueDateModal.map(a =>
+                    `訂單號:${a.order_number}(${FACTORY_LABEL_ZH[a.factory] ?? a.factory})\n客戶:${a.customer}\n交期:${a.delivery_date} 數量:${a.quantity}\n品項:${a.item_code}\n異常原因:${a.reason}`
+                  ).join('\n\n')
+                  void navigator.clipboard.writeText(text).then(() => {
+                    setDueDateCopied(true)
+                    setTimeout(() => setDueDateCopied(false), 2000)
+                  })
+                }}
+                className="px-4 py-2 rounded-lg bg-cyan-700 hover:bg-cyan-600 text-white text-sm font-medium transition-colors"
+              >
+                {dueDateCopied ? '✅ 已複製' : '📋 一鍵複製'}
+              </button>
+              <button
+                onClick={() => setDueDateModal(null)}
+                className="px-4 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-300 text-sm transition-colors"
+              >
+                關閉
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* 入庫比對 + 塔台報工 Modal */}
       {legacyModal && (
