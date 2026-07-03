@@ -602,17 +602,15 @@ export default function DailyOrderSheetPage() {
 
   // ---- 載入交期閾值設定 ----
   useEffect(() => {
-    supabase
-      .from('app_settings')
-      .select('value')
-      .eq('key', 'due_date_thresholds')
-      .single()
-      .then(({ data }) => {
-        if (data?.value && typeof data.value === 'object') {
-          setDueDateThresholds(data.value as Record<string, number>)
+    fetch('/api/app-settings?key=due_date_thresholds')
+      .then(r => r.json())
+      .then((json: { value?: Record<string, number> }) => {
+        if (json.value && typeof json.value === 'object') {
+          setDueDateThresholds(json.value)
         }
         setDueDateThresholdsLoaded(true)
       })
+      .catch(() => setDueDateThresholdsLoaded(true))
   }, [])
 
   useEffect(() => {
@@ -1580,8 +1578,17 @@ export default function DailyOrderSheetPage() {
       if (isNaN(n) || n < 1) { setThresholdMsg(`❌ ${k} 廠別天數必須為正整數`); setThresholdSaving(false); return }
       newVal[k] = n
     }
-    const { error } = await supabase.from('app_settings').upsert({ key: 'due_date_thresholds', value: newVal })
-    if (error) { setThresholdMsg(`❌ 儲存失敗：${error.message}`); setThresholdSaving(false); return }
+    const res = await fetch('/api/app-settings', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key: 'due_date_thresholds', value: newVal }),
+    })
+    if (!res.ok) {
+      const json = await res.json() as { error?: string }
+      setThresholdMsg(`❌ 儲存失敗：${json.error ?? res.statusText}`)
+      setThresholdSaving(false)
+      return
+    }
     setDueDateThresholds(newVal)
     setThresholdMsg('✅ 已儲存')
     setThresholdSaving(false)
