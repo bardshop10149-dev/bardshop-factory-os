@@ -12,7 +12,8 @@ interface InputRow {
   quantity: number
   due: string
   pan_count: number
-  mo_number?: string            // 製令單號（MOT...）
+  mo_number?: string            // 製令單號（MOT...）/ 採購單號（POC...）/ 請購單號（POO...）
+  line_seq?: string             // 採購或請購單的序號（sub_no from erp_pj_sync）；製令單留空
   customer?: string             // 客戶名稱
   factory?: 'T' | 'C' | 'O'   // 廠區：T=台北 C=常平 O=委外（僅預覽，不匯出）
 }
@@ -263,6 +264,32 @@ export default function ProcessGenPage() {
         setSheetLoadError(`${sheetDate} 出單表無有效品項資料`)
         return
       }
+
+      // ── 從 erp_pj_sync 查詢 C/O 廠列的請購/採購單序號（lot_number 用）────
+      const coRows = parsed.filter(r => (r.factory === 'C' || r.factory === 'O') && r.mo_number)
+      if (coRows.length > 0) {
+        const docNos = [...new Set(coRows.map(r => r.mo_number!))]
+        const { data: syncRows } = await supabase
+          .from('erp_pj_sync')
+          .select('doc_no, sub_no, item_code')
+          .in('doc_no', docNos)
+          .in('doc_type', ['採購單號', '請購單號'])
+        if (syncRows?.length) {
+          // key = doc_no|item_code → sub_no（若同一 doc+item 有多筆，取第一筆）
+          const syncMap = new Map<string, string>()
+          for (const sr of syncRows) {
+            const k = `${sr.doc_no}|${sr.item_code ?? ''}`
+            if (!syncMap.has(k)) syncMap.set(k, String(sr.sub_no ?? ''))
+          }
+          for (const r of parsed) {
+            if ((r.factory === 'C' || r.factory === 'O') && r.mo_number) {
+              const seq = syncMap.get(`${r.mo_number}|${r.item_code}`)
+              if (seq) r.line_seq = seq
+            }
+          }
+        }
+      }
+
       setInputRows(parsed)
       setNoRouteRows([])
       setSaraRows([])
@@ -358,7 +385,8 @@ export default function ProcessGenPage() {
           out.push({
             order_number: row.order_number, mfg_order_number: row.mo_number || row.order_number,
             product_name: row.item_code, product_desc: row.item_spec,
-            lot_number: '', prod_qty: row.quantity, due: row.due,
+            lot_number: (row.factory === 'C' || row.factory === 'O') ? (row.line_seq ?? '') : '',
+            prod_qty: row.quantity, due: row.due,
             priority: '', earliest_start: today,
             job_seq: '', workcenter: '', job_name: '', job_qty: row.quantity,
             outsourcing: '', est_time: 0, time_unit: '分鐘', bom: '', mat_req_qty: '',
@@ -379,7 +407,8 @@ export default function ProcessGenPage() {
           out.push({
             order_number: row.order_number, mfg_order_number: row.mo_number || row.order_number,
             product_name: row.item_code, product_desc: row.item_spec,
-            lot_number: '', prod_qty: row.quantity, due: row.due,
+            lot_number: (row.factory === 'C' || row.factory === 'O') ? (row.line_seq ?? '') : '',
+            prod_qty: row.quantity, due: row.due,
             priority: '', earliest_start: today,
             job_seq: op.sequence, workcenter: station, job_name: op.op_name,
             job_qty: jobQty, outsourcing: '', est_time: est, time_unit: '分鐘',
@@ -422,13 +451,13 @@ export default function ProcessGenPage() {
       placeholders.push({
         order_number: orig.order_number, mfg_order_number: orig.mo_number || orig.order_number,
         product_name: orig.item_code, product_desc: orig.item_spec,
-        lot_number: '', prod_qty: orig.quantity, due: orig.due,
+        lot_number: (orig.factory === 'C' || orig.factory === 'O') ? (orig.line_seq ?? '') : '',
+        prod_qty: orig.quantity, due: orig.due,
         priority: '', earliest_start: today,
         job_seq: '', workcenter: '', job_name: '', job_qty: orig.quantity,
         outsourcing: '', est_time: 0, time_unit: '分鐘', bom: '', mat_req_qty: '',
         customer: orig.customer, factory: orig.factory, _noRoute: true,
       })
-    }
     setSaraRows(prev => [
       ...prev.filter(r => !groupKeys.has(rerouteKey(r))),
       ...placeholders,
@@ -483,8 +512,8 @@ export default function ProcessGenPage() {
         return {
           order_number: row.order_number, mfg_order_number: row.mo_number || row.order_number,
           product_name: row.item_code, product_desc: row.item_spec,
-          lot_number: '', prod_qty: row.quantity, due: row.due,
-          priority: '', earliest_start: today,
+          lot_number: (row.factory === 'C' || row.factory === 'O') ? (row.line_seq ?? '') : '',
+          prod_qty: row.quantity, due: row.due,
           job_seq: op.sequence, workcenter: station, job_name: op.op_name,
           job_qty: jobQty, outsourcing: '', est_time: est, time_unit: '分鐘',
           bom: '', mat_req_qty: '',
