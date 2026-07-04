@@ -515,6 +515,7 @@ export default function ProcessGenPage() {
           product_name: row.item_code, product_desc: row.item_spec,
           lot_number: (row.factory === 'C' || row.factory === 'O') ? (row.line_seq ?? '') : '',
           prod_qty: row.quantity, due: row.due,
+          priority: '', earliest_start: today,
           job_seq: op.sequence, workcenter: station, job_name: op.op_name,
           job_qty: jobQty, outsourcing: '', est_time: est, time_unit: '分鐘',
           bom: '', mat_req_qty: '',
