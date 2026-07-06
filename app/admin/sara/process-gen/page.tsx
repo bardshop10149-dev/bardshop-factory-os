@@ -334,13 +334,23 @@ export default function ProcessGenPage() {
 
       // 廠區與途程相符性確認（規則 4/5/6）
       const fakeKo = inputRows.filter(r => r.factory === 'T' && r.item_spec.includes('仿柯'))
-      if (fakeKo.length) confirms.push(`廠區為台北但品名規格含「仿柯」，請確認是否應改為委外（${fakeKo.length} 筆）：${fakeKo.slice(0, 3).map(r => r.item_code).join('、')}${fakeKo.length > 3 ? '…' : ''}`)
+      if (fakeKo.length) {
+        const uniq = [...new Set(fakeKo.map(r => `${r.order_number}/${r.item_code}`))]
+        confirms.push(`廠區為台北但品名規格含「仿柯」，請確認是否應改為委外（${fakeKo.length} 筆 / ${uniq.length} 品項）：${uniq.slice(0, 4).join('、')}${uniq.length > 4 ? '…' : ''}`)
+      }
       const CP_ROUTE = '常平一般壓克力製程'
       const cpMis = inputRows.filter(r => r.factory === 'C' && irMap.has(r.item_code) && irMap.get(r.item_code) !== CP_ROUTE)
-      if (cpMis.length) confirms.push(`廠區為常平但套用途程非「${CP_ROUTE}」，請確認（${cpMis.length} 筆）：${cpMis.slice(0, 3).map(r => r.item_code).join('、')}${cpMis.length > 3 ? '…' : ''}`)
+      if (cpMis.length) {
+        // 依 order_number|item_code|mo_number 去重，方便使用者定位
+        const uniqKeys = [...new Set(cpMis.map(r => `${r.order_number}/${r.item_code}（${irMap.get(r.item_code)}）`))]
+        confirms.push(`廠區為常平但套用途程非「${CP_ROUTE}」，請確認（共 ${cpMis.length} 筆，${uniqKeys.length} 項品號）：${uniqKeys.slice(0, 4).join('、')}${uniqKeys.length > 4 ? '…' : ''}`)
+      }
       const O_ROUTES = new Set(['委外/7天回', '委外/9天回', '委外/11天回'])
       const ouMis = inputRows.filter(r => r.factory === 'O' && irMap.has(r.item_code) && !O_ROUTES.has(irMap.get(r.item_code)!))
-      if (ouMis.length) confirms.push(`廠區為委外但套用途程非標準委外途程（委外/7天回、9天回、11天回），請確認（${ouMis.length} 筆）：${ouMis.slice(0, 3).map(r => r.item_code).join('、')}${ouMis.length > 3 ? '…' : ''}`)
+      if (ouMis.length) {
+        const uniq = [...new Set(ouMis.map(r => `${r.order_number}/${r.item_code}（${irMap.get(r.item_code)}）`))]
+        confirms.push(`廠區為委外但套用途程非標準委外途程，請確認（${ouMis.length} 筆，${uniq.length} 項品號）：${uniq.slice(0, 4).join('、')}${uniq.length > 4 ? '…' : ''}`)
+      }
 
       // 標記問題列（含製令號 + 數量，不同序號獨立影響）
       const flagged = new Set<string>()
