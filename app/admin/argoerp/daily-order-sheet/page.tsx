@@ -2055,10 +2055,25 @@ export default function DailyOrderSheetPage() {
     setBatchProgress('')
     setSaveMsg('')
     try {
-      // 1. 一次抓全部 SO 明細（所有比對的依據）
+      // 0. 先撈所有出單表以取得全部訂單號（避免 SO 明細查詢被 Supabase 1000 筆預設上限截斷）
+      const { data: allSheetsPreload, error: sheetsPreErr } = await supabase
+        .from('daily_order_sheets')
+        .select('sheet_date, rows, raw_text')
+        .order('sheet_date', { ascending: false })
+      if (sheetsPreErr) throw sheetsPreErr
+      const allSheetsData = allSheetsPreload ?? []
+      const allSheetOrderNumbers = new Set<string>()
+      for (const sheet of allSheetsData) {
+        const rows = Array.isArray(sheet.rows) ? (sheet.rows as SheetRow[]) : []
+        for (const r of rows) { if (r.order_number) allSheetOrderNumbers.add(r.order_number) }
+      }
+      const soFilter = allSheetOrderNumbers.size > 0 ? [...allSheetOrderNumbers] : ['__none__']
+
+      // 1. 以訂單號過濾撈 SO 明細（避免截斷）
       const { data: allSoLines, error: soErr } = await supabase
         .from('erp_so_lines')
         .select('project_id, line_no, mbp_part, order_qty_oru, pdl_seq')
+        .in('project_id', soFilter)
       if (soErr) throw soErr
       const soProjectIds = new Set((allSoLines ?? []).map(l => l.project_id))
       const candidateMap = new Map<string, Array<{ line_no: string; pdl_seq: number | null }>>()
@@ -2162,14 +2177,8 @@ export default function DailyOrderSheetPage() {
         extra: (r.extra ?? null) as Record<string, unknown> | null, _used: false,
       }))
 
-      // 4. 逐張出單表處理
-      const { data: allSheets, error: sheetsErr } = await supabase
-        .from('daily_order_sheets')
-        .select('sheet_date, rows, raw_text')
-        .order('sheet_date', { ascending: false })
-      if (sheetsErr) throw sheetsErr
-
-      const sheets = allSheets ?? []
+      // 4. 逐張出單表處理（使用步驟 0 已載入的資料）
+      const sheets = allSheetsData
       let totalUpdated = 0
 
       for (let si = 0; si < sheets.length; si++) {
