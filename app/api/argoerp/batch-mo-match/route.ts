@@ -128,18 +128,23 @@ async function matchSheet(supabase: any, sheet: DailySheet): Promise<number> {
   }
 
   // 3. 比對每列
+  const rawLogMoSet = new Set(rawLogMoNumbers)
   const next: SheetRow[] = sheetRows.map(r => {
     const matchSeq = r.match_line_no != null
       ? String(parseInt(r.match_line_no, 10)).padStart(2, '0')
       : null
 
     if (r.mo_number?.startsWith('MO')) {
+      // 本系統有此 MO 的上傳紀錄，但已從 argoerp_mo_summary 刪除（使用者主動刪除）
+      // 以本系統為準，即使 erp_mo_lines 仍有此記錄也清除
+      if (rawLogMoSet.has(r.mo_number) && !activeMoNumbers.has(r.mo_number)) {
+        return { ...r, mo_number: undefined, mo_status: null, material_prep_status: null }
+      }
       const erpMosForOrder = erpMoBySourceOrder.get(r.order_number)
       if (erpMosForOrder && !erpMosForOrder.has(r.mo_number)) {
         return { ...r, mo_number: undefined, mo_status: null, material_prep_status: null }
       }
-      // ERP 無此訂單製令紀錄，且製令已從 argoerp_mo_summary 刪除 → 清除殘留值
-      // 修正：避免已刪除的製令號（如 MOT26070601）因 erpMosForOrder=undefined 而被略過檢查
+      // ERP 無此訂單製令紀錄，且製令已從 argoerp_mo_summary 刪除 → 清除殘留値
       if (!erpMosForOrder && !activeMoNumbers.has(r.mo_number)) {
         return { ...r, mo_number: undefined, mo_status: null, material_prep_status: null }
       }

@@ -1097,6 +1097,7 @@ export default function DailyOrderSheetPage() {
       //    ① erp_mo_lines：用 line_no 精準比對（ARGO 直接建立的 MO）
       //    ② argoerp_mo_upload_log：末碼=序號（你們系統建立的 MO）
       //    ③ erpMoBaseMap 唯一製令 fallback
+      const rawLogMoSet = new Set(rawLogMoNumbers)
       const next: SheetRow[] = sheetRows.map(r => {
         const matchSeq = r.match_line_no != null
           ? String(parseInt(r.match_line_no, 10)).padStart(2, '0')
@@ -1104,8 +1105,12 @@ export default function DailyOrderSheetPage() {
 
         // 若已有 MO：先檢查是否仍存在於 ARGO erp_mo_lines
         if (r.mo_number?.startsWith('MO')) {
+          // 本系統有此 MO 的上傳紀錄，但已從 argoerp_mo_summary 刪除（使用者主動刪除）
+          // 以本系統為準，即使 erp_mo_lines 仍有此記錄也清除（避免錯誤的製令號殘留）
+          if (rawLogMoSet.has(r.mo_number) && !activeMoNumbers.has(r.mo_number)) {
+            return { ...r, mo_number: undefined, mo_status: null, material_prep_status: null }
+          }
           const erpMosForOrder = erpMoBySourceOrder.get(r.order_number)
-          // erp_mo_lines 已同步此來源訂單，但找不到此製令 → 已從 ARGO 刪除，清除
           if (erpMosForOrder && !erpMosForOrder.has(r.mo_number)) {
             return { ...r, mo_number: undefined, mo_status: null, material_prep_status: null }
           }
