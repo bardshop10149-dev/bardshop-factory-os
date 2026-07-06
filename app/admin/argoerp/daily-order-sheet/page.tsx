@@ -577,6 +577,29 @@ export default function DailyOrderSheetPage() {
           }
         }
 
+        // ── 格式不符的製令號在載入時立即清除並存回 DB ──
+        // 避免舊的截斷格式（如 MOT26070601）殘留顯示，不等同步按鈕觸發
+        const isValidMoFmt = (mo: string): boolean => {
+          if (!/^MO[TCO]/.test(mo)) return false
+          const s = mo.slice(3)
+          if (s.includes('-')) return s.length >= 15 && /^\d{6}-/.test(s)
+          return /^\d{10,}$/.test(s)
+        }
+        const invalidMoRows = finalRows.filter(r => r.mo_number?.startsWith('MO') && !isValidMoFmt(r.mo_number))
+        if (invalidMoRows.length > 0) {
+          finalRows = finalRows.map(r =>
+            r.mo_number?.startsWith('MO') && !isValidMoFmt(r.mo_number)
+              ? { ...r, mo_number: undefined, mo_status: null, material_prep_status: null }
+              : r
+          )
+          // 非同步存回 DB（不阻塞 UI）
+          fetch('/api/argoerp/daily-order-sheet', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ sheet_date: date, raw_text: rawTextStored, rows: finalRows }),
+          }).catch(() => {})
+        }
+
         setSheetRows(finalRows)
         // 還原沒有 mo_number 的 row-level 機台分配
         const rmMap: Record<string, string> = {}
