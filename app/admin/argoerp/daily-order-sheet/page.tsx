@@ -1109,6 +1109,10 @@ export default function DailyOrderSheetPage() {
           if (erpMosForOrder && !erpMosForOrder.has(r.mo_number)) {
             return { ...r, mo_number: undefined, mo_status: null, material_prep_status: null }
           }
+          // ERP 無此訂單製令紀錄，且製令已從 argoerp_mo_summary 刪除 → 清除殘留值
+          if (!erpMosForOrder && !activeMoNumbers.has(r.mo_number)) {
+            return { ...r, mo_number: undefined, mo_status: null, material_prep_status: null }
+          }
           if (!matchSeq) return r
           const erpConfirm = erpMoMap.get(`${r.order_number}|${r.item_code}|${matchSeq}`)
           if (!erpConfirm) return r              // ARGO 尚無資料，保留上傳 log 結果
