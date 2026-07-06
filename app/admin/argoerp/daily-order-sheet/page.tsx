@@ -1249,9 +1249,12 @@ export default function DailyOrderSheetPage() {
       const qty = parseFloat(String(row.quantity).replace(/,/g, '')) || 0
       const matchLineNo = (row.match_line_no ?? '').trim()
       // 第一優先：料號 + 數量 + SO_PROJECT_ID === 銷售訂單號（委外 PO 用此欄位記錄來源單）
+      // 額外驗證批號：MBP_LOT_NO 若有值，必須也等於訂單號（防止跨單誤配）
       let hitIdx = pool.findIndex(c =>
         !c._used && (c.item_code ?? '') === row.item_code && c.qty === qty &&
-        String(c.extra?.SO_PROJECT_ID ?? '') === (row.order_number ?? '')
+        String(c.extra?.SO_PROJECT_ID ?? '') === (row.order_number ?? '') &&
+        (!String(c.extra?.MBP_LOT_NO ?? '').trim() ||
+          String(c.extra?.MBP_LOT_NO ?? '').trim() === (row.order_number ?? '').trim())
       )
       // 第二優先：料號 + 數量 + MBP_LOT_NO === 銷售訂單號（常平 PO 批號即 SO 單號）
       if (hitIdx === -1)
@@ -1304,7 +1307,7 @@ export default function DailyOrderSheetPage() {
     return null
   }
 
-  type PrCandidate = { doc_no: string; sub_no: string; item_code: string | null; ro: string; status: string | null; _used: boolean }
+  type PrCandidate = { doc_no: string; sub_no: string; item_code: string | null; ro: string; mbp_lot_no: string; status: string | null; _used: boolean }
   // 對僅 factory==='O' 的列做請購單比對；rows 已是最新狀態（含採購比對結果）
   // 比對優先序：
   //   (a) 直接 SO 號比對：請購 extra.PROJECT_ID / MBP_LOT_NO 直接帶出單表 SO 號（委外 MPO 類請購常見，無 RO）
@@ -1343,7 +1346,12 @@ export default function DailyOrderSheetPage() {
       // (b) RO 橋接比對（後備）
       const ro = soToRoByItem.get(`${so}|${row.item_code}`) ?? soToRoAny.get(so) ?? null
       if (ro) {
-        const roHit = pickHit(roToPr.get(ro), row.item_code)
+        const roCands = (roToPr.get(ro) ?? []).filter(c => {
+          // 批號驗證：MBP_LOT_NO 必須為空、等於 RO 號、或等於當前 SO 號（三者皆合理）
+          if (!c.mbp_lot_no) return true
+          return c.mbp_lot_no === ro || c.mbp_lot_no === so
+        })
+        const roHit = pickHit(roCands, row.item_code)
         if (roHit) {
           roHit._used = true
           return { ...row, pr_number: roHit.doc_no, pr_sub_no: roHit.sub_no, pr_status: 'matched' }
@@ -1370,7 +1378,7 @@ export default function DailyOrderSheetPage() {
       const list = soToPr.get(key)!
       // 去重：同 doc_no#sub_no 只留一筆
       if (list.some(c => c.doc_no === r.doc_no && c.sub_no === r.sub_no)) return
-      list.push({ doc_no: r.doc_no, sub_no: r.sub_no, item_code: r.item_code, ro: '', status: r.status, _used: false })
+      list.push({ doc_no: r.doc_no, sub_no: r.sub_no, item_code: r.item_code, ro: '', mbp_lot_no: so, status: r.status, _used: false })
     }
     for (const field of ['MBP_LOT_NO', 'PROJECT_ID'] as const) {
       const { data: prDirect, error: prDirectErr } = await supabase
@@ -1416,7 +1424,8 @@ export default function DailyOrderSheetPage() {
         const ro = String((r.extra as Record<string, unknown> | null)?.SO_PROJECT_ID ?? '').trim().toUpperCase()
         if (!ro) continue
         if (!roToPr.has(ro)) roToPr.set(ro, [])
-        roToPr.get(ro)!.push({ doc_no: r.doc_no, sub_no: r.sub_no, item_code: r.item_code, ro, status: r.status, _used: false })
+        const mbpLotNo = String((r.extra as Record<string, unknown> | null)?.MBP_LOT_NO ?? '').trim()
+        roToPr.get(ro)!.push({ doc_no: r.doc_no, sub_no: r.sub_no, item_code: r.item_code, ro, mbp_lot_no: mbpLotNo, status: r.status, _used: false })
       }
     }
 
