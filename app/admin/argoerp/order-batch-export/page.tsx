@@ -236,13 +236,26 @@ async function prefetchSeqFromDb(): Promise<void> {
     const maxByKey = new Map<string, number>()
     for (const r of records) {
       const mo = r?.mo_number ?? ''
-      // 期望格式：MOT/MOC/MOO + 8碼日期 + 3碼流水
-      const m = mo.match(/^(MO[TCO])(\d{8})(\d{3})$/)
-      if (!m) continue
-      const key = `${m[1]}${m[2]}`
-      const seq = Number(m[3])
-      const cur = maxByKey.get(key) ?? 0
-      if (seq > cur) maxByKey.set(key, seq)
+      if (!mo.startsWith('MO')) continue
+      // 舊格式：MO[TCO] + 8碼日期 + 3碼流水（共 14 碼）
+      const oldM = mo.match(/^(MO[TCO])(\d{8})(\d{3})$/)
+      if (oldM) {
+        const key = `${oldM[1]}${oldM[2]}`
+        const seq = Number(oldM[3])
+        const cur = maxByKey.get(key) ?? 0
+        if (seq > cur) maxByKey.set(key, seq)
+        continue
+      }
+      // 新格式（SOA 含連字號 或 一般 2 碼流水）：末兩碼為序號
+      // 涵蓋：MOT260622-111728-48601、MOT2605010101 等所有非舊格式
+      if (mo.length >= 5) {
+        const key = mo.slice(0, -2)
+        const seq = Number(mo.slice(-2))
+        if (Number.isFinite(seq)) {
+          const cur = maxByKey.get(key) ?? 0
+          if (seq > cur) maxByKey.set(key, seq)
+        }
+      }
     }
     // 寫回模組 cache（以 DB 為準，覆蓋舊值）
     for (const [k, v] of maxByKey) seqCacheFromDb.set(k, v)
@@ -283,7 +296,9 @@ function getMaxUsedSeq(prefix: string, dateDigits: string): number {
 // 從銷售訂單號取出英文前綴後的完整數字串
 // 例：RO26042801 → "26042801"、RO26050101 → "26050101"
 function parseSoDateDigits(orderNumber: string): string | null {
-  const m = orderNumber.match(/^[A-Za-z]+(\d+)/)
+  // 擷取英文前綴後的完整後綴（含連字號），以支援外部系統產生的 SOA 格式
+  // 例：SOA260622-111728-486 → "260622-111728-486"、RO26050101 → "26050101"
+  const m = orderNumber.match(/^[A-Za-z]+(.+)/)
   if (!m) return null
   return m[1]
 }
@@ -451,12 +466,25 @@ async function saveRecordsToSummary(records: ReturnType<typeof buildSummaryRecor
   try { saveRecordsToSummaryLocal(records) } catch {}
   // 同步更新 seq cache
   for (const r of records) {
-    const m = r.mo_number.match(/^(MO[TCO])(\d{8})(\d{3})$/)
-    if (!m) continue
-    const key = `${m[1]}${m[2]}`
-    const seq = Number(m[3])
-    const cur = seqCacheFromDb.get(key) ?? 0
-    if (seq > cur) seqCacheFromDb.set(key, seq)
+    const mo = r.mo_number
+    // 舊格式
+    const oldM = mo.match(/^(MO[TCO])(\d{8})(\d{3})$/)
+    if (oldM) {
+      const key = `${oldM[1]}${oldM[2]}`
+      const seq = Number(oldM[3])
+      const cur = seqCacheFromDb.get(key) ?? 0
+      if (seq > cur) seqCacheFromDb.set(key, seq)
+      continue
+    }
+    // 新格式（SOA 含連字號 或 一般 2 碼流水）
+    if (mo.startsWith('MO') && mo.length >= 5) {
+      const key = mo.slice(0, -2)
+      const seq = Number(mo.slice(-2))
+      if (Number.isFinite(seq)) {
+        const cur = seqCacheFromDb.get(key) ?? 0
+        if (seq > cur) seqCacheFromDb.set(key, seq)
+      }
+    }
   }
 }
 
@@ -2465,6 +2493,11 @@ export default function OrderBatchExportPage() {
                 <h2 className="text-base font-bold text-white">匯入預覽 — {factoryLabel(importPreview.factory)} ({importPreview.rows.length} 筆)</h2>
                 <p className="text-xs text-slate-400 mt-0.5 flex flex-wrap items-center gap-2">
                   以下為將產生的製令單號，請確認無誤後再匯入
+                  {importPreview.rows.some(r => /^[A-Za-z]+\d+-/.test(r.source_order)) && (
+                    <span className="px-2 py-0.5 rounded text-[11px] font-mono bg-amber-900/60 text-amber-300">
+                      ⚠ 含外部訂單（琥珀色）：製令號由完整訂單號派生，序號從 01 起算
+                    </span>
+                  )}
                   <span className={`px-2 py-0.5 rounded text-[11px] font-mono ${importPreview.dbMax > 0 ? 'bg-emerald-900/60 text-emerald-300' : 'bg-yellow-900/60 text-yellow-300'}`}>
                     DB 已用最大號：{importPreview.dbMax > 0 ? String(importPreview.dbMax).padStart(3, '0') : '未抓到（server 可能需重啟）'}
                   </span>
@@ -2492,10 +2525,16 @@ export default function OrderBatchExportPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {importPreview.rows.map((row, i) => (
+                  {importPreview.rows.map((row, i) => {
+                    const isSoaDerived = /^[A-Za-z]+\d+-/.test(row.source_order)
+                    return (
                     <tr key={i} className={`border-b border-slate-800/50 ${i % 2 === 0 ? 'bg-slate-900/60' : 'bg-slate-900/20'}`}>
                       <td className="px-3 py-2 text-slate-500 text-xs">{i + 1}</td>
-                      <td className="px-3 py-2 font-mono text-cyan-300 text-xs whitespace-nowrap">{row.mo_number}</td>
+                      <td className="px-3 py-2 font-mono text-xs whitespace-nowrap">
+                        <span className={isSoaDerived ? 'text-amber-300' : 'text-cyan-300'} title={isSoaDerived ? '外部系統訂單：製令單號由訂單號派生，請確認格式正確' : undefined}>
+                          {row.mo_number}{isSoaDerived && ' ⚠'}
+                        </span>
+                      </td>
                       <td className="px-3 py-2 text-white text-xs whitespace-nowrap">{row.product_code}</td>
                       <td className="px-3 py-2 text-slate-300 text-xs whitespace-nowrap">{row.source_order}</td>
                       <td className="px-3 py-2 text-center text-xs">
@@ -2507,7 +2546,8 @@ export default function OrderBatchExportPage() {
                       <td className="px-3 py-2 text-slate-400 text-xs max-w-[150px] truncate" title={row.custom_1}>{row.custom_1}</td>
                       <td className="px-3 py-2 text-slate-400 text-xs whitespace-nowrap">{row.planned_end_date}</td>
                     </tr>
-                  ))}
+                    )
+                  })}
                 </tbody>
               </table>
             </div>

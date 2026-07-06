@@ -3058,8 +3058,12 @@ export default function DailyOrderSheetPage() {
                                 <span className="text-slate-600">—</span>
                               )}
                               {row.factory === 'O' && row.pr_status === 'matched' && row.pr_number && (
-                                <div className="mt-1 text-[10px] text-sky-400/80" title="同步區請購單（採購單優先，請購為輔）">
-                                  請購 {row.pr_number}{row.pr_sub_no && <span className="text-slate-500">#{row.pr_sub_no}</span>}
+                                <div className="mt-1 text-[10px]" title="同步區請購單（採購單優先，請購為輔）">
+                                  <button
+                                    onClick={() => setPoModalId(row.pr_number!)}
+                                    className="text-sky-400/80 hover:text-sky-200 hover:underline underline-offset-2 transition-colors text-left"
+                                  >請購 {row.pr_number}</button>
+                                  {row.pr_sub_no && <span className="text-slate-500">#{row.pr_sub_no}</span>}
                                 </div>
                               )}
                             </td>

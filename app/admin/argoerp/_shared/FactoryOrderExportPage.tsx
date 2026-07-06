@@ -179,7 +179,9 @@ function getNextBusinessDay(from: Date): Date {
 }
 
 function parseSoDateDigits(orderNumber: string): string | null {
-  const m = orderNumber.match(/^[A-Za-z]+(\d+)/)
+  // 擷取英文前綴後的完整後綴（含連字號），以支援外部系統產生的 SOA 格式
+  // 例：SOA260622-111728-486 → "260622-111728-486"、SOT20260622 → "20260622"
+  const m = orderNumber.match(/^[A-Za-z]+(.+)/)
   return m ? m[1] : null
 }
 
@@ -225,12 +227,26 @@ async function prefetchSeqFromDb(): Promise<void> {
     const maxByKey = new Map<string, number>()
     for (const r of records) {
       const mo = r?.mo_number ?? ''
-      const m = mo.match(/^(MO[TCO])(\d{8})(\d{3})$/)
-      if (!m) continue
-      const key = `${m[1]}${m[2]}`
-      const seq = Number(m[3])
-      const cur = maxByKey.get(key) ?? 0
-      if (seq > cur) maxByKey.set(key, seq)
+      if (!mo.startsWith('MO')) continue
+      // 舊格式：MO[TCO] + 8碼日期 + 3碼流水（共 14 碼）
+      const oldM = mo.match(/^(MO[TCO])(\d{8})(\d{3})$/)
+      if (oldM) {
+        const key = `${oldM[1]}${oldM[2]}`
+        const seq = Number(oldM[3])
+        const cur = maxByKey.get(key) ?? 0
+        if (seq > cur) maxByKey.set(key, seq)
+        continue
+      }
+      // 新格式（SOA 含連字號 或 一般 2 碼流水）：末兩碼為序號
+      // 涵蓋：MOT260622-111728-48601、MOT2605010101 等所有非舊格式
+      if (mo.length >= 5) {
+        const key = mo.slice(0, -2)
+        const seq = Number(mo.slice(-2))
+        if (Number.isFinite(seq)) {
+          const cur = maxByKey.get(key) ?? 0
+          if (seq > cur) maxByKey.set(key, seq)
+        }
+      }
     }
     for (const [k, v] of maxByKey) seqCache.set(k, v)
   } catch { /* fallback */ }
@@ -372,12 +388,25 @@ async function saveRecordsToSummaryDbUpsert(records: ReturnType<typeof buildSumm
 async function saveRecordsToSummary(records: ReturnType<typeof buildSummaryRecords>): Promise<void> {
   await saveRecordsToSummaryDb(records)
   for (const r of records) {
-    const m = r.mo_number.match(/^(MO[TCO])(\d{8})(\d{3})$/)
-    if (!m) continue
-    const key = `${m[1]}${m[2]}`
-    const seq = Number(m[3])
-    const cur = seqCache.get(key) ?? 0
-    if (seq > cur) seqCache.set(key, seq)
+    const mo = r.mo_number
+    // 舊格式
+    const oldM = mo.match(/^(MO[TCO])(\d{8})(\d{3})$/)
+    if (oldM) {
+      const key = `${oldM[1]}${oldM[2]}`
+      const seq = Number(oldM[3])
+      const cur = seqCache.get(key) ?? 0
+      if (seq > cur) seqCache.set(key, seq)
+      continue
+    }
+    // 新格式（SOA 含連字號 或 一般 2 碼流水）
+    if (mo.startsWith('MO') && mo.length >= 5) {
+      const key = mo.slice(0, -2)
+      const seq = Number(mo.slice(-2))
+      if (Number.isFinite(seq)) {
+        const cur = seqCache.get(key) ?? 0
+        if (seq > cur) seqCache.set(key, seq)
+      }
+    }
   }
 }
 
@@ -995,17 +1024,24 @@ export default function FactoryOrderExportPage({
                       </tr>
                     </thead>
                     <tbody>
-                      {importPreview.rows.map((r, i) => (
+                      {importPreview.rows.map((r, i) => {
+                        const isSoaDerived = /^[A-Za-z]+\d+-/.test(r.source_order)
+                        return (
                         <tr key={i} className={`border-t border-slate-800/50 ${i % 2 === 0 ? '' : 'bg-slate-900/40'}`}>
                           <td className="px-3 py-1.5 text-slate-500">{i + 1}</td>
-                          <td className={`px-3 py-1.5 font-mono font-semibold ${theme.accent}`}>{r.mo_number}</td>
+                          <td className="px-3 py-1.5 font-mono font-semibold">
+                            <span className={isSoaDerived ? 'text-amber-300' : theme.accent} title={isSoaDerived ? '外部系統訂單：製令單號由訂單號派生，請確認格式正確' : undefined}>
+                              {r.mo_number}{isSoaDerived && ' ⚠'}
+                            </span>
+                          </td>
                           <td className="px-3 py-1.5 text-slate-300">{r.product_code}</td>
                           <td className="px-3 py-1.5 font-mono text-slate-400">{r.source_order}</td>
                           <td className="px-3 py-1.5 text-center text-slate-400">{r.source_order_line}</td>
                           <td className="px-3 py-1.5 text-right text-slate-300">{r.planned_qty}</td>
                           <td className="px-3 py-1.5 text-yellow-400/80 whitespace-nowrap">{r.planned_end_date}</td>
                         </tr>
-                      ))}
+                        )
+                      })}
                     </tbody>
                   </table>
                 </div>

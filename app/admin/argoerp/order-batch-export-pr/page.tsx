@@ -11,6 +11,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import * as XLSX from 'xlsx'
 import { supabase } from '../../../../lib/supabaseClient'
+import PoOrderModal from '../../../../components/PoOrderModal'
 
 interface SourceRow {
   row_key?: string
@@ -105,8 +106,10 @@ function makeDefaultHeader(): PrHeader {
 
 function isMpoImportedRow(row: SourceRow): boolean {
   const moNo = String(row.mo_number ?? '').trim().toUpperCase()
-  const prNo = String(row.pr_number ?? '').trim().toUpperCase()
-  return moNo.startsWith('MPO') || prNo.startsWith('MPO')
+  const prNo = String(row.pr_number ?? '').trim()
+  // 任何非空的 pr_number 均表示已比對到請購單（無論格式，含舊格式 MP... 及新格式 MPO...）
+  // 保留舊相容：mo_number 本身是 MPO 前綴（歷史遺留資料）
+  return !!prNo || moNo.startsWith('MPO')
 }
 
 export default function PrBatchExportOPage() {
@@ -134,6 +137,7 @@ export default function PrBatchExportOPage() {
   const [prSearchId, setPrSearchId] = useState('')
   const [prSearching, setPrSearching] = useState(false)
   const [prSyncRows, setPrSyncRows] = useState<Array<Record<string, unknown>> | null>(null)
+  const [poModalId, setPoModalId] = useState<string | null>(null)
 
   useEffect(() => {
     try {
@@ -749,7 +753,13 @@ export default function PrBatchExportOPage() {
                     {importedMpoRows.map((row, i) => (
                       <tr key={`${row.row_key || row.order_number}-imp-${i}`} className="border-t border-slate-800/80">
                         <td className="px-2 py-1.5 text-slate-500">{i + 1}</td>
-                        <td className="px-2 py-1.5 font-mono text-emerald-300">{row.pr_number || row.mo_number || '—'}</td>
+                        <td className="px-2 py-1.5 font-mono text-emerald-300">
+                          {row.pr_number || row.mo_number
+                            ? <button
+                                onClick={() => setPoModalId(row.pr_number || row.mo_number || null)}
+                                className="hover:underline underline-offset-2 text-emerald-300 hover:text-emerald-100 transition-colors text-left"
+                              >{row.pr_number || row.mo_number}</button>
+                            : '—'}</td>
                         <td className="px-2 py-1.5 text-cyan-300">{row.order_number}</td>
                         <td className="px-2 py-1.5">{row.doc_type}</td>
                         <td className="px-2 py-1.5 font-mono">{row.item_code}</td>
@@ -804,6 +814,7 @@ export default function PrBatchExportOPage() {
           )}
         </section>
       </div>
+      <PoOrderModal docNo={poModalId} onClose={() => setPoModalId(null)} />
     </main>
   )
 }
