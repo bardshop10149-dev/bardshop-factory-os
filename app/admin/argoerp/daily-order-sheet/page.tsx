@@ -2055,35 +2055,14 @@ export default function DailyOrderSheetPage() {
     setBatchProgress('')
     setSaveMsg('')
     try {
-      // 0. 先撈所有出單表以取得全部訂單號（避免 SO 明細查詢被 Supabase 1000 筆預設上限截斷）
+      // 0. 先撈所有出單表（供後續逐張處理用）
       const { data: allSheetsPreload, error: sheetsPreErr } = await supabase
         .from('daily_order_sheets')
         .select('sheet_date, rows, raw_text')
         .order('sheet_date', { ascending: false })
       if (sheetsPreErr) throw sheetsPreErr
       const allSheetsData = allSheetsPreload ?? []
-      const allSheetOrderNumbers = new Set<string>()
-      for (const sheet of allSheetsData) {
-        const rows = Array.isArray(sheet.rows) ? (sheet.rows as SheetRow[]) : []
-        for (const r of rows) { if (r.order_number) allSheetOrderNumbers.add(r.order_number) }
-      }
-      const soFilter = allSheetOrderNumbers.size > 0 ? [...allSheetOrderNumbers] : ['__none__']
-
-      // 1. 以訂單號過濾撈 SO 明細（避免截斷）
-      const { data: allSoLines, error: soErr } = await supabase
-        .from('erp_so_lines')
-        .select('project_id, line_no, mbp_part, order_qty_oru, pdl_seq')
-        .in('project_id', soFilter)
-      if (soErr) throw soErr
-      const soProjectIds = new Set((allSoLines ?? []).map(l => l.project_id))
-      const candidateMap = new Map<string, Array<{ line_no: string; pdl_seq: number | null }>>()
-      for (const line of (allSoLines ?? [])) {
-        const qty = Number(line.order_qty_oru ?? 0)
-        const key = `${line.project_id}|${line.mbp_part ?? ''}|${qty}`
-        if (!candidateMap.has(key)) candidateMap.set(key, [])
-        candidateMap.get(key)!.push({ line_no: String(line.line_no ?? ''), pdl_seq: line.pdl_seq != null ? Number(line.pdl_seq) : null })
-      }
-      for (const arr of candidateMap.values()) arr.sort((a, b) => (Number(a.line_no) || 0) - (Number(b.line_no) || 0))
+      // NOTE: erp_so_lines 查詢在各張出單表 loop 內逐張執行（同 一鍵全同步），避免 Supabase 1000 筆截斷
 
       // 2. 一次抓全部 MO 相關資料
       const { data: allMoLogs, error: moErr } = await supabase
@@ -2188,8 +2167,22 @@ export default function DailyOrderSheetPage() {
         let rows: SheetRow[] = Array.isArray(sheet.rows) ? (sheet.rows as SheetRow[]) : []
         if (rows.length === 0) continue
 
-        // Step A: 序號比對
+        // Step A: 序號比對（同 一鍵全同步：每張獨立查詢 erp_so_lines，避免 Supabase 截斷）
         const orderNumbers = [...new Set(rows.map(r => r.order_number).filter(Boolean))]
+        const soFilterSheet = orderNumbers.length > 0 ? orderNumbers : ['__none__']
+        const { data: sheetSoLines } = await supabase
+          .from('erp_so_lines')
+          .select('project_id, line_no, mbp_part, order_qty_oru, pdl_seq')
+          .in('project_id', soFilterSheet)
+        const soProjectIds = new Set((sheetSoLines ?? []).map((l: { project_id: string }) => l.project_id))
+        const candidateMap = new Map<string, Array<{ line_no: string; pdl_seq: number | null }>>()
+        for (const line of (sheetSoLines ?? [])) {
+          const qty = Number(line.order_qty_oru ?? 0)
+          const key = `${line.project_id}|${line.mbp_part ?? ''}|${qty}`
+          if (!candidateMap.has(key)) candidateMap.set(key, [])
+          candidateMap.get(key)!.push({ line_no: String(line.line_no ?? ''), pdl_seq: line.pdl_seq != null ? Number(line.pdl_seq) : null })
+        }
+        for (const arr of candidateMap.values()) arr.sort((a, b) => (Number(a.line_no) || 0) - (Number(b.line_no) || 0))
         const usageCounter = new Map<string, number>()
         rows = rows.map(src => {
           if (!src.order_number || !soProjectIds.has(src.order_number))
