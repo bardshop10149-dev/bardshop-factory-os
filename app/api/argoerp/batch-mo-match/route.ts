@@ -60,6 +60,22 @@ export async function POST() {
   return NextResponse.json({ success: true, results })
 }
 
+// 製令單號格式驗證
+// 有效格式：
+//   一般格式：MO[TCO] + 日期後綴(≥8碼數字) + 序號(2碼) = 共≥3後至10碼 = 整高13碼
+//   SOA 格式：MO[TCO] + YYMMDD-HHMMSS-NNN + 2碼序號 = 含連字號且後綴≥7碼
+// 不符合的四不像製令號（如 MOT26070601）一律排除
+function isValidMoFormat(mo: string): boolean {
+  if (!/^MO[TCO]/.test(mo)) return false
+  const suffix = mo.slice(3)
+  if (suffix.includes('-')) {
+    // SOA 格式：YYMMDD-XXXXXX-NNNss（連字號後至少 15 碼）
+    return suffix.length >= 15 && /^\d{6}-/.test(suffix)
+  }
+  // 一般格式：日期後綴(>=8碼) + 序號(>=2碼) = >=10碼純數字
+  return /^\d{10,}$/.test(suffix)
+}
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function matchSheet(supabase: any, sheet: DailySheet): Promise<number> {
   const sheetRows: SheetRow[] = Array.isArray(sheet.rows) ? sheet.rows : []
@@ -135,6 +151,10 @@ async function matchSheet(supabase: any, sheet: DailySheet): Promise<number> {
       : null
 
     if (r.mo_number?.startsWith('MO')) {
+      // 格式驗證：不符合有效製令號編碼的對象一律清除
+      if (!isValidMoFormat(r.mo_number)) {
+        return { ...r, mo_number: undefined, mo_status: null, material_prep_status: null }
+      }
       // 本系統有此 MO 的上傳紀錄，但已從 argoerp_mo_summary 刪除（使用者主動刪除）
       // 以本系統為準，即使 erp_mo_lines 仍有此記錄也清除
       if (rawLogMoSet.has(r.mo_number) && !activeMoNumbers.has(r.mo_number)) {

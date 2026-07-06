@@ -1098,6 +1098,17 @@ export default function DailyOrderSheetPage() {
       //    ② argoerp_mo_upload_log：末碼=序號（你們系統建立的 MO）
       //    ③ erpMoBaseMap 唯一製令 fallback
       const rawLogMoSet = new Set(rawLogMoNumbers)
+
+      // 製令單號格式驗證函式
+      // 一般格式：MO[TCO] + 日期後綴(≥8碼) + 序號(2碼) = 後綴≥8碼+2碼 = ≥8字元後綴
+      // SOA 格式：MO[TCO] + YYMMDD-HHMMSS-NNNss（含連字號）
+      const isValidMoFormat = (mo: string): boolean => {
+        if (!/^MO[TCO]/.test(mo)) return false
+        const s = mo.slice(3)
+        if (s.includes('-')) return s.length >= 15 && /^\d{6}-/.test(s)
+        return /^\d{10,}$/.test(s)
+      }
+
       const next: SheetRow[] = sheetRows.map(r => {
         const matchSeq = r.match_line_no != null
           ? String(parseInt(r.match_line_no, 10)).padStart(2, '0')
@@ -1105,6 +1116,10 @@ export default function DailyOrderSheetPage() {
 
         // 若已有 MO：先檢查是否仍存在於 ARGO erp_mo_lines
         if (r.mo_number?.startsWith('MO')) {
+          // 格式驗證：不符合有效製令號編碼原則的對象一律清除
+          if (!isValidMoFormat(r.mo_number)) {
+            return { ...r, mo_number: undefined, mo_status: null, material_prep_status: null }
+          }
           // 本系統有此 MO 的上傳紀錄，但已從 argoerp_mo_summary 刪除（使用者主動刪除）
           // 以本系統為準，即使 erp_mo_lines 仍有此記錄也清除（避免錯誤的製令號殘留）
           if (rawLogMoSet.has(r.mo_number) && !activeMoNumbers.has(r.mo_number)) {
