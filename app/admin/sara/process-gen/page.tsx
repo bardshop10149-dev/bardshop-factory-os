@@ -432,7 +432,11 @@ export default function ProcessGenPage() {
   // ── 套用臨時途程至単一無途程訂單 ─────────────────────────────────────
 
   const rowKey = (r: InputRow) => `${r.order_number}||${r.item_code}||${r.quantity}`
-  const rerouteKey = (r: { order_number: string; product_name: string }) => `${r.order_number}|${r.product_name}`
+  // 連字號分险4節，避免孕值中有 | 符號導致切錯
+  // 綁定原則：同一訂單號 + 同一品號 + 同一製令/採購單號 的所有工序列才綁定勾選
+  // 同訂單不同序號（不同製令號）必須可分開勾選
+  const rerouteKey = (r: { order_number: string; product_name: string; mfg_order_number?: string }) =>
+    `${r.order_number}||${r.product_name}||${r.mfg_order_number ?? ''}`
 
   // ── 將已有途程的列移回無途程區（修改途程） ─────────────────────────
 
@@ -443,10 +447,14 @@ export default function ProcessGenPage() {
     const newInputRows: InputRow[] = []
     const placeholders: SaraRow[] = []
     for (const gk of groupKeys) {
-      const [orderNum, itemCode] = gk.split('|')
-      const orig = inputRows.find(r => r.order_number === orderNum && r.item_code === itemCode)
+      const [orderNum, itemCode, moNumber] = gk.split('||')
+      const orig = inputRows.find(r =>
+        r.order_number === orderNum &&
+        r.item_code === itemCode &&
+        (r.mo_number ?? '') === (moNumber ?? '')
+      )
       if (!orig) continue
-      if (noRouteRows.some(r => r.order_number === orderNum && r.item_code === itemCode)) continue
+      if (noRouteRows.some(r => r.order_number === orderNum && r.item_code === itemCode && (r.mo_number ?? '') === (moNumber ?? ''))) continue
       newInputRows.push(orig)
       placeholders.push({
         order_number: orig.order_number, mfg_order_number: orig.mo_number || orig.order_number,
