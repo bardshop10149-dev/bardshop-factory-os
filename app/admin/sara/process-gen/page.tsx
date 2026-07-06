@@ -352,11 +352,13 @@ export default function ProcessGenPage() {
         confirms.push(`廠區為委外但套用途程非標準委外途程，請確認（${ouMis.length} 筆，${uniq.length} 項品號）：${uniq.slice(0, 4).join('、')}${uniq.length > 4 ? '…' : ''}`)
       }
 
-      // 標記問題列（含製令號 + 數量，不同序號獨立影響）
+      // 標記問題列（含製令號 + 數量 + 批號，不同序號獨立影響）
+      const inputFlagKey = (r: InputRow) =>
+        `${r.order_number}||${r.item_code}||${r.mo_number || r.order_number}||${r.quantity}||${(r.factory === 'C' || r.factory === 'O') ? (r.line_seq ?? '') : ''}`
       const flagged = new Set<string>()
-      fakeKo.forEach(r => flagged.add(`${r.order_number}||${r.item_code}||${r.mo_number || r.order_number}||${r.quantity}`))
-      cpMis.forEach(r => flagged.add(`${r.order_number}||${r.item_code}||${r.mo_number || r.order_number}||${r.quantity}`))
-      ouMis.forEach(r => flagged.add(`${r.order_number}||${r.item_code}||${r.mo_number || r.order_number}||${r.quantity}`))
+      fakeKo.forEach(r => flagged.add(inputFlagKey(r)))
+      cpMis.forEach(r => flagged.add(inputFlagKey(r)))
+      ouMis.forEach(r => flagged.add(inputFlagKey(r)))
       setFlaggedItems(flagged)
 
       // 2. route_operations
@@ -442,11 +444,11 @@ export default function ProcessGenPage() {
   // ── 套用臨時途程至単一無途程訂單 ─────────────────────────────────────
 
   const rowKey = (r: InputRow) => `${r.order_number}||${r.item_code}||${r.quantity}`
-  // 連字號分险4節，避免孕值中有 | 符號導致切錯
-  // 綁定原則：同一訂單號 + 同一品號 + 同一製令/採購單號 + 同一數量 的所有工序列才綁定勾選
-  // 同訂單不同序號（不同製令號 / 不同數量）必須可分開勾選
-  const rerouteKey = (r: { order_number: string; product_name: string; mfg_order_number?: string; prod_qty?: number }) =>
-    `${r.order_number}||${r.product_name}||${r.mfg_order_number ?? ''}||${r.prod_qty ?? ''}`
+  // 連字號分险5節，避免孕值中有 | 符號導致切錯
+  // 綁定原則：同一訂單號 + 同一品號 + 同一製令/採購單號 + 同一數量 + 同一批號(序號) 的所有工序列才綁定勾選
+  // 同訂單不同序號（不同製令號 / 不同數量 / 不同批號）必須可分開勾選
+  const rerouteKey = (r: { order_number: string; product_name: string; mfg_order_number?: string; prod_qty?: number; lot_number?: string }) =>
+    `${r.order_number}||${r.product_name}||${r.mfg_order_number ?? ''}||${r.prod_qty ?? ''}||${r.lot_number ?? ''}`
 
   // ── 將已有途程的列移回無途程區（修改途程） ─────────────────────────
 
@@ -457,19 +459,21 @@ export default function ProcessGenPage() {
     const newInputRows: InputRow[] = []
     const placeholders: SaraRow[] = []
     for (const gk of groupKeys) {
-      const [orderNum, itemCode, moNumber, qty] = gk.split('||')
+      const [orderNum, itemCode, moNumber, qty, lotNum] = gk.split('||')
       const orig = inputRows.find(r =>
         r.order_number === orderNum &&
         r.item_code === itemCode &&
         (r.mo_number ?? '') === (moNumber ?? '') &&
-        String(r.quantity) === (qty ?? '')
+        String(r.quantity) === (qty ?? '') &&
+        ((r.factory === 'C' || r.factory === 'O') ? (r.line_seq ?? '') : '') === (lotNum ?? '')
       )
       if (!orig) continue
       if (noRouteRows.some(r =>
         r.order_number === orderNum &&
         r.item_code === itemCode &&
         (r.mo_number ?? '') === (moNumber ?? '') &&
-        String(r.quantity) === (qty ?? '')
+        String(r.quantity) === (qty ?? '') &&
+        ((r.factory === 'C' || r.factory === 'O') ? (r.line_seq ?? '') : '') === (lotNum ?? '')
       )) continue
       newInputRows.push(orig)
       placeholders.push({
@@ -558,12 +562,13 @@ export default function ProcessGenPage() {
         applyConfirms.push(`【${row.item_code}】廠區委外但途程非標準委外途程（套用：${routeId}），請確認`)
       if (applyConfirms.length) {
         setConfirmWarns(prev => [...prev, ...applyConfirms])
-        setFlaggedItems(prev => new Set([...prev, `${row.order_number}||${row.item_code}||${row.mo_number || row.order_number}||${row.quantity}`]))
+        setFlaggedItems(prev => new Set([...prev, `${row.order_number}||${row.item_code}||${row.mo_number || row.order_number}||${row.quantity}||${(row.factory === 'C' || row.factory === 'O') ? (row.line_seq ?? '') : ''}`]))
       }
 
       // 從 saraRows 移除此行的 _noRoute 佔位，加入新產生列
+      const origLot = (row.factory === 'C' || row.factory === 'O') ? (row.line_seq ?? '') : ''
       setSaraRows(prev => [
-        ...prev.filter(r => !(r._noRoute && r.order_number === row.order_number && r.product_name === row.item_code && r.mfg_order_number === (row.mo_number || row.order_number) && r.prod_qty === row.quantity)),
+        ...prev.filter(r => !(r._noRoute && r.order_number === row.order_number && r.product_name === row.item_code && r.mfg_order_number === (row.mo_number || row.order_number) && r.prod_qty === row.quantity && r.lot_number === origLot)),
         ...newRows,
       ])
       setNoRouteRows(prev => prev.filter(r => rowKey(r) !== key))
