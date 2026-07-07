@@ -57,6 +57,7 @@ interface MatchedRow {
 // 結果表要顯示的欄位（label → 訂單明細表頭候選詞）
 const DISPLAY_FIELDS: { label: string; candidates: string[] }[] = [
   { label: '訂貨單號', candidates: ['訂貨單號', '工單編號', '工單號碼', '工單'] },
+  { label: '序號',     candidates: ['序號', '項次', '行號', 'LINE NO', 'LINE_NO', '編號'] },
   { label: '客戶名稱', candidates: ['客戶/供應商', '客戶名稱', '客戶', '供應商'] },
   { label: '品項編碼', candidates: ['品項編碼', '品項代碼', '料號', '貨號'] },
   { label: '品項名稱', candidates: ['品項名稱', '品名', '商品名稱'] },

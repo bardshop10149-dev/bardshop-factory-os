@@ -50,18 +50,34 @@ export async function GET(request: NextRequest) {
       const list = (data ?? []).map((r: { sheet_date: string; rows: unknown[]; updated_at: string }) => {
         const rowsArr = Array.isArray(r.rows) ? (r.rows as Array<Record<string, unknown>>) : []
         const pendingMos = new Set<string>()
+        let pendingPrCount = 0
+        let pendingCCount = 0
         for (const row of rowsArr) {
-          if (row.mo_status !== '已匯入製令') continue
-          const mo = typeof row.mo_number === 'string' ? row.mo_number : ''
-          if (!mo) continue
-          const status = typeof row.material_prep_status === 'string' ? row.material_prep_status : ''
-          if (DONE_STATES.has(status)) continue
-          pendingMos.add(mo)
+          // 批備料待處理計數
+          if (row.mo_status === '已匯入製令') {
+            const mo = typeof row.mo_number === 'string' ? row.mo_number : ''
+            if (mo) {
+              const status = typeof row.material_prep_status === 'string' ? row.material_prep_status : ''
+              if (!DONE_STATES.has(status)) pendingMos.add(mo)
+            }
+          }
+          // 委外請購待處理計數（factory=O，非 no_po，未匯入 MPO）
+          if (row.factory === 'O' && row.po_status !== 'no_po') {
+            const mo = typeof row.mo_number === 'string' ? row.mo_number.trim().toUpperCase() : ''
+            const pr = typeof row.pr_number === 'string' ? row.pr_number.trim().toUpperCase() : ''
+            if (!mo.startsWith('MPO') && !pr.startsWith('MPO')) pendingPrCount++
+          }
+          // 常平採購待處理計數（factory=C，無 po_number，非 matched）
+          if (row.factory === 'C' && !row.po_number && row.po_status !== 'matched') {
+            pendingCCount++
+          }
         }
         return {
           sheet_date: r.sheet_date,
           row_count: rowsArr.length,
           pending_count: pendingMos.size,
+          pending_pr_count: pendingPrCount,
+          pending_c_count: pendingCCount,
           updated_at: r.updated_at,
         }
       })
@@ -104,7 +120,15 @@ export async function POST(request: NextRequest) {
     const supabase = getSupabaseAdminClient()
     const { data, error } = await supabase
       .from(TABLE)
-      .upsert({ sheet_date, raw_text, rows, updated_at: new Date().toISOString() }, { onConflict: 'sheet_date' })
+      .upsert({
+        sheet_date,
+        raw_text,
+        rows,
+        updated_at: new Date().toISOString(),
+        updated_by: guard.member.email,
+        updated_by_name: guard.member.realName ?? guard.member.email,
+        last_action: 'save',
+      }, { onConflict: 'sheet_date' })
       .select()
       .single()
     if (error) throw error
@@ -180,7 +204,13 @@ export async function PATCH(request: NextRequest) {
 
     const { error: updateError } = await supabase
       .from(TABLE)
-      .update({ rows: updatedRows, updated_at: new Date().toISOString() })
+      .update({
+        rows: updatedRows,
+        updated_at: new Date().toISOString(),
+        updated_by: guard.member.email,
+        updated_by_name: guard.member.realName ?? guard.member.email,
+        last_action: 'patch',
+      })
       .eq('sheet_date', sheet_date)
     if (updateError) throw updateError
 

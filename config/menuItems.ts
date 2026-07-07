@@ -77,6 +77,16 @@ export const NAV_GROUPS = [
         path: '/admin/sara/sync',
         icon: 'M13 10V3L4 14h7v7l9-11h-7z'
       },
+      {
+        name: 'SARA 工序格式產生器',
+        path: '/admin/sara/process-gen',
+        icon: 'M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2'
+      },
+      {
+        name: '塔台報工紀錄',
+        path: '/admin/sara/wip-records',
+        icon: 'M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01'
+      },
     ]
   },
   {

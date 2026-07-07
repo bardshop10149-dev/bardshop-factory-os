@@ -16,9 +16,28 @@ interface LegacyReceiptRow {
   good_qty: number
 }
 
+// ===== 塔台報工紀錄比對 =====
+interface SaraWipRow {
+  work_order: string
+  mo_nbr: string | null
+  doc_nbr: string | null
+  product_name: string | null
+  product_subname: string | null
+  product_description: string | null
+  workcenter_name: string | null
+  job_name: string | null
+  job_sequence: number | null
+  status: string | null
+  wip_qty: number | null
+  real_end_time: string | null
+  report_resources: string | null
+  username: string | null
+}
+
 // ===== 型別定義（與 order-batch-export 一致）=====
 interface SourceRow {
   order_number: string
+  line_no_input: string   // B欄：貼入時直接填寫的序號（空字串 = 無填入，需比對）
   doc_type: string
   factory: 'T' | 'C' | 'O'
   receiver: string
@@ -32,6 +51,7 @@ interface SourceRow {
   item_code: string
   item_name: string
   note: string
+  packing: string
   quantity: string
   delivery_date: string
   plate_count: string
@@ -153,9 +173,35 @@ function parseTSV(text: string): string[][] {
   return rows
 }
 
-function parseSourceRows(text: string): { rows: SourceRow[]; error: string } {
+// 2026-06-18 起出單表新增 PACKING 欄（cells[14]），舊日期無此欄，後面欄位需往前移一格
+const PACKING_COL_SINCE = '2026-06-18'
+
+// 若舊日期的 row 是在 packing 欄加入後才儲存（無 raw_text 可重新解析時），
+// quantity 欄會存到交付日字串 → 偵測並往回移一格還原
+function fixStoredPackingShift<T extends {
+  packing?: string; quantity?: string; delivery_date?: string
+  plate_count?: string; upload_ro?: string; order_status?: string
+  pm_note?: string; assigned_machine?: string
+}>(row: T, sheetDate: string): T {
+  if (sheetDate >= PACKING_COL_SINCE) return row
+  if (!row.quantity || !/^\d{4}[\/\-]/.test(row.quantity)) return row
+  return {
+    ...row,
+    packing:          '',
+    quantity:         row.packing         ?? '',
+    delivery_date:    row.quantity        ?? '',
+    plate_count:      row.delivery_date   ?? '',
+    upload_ro:        row.plate_count     ?? '',
+    order_status:     row.upload_ro       ?? '',
+    pm_note:          row.order_status    ?? '',
+    assigned_machine: row.pm_note         ?? '',
+  }
+}
+
+function parseSourceRows(text: string, sheetDate?: string): { rows: SourceRow[]; error: string; duplicateWarnings: string[] } {
+  const hasPackingCol = !sheetDate || sheetDate >= PACKING_COL_SINCE
   const rawRows = parseTSV(text.trim())
-  if (rawRows.length === 0) return { rows: [], error: '未偵測到有效資料行' }
+  if (rawRows.length === 0) return { rows: [], error: '未偵測到有效資料行', duplicateWarnings: [] }
 
   // 合併因儲存格內換行而被切分的延續行：
   // 若某行第一格為空白，代表上一筆資料的儲存格值含有 \n，
@@ -188,6 +234,7 @@ function parseSourceRows(text: string): { rows: SourceRow[]; error: string } {
     const docType = (cells[2] ?? '').trim()
     const row: SourceRow = {
       order_number: (cells[0] ?? '').trim(),
+      line_no_input: (cells[1] ?? '').trim(),
       doc_type: docType,
       factory: detectFactory(docType),
       receiver: (cells[3] ?? '').trim(),
@@ -201,19 +248,33 @@ function parseSourceRows(text: string): { rows: SourceRow[]; error: string } {
       item_code: (cells[11] ?? '').trim(),
       item_name: (cells[12] ?? '').trim(),
       note: (cells[13] ?? '').trim(),
-      quantity: (cells[14] ?? '').trim(),
-      delivery_date: (cells[15] ?? '').trim(),
-      plate_count: (cells[16] ?? '').trim(),
-      upload_ro: (cells[17] ?? '').trim(),
-      order_status: (cells[18] ?? '').trim(),
-      pm_note: (cells[19] ?? '').trim(),
-      assigned_machine: (cells[20] ?? '').trim(),
+      // PACKING 欄從 2026-06-18 起才有（舊資料往前移一格）
+      packing: hasPackingCol ? (cells[14] ?? '').trim() : '',
+      quantity: hasPackingCol ? (cells[15] ?? '').trim() : (cells[14] ?? '').trim(),
+      delivery_date: hasPackingCol ? (cells[16] ?? '').trim() : (cells[15] ?? '').trim(),
+      plate_count: hasPackingCol ? (cells[17] ?? '').trim() : (cells[16] ?? '').trim(),
+      upload_ro: hasPackingCol ? (cells[18] ?? '').trim() : (cells[17] ?? '').trim(),
+      order_status: hasPackingCol ? (cells[19] ?? '').trim() : (cells[18] ?? '').trim(),
+      pm_note: hasPackingCol ? (cells[20] ?? '').trim() : (cells[19] ?? '').trim(),
+      assigned_machine: hasPackingCol ? (cells[21] ?? '').trim() : (cells[20] ?? '').trim(),
     }
     if (row.order_number || row.item_code) parsed.push(row)
   }
 
-  if (parsed.length === 0) return { rows: [], error: '未解析到有效資料，請確認資料是從 Excel 以 Tab 分隔複製' }
-  return { rows: parsed, error: '' }
+  if (parsed.length === 0) return { rows: [], error: '未解析到有效資料，請確認資料是從 Excel 以 Tab 分隔複製', duplicateWarnings: [] }
+
+  // 重複訂單號+序號偵測
+  const seenDupKeys = new Set<string>()
+  const duplicateWarnings: string[] = []
+  for (const row of parsed) {
+    if (!row.line_no_input) continue
+    const dupKey = `${row.order_number}|${row.line_no_input}`
+    if (seenDupKeys.has(dupKey)) {
+      duplicateWarnings.push(`${row.order_number} 序號 ${row.line_no_input}`)
+    }
+    seenDupKeys.add(dupKey)
+  }
+  return { rows: parsed, error: '', duplicateWarnings }
 }
 
 function encodeTsvCell(v: string): string {
@@ -249,6 +310,61 @@ const STATUS_LABELS: Record<string, { label: string; cls: string }> = {
   '已匯入製令': { label: '已匯入製令', cls: 'bg-emerald-900/50 text-emerald-300 border-emerald-700/50' },
   '已匯入採單': { label: '已匯入採單', cls: 'bg-orange-900/50 text-orange-300 border-orange-700/50' },
   '暫緩區': { label: '暫緩區', cls: 'bg-amber-900/50 text-amber-300 border-amber-700/50' },
+}
+
+// ── 交期檢查工具函式 ──────────────────────────────────────────────────────────
+
+/** 解析日期字串（支援 YYYY/M/D、YYYY-MM-DD、YYYYMMDD），回傳 Date 或 null */
+function parseDeliveryDate(s: string): Date | null {
+  const t = (s ?? '').trim()
+  if (!t) return null
+  let y: number, m: number, d: number
+  if (/^\d{8}$/.test(t)) {
+    y = +t.slice(0, 4); m = +t.slice(4, 6); d = +t.slice(6, 8)
+  } else {
+    const parts = t.slice(0, 10).split(/[\/\-]/)
+    if (parts.length < 3) return null
+    y = +parts[0]; m = +parts[1]; d = +parts[2]
+  }
+  if (!y || !m || !d) return null
+  const dt = new Date(y, m - 1, d)
+  return isNaN(dt.getTime()) ? null : dt
+}
+
+/**
+ * 從「出單表日期」（day 0）開始，計算到 to 有幾個工作天（週一～週五）。
+ * from 本身是 day 0，所以從 from+1 起算。
+ * 如果 to <= from，回傳 0。
+ */
+function countWorkingDaysFrom(from: Date, to: Date): number {
+  const start = new Date(from)
+  start.setHours(0, 0, 0, 0)
+  const end = new Date(to)
+  end.setHours(0, 0, 0, 0)
+  if (end <= start) return 0
+  let count = 0
+  const cur = new Date(start)
+  cur.setDate(cur.getDate() + 1) // day 1
+  while (cur <= end) {
+    const dow = cur.getDay()
+    if (dow !== 0 && dow !== 6) count++
+    cur.setDate(cur.getDate() + 1)
+  }
+  return count
+}
+
+const FACTORY_LABEL_ZH: Record<string, string> = { T: '台北', C: '常平', O: '委外' }
+const DUE_THRESHOLD: Record<string, number> = { T: 4, C: 5, O: 5 }
+
+interface DueDateAnomaly {
+  order_number: string
+  factory: string
+  customer: string
+  item_code: string
+  item_name: string
+  quantity: string
+  delivery_date: string
+  reason: string
 }
 
 type OutsourcePrefix = 'MOT' | 'POC' | 'POO' | 'MPO'
@@ -288,6 +404,7 @@ export default function DailyOrderSheetPage() {
   const [currentRawText, setCurrentRawText] = useState('')   // stored raw_text for this date
   const [showPasteArea, setShowPasteArea] = useState(false)
   const [parseError, setParseError] = useState('')
+  const [parseWarnings, setParseWarnings] = useState<string[]>([])
   const [loading, setLoading] = useState(false)
   const [saving, setSaving] = useState(false)
   const [saveMsg, setSaveMsg] = useState('')
@@ -328,12 +445,22 @@ export default function DailyOrderSheetPage() {
   const [soModalId, setSoModalId] = useState<string | null>(null)
   const [poModalId, setPoModalId] = useState<string | null>(null)
   const [searchQuery, setSearchQuery] = useState('')
-  const [activeFactory, setActiveFactory] = useState<'ALL' | 'T' | 'C' | 'O'>('ALL')
+  const [activeFactory, setActiveFactory] = useState<'ALL' | 'T' | 'C' | 'O' | 'G'>('ALL')
   const [globalSearch, setGlobalSearch] = useState('')
   const [globalSearching, setGlobalSearching] = useState(false)
   const [globalResults, setGlobalResults] = useState<{ sheet_date: string; rows: SheetRow[] }[] | null>(null)
   const [sampleRefInputs, setSampleRefInputs] = useState<Record<string, string>>({})
-  const [legacyModal, setLegacyModal] = useState<{ query: string; rows: LegacyReceiptRow[]; loading: boolean } | null>(null)
+  const [legacyModal, setLegacyModal] = useState<{ query: string; rows: LegacyReceiptRow[]; saraWipRows: SaraWipRow[]; loading: boolean } | null>(null)
+  const [dueDateModal, setDueDateModal] = useState<DueDateAnomaly[] | null>(null)
+  const [dueDateCopied, setDueDateCopied] = useState(false)
+  // ---- 交期閾值設定（從 Supabase app_settings 載入）----
+  const DUE_THRESHOLD_DEFAULTS: Record<string, number> = { T: 4, C: 5, O: 5 }
+  const [dueDateThresholds, setDueDateThresholds] = useState<Record<string, number>>(DUE_THRESHOLD_DEFAULTS)
+  const [dueDateThresholdsLoaded, setDueDateThresholdsLoaded] = useState(false)
+  const [showThresholdModal, setShowThresholdModal] = useState(false)
+  const [thresholdInput, setThresholdInput] = useState<Record<string, string>>({})
+  const [thresholdSaving, setThresholdSaving] = useState(false)
+  const [thresholdMsg, setThresholdMsg] = useState('')
 
   // ---- 常平廠訂單（C01510 採購單）----
   const fetchCOrders = useCallback(async () => {
@@ -363,22 +490,31 @@ export default function DailyOrderSheetPage() {
     if (activeMainTab === 'c-orders') fetchCOrders()
   }, [activeMainTab, fetchCOrders])
 
-  // ---- 舊系統入庫紀錄比對 ----
+  // ---- 舊系統入庫紀錄比對 + 塔台報工紀錄比對 ----
   const handleLegacyLookup = useCallback(async (orderNo: string) => {
     const q = orderNo.trim()
     if (!q) return
-    setLegacyModal({ query: q, rows: [], loading: true })
-    const { data, error } = await supabase
-      .from('legacy_inventory_receipts')
-      .select('entry_no, entry_date, order_number, source_location, handler_name, item_name, good_qty')
-      .eq('order_number', q)
-      .order('entry_date', { ascending: true })
-      .order('entry_no', { ascending: true })
-    if (error || !data) {
-      setLegacyModal({ query: q, rows: [], loading: false })
-    } else {
-      setLegacyModal({ query: q, rows: data as LegacyReceiptRow[], loading: false })
-    }
+    setLegacyModal({ query: q, rows: [], saraWipRows: [], loading: true })
+    const [legacyRes, saraWipRes] = await Promise.all([
+      supabase
+        .from('legacy_inventory_receipts')
+        .select('entry_no, entry_date, order_number, source_location, handler_name, item_name, good_qty')
+        .eq('order_number', q)
+        .order('entry_date', { ascending: true })
+        .order('entry_no', { ascending: true }),
+      supabase
+        .from('sara_wip_records')
+        .select('work_order, mo_nbr, doc_nbr, product_name, product_subname, product_description, workcenter_name, job_name, job_sequence, status, wip_qty, real_end_time, report_resources, username')
+        .eq('workcenter_name', '印刷站2F')
+        .or(`mo_nbr.eq.${q},doc_nbr.eq.${q}`)
+        .order('real_end_time', { ascending: false }),
+    ])
+    setLegacyModal({
+      query: q,
+      rows: legacyRes.error || !legacyRes.data ? [] : (legacyRes.data as LegacyReceiptRow[]),
+      saraWipRows: saraWipRes.error || !saraWipRes.data ? [] : (saraWipRes.data as SaraWipRow[]),
+      loading: false,
+    })
   }, [])
 
   // ---- 讀取所有日期清單 ----
@@ -408,9 +544,10 @@ export default function DailyOrderSheetPage() {
 
         // 以 raw_text 重新解析確保所有廠別（T/C/O）都能正確還原，
         // 再以 row_key 對應，保留 DB 裡已有的 MO / 採購單 / 機台等富化資料
-        let finalRows: SheetRow[] = storedRows
+        // raw_text 無法取得時退用 storedRows，並對舊格式錯位資料做修正
+        let finalRows: SheetRow[] = storedRows.map(r => fixStoredPackingShift(r, date))
         if (rawTextStored.trim()) {
-          const { rows: parsedRows } = parseSourceRows(rawTextStored)
+          const { rows: parsedRows } = parseSourceRows(rawTextStored, date)
           if (parsedRows.length > 0) {
             const enrichedMap = new Map(storedRows.map(r => [r.row_key, r]))
             finalRows = parsedRows.map(r => {
@@ -440,6 +577,29 @@ export default function DailyOrderSheetPage() {
           }
         }
 
+        // ── 格式不符的製令號在載入時立即清除並存回 DB ──
+        // 避免舊的截斷格式（如 MOT26070601）殘留顯示，不等同步按鈕觸發
+        const isValidMoFmt = (mo: string): boolean => {
+          if (!/^MO[TCO]/.test(mo)) return false
+          const s = mo.slice(3)
+          if (s.includes('-')) return s.length >= 15 && /^\d{6}-/.test(s)
+          return /^\d{10,}$/.test(s)
+        }
+        const invalidMoRows = finalRows.filter(r => r.mo_number?.startsWith('MO') && !isValidMoFmt(r.mo_number))
+        if (invalidMoRows.length > 0) {
+          finalRows = finalRows.map(r =>
+            r.mo_number?.startsWith('MO') && !isValidMoFmt(r.mo_number)
+              ? { ...r, mo_number: undefined, mo_status: null, material_prep_status: null }
+              : r
+          )
+          // 非同步存回 DB（不阻塞 UI）
+          fetch('/api/argoerp/daily-order-sheet', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ sheet_date: date, raw_text: rawTextStored, rows: finalRows }),
+          }).catch(() => {})
+        }
+
         setSheetRows(finalRows)
         // 還原沒有 mo_number 的 row-level 機台分配
         const rmMap: Record<string, string> = {}
@@ -462,6 +622,19 @@ export default function DailyOrderSheetPage() {
 
   useEffect(() => { loadSheetList() }, [loadSheetList])
   useEffect(() => { loadSheet(selectedDate) }, [selectedDate, loadSheet])
+
+  // ---- 載入交期閾值設定 ----
+  useEffect(() => {
+    fetch('/api/app-settings?key=due_date_thresholds')
+      .then(r => r.json())
+      .then((json: { value?: Record<string, number> }) => {
+        if (json.value && typeof json.value === 'object') {
+          setDueDateThresholds(json.value)
+        }
+        setDueDateThresholdsLoaded(true)
+      })
+      .catch(() => setDueDateThresholdsLoaded(true))
+  }, [])
 
   useEffect(() => {
     if (!rawText.trim()) {
@@ -545,7 +718,9 @@ export default function DailyOrderSheetPage() {
             }).catch(() => {})
           }
 
-          setMoMachines(map)
+          // 用 merge 方式更新：DB 值填補空缺，但保留使用者已手動改過的選擇
+          // { ...map, ...prev }：prev（使用者最新狀態）覆蓋 map（DB 值）
+          setMoMachines(prev => ({ ...map, ...prev }))
         }
       })
       .catch(() => {})
@@ -613,14 +788,19 @@ export default function DailyOrderSheetPage() {
   // ---- 解析貼上資料 ----
   const handleParse = useCallback(() => {
     setParseError('')
+    setParseWarnings([])
     if (!rawText.trim()) { setParseError('請先貼上資料'); return }
-    const { rows, error } = parseSourceRows(rawText)
+    const { rows, error, duplicateWarnings } = parseSourceRows(rawText, selectedDate)
     if (error) { setParseError(error); return }
 
     const sheetRowsNew: SheetRow[] = rows.map(r => ({
       ...r,
       row_key: createRowKey(r),
       mo_status: null,
+      // 若原始資料已填入序號（B欄），直接預填 match_line_no，無需比對
+      ...(r.line_no_input
+        ? { match_line_no: r.line_no_input, match_status: 'matched' as MatchStatus, match_reason: '原始資料直接填入' }
+        : {}),
     }))
 
     // 保留已有狀態（相同 row_key 的保留舊狀態）
@@ -632,7 +812,10 @@ export default function DailyOrderSheetPage() {
     setSheetRows(merged)
     setShowPasteArea(false)
     setParseError('')
-  }, [rawText, sheetRows])
+    if (duplicateWarnings.length > 0) {
+      setParseWarnings(duplicateWarnings)
+    }
+  }, [rawText, sheetRows, selectedDate])
 
   // ---- 儲存至 Supabase ----
   const handleSave = useCallback(async () => {
@@ -787,6 +970,9 @@ export default function DailyOrderSheetPage() {
       const normalizeText = (v: string): string => v.replace(/\s+/g, '').trim()
 
       const next: SheetRow[] = sheetRows.map(src => {
+        // 原始資料已有序號（B欄直接填入）→ 跳過比對，保留現有值
+        if (src.line_no_input) return src
+
         if (!src.order_number || !soProjectIds.has(src.order_number)) {
           return { ...src, match_status: 'no_order', match_line_no: null, match_pdl_seq: null, match_reason: '無對應來源單號' }
         }
@@ -934,6 +1120,18 @@ export default function DailyOrderSheetPage() {
       //    ① erp_mo_lines：用 line_no 精準比對（ARGO 直接建立的 MO）
       //    ② argoerp_mo_upload_log：末碼=序號（你們系統建立的 MO）
       //    ③ erpMoBaseMap 唯一製令 fallback
+      const rawLogMoSet = new Set(rawLogMoNumbers)
+
+      // 製令單號格式驗證函式
+      // 一般格式：MO[TCO] + 日期後綴(≥8碼) + 序號(2碼) = 後綴≥8碼+2碼 = ≥8字元後綴
+      // SOA 格式：MO[TCO] + YYMMDD-HHMMSS-NNNss（含連字號）
+      const isValidMoFormat = (mo: string): boolean => {
+        if (!/^MO[TCO]/.test(mo)) return false
+        const s = mo.slice(3)
+        if (s.includes('-')) return s.length >= 15 && /^\d{6}-/.test(s)
+        return /^\d{10,}$/.test(s)
+      }
+
       const next: SheetRow[] = sheetRows.map(r => {
         const matchSeq = r.match_line_no != null
           ? String(parseInt(r.match_line_no, 10)).padStart(2, '0')
@@ -941,9 +1139,21 @@ export default function DailyOrderSheetPage() {
 
         // 若已有 MO：先檢查是否仍存在於 ARGO erp_mo_lines
         if (r.mo_number?.startsWith('MO')) {
+          // 格式驗證：不符合有效製令號編碼原則的對象一律清除
+          if (!isValidMoFormat(r.mo_number)) {
+            return { ...r, mo_number: undefined, mo_status: null, material_prep_status: null }
+          }
+          // 本系統有此 MO 的上傳紀錄，但已從 argoerp_mo_summary 刪除（使用者主動刪除）
+          // 以本系統為準，即使 erp_mo_lines 仍有此記錄也清除（避免錯誤的製令號殘留）
+          if (rawLogMoSet.has(r.mo_number) && !activeMoNumbers.has(r.mo_number)) {
+            return { ...r, mo_number: undefined, mo_status: null, material_prep_status: null }
+          }
           const erpMosForOrder = erpMoBySourceOrder.get(r.order_number)
-          // erp_mo_lines 已同步此來源訂單，但找不到此製令 → 已從 ARGO 刪除，清除
           if (erpMosForOrder && !erpMosForOrder.has(r.mo_number)) {
+            return { ...r, mo_number: undefined, mo_status: null, material_prep_status: null }
+          }
+          // ERP 無此訂單製令紀錄，且製令已從 argoerp_mo_summary 刪除 → 清除殘留值
+          if (!erpMosForOrder && !activeMoNumbers.has(r.mo_number)) {
             return { ...r, mo_number: undefined, mo_status: null, material_prep_status: null }
           }
           if (!matchSeq) return r
@@ -1086,9 +1296,12 @@ export default function DailyOrderSheetPage() {
       const qty = parseFloat(String(row.quantity).replace(/,/g, '')) || 0
       const matchLineNo = (row.match_line_no ?? '').trim()
       // 第一優先：料號 + 數量 + SO_PROJECT_ID === 銷售訂單號（委外 PO 用此欄位記錄來源單）
+      // 額外驗證批號：MBP_LOT_NO 若有值，必須也等於訂單號（防止跨單誤配）
       let hitIdx = pool.findIndex(c =>
         !c._used && (c.item_code ?? '') === row.item_code && c.qty === qty &&
-        String(c.extra?.SO_PROJECT_ID ?? '') === (row.order_number ?? '')
+        String(c.extra?.SO_PROJECT_ID ?? '') === (row.order_number ?? '') &&
+        (!String(c.extra?.MBP_LOT_NO ?? '').trim() ||
+          String(c.extra?.MBP_LOT_NO ?? '').trim() === (row.order_number ?? '').trim())
       )
       // 第二優先：料號 + 數量 + MBP_LOT_NO === 銷售訂單號（常平 PO 批號即 SO 單號）
       if (hitIdx === -1)
@@ -1141,7 +1354,7 @@ export default function DailyOrderSheetPage() {
     return null
   }
 
-  type PrCandidate = { doc_no: string; sub_no: string; item_code: string | null; ro: string; status: string | null; _used: boolean }
+  type PrCandidate = { doc_no: string; sub_no: string; item_code: string | null; ro: string; mbp_lot_no: string; status: string | null; _used: boolean }
   // 對僅 factory==='O' 的列做請購單比對；rows 已是最新狀態（含採購比對結果）
   // 比對優先序：
   //   (a) 直接 SO 號比對：請購 extra.PROJECT_ID / MBP_LOT_NO 直接帶出單表 SO 號（委外 MPO 類請購常見，無 RO）
@@ -1180,7 +1393,12 @@ export default function DailyOrderSheetPage() {
       // (b) RO 橋接比對（後備）
       const ro = soToRoByItem.get(`${so}|${row.item_code}`) ?? soToRoAny.get(so) ?? null
       if (ro) {
-        const roHit = pickHit(roToPr.get(ro), row.item_code)
+        const roCands = (roToPr.get(ro) ?? []).filter(c => {
+          // 批號驗證：MBP_LOT_NO 必須為空、等於 RO 號、或等於當前 SO 號（三者皆合理）
+          if (!c.mbp_lot_no) return true
+          return c.mbp_lot_no === ro || c.mbp_lot_no === so
+        })
+        const roHit = pickHit(roCands, row.item_code)
         if (roHit) {
           roHit._used = true
           return { ...row, pr_number: roHit.doc_no, pr_sub_no: roHit.sub_no, pr_status: 'matched' }
@@ -1207,7 +1425,7 @@ export default function DailyOrderSheetPage() {
       const list = soToPr.get(key)!
       // 去重：同 doc_no#sub_no 只留一筆
       if (list.some(c => c.doc_no === r.doc_no && c.sub_no === r.sub_no)) return
-      list.push({ doc_no: r.doc_no, sub_no: r.sub_no, item_code: r.item_code, ro: '', status: r.status, _used: false })
+      list.push({ doc_no: r.doc_no, sub_no: r.sub_no, item_code: r.item_code, ro: '', mbp_lot_no: so, status: r.status, _used: false })
     }
     for (const field of ['MBP_LOT_NO', 'PROJECT_ID'] as const) {
       const { data: prDirect, error: prDirectErr } = await supabase
@@ -1253,7 +1471,8 @@ export default function DailyOrderSheetPage() {
         const ro = String((r.extra as Record<string, unknown> | null)?.SO_PROJECT_ID ?? '').trim().toUpperCase()
         if (!ro) continue
         if (!roToPr.has(ro)) roToPr.set(ro, [])
-        roToPr.get(ro)!.push({ doc_no: r.doc_no, sub_no: r.sub_no, item_code: r.item_code, ro, status: r.status, _used: false })
+        const mbpLotNo = String((r.extra as Record<string, unknown> | null)?.MBP_LOT_NO ?? '').trim()
+        roToPr.get(ro)!.push({ doc_no: r.doc_no, sub_no: r.sub_no, item_code: r.item_code, ro, mbp_lot_no: mbpLotNo, status: r.status, _used: false })
       }
     }
 
@@ -1365,6 +1584,72 @@ export default function DailyOrderSheetPage() {
   // ---- 漏單檢測：跨所有日期，匯出未比對到製令且未比對到採購單的列 ----
   const [exportingMissing, setExportingMissing] = useState(false)
   const [exportingSheetCsv, setExportingSheetCsv] = useState(false)
+
+  // ---- 交期檢查 ----
+  const handleDueDateCheck = useCallback(() => {
+    // 以出單表日期（selectedDate）為 day 0，而非執行當天
+    const sheetDateObj = selectedDate ? new Date(selectedDate) : new Date()
+    sheetDateObj.setHours(0, 0, 0, 0)
+
+    const anomalies: DueDateAnomaly[] = []
+    for (const row of sheetRows) {
+      const factoryKey = row.factory ?? ''
+      const threshold = dueDateThresholds[factoryKey]
+      if (threshold === undefined) continue
+      if (!row.delivery_date) continue
+      const dueDate = parseDeliveryDate(row.delivery_date)
+      if (!dueDate) continue
+      const workDays = countWorkingDaysFrom(sheetDateObj, dueDate)
+      if (workDays < threshold) {
+        const factoryLabel = FACTORY_LABEL_ZH[factoryKey] ?? factoryKey
+        const reason = `${factoryLabel}訂單交期不足${threshold}工作天`
+        const dueStr = `${dueDate.getFullYear()}/${dueDate.getMonth() + 1}/${dueDate.getDate()}`
+        anomalies.push({
+          order_number: row.order_number ?? '',
+          factory: factoryKey,
+          customer: row.customer ?? '',
+          item_code: row.item_code ?? '',
+          item_name: row.item_name ?? '',
+          quantity: row.quantity != null ? String(row.quantity) : '',
+          delivery_date: dueStr,
+          reason,
+        })
+      }
+    }
+    if (anomalies.length === 0) {
+      alert('✅ 所有訂單交期正常')
+      return
+    }
+    setDueDateCopied(false)
+    setDueDateModal(anomalies)
+  }, [sheetRows, selectedDate, dueDateThresholds])
+
+  // ---- 儲存交期閾值設定 ----
+  const handleSaveThresholds = useCallback(async () => {
+    setThresholdSaving(true)
+    setThresholdMsg('')
+    const newVal: Record<string, number> = {}
+    for (const [k, v] of Object.entries(thresholdInput)) {
+      const n = parseInt(v, 10)
+      if (isNaN(n) || n < 1) { setThresholdMsg(`❌ ${k} 廠別天數必須為正整數`); setThresholdSaving(false); return }
+      newVal[k] = n
+    }
+    const res = await fetch('/api/app-settings', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key: 'due_date_thresholds', value: newVal }),
+    })
+    if (!res.ok) {
+      const json = await res.json() as { error?: string }
+      setThresholdMsg(`❌ 儲存失敗：${json.error ?? res.statusText}`)
+      setThresholdSaving(false)
+      return
+    }
+    setDueDateThresholds(newVal)
+    setThresholdMsg('✅ 已儲存')
+    setThresholdSaving(false)
+    setTimeout(() => { setThresholdMsg(''); setShowThresholdModal(false) }, 1200)
+  }, [thresholdInput])
 
   const handleExportSheetCsv = useCallback(() => {
     if (sheetRows.length === 0) {
@@ -1817,20 +2102,14 @@ export default function DailyOrderSheetPage() {
     setBatchProgress('')
     setSaveMsg('')
     try {
-      // 1. 一次抓全部 SO 明細（所有比對的依據）
-      const { data: allSoLines, error: soErr } = await supabase
-        .from('erp_so_lines')
-        .select('project_id, line_no, mbp_part, order_qty_oru, pdl_seq')
-      if (soErr) throw soErr
-      const soProjectIds = new Set((allSoLines ?? []).map(l => l.project_id))
-      const candidateMap = new Map<string, Array<{ line_no: string; pdl_seq: number | null }>>()
-      for (const line of (allSoLines ?? [])) {
-        const qty = Number(line.order_qty_oru ?? 0)
-        const key = `${line.project_id}|${line.mbp_part ?? ''}|${qty}`
-        if (!candidateMap.has(key)) candidateMap.set(key, [])
-        candidateMap.get(key)!.push({ line_no: String(line.line_no ?? ''), pdl_seq: line.pdl_seq != null ? Number(line.pdl_seq) : null })
-      }
-      for (const arr of candidateMap.values()) arr.sort((a, b) => (Number(a.line_no) || 0) - (Number(b.line_no) || 0))
+      // 0. 先撈所有出單表（供後續逐張處理用）
+      const { data: allSheetsPreload, error: sheetsPreErr } = await supabase
+        .from('daily_order_sheets')
+        .select('sheet_date, rows, raw_text')
+        .order('sheet_date', { ascending: false })
+      if (sheetsPreErr) throw sheetsPreErr
+      const allSheetsData = allSheetsPreload ?? []
+      // NOTE: erp_so_lines 查詢在各張出單表 loop 內逐張執行（同 一鍵全同步），避免 Supabase 1000 筆截斷
 
       // 2. 一次抓全部 MO 相關資料
       const { data: allMoLogs, error: moErr } = await supabase
@@ -1924,14 +2203,8 @@ export default function DailyOrderSheetPage() {
         extra: (r.extra ?? null) as Record<string, unknown> | null, _used: false,
       }))
 
-      // 4. 逐張出單表處理
-      const { data: allSheets, error: sheetsErr } = await supabase
-        .from('daily_order_sheets')
-        .select('sheet_date, rows, raw_text')
-        .order('sheet_date', { ascending: false })
-      if (sheetsErr) throw sheetsErr
-
-      const sheets = allSheets ?? []
+      // 4. 逐張出單表處理（使用步驟 0 已載入的資料）
+      const sheets = allSheetsData
       let totalUpdated = 0
 
       for (let si = 0; si < sheets.length; si++) {
@@ -1941,8 +2214,22 @@ export default function DailyOrderSheetPage() {
         let rows: SheetRow[] = Array.isArray(sheet.rows) ? (sheet.rows as SheetRow[]) : []
         if (rows.length === 0) continue
 
-        // Step A: 序號比對
+        // Step A: 序號比對（同 一鍵全同步：每張獨立查詢 erp_so_lines，避免 Supabase 截斷）
         const orderNumbers = [...new Set(rows.map(r => r.order_number).filter(Boolean))]
+        const soFilterSheet = orderNumbers.length > 0 ? orderNumbers : ['__none__']
+        const { data: sheetSoLines } = await supabase
+          .from('erp_so_lines')
+          .select('project_id, line_no, mbp_part, order_qty_oru, pdl_seq')
+          .in('project_id', soFilterSheet)
+        const soProjectIds = new Set((sheetSoLines ?? []).map((l: { project_id: string }) => l.project_id))
+        const candidateMap = new Map<string, Array<{ line_no: string; pdl_seq: number | null }>>()
+        for (const line of (sheetSoLines ?? [])) {
+          const qty = Number(line.order_qty_oru ?? 0)
+          const key = `${line.project_id}|${line.mbp_part ?? ''}|${qty}`
+          if (!candidateMap.has(key)) candidateMap.set(key, [])
+          candidateMap.get(key)!.push({ line_no: String(line.line_no ?? ''), pdl_seq: line.pdl_seq != null ? Number(line.pdl_seq) : null })
+        }
+        for (const arr of candidateMap.values()) arr.sort((a, b) => (Number(a.line_no) || 0) - (Number(b.line_no) || 0))
         const usageCounter = new Map<string, number>()
         rows = rows.map(src => {
           if (!src.order_number || !soProjectIds.has(src.order_number))
@@ -2102,7 +2389,9 @@ export default function DailyOrderSheetPage() {
     setEditFactoryIdx(null)
   }, [])
 
-  const factoryBadge = (f: 'T' | 'C' | 'O') => {
+  const factoryBadge = (f: 'T' | 'C' | 'O', docType?: string) => {
+    if ((docType ?? '').includes('集單'))
+      return <span className="px-1.5 py-0.5 rounded text-xs font-medium bg-violet-900/40 text-violet-300">集單</span>
     const m = { T: 'bg-blue-900/40 text-blue-300', C: 'bg-orange-900/40 text-orange-300', O: 'bg-purple-900/40 text-purple-300' }
     const l = { T: '台北', C: '常平', O: '委外' }
     return <span className={`px-1.5 py-0.5 rounded text-xs font-medium ${m[f]}`}>{l[f]}</span>
@@ -2113,8 +2402,13 @@ export default function DailyOrderSheetPage() {
 
   // 與表格中相同的篩選條件，確保全選只選當前顯示的列
   const visibleRows = sheetRows.filter(r => {
-    if ((r.doc_type ?? '').includes('集單')) return false
-    if (activeFactory !== 'ALL' && r.factory !== activeFactory) return false
+    const isJidan = (r.doc_type ?? '').includes('集單')
+    if (activeFactory === 'G') {
+      if (!isJidan) return false
+    } else if (activeFactory !== 'ALL') {
+      if (isJidan) return false
+      if (r.factory !== activeFactory) return false
+    }
     if (!searchQuery.trim()) return true
     const q = searchQuery.trim().toLowerCase()
     return (r.order_number?.toLowerCase().includes(q)) || (r.mo_number?.toLowerCase().includes(q)) || (r.po_number?.toLowerCase().includes(q))
@@ -2190,17 +2484,6 @@ export default function DailyOrderSheetPage() {
                   </svg>
                   {batchSyncing ? (batchProgress ? `比對中 ${batchProgress}` : '比對中…') : '🔁 全日期批次比對'}
                 </button>
-                <button
-                  onClick={() => void handleMissingExport()}
-                  disabled={exportingMissing || batchSyncing}
-                  className="px-4 py-2 rounded-lg bg-orange-900/60 border border-orange-700/50 hover:bg-orange-800 disabled:bg-slate-700 disabled:text-slate-500 disabled:border-slate-600 text-orange-200 text-sm font-medium transition-colors flex items-center gap-1.5"
-                  title="掃描所有日期的出單表，匯出未比對到製令且未比對到採購單的漏單"
-                >
-                  <svg className="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/>
-                  </svg>
-                  {exportingMissing ? '檢測中…' : '⚠ 漏單檢測'}
-                </button>
               </>
             )}
             {hasData && (
@@ -2214,6 +2497,26 @@ export default function DailyOrderSheetPage() {
                   {syncingAll ? '全同步中…' : '⚡ 一鍵全同步'}
                 </button>
                 <button
+                  onClick={handleDueDateCheck}
+                  className="px-4 py-2 rounded-lg bg-rose-700 hover:bg-rose-600 text-white text-sm font-medium transition-colors"
+                  title="檢查目前出單表各廠別訂單是否滿足工作天數要求"
+                >
+                  📅 交期檢查
+                </button>
+                <button
+                  onClick={() => {
+                    const init: Record<string, string> = {}
+                    for (const [k, v] of Object.entries(dueDateThresholds)) init[k] = String(v)
+                    setThresholdInput(init)
+                    setThresholdMsg('')
+                    setShowThresholdModal(true)
+                  }}
+                  className="px-3 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-300 text-sm font-medium transition-colors"
+                  title="設定各廠別交期檢查工作天數"
+                >
+                  ⚙️
+                </button>
+                <button
                   onClick={() => void handleSaveMachines()}
                   disabled={savingMachine || !machineChanged}
                   className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
@@ -2224,12 +2527,6 @@ export default function DailyOrderSheetPage() {
                   title="將目前所有機台選擇儲存至 Supabase，並重新讀回確認"
                 >
                   {savingMachine ? '儲存中…' : `🖥 儲存機台分配${machineChanged ? ' *' : ''}`}
-                </button>
-                <button
-                  onClick={() => { setShowPasteArea(v => !v); setRawText('') }}
-                  className="px-4 py-2 rounded-lg bg-cyan-700 hover:bg-cyan-600 text-white text-sm font-medium transition-colors"
-                >
-                  {showPasteArea ? '收合貼上區' : '🔄 重新貼上取代'}
                 </button>
                 <button
                   onClick={handleExportSheetCsv}
@@ -2253,25 +2550,6 @@ export default function DailyOrderSheetPage() {
                 >
                   <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2zm8-12V5a2 2 0 00-2-2H9a2 2 0 00-2 2v4h10z" /></svg>
                   列印{selectedKeys.size > 0 ? ` (${selectedKeys.size})` : ''}
-                </button>
-                <button
-                  onClick={() => {
-                    if (selectedKeys.size === 0) return
-                    if (!confirm(`確定刪除已勾選的 ${selectedKeys.size} 筆資料？`)) return
-                    setSheetRows(prev => prev.filter((r, i) => !selectedKeys.has(r.row_key || String(i))))
-                    setSelectedKeys(new Set())
-                  }}
-                  disabled={selectedKeys.size === 0}
-                  className="px-4 py-2 rounded-lg bg-red-900/40 border border-red-700/50 text-red-300 hover:bg-red-800 hover:text-white disabled:bg-slate-800 disabled:text-slate-600 disabled:border-slate-700 text-sm transition-colors"
-                >
-                  🗑 刪除選取列{selectedKeys.size > 0 ? ` (${selectedKeys.size})` : ''}
-                </button>
-                <button
-                  onClick={handleDelete}
-                  disabled={saving}
-                  className="px-4 py-2 rounded-lg bg-red-900/60 border border-red-700/50 text-red-300 hover:bg-red-800 hover:text-white text-sm transition-colors"
-                >
-                  🗑 刪除此日出單表
                 </button>
               </>
             )}
@@ -2311,24 +2589,44 @@ export default function DailyOrderSheetPage() {
 
           {/* ===== 每日出單表分頁 ===== */}
           {activeMainTab === 'daily' && (<>
-          {/* 水平日期列 */}
-          {availableSheets.length > 0 && (
-            <div className="mb-4 flex gap-2 flex-wrap">
-              {availableSheets.map(s => (
-                <button
-                  key={s.sheet_date}
-                  onClick={() => setSelectedDate(s.sheet_date)}
-                  className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors border ${
-                    s.sheet_date === selectedDate
-                      ? 'bg-cyan-700 text-white border-cyan-600'
-                      : 'bg-slate-900 text-slate-300 border-slate-700 hover:bg-slate-800'
-                  }`}
-                >
-                  {s.sheet_date} <span className="opacity-60">{s.row_count}筆</span>
-                </button>
-              ))}
-            </div>
-          )}
+          {/* 水平日期列：顯示最近 10 天，超過 10 天以下拉選單呈現 */}
+          {availableSheets.length > 0 && (() => {
+            const recentSheets = availableSheets.slice(0, 10)
+            const olderSheets = availableSheets.slice(10)
+            return (
+              <div className="mb-4 flex gap-2 flex-wrap items-center">
+                {recentSheets.map(s => (
+                  <button
+                    key={s.sheet_date}
+                    onClick={() => setSelectedDate(s.sheet_date)}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors border ${
+                      s.sheet_date === selectedDate
+                        ? 'bg-cyan-700 text-white border-cyan-600'
+                        : 'bg-slate-900 text-slate-300 border-slate-700 hover:bg-slate-800'
+                    }`}
+                  >
+                    {s.sheet_date} <span className="opacity-60">{s.row_count}筆</span>
+                  </button>
+                ))}
+                {olderSheets.length > 0 && (
+                  <select
+                    value={olderSheets.some(s => s.sheet_date === selectedDate) ? selectedDate : ''}
+                    onChange={e => { if (e.target.value) setSelectedDate(e.target.value) }}
+                    className={`px-2 py-1.5 rounded-lg text-xs font-medium transition-colors border focus:outline-none focus:border-cyan-500 ${
+                      olderSheets.some(s => s.sheet_date === selectedDate)
+                        ? 'bg-cyan-700 text-white border-cyan-600'
+                        : 'bg-slate-900 text-slate-400 border-slate-700 hover:bg-slate-800'
+                    }`}
+                  >
+                    <option value="">更早的日期…</option>
+                    {olderSheets.map(s => (
+                      <option key={s.sheet_date} value={s.sheet_date}>{s.sheet_date}（{s.row_count}筆）</option>
+                    ))}
+                  </select>
+                )}
+              </div>
+            )
+          })()}
 
           {/* 跨日期搜尋結果 */}
           {(globalResults !== null) && (
@@ -2452,6 +2750,14 @@ export default function DailyOrderSheetPage() {
                 {parseError && (
                   <p className="mt-2 text-red-400 text-sm">{parseError}</p>
                 )}
+                {parseWarnings.length > 0 && (
+                  <div className="mt-2 p-3 rounded-lg bg-amber-900/30 border border-amber-700/50">
+                    <p className="text-amber-300 text-sm font-semibold mb-1">⚠ 發現重複的訂單號＋序號組合（{parseWarnings.length} 筆），請確認來源資料：</p>
+                    <ul className="text-amber-400 text-xs space-y-0.5">
+                      {parseWarnings.map((w, i) => <li key={i}>• {w}</li>)}
+                    </ul>
+                  </div>
+                )}
                 <div className="mt-3 flex gap-2 flex-wrap">
                   <button
                     onClick={handleParse}
@@ -2500,7 +2806,7 @@ export default function DailyOrderSheetPage() {
                     ／尚未轉單：<span className="text-slate-400">{sheetRows.filter(r => !r.mo_status).length}</span>
                     {sheetRows.some(r => (r.doc_type ?? '').includes('集單')) && (
                       <span className="ml-2 text-violet-400">
-                        ／集單隱藏：{sheetRows.filter(r => (r.doc_type ?? '').includes('集單')).length}（<a href="/admin/argoerp/group-order-export" className="underline hover:text-violet-200">前往集合單頁面</a>）
+                        ／集單：{sheetRows.filter(r => (r.doc_type ?? '').includes('集單')).length}
                       </span>
                     )}
                   </span>
@@ -2519,20 +2825,26 @@ export default function DailyOrderSheetPage() {
             {/* 廠別快速標籤 */}
             {!loading && sheetRows.length > 0 && (
               <div className="mb-3 flex items-center gap-1 flex-wrap">
-                {(['ALL', 'T', 'C', 'O'] as const).map(f => {
-                  const count = f === 'ALL' ? sheetRows.length : sheetRows.filter(r => r.factory === f).length
+                {(['ALL', 'T', 'C', 'O', 'G'] as const).map(f => {
+                  const count = f === 'ALL'
+                    ? sheetRows.length
+                    : f === 'G'
+                    ? sheetRows.filter(r => (r.doc_type ?? '').includes('集單')).length
+                    : sheetRows.filter(r => r.factory === f && !(r.doc_type ?? '').includes('集單')).length
                   if (f !== 'ALL' && count === 0) return null
-                  const label = f === 'ALL' ? '全部' : f === 'T' ? '四川廠' : f === 'C' ? '常平廠' : '委外'
+                  const label = f === 'ALL' ? '全部' : f === 'T' ? '台北' : f === 'C' ? '常平' : f === 'O' ? '委外' : '集單'
                   const colors = f === 'ALL'
                     ? 'bg-slate-700 text-slate-200 border-slate-600'
                     : f === 'T' ? 'bg-cyan-900/60 text-cyan-200 border-cyan-700/60'
                     : f === 'C' ? 'bg-orange-900/60 text-orange-200 border-orange-700/60'
-                    : 'bg-purple-900/60 text-purple-200 border-purple-700/60'
+                    : f === 'O' ? 'bg-purple-900/60 text-purple-200 border-purple-700/60'
+                    : 'bg-violet-900/60 text-violet-200 border-violet-700/60'
                   const activeColors = f === 'ALL'
                     ? 'bg-slate-500 text-white border-slate-400'
                     : f === 'T' ? 'bg-cyan-700 text-white border-cyan-500'
                     : f === 'C' ? 'bg-orange-700 text-white border-orange-500'
-                    : 'bg-purple-700 text-white border-purple-500'
+                    : f === 'O' ? 'bg-purple-700 text-white border-purple-500'
+                    : 'bg-violet-700 text-white border-violet-500'
                   return (
                     <button
                       key={f}
@@ -2674,7 +2986,7 @@ export default function DailyOrderSheetPage() {
                                   </div>
                                 ) : (
                                   <button onClick={() => setEditFactoryIdx(idx)}>
-                                    {factoryBadge(row.factory)}
+                                    {factoryBadge(row.factory, row.doc_type)}
                                   </button>
                                 )}
                               </div>
@@ -2793,8 +3105,12 @@ export default function DailyOrderSheetPage() {
                                 <span className="text-slate-600">—</span>
                               )}
                               {row.factory === 'O' && row.pr_status === 'matched' && row.pr_number && (
-                                <div className="mt-1 text-[10px] text-sky-400/80" title="同步區請購單（採購單優先，請購為輔）">
-                                  請購 {row.pr_number}{row.pr_sub_no && <span className="text-slate-500">#{row.pr_sub_no}</span>}
+                                <div className="mt-1 text-[10px]" title="同步區請購單（採購單優先，請購為輔）">
+                                  <button
+                                    onClick={() => setPoModalId(row.pr_number!)}
+                                    className="text-sky-400/80 hover:text-sky-200 hover:underline underline-offset-2 transition-colors text-left"
+                                  >請購 {row.pr_number}</button>
+                                  {row.pr_sub_no && <span className="text-slate-500">#{row.pr_sub_no}</span>}
                                 </div>
                               )}
                             </td>
@@ -3046,60 +3362,222 @@ export default function DailyOrderSheetPage() {
       <SoOrderModal projectId={soModalId} onClose={() => setSoModalId(null)} />
       <PoOrderModal docNo={poModalId} onClose={() => setPoModalId(null)} />
 
-      {/* 舊系統入庫比對 Modal */}
+      {/* 交期檢查 Modal */}
+      {dueDateModal && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
+          onClick={() => setDueDateModal(null)}
+        >
+          <div
+            className="bg-slate-900 border border-red-700/50 rounded-2xl shadow-2xl w-full max-w-2xl flex flex-col max-h-[80vh]"
+            onClick={e => e.stopPropagation()}
+          >
+            {/* Header */}
+            <div className="px-5 py-4 border-b border-slate-700 flex items-center justify-between shrink-0">
+              <h2 className="text-lg font-bold text-red-300">⚠ 交期異常（{dueDateModal.length} 筆）</h2>
+              <button
+                onClick={() => setDueDateModal(null)}
+                className="text-slate-500 hover:text-white transition-colors text-xl leading-none"
+              >✕</button>
+            </div>
+
+            {/* Body */}
+            <div className="overflow-y-auto flex-1 p-4">
+              <div className="bg-slate-950 rounded-lg p-3 font-mono text-xs text-slate-300 whitespace-pre-wrap leading-relaxed">
+                {dueDateModal.map(a =>
+                  `訂單號:${a.order_number}(${FACTORY_LABEL_ZH[a.factory] ?? a.factory})\n客戶:${a.customer}\n交期:${a.delivery_date} 數量:${a.quantity}\n品項:${a.item_code}\n異常原因:${a.reason}`
+                ).join('\n\n')}
+              </div>
+            </div>
+
+            {/* Footer */}
+            <div className="px-5 py-3 border-t border-slate-700 shrink-0 flex items-center gap-3">
+              <button
+                onClick={() => {
+                  const text = dueDateModal.map(a =>
+                    `訂單號:${a.order_number}(${FACTORY_LABEL_ZH[a.factory] ?? a.factory})\n客戶:${a.customer}\n交期:${a.delivery_date} 數量:${a.quantity}\n品項:${a.item_code}\n異常原因:${a.reason}`
+                  ).join('\n\n')
+                  void navigator.clipboard.writeText(text).then(() => {
+                    setDueDateCopied(true)
+                    setTimeout(() => setDueDateCopied(false), 2000)
+                  })
+                }}
+                className="px-4 py-2 rounded-lg bg-cyan-700 hover:bg-cyan-600 text-white text-sm font-medium transition-colors"
+              >
+                {dueDateCopied ? '✅ 已複製' : '📋 一鍵複製'}
+              </button>
+              <button
+                onClick={() => setDueDateModal(null)}
+                className="px-4 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-300 text-sm transition-colors"
+              >
+                關閉
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 交期閾值設定 Modal */}
+      {showThresholdModal && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
+          onClick={() => setShowThresholdModal(false)}
+        >
+          <div
+            className="bg-slate-900 border border-slate-700 rounded-2xl shadow-2xl w-full max-w-sm"
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="px-5 py-4 border-b border-slate-700 flex items-center justify-between">
+              <h2 className="text-lg font-bold text-white">⚙️ 交期檢查天數設定</h2>
+              <button onClick={() => setShowThresholdModal(false)} className="text-slate-500 hover:text-white text-xl leading-none">✕</button>
+            </div>
+            <div className="px-5 py-4 space-y-3">
+              <p className="text-slate-400 text-sm">設定各廠別最低所需工作天數（以出單表日期為 day 0）</p>
+              {Object.entries(thresholdInput).map(([k, v]) => (
+                <div key={k} className="flex items-center gap-3">
+                  <span className="w-20 text-sm font-medium text-slate-300">
+                    {k === 'T' ? '台北廠 (T)' : k === 'C' ? '常平廠 (C)' : k === 'O' ? '委外 (O)' : k}
+                  </span>
+                  <input
+                    type="number"
+                    min={1}
+                    max={30}
+                    value={v}
+                    onChange={e => setThresholdInput(prev => ({ ...prev, [k]: e.target.value }))}
+                    className="w-20 px-3 py-1.5 bg-slate-800 border border-slate-600 rounded-lg text-white text-sm focus:outline-none focus:border-rose-500"
+                  />
+                  <span className="text-slate-500 text-sm">工作天</span>
+                </div>
+              ))}
+              {thresholdMsg && <p className={`text-sm ${thresholdMsg.startsWith('✅') ? 'text-green-400' : 'text-red-400'}`}>{thresholdMsg}</p>}
+            </div>
+            <div className="px-5 py-4 border-t border-slate-700 flex justify-end gap-2">
+              <button
+                onClick={() => setShowThresholdModal(false)}
+                className="px-4 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-300 text-sm transition-colors"
+              >取消</button>
+              <button
+                onClick={() => void handleSaveThresholds()}
+                disabled={thresholdSaving}
+                className="px-4 py-2 rounded-lg bg-rose-700 hover:bg-rose-600 disabled:bg-slate-700 text-white text-sm font-medium transition-colors"
+              >{thresholdSaving ? '儲存中…' : '儲存'}</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 入庫比對 + 塔台報工 Modal */}
       {legacyModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm" onClick={() => setLegacyModal(null)}>
           <div className="bg-slate-900 border border-slate-700 rounded-xl shadow-2xl w-full max-w-4xl max-h-[85vh] flex flex-col" onClick={e => e.stopPropagation()}>
             {/* Header */}
             <div className="px-5 py-4 border-b border-slate-700 flex items-center justify-between shrink-0">
               <div>
-                <h2 className="text-white font-semibold">舊系統入庫比對</h2>
+                <h2 className="text-white font-semibold">入庫比對</h2>
                 <p className="text-slate-400 text-sm mt-0.5">訂貨單號：<span className="font-mono text-amber-300">{legacyModal.query}</span></p>
               </div>
               <button onClick={() => setLegacyModal(null)} className="text-slate-500 hover:text-white transition-colors text-xl leading-none">✕</button>
             </div>
 
             {/* Body */}
-            <div className="overflow-y-auto flex-1">
+            <div className="overflow-y-auto flex-1 divide-y divide-slate-800">
               {legacyModal.loading ? (
                 <div className="py-16 text-center text-slate-400 text-sm">比對中…</div>
-              ) : legacyModal.rows.length === 0 ? (
-                <div className="py-16 text-center space-y-2">
-                  <p className="text-slate-400 text-sm">舊系統入庫紀錄中未找到訂貨單號 <span className="font-mono text-amber-300">{legacyModal.query}</span></p>
-                  <p className="text-slate-600 text-xs">請確認已匯入舊系統入庫紀錄，且單號格式一致</p>
-                </div>
               ) : (
-                <table className="w-full text-xs">
-                  <thead className="sticky top-0 bg-slate-800/90">
-                    <tr className="border-b border-slate-700">
-                      <th className="px-3 py-2.5 text-left text-slate-300 whitespace-nowrap">日期-號碼</th>
-                      <th className="px-3 py-2.5 text-left text-slate-300 whitespace-nowrap">訂貨單號</th>
-                      <th className="px-3 py-2.5 text-left text-slate-300 whitespace-nowrap">出庫工廠</th>
-                      <th className="px-3 py-2.5 text-left text-slate-300 whitespace-nowrap">承辦人</th>
-                      <th className="px-3 py-2.5 text-left text-slate-300 whitespace-nowrap">品項名[規格]</th>
-                      <th className="px-3 py-2.5 text-right text-slate-300 whitespace-nowrap">良品數</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {legacyModal.rows.map((r, i) => (
-                      <tr key={i} className={`border-b border-slate-800/40 ${i % 2 === 0 ? 'bg-slate-900/40' : ''}`}>
-                        <td className="px-3 py-2 font-mono text-cyan-300 whitespace-nowrap">{r.entry_no}</td>
-                        <td className="px-3 py-2 font-mono text-amber-300/80 whitespace-nowrap">{r.order_number}</td>
-                        <td className="px-3 py-2 text-slate-300 whitespace-nowrap">{r.source_location}</td>
-                        <td className="px-3 py-2 text-slate-400 whitespace-nowrap">{r.handler_name}</td>
-                        <td className="px-3 py-2 text-slate-200 max-w-[320px] truncate" title={r.item_name}>{r.item_name}</td>
-                        <td className="px-3 py-2 text-right font-mono text-emerald-300 whitespace-nowrap">{r.good_qty.toLocaleString()}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+                <>
+                  {/* ── 舊系統入庫紀錄 ── */}
+                  <div>
+                    <div className="px-4 py-2 bg-slate-800/50 text-xs font-semibold text-slate-300 uppercase tracking-wide">
+                      舊系統入庫紀錄
+                      {legacyModal.rows.length > 0 && (
+                        <span className="ml-2 font-normal text-slate-400 normal-case">共 {legacyModal.rows.length} 筆</span>
+                      )}
+                    </div>
+                    {legacyModal.rows.length === 0 ? (
+                      <div className="py-6 text-center space-y-1">
+                        <p className="text-slate-500 text-xs">未找到舊系統入庫紀錄</p>
+                      </div>
+                    ) : (
+                      <table className="w-full text-xs">
+                        <thead className="bg-slate-800/90">
+                          <tr className="border-b border-slate-700">
+                            <th className="px-3 py-2.5 text-left text-slate-300 whitespace-nowrap">日期-號碼</th>
+                            <th className="px-3 py-2.5 text-left text-slate-300 whitespace-nowrap">訂貨單號</th>
+                            <th className="px-3 py-2.5 text-left text-slate-300 whitespace-nowrap">出庫工廠</th>
+                            <th className="px-3 py-2.5 text-left text-slate-300 whitespace-nowrap">承辦人</th>
+                            <th className="px-3 py-2.5 text-left text-slate-300 whitespace-nowrap">品項名[規格]</th>
+                            <th className="px-3 py-2.5 text-right text-slate-300 whitespace-nowrap">良品數</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {legacyModal.rows.map((r, i) => (
+                            <tr key={i} className={`border-b border-slate-800/40 ${i % 2 === 0 ? 'bg-slate-900/40' : ''}`}>
+                              <td className="px-3 py-2 font-mono text-cyan-300 whitespace-nowrap">{r.entry_no}</td>
+                              <td className="px-3 py-2 font-mono text-amber-300/80 whitespace-nowrap">{r.order_number}</td>
+                              <td className="px-3 py-2 text-slate-300 whitespace-nowrap">{r.source_location}</td>
+                              <td className="px-3 py-2 text-slate-400 whitespace-nowrap">{r.handler_name}</td>
+                              <td className="px-3 py-2 text-slate-200 max-w-[320px] truncate" title={r.item_name}>{r.item_name}</td>
+                              <td className="px-3 py-2 text-right font-mono text-emerald-300 whitespace-nowrap">{r.good_qty.toLocaleString()}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    )}
+                  </div>
+
+                  {/* ── 塔台報工紀錄（印刷站2F）── */}
+                  <div>
+                    <div className="px-4 py-2 bg-slate-800/50 text-xs font-semibold text-slate-300 uppercase tracking-wide">
+                      塔台報工紀錄（印刷站2F）
+                      {legacyModal.saraWipRows.length > 0 && (
+                        <span className="ml-2 font-normal text-slate-400 normal-case">共 {legacyModal.saraWipRows.length} 筆</span>
+                      )}
+                    </div>
+                    {legacyModal.saraWipRows.length === 0 ? (
+                      <div className="py-6 text-center space-y-1">
+                        <p className="text-slate-500 text-xs">未找到印刷站2F報工紀錄</p>
+                      </div>
+                    ) : (
+                      <table className="w-full text-xs">
+                        <thead className="bg-slate-800/90">
+                          <tr className="border-b border-slate-700">
+                            <th className="px-3 py-2.5 text-left text-slate-300 whitespace-nowrap">站點</th>
+                            <th className="px-3 py-2.5 text-left text-slate-300 whitespace-nowrap">製程名稱</th>
+                            <th className="px-3 py-2.5 text-left text-slate-300 whitespace-nowrap">生產料號</th>
+                            <th className="px-3 py-2.5 text-left text-slate-300 whitespace-nowrap">品名</th>
+                            <th className="px-3 py-2.5 text-left text-slate-300 whitespace-nowrap">來源單號</th>
+                            <th className="px-3 py-2.5 text-right text-slate-300 whitespace-nowrap">回報數量</th>
+                            <th className="px-3 py-2.5 text-left text-slate-300 whitespace-nowrap">報工資源</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {legacyModal.saraWipRows.map((r, i) => (
+                            <tr key={r.work_order} className={`border-b border-slate-800/40 ${i % 2 === 0 ? 'bg-slate-900/40' : ''}`}>
+                              <td className="px-3 py-2 text-slate-300 whitespace-nowrap">{r.workcenter_name ?? '—'}</td>
+                              <td className="px-3 py-2 text-slate-300 whitespace-nowrap">{r.job_name ?? '—'}</td>
+                              <td className="px-3 py-2 font-mono text-slate-400 whitespace-nowrap">{r.product_name ?? '—'}</td>
+                              <td className="px-3 py-2 text-slate-200 max-w-[160px] truncate" title={r.product_subname ?? r.product_description ?? ''}>{r.product_subname || r.product_description || '—'}</td>
+                              <td className="px-3 py-2 font-mono text-amber-300/80 whitespace-nowrap">{r.doc_nbr ?? '—'}</td>
+                              <td className="px-3 py-2 text-right font-mono text-emerald-300 whitespace-nowrap">
+                                {r.wip_qty != null ? r.wip_qty.toLocaleString() : '—'}
+                              </td>
+                              <td className="px-3 py-2 text-slate-400 max-w-[140px] truncate" title={r.report_resources ?? ''}>{r.report_resources ?? '—'}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    )}
+                  </div>
+                </>
               )}
             </div>
 
             {/* Footer */}
-            {!legacyModal.loading && legacyModal.rows.length > 0 && (
+            {!legacyModal.loading && (
               <div className="px-5 py-3 border-t border-slate-700 shrink-0 flex items-center justify-between">
-                <span className="text-slate-400 text-xs">共 {legacyModal.rows.length} 筆入庫紀錄</span>
+                <span className="text-slate-400 text-xs">
+                  入庫 {legacyModal.rows.length} 筆・報工 {legacyModal.saraWipRows.length} 筆
+                </span>
                 <button onClick={() => setLegacyModal(null)} className="px-4 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-200 text-sm transition-colors">關閉</button>
               </div>
             )}

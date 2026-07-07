@@ -556,15 +556,16 @@ export async function POST(request: NextRequest) {
 
       try {
         const supabaseAdmin = getSupabaseAdminClient()
-        const { error: clearError } = await supabaseAdmin.from('material_inventory_list').delete().neq('id', 0)
-        if (clearError) throw clearError
-
-        const batchSize = 500
-        for (let index = 0; index < normalizedRows.length; index += batchSize) {
-          const chunk = normalizedRows.slice(index, index + batchSize)
-          const { error: insertError } = await supabaseAdmin.from('material_inventory_list').insert(chunk)
-          if (insertError) throw insertError
-        }
+        // 增量比對更新（取代整批 delete+insert）。sequence_no 為位置性編號，
+        // 納入比對以維持「每次同步照 ARGO 順序重新編號」的原行為（首頁/物料頁靠它排序與搜尋）。
+        await reconcileTable(supabaseAdmin, {
+          table: 'material_inventory_list',
+          keyCols: ['item_code'],
+          compareCols: ['sequence_no', 'item_name', 'spec', 'unit_of_measure', 'physical_count', 'book_count', 'qisheng_sichuan_total'],
+          rows: normalizedRows,
+          action: 'sync_inventory',
+          docNoCol: 'item_code',
+        })
       } catch (error) {
         const pgErr = error as { message?: string; code?: string; details?: string; hint?: string }
         const message = pgErr?.message
@@ -861,22 +862,26 @@ export async function POST(request: NextRequest) {
         }
       })
 
+      // 增量比對更新（取代整批 delete+insert）：只寫變動列、刪除消失列、逐筆記 log
+      let soRecon
       try {
         const supabaseAdmin = getSupabaseAdminClient()
-
-        const { error: clearError } = await supabaseAdmin.from('erp_so_lines').delete().neq('id', 0)
-        if (clearError) throw clearError
-
-        const batchSize = 500
-        for (let i = 0; i < soLines.length; i += batchSize) {
-          const chunk = soLines.slice(i, i + batchSize)
-          const { error: insertError } = await supabaseAdmin.from('erp_so_lines').insert(chunk)
-          if (insertError) {
-            const detail = typeof insertError === 'object' && 'message' in insertError
-              ? (insertError as { message: string }).message : JSON.stringify(insertError)
-            throw new Error(detail)
-          }
-        }
+        soRecon = await reconcileTable(supabaseAdmin, {
+          table: 'erp_so_lines',
+          keyCols: ['project_id', 'line_no'],
+          compareCols: [
+            'begin_date', 'tpn_partner_id', 'sales_name', 'sales_id', 'currency', 'exchange_rate',
+            'department', 'sales_category', 'hold_status', 'pdl_seq', 'mbp_part', 'mbp_ver',
+            'duedate', 'description', 'partner_name', 'delivery_address', 'customer_remark',
+            'invoice_format', 'remark', 'packing', 'remark2', 'tpn_part_no',
+            'order_qty_oru', 'unit_of_measure_oru', 'unit_price_oru', 'grade',
+            'create_date', 'update_date',
+          ],
+          rows: soLines,
+          action: 'sync_so',
+          docNoCol: 'project_id',
+          subNoCol: 'line_no',
+        })
       } catch (err) {
         const message = err instanceof Error ? formatSupabaseAdminError(err.message) : '寫入 erp_so_lines 失敗'
         return NextResponse.json({ status: 'error', error: message }, { status: 500 })
@@ -887,6 +892,10 @@ export async function POST(request: NextRequest) {
         syncedCount: soLines.length,
         totalRows: soDetailRows.length,
         headerCount: soHeaderRows.length,
+        inserted: soRecon.inserted,
+        updated: soRecon.updated,
+        deleted: soRecon.deleted,
+        unchanged: soRecon.unchanged,
       })
     }
 
@@ -1034,16 +1043,20 @@ export async function POST(request: NextRequest) {
         synced_at: poSyncedAt,
       }))
 
+      // 增量比對更新（取代整批 delete+insert）；scope 限 doc_type，PO 對帳絕不動 PR/其他單別
+      let poRecon
       try {
         const supabaseAdmin = getSupabaseAdminClient()
-        const { error: clearError } = await supabaseAdmin.from('erp_pj_sync').delete().eq('doc_type', '採購單號')
-        if (clearError) throw clearError
-        const batchSize = 500
-        for (let i = 0; i < poSyncRows.length; i += batchSize) {
-          const chunk = poSyncRows.slice(i, i + batchSize)
-          const { error: insertError } = await supabaseAdmin.from('erp_pj_sync').insert(chunk)
-          if (insertError) throw insertError
-        }
+        poRecon = await reconcileTable(supabaseAdmin, {
+          table: 'erp_pj_sync',
+          keyCols: ['doc_type', 'doc_no', 'sub_no'],
+          compareCols: ['item_code', 'description', 'qty', 'unit', 'status', 'start_date', 'end_date', 'customer_vendor', 'remark', 'extra'],
+          rows: poSyncRows,
+          scope: { col: 'doc_type', value: '採購單號' },
+          action: 'sync_po',
+          docNoCol: 'doc_no',
+          subNoCol: 'sub_no',
+        })
       } catch (err) {
         const message = err instanceof Error ? formatSupabaseAdminError(err.message) : '寫入 erp_pj_sync 失敗'
         return NextResponse.json({ status: 'error', error: message }, { status: 500 })
@@ -1054,6 +1067,10 @@ export async function POST(request: NextRequest) {
         syncedCount: poSyncRows.length,
         totalHdrRows: hdrRows.length,
         totalDtlRows: dtlRows.length,
+        inserted: poRecon.inserted,
+        updated: poRecon.updated,
+        deleted: poRecon.deleted,
+        unchanged: poRecon.unchanged,
       })
     }
 
@@ -1075,16 +1092,19 @@ export async function POST(request: NextRequest) {
         return null
       }
 
+      // 增量比對更新（取代整批 delete+insert）；scope 限 doc_type，PR 對帳絕不動 PO/其他單別
       async function persistPrSyncRows(prSyncRows: Array<Record<string, unknown>>) {
         const supabaseAdmin = getSupabaseAdminClient()
-        const { error: clearError } = await supabaseAdmin.from('erp_pj_sync').delete().eq('doc_type', '請購單號')
-        if (clearError) throw clearError
-        const batchSize = 500
-        for (let i = 0; i < prSyncRows.length; i += batchSize) {
-          const chunk = prSyncRows.slice(i, i + batchSize)
-          const { error: insertError } = await supabaseAdmin.from('erp_pj_sync').insert(chunk)
-          if (insertError) throw insertError
-        }
+        await reconcileTable(supabaseAdmin, {
+          table: 'erp_pj_sync',
+          keyCols: ['doc_type', 'doc_no', 'sub_no'],
+          compareCols: ['item_code', 'description', 'qty', 'unit', 'status', 'start_date', 'end_date', 'customer_vendor', 'remark', 'extra'],
+          rows: prSyncRows,
+          scope: { col: 'doc_type', value: '請購單號' },
+          action: 'sync_pr',
+          docNoCol: 'doc_no',
+          subNoCol: 'sub_no',
+        })
       }
 
       async function runPrQuery(
@@ -1506,17 +1526,19 @@ export async function POST(request: NextRequest) {
       }
       const dedupedLines = Array.from(dedupeMap.values())
 
+      // 增量比對更新（取代整批 delete+insert）：只寫變動列、刪除消失列、逐筆記 log
+      let moRecon
       try {
         const supabaseAdmin = getSupabaseAdminClient()
-        const { error: clearError } = await supabaseAdmin.from('erp_mo_lines').delete().neq('id', 0)
-        if (clearError) throw clearError
-
-        const batchSize = 500
-        for (let i = 0; i < dedupedLines.length; i += batchSize) {
-          const chunk = dedupedLines.slice(i, i + batchSize)
-          const { error: insertError } = await supabaseAdmin.from('erp_mo_lines').insert(chunk)
-          if (insertError) throw insertError
-        }
+        moRecon = await reconcileTable(supabaseAdmin, {
+          table: 'erp_mo_lines',
+          keyCols: ['project_id', 'line_no'],
+          compareCols: ['begin_date', 'end_date', 'hold_status', 'mo_begin_date', 'mbp_part', 'mbp_lot_no', 'order_qty', 'source_order'],
+          rows: dedupedLines,
+          action: 'sync_mo',
+          docNoCol: 'project_id',
+          subNoCol: 'line_no',
+        })
       } catch (err) {
         const pgError = err as { message?: string; code?: string; details?: string; hint?: string }
         const message = pgError?.message
@@ -1532,6 +1554,10 @@ export async function POST(request: NextRequest) {
         detailTotal,
         detailAuthorized,
         detailError,
+        inserted: moRecon.inserted,
+        updated: moRecon.updated,
+        deleted: moRecon.deleted,
+        unchanged: moRecon.unchanged,
       })
     }
 
@@ -1628,19 +1654,17 @@ export async function POST(request: NextRequest) {
 
       try {
         const supabaseAdmin = getSupabaseAdminClient()
-        // 刪除同類型舊資料後重寫
-        const { error: clearError } = await supabaseAdmin
-          .from('erp_pj_sync')
-          .delete()
-          .eq('doc_type', docType)
-        if (clearError) throw clearError
-
-        const batchSize = 500
-        for (let index = 0; index < normalizedRows.length; index += batchSize) {
-          const chunk = normalizedRows.slice(index, index + batchSize)
-          const { error: insertError } = await supabaseAdmin.from('erp_pj_sync').insert(chunk)
-          if (insertError) throw insertError
-        }
+        // 增量比對更新（取代整批 delete+insert）；scope 限本次 docType，不動其他單別
+        await reconcileTable(supabaseAdmin, {
+          table: 'erp_pj_sync',
+          keyCols: ['doc_type', 'doc_no', 'sub_no'],
+          compareCols: ['item_code', 'description', 'qty', 'unit', 'status', 'start_date', 'end_date', 'customer_vendor', 'remark', 'extra'],
+          rows: normalizedRows,
+          scope: { col: 'doc_type', value: docType },
+          action: 'sync_pj',
+          docNoCol: 'doc_no',
+          subNoCol: 'sub_no',
+        })
       } catch (err) {
         const message = err instanceof Error ? formatSupabaseAdminError(err.message) : '寫入 erp_pj_sync 失敗'
         return NextResponse.json({ status: 'error', error: message }, { status: 500 })
@@ -1847,7 +1871,10 @@ export async function POST(request: NextRequest) {
         })
       }
 
-      // 全量刪除後重寫
+      // 全量刪除後重寫。
+      // 【刻意維持整批覆蓋，勿改增量】實測 ARGO IV_NOTICEDETAIL 同一 (slip_no, line_no)
+      // 可有多筆不同料號、也有完全相同的重複列（2026-07-03 稽核：2216 列中 8 組重複，
+      // 其中 MOT26061101401 line 1 有兩種料）。此表沒有可靠自然鍵，上唯一索引/upsert 會丟資料。
       try {
         const supabaseAdmin = getSupabaseAdminClient()
         const { error: clearError } = await supabaseAdmin.from('erp_material_prep_lines').delete().neq('id', 0)

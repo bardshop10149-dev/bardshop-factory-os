@@ -39,7 +39,8 @@ export default function PoOrderModal({ docNo, onClose }: Props) {
       .then(({ data, error: err }) => {
         setLoading(false)
         if (err) { setError(err.message); return }
-        if (!data || data.length === 0) { setError('查無採購單明細'); return }
+        const label = docNo.toUpperCase().startsWith('MPO') ? '請購單' : '採購單'
+        if (!data || data.length === 0) { setError(`查無${label}明細`); return }
         setLines(data as PoLine[])
       })
   }, [docNo])
@@ -53,6 +54,8 @@ export default function PoOrderModal({ docNo, onClose }: Props) {
   if (!docNo) return null
 
   const first = lines[0]
+  const isPr = docNo.toUpperCase().startsWith('MPO')
+  const typeLabel = isPr ? '請購單' : '採購單'
   const vendor = first?.extra?.['TPN_PARTNER_ID'] as string | undefined
   const currency = first?.extra?.['CURRENCY'] as string | undefined
   const paymentTerm = first?.extra?.['PAYMENT_TERM'] as string | undefined
@@ -78,6 +81,7 @@ export default function PoOrderModal({ docNo, onClose }: Props) {
         {/* Header */}
         <div className="flex items-start justify-between px-6 py-5 border-b border-slate-800 bg-slate-900/80 rounded-t-xl flex-shrink-0">
           <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5">
+            <span className="text-slate-400 text-xs font-mono uppercase tracking-widest">{typeLabel}</span>
             <span className="text-xl font-bold font-mono text-purple-300 tracking-wide">{docNo}</span>
             {vendor && (
               <span className="text-slate-200 text-sm font-medium">{vendor}</span>

@@ -25,7 +25,9 @@ interface OperationTimeInsert {
 
 // --- 輔助函式：簡易 CSV 解析器 (處理中文編碼與換行) ---
 const parseCSV = (content: string) => {
-  const lines = content.split(/\r?\n/).filter(line => line.trim() !== '')
+  // 去除 BOM（Excel 存 CSV 時常見）
+  const cleaned = content.replace(/^\uFEFF/, '')
+  const lines = cleaned.split(/\r?\n/).filter(line => line.trim() !== '')
   if (lines.length === 0) return []
   
   const headers = lines[0].split(',').map(h => h.trim())
@@ -53,7 +55,7 @@ const batchInsert = async <T extends object>(table: string, data: T[], statusCal
     statusCallback(`正在寫入 ${table}... (${i + 1}/${data.length})`)
     
     const { error } = await supabase.from(table).insert(chunk)
-    if (error) throw error
+    if (error) throw new Error(error.message ?? error.details ?? JSON.stringify(error))
   }
 }
 
@@ -108,15 +110,19 @@ export default function UploadPage() {
         addLog('📖 讀取檔案：品項對途程...')
         const text = await files.itemRoutes.text()
         const raw = parseCSV(text)
+        // 以 item_code 去重（同一品號取最後一筆），避免違反唯一鍵限制
+        const itemRouteMap = new Map<string, ItemRouteInsert>()
         raw
-          .filter((row) => row['品項編碼'] && row['途程名稱'])
+          .filter((row) => (row['品項編碼'] || row['品號']) && row['途程名稱'])
           .forEach((row) => {
-            dataItemRoutes.push({
-              item_code: row['品項編碼'].toUpperCase(),
+            const itemCode = (row['品項編碼'] || row['品號'] || '').toUpperCase()
+            itemRouteMap.set(itemCode, {
+              item_code: itemCode,
               route_id: row['途程名稱'],
               item_name: row['品項名稱'] ? row['品項名稱'].trim() : undefined
             })
           })
+        dataItemRoutes.push(...itemRouteMap.values())
       }
 
       // B. 解析：途程對工序
@@ -171,7 +177,7 @@ export default function UploadPage() {
       if (files.itemRoutes) {
         addLog('  - 刪除 item_routes...')
         const { error } = await supabase.from('item_routes').delete().neq('id', 0)
-        if (error) throw error
+        if (error) throw new Error(error.message ?? error.details ?? JSON.stringify(error))
       }
 
       // 1-2. 再清空 途程表 (中游)
@@ -179,14 +185,14 @@ export default function UploadPage() {
       if (files.routeOps || files.opTimes) {
         addLog('  - 刪除 route_operations...')
         const { error } = await supabase.from('route_operations').delete().neq('id', 0)
-        if (error) throw error
+        if (error) throw new Error(error.message ?? error.details ?? JSON.stringify(error))
       }
 
       // 1-3. 最後清空 工時表 (最上游/母資料)
       if (files.opTimes) {
         addLog('  - 刪除 operation_times...')
         const { error } = await supabase.from('operation_times').delete().neq('id', 0)
-        if (error) throw error
+        if (error) throw new Error(error.message ?? error.details ?? JSON.stringify(error))
       }
 
       // -----------------------------------------------------------
