@@ -12,8 +12,11 @@ interface InputRow {
   quantity: number
   due: string
   pan_count: number
-  mo_number?: string            // 製令?��?（MOT...�? ?�購?��?（POC...�? 請購?��?（POO...�?  line_seq?: string             // ?�購?��?購單?��??��?sub_no from erp_pj_sync）�?製令?��?�?  customer?: string             // 客戶?�稱
-  factory?: 'T' | 'C' | 'O'   // 廠�?：T=?��? C=常平 O=委�?（�??�覽，�??�出�?}
+  mo_number?: string            // 製令單號（MOT...）/ 採購單號（POC...）/ 請購單號（POO...）
+  line_seq?: string             // 銷售訂單序號（match_line_no）；C/O 廠 fallback 為採購單行號
+  customer?: string             // 客戶名稱
+  factory?: 'T' | 'C' | 'O'   // 廠區：T=台北 C=常平 O=委外（僅預覽，不匯出）
+}
 
 interface SaraRow {
   order_number: string
