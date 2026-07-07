@@ -251,6 +251,10 @@ export default function ProcessGenPage() {
           due:          String(r.delivery_date ?? '').trim(),
           pan_count:    pan,
           mo_number:    refNumber,
+          // 銷售訂單序號（match_line_no = SO 項次，所有廠別通用）
+          // C/O 廠的 line_seq 會在後續由 erp_pj_sync 補正為採購單行號，
+          // 但若採購單行號取得失敗，此處的 SO 序號作為 fallback
+          line_seq:     String(r.match_line_no ?? '').trim() || undefined,
           customer:     String(r.customer  ?? '').trim() || undefined,
           factory,
         })
@@ -277,7 +281,8 @@ export default function ProcessGenPage() {
             if (!syncMap.has(k)) syncMap.set(k, String(sr.sub_no ?? ''))
           }
           for (const r of parsed) {
-            if ((r.factory === 'C' || r.factory === 'O') && r.mo_number) {
+            if ((r.factory === 'C' || r.factory === 'O') && r.mo_number && !r.line_seq) {
+              // 僅在 match_line_no 未能提供序號時，才以採購單行號作為 fallback
               const seq = syncMap.get(`${r.mo_number}|${r.item_code}`)
               if (seq) r.line_seq = seq
             }
