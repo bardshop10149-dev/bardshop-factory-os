@@ -99,17 +99,17 @@ export default function SoQueryPage() {
 
   // 採購進度 modal（跨區資訊：僅進度/貨運/交期，不含供應商與付款）
   const [poModalSo, setPoModalSo] = useState<string | null>(null)
+  const [poFocus, setPoFocus] = useState<string | null>(null)   // 點 PO 單號 → 顯示整張 PO 明細
   const [poLines, setPoLines] = useState<PublicPoLine[]>([])
   const [poLoading, setPoLoading] = useState(false)
   const [poError, setPoError] = useState<string | null>(null)
 
-  const openPoModal = useCallback(async (soNo: string) => {
-    setPoModalSo(soNo)
+  const fetchPoLines = useCallback(async (query: string) => {
     setPoLines([])
     setPoError(null)
     setPoLoading(true)
     try {
-      const res = await fetch(`/api/purchasing/po-public?so=${encodeURIComponent(soNo)}`)
+      const res = await fetch(`/api/purchasing/po-public?${query}`)
       const json = await res.json().catch(() => ({}))
       if (!res.ok || !json.success) throw new Error(json.error || `HTTP ${res.status}`)
       setPoLines(json.lines as PublicPoLine[])
@@ -119,6 +119,23 @@ export default function SoQueryPage() {
       setPoLoading(false)
     }
   }, [])
+
+  const openPoModal = useCallback((soNo: string) => {
+    setPoModalSo(soNo)
+    setPoFocus(null)
+    void fetchPoLines(`so=${encodeURIComponent(soNo)}`)
+  }, [fetchPoLines])
+
+  /** 點 PO 單號 → 整張採購單明細（仍走 po-public，不含供應商/付款） */
+  const openPoFull = useCallback((poNo: string) => {
+    setPoFocus(poNo)
+    void fetchPoLines(`po=${encodeURIComponent(poNo)}`)
+  }, [fetchPoLines])
+
+  const backToSoView = useCallback(() => {
+    setPoFocus(null)
+    if (poModalSo) void fetchPoLines(`so=${encodeURIComponent(poModalSo)}`)
+  }, [poModalSo, fetchPoLines])
 
   // 同步進行中的階段提示（依據經過時間推測）
   useEffect(() => {
@@ -477,12 +494,20 @@ export default function SoQueryPage() {
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm" onClick={() => setPoModalSo(null)}>
           <div className="w-[720px] max-w-[94vw] max-h-[80vh] overflow-y-auto rounded-2xl bg-slate-900 border border-slate-700 shadow-2xl p-6" onClick={e => e.stopPropagation()}>
             <div className="flex items-center gap-3 mb-4">
-              <h3 className="text-lg font-semibold">採購執行進度</h3>
-              <span className="font-mono text-sm text-cyan-300">{poModalSo}</span>
-              <button
-                onClick={() => setPoModalSo(null)}
-                className="ml-auto px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-xs"
-              >關閉</button>
+              <h3 className="text-lg font-semibold">{poFocus ? '採購單明細' : '採購執行進度'}</h3>
+              <span className="font-mono text-sm text-cyan-300">{poFocus ?? poModalSo}</span>
+              <div className="ml-auto flex items-center gap-2">
+                {poFocus && (
+                  <button
+                    onClick={backToSoView}
+                    className="px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-xs"
+                  >← 回訂單檢視</button>
+                )}
+                <button
+                  onClick={() => setPoModalSo(null)}
+                  className="px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-xs"
+                >關閉</button>
+              </div>
             </div>
 
             {poLoading && <p className="text-sm text-slate-500 py-6 text-center">載入中…</p>}
@@ -508,8 +533,17 @@ export default function SoQueryPage() {
                   <tbody>
                     {poLines.map(l => (
                       <tr key={`${l.doc_no}|${l.sub_no}`} className="border-b border-slate-800/60 last:border-0">
-                        <td className="px-2 py-2 font-mono text-cyan-300 whitespace-nowrap">
-                          {l.doc_no}
+                        <td className="px-2 py-2 font-mono whitespace-nowrap">
+                          {poFocus ? (
+                            <span className="text-cyan-300">{l.doc_no}</span>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => openPoFull(l.doc_no)}
+                              title="點擊查看這張採購單的整張明細"
+                              className="text-cyan-300 hover:text-cyan-200 hover:underline"
+                            >{l.doc_no}</button>
+                          )}
                           {l.po_status && l.po_status !== 'OPEN' && (
                             <span className="ml-1.5 text-[10px] px-1 py-0.5 rounded bg-slate-800 text-slate-400 border border-slate-600">{l.po_status}</span>
                           )}
@@ -523,9 +557,10 @@ export default function SoQueryPage() {
                         <td className="px-2 py-2 text-slate-300 whitespace-nowrap">{l.due_date ?? '—'}</td>
                         <td className="px-2 py-2 whitespace-nowrap">
                           <span className={`text-[10px] px-1.5 py-0.5 rounded font-semibold border ${
-                            l.progress === '已出貨'
-                              ? 'bg-emerald-900/60 text-emerald-400 border-emerald-700/50'
-                              : 'bg-amber-900/60 text-amber-400 border-amber-700/50'
+                            l.progress === '已到倉' ? 'bg-emerald-900/60 text-emerald-400 border-emerald-700/50'
+                            : l.progress === '已出貨' ? 'bg-amber-900/60 text-amber-400 border-amber-700/50'
+                            : l.progress === '已發單' ? 'bg-sky-900/60 text-sky-300 border-sky-700/50'
+                            : 'bg-slate-800 text-slate-400 border-slate-600'
                           }`}>{l.progress}</span>
                         </td>
                         <td className="px-2 py-2 text-slate-300 whitespace-nowrap">{l.ship_method ?? '—'}</td>

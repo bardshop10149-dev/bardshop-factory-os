@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { getSupabaseAdminClient, formatSupabaseAdminError } from '@/lib/supabaseAdmin'
 import { guardAuth } from '@/lib/requireAuth'
 import type { PublicPoLine, ShipMethod } from '@/lib/purchasing/types'
-import { normalizeDateText } from '@/lib/purchasing/types'
+import { normalizeDateText, milestoneOf } from '@/lib/purchasing/types'
 
 export const dynamic = 'force-dynamic'
 
@@ -22,12 +22,14 @@ export async function GET(request: NextRequest) {
   }
 
   const supabase = getSupabaseAdminClient()
-  const SELECT = 'doc_no, sub_no, item_code, description, qty, unit, status, end_date'
+  // received_qty 以 jsonb 取單一鍵：不 select 整包 extra（內含付款條件等不外流欄位）
+  const SELECT = 'doc_no, sub_no, item_code, description, qty, unit, status, end_date, received_qty:extra->>RECEIVED_QTY'
 
   try {
     type Row = {
       doc_no: string; sub_no: string; item_code: string | null; description: string | null
       qty: number | null; unit: string | null; status: string | null; end_date: string | null
+      received_qty: string | null
     }
     const rows: Row[] = []
     if (po) {
@@ -47,12 +49,12 @@ export async function GET(request: NextRequest) {
       }
     }
 
-    const trackingMap = new Map<string, { shipped_at: string | null; ship_method: string | null; expected_ship_date: string | null }>()
+    const trackingMap = new Map<string, { sent_at: string | null; shipped_at: string | null; ship_method: string | null; expected_ship_date: string | null }>()
     const docNos = [...new Set(rows.map((r) => r.doc_no))]
     if (docNos.length > 0) {
       const { data, error } = await supabase
         .from('po_line_tracking')
-        .select('doc_no, sub_no, shipped_at, ship_method, expected_ship_date')
+        .select('doc_no, sub_no, sent_at, shipped_at, ship_method, expected_ship_date')
         .in('doc_no', docNos)
       if (error) throw new Error(error.message)
       for (const t of data ?? []) trackingMap.set(`${t.doc_no}|${t.sub_no}`, t)
@@ -60,6 +62,8 @@ export async function GET(request: NextRequest) {
 
     const lines: PublicPoLine[] = rows.map((r) => {
       const t = trackingMap.get(`${r.doc_no}|${r.sub_no}`)
+      const rv = Number(r.received_qty)
+      const receivedQty = r.received_qty != null && Number.isFinite(rv) ? rv : null
       return {
         doc_no: r.doc_no,
         sub_no: r.sub_no,
@@ -67,9 +71,10 @@ export async function GET(request: NextRequest) {
         description: r.description,
         qty: r.qty,
         unit: r.unit,
+        received_qty: receivedQty,
         po_status: r.status,
         due_date: normalizeDateText(r.end_date),
-        progress: t?.shipped_at ? '已出貨' : '排程製作中',
+        progress: milestoneOf({ sent_at: t?.sent_at ?? null, shipped_at: t?.shipped_at ?? null, qty: r.qty, received_qty: receivedQty }),
         ship_method: (t?.ship_method ?? null) as ShipMethod | null,
         expected_ship_date: t?.expected_ship_date ?? null,
       }

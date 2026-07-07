@@ -50,18 +50,34 @@ function chunk<T>(arr: T[], size: number): T[][] {
   return out
 }
 
-/** 1000 行批次抓全表（erp_pj_sync OPEN PO 明細數量有界） */
-async function fetchAllOpenPoRows(supabase: SupabaseAdmin): Promise<PjSyncRow[]> {
+/** YYYY-MM-DD → YYYY/MM/DD（erp_pj_sync.start_date 存斜線格式，可字典序比較） */
+function toSlashDate(d?: string | null): string | null {
+  if (!d) return null
+  const s = d.trim()
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s.replace(/-/g, '/')
+  return null
+}
+
+/**
+ * 1000 行批次抓 OPEN 採購明細；可用下單日(start_date)區間先在伺服器端收斂，
+ * 大幅減少後續 PR/MO/供應商 enrich 的資料量（下單日為 YYYY/MM/DD，字典序可比）。
+ */
+async function fetchAllOpenPoRows(supabase: SupabaseAdmin, range?: { orderFrom?: string | null; orderTo?: string | null }): Promise<PjSyncRow[]> {
+  const from = toSlashDate(range?.orderFrom)
+  const to = toSlashDate(range?.orderTo)
   const rows: PjSyncRow[] = []
-  for (let from = 0; ; from += BATCH) {
-    const { data, error } = await supabase
+  for (let offset = 0; ; offset += BATCH) {
+    let q = supabase
       .from('erp_pj_sync')
       .select('doc_no, sub_no, item_code, description, qty, unit, status, start_date, end_date, customer_vendor, extra')
       .eq('doc_type', '採購單號')
       .eq('status', 'OPEN')
+    if (from) q = q.gte('start_date', from)
+    if (to) q = q.lte('start_date', to)
+    const { data, error } = await q
       .order('doc_no', { ascending: true })
       .order('sub_no', { ascending: true })
-      .range(from, from + BATCH - 1)
+      .range(offset, offset + BATCH - 1)
     if (error) throw new Error(error.message)
     rows.push(...((data ?? []) as PjSyncRow[]))
     if (!data || data.length < BATCH) break
@@ -185,6 +201,33 @@ function pickPr(index: Map<string, PrCandidate[]>, so: string | null, itemCode: 
   return null
 }
 
+/** 查詢建議清單（頁面 datalist 用）：承辦人工號+姓名、OPEN PO 料號+品名 */
+export async function loadLookups(supabase: SupabaseAdmin): Promise<{
+  buyers: { id: string; name: string | null }[]
+  items: { code: string; name: string | null }[]
+}> {
+  const poRows = await fetchAllOpenPoRows(supabase)
+
+  const buyerMap = new Map<string, string>()   // SALES_ID → SALES_NAME（取自 PO extra，不查 erp_so_lines）
+  const buyerIds = new Set<string>()
+  const itemMap = new Map<string, string | null>()
+  for (const r of poRows) {
+    const id = strField(r.extra, 'SALES_ID')
+    if (id) {
+      buyerIds.add(id)
+      const name = strField(r.extra, 'SALES_NAME')
+      if (name && !buyerMap.has(id)) buyerMap.set(id, name)
+    }
+    const code = (r.item_code ?? '').trim()
+    if (code && !itemMap.has(code)) itemMap.set(code, r.description)
+  }
+
+  return {
+    buyers: [...buyerIds].sort().map((id) => ({ id, name: buyerMap.get(id) ?? null })),
+    items: [...itemMap.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([code, name]) => ({ code, name })),
+  }
+}
+
 /** SO/RO 清單 → 製令索引（source_order → 該單所有 MO 行） */
 async function buildMoIndex(supabase: SupabaseAdmin, soNos: string[]): Promise<Map<string, { project_id: string; mbp_part: string | null }[]>> {
   const index = new Map<string, { project_id: string; mbp_part: string | null }[]>()
@@ -217,19 +260,22 @@ function pickMo(index: Map<string, { project_id: string; mbp_part: string | null
 export interface LoadOptions {
   /** true = 只組提醒統計所需欄位（略過 PR/MO/供應商 enrich），首頁徽章用 */
   countOnly?: boolean
+  /** 下單日區間（YYYY-MM-DD）：伺服器端先收斂，加速 enrich */
+  orderFrom?: string | null
+  orderTo?: string | null
 }
 
-/** 讀取全部 OPEN 採購明細並組裝追蹤資訊 */
+/** 讀取 OPEN 採購明細（可依下單日區間收斂）並組裝追蹤資訊 */
 export async function loadPoTrackingLines(supabase: SupabaseAdmin, opts: LoadOptions = {}): Promise<PoTrackingLine[]> {
-  const poRows = await fetchAllOpenPoRows(supabase)
+  const poRows = await fetchAllOpenPoRows(supabase, { orderFrom: opts.orderFrom, orderTo: opts.orderTo })
   const today = todayTaipei()
 
   // 覆蓋層：po_line_tracking / po_payment（表都有界，整表抓）
-  const trackingMap = new Map<string, { shipped_at: string | null; ship_method: string | null; expected_ship_date: string | null; updated_by: string | null; updated_at: string | null }>()
+  const trackingMap = new Map<string, { sent_at: string | null; shipped_at: string | null; ship_method: string | null; expected_ship_date: string | null; updated_by: string | null; updated_at: string | null }>()
   {
     const { data, error } = await supabase
       .from('po_line_tracking')
-      .select('doc_no, sub_no, shipped_at, ship_method, expected_ship_date, updated_by, updated_at')
+      .select('doc_no, sub_no, sent_at, shipped_at, ship_method, expected_ship_date, updated_by, updated_at')
     if (error) throw new Error(error.message)
     for (const r of data ?? []) trackingMap.set(`${r.doc_no}|${r.sub_no}`, r)
   }
@@ -243,8 +289,16 @@ export async function loadPoTrackingLines(supabase: SupabaseAdmin, opts: LoadOpt
   let vendorMap = new Map<string, string>()
   let prIndex = new Map<string, PrCandidate[]>()
   let moIndex = new Map<string, { project_id: string; mbp_part: string | null }[]>()
+  // 承辦人姓名直接取自 PO extra.SALES_NAME（sync_po 已帶入）；用本頁資料建 SALES_ID→姓名
+  // 記憶體 fallback（不查 erp_so_lines，其 sales_id 為 null 無用且是全表掃描）
+  const buyerMap = new Map<string, string>()
 
   if (!opts.countOnly) {
+    for (const r of poRows) {
+      const id = strField(r.extra, 'SALES_ID')
+      const name = strField(r.extra, 'SALES_NAME')
+      if (id && name && !buyerMap.has(id)) buyerMap.set(id, name)
+    }
     const vendorCodes = [...new Set(poRows.map((r) => (r.customer_vendor ?? '').trim()).filter(Boolean))]
     vendorMap = new Map<string, string>()
     for (const part of chunk(vendorCodes, IN_CHUNK)) {
@@ -269,6 +323,10 @@ export async function loadPoTrackingLines(supabase: SupabaseAdmin, opts: LoadOpt
       description: r.description,
       qty: r.qty,
       unit: r.unit,
+      received_qty: (() => {
+        const v = Number(r.extra?.RECEIVED_QTY)
+        return Number.isFinite(v) ? v : null
+      })(),
       po_status: r.status,
       order_date: normalizeDateText(r.start_date),
       due_date: dueDate,
@@ -280,7 +338,9 @@ export async function loadPoTrackingLines(supabase: SupabaseAdmin, opts: LoadOpt
       pr_no: pr?.doc_no ?? null,
       pr_sub: pr?.sub_no ?? null,
       mo_no: opts.countOnly ? null : pickMo(moIndex, so, r.item_code),
-      buyer: strField(r.extra, 'SALES_NAME') ?? strField(r.extra, 'SALES_ID'),
+      buyer: strField(r.extra, 'SALES_NAME') ?? (() => { const id = strField(r.extra, 'SALES_ID'); return id ? buyerMap.get(id) ?? null : null })(),
+      buyer_id: strField(r.extra, 'SALES_ID'),
+      sent_at: tracking?.sent_at ?? null,
       shipped_at: tracking?.shipped_at ?? null,
       ship_method: (tracking?.ship_method ?? null) as ShipMethod | null,
       expected_ship_date: tracking?.expected_ship_date ?? null,

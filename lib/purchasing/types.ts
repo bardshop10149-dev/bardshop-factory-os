@@ -7,6 +7,22 @@ export type ShipMethod = typeof SHIP_METHODS[number]
 export const PAYMENT_PCTS = [0, 30, 50, 70, 100] as const
 export type PaymentPct = typeof PAYMENT_PCTS[number]
 
+// 執行進度＝三個里程碑：已發單、已出貨（皆採購手動點選）＋已到倉（入庫量滿足採購量自動亮）
+export type Progress = '未發單' | '已發單' | '已出貨' | '已到倉'
+
+/** 入庫量是否已滿足採購量（已到倉的判定依據） */
+export function arrivedFull(t: { qty: number | null; received_qty: number | null }): boolean {
+  return t.received_qty != null && t.qty != null && t.qty > 0 && t.received_qty >= t.qty
+}
+
+/** 目前抵達的最高里程碑（跨區單一標籤用）：已到倉 > 已出貨 > 已發單 > 未發單 */
+export function milestoneOf(t: { sent_at: string | null; shipped_at: string | null; qty: number | null; received_qty: number | null }): Progress {
+  if (arrivedFull(t)) return '已到倉'
+  if (t.shipped_at) return '已出貨'
+  if (t.sent_at) return '已發單'
+  return '未發單'
+}
+
 /** 到期提醒門檻（交期前 N 日；2 含逾期） */
 export const DUE_THRESHOLDS = [10, 5, 2] as const
 
@@ -18,6 +34,7 @@ export interface PoTrackingLine {
   description: string | null
   qty: number | null
   unit: string | null
+  received_qty: number | null         // 已入庫量（ARGO 進貨入庫後回寫的 ACTUAL_QTY）
   po_status: string | null            // ARGO HOLD_STATUS（OPEN…）
   order_date: string | null           // 下單日（YYYY-MM-DD）
   due_date: string | null             // 交期（YYYY-MM-DD，同步時已倒推 2 工作日）
@@ -29,8 +46,10 @@ export interface PoTrackingLine {
   pr_no: string | null                // 對應請購單號（比對不到為 null）
   pr_sub: string | null
   mo_no: string | null                // 對應製令單號（比對不到為 null）
-  buyer: string | null                // 承辦人（SALES_NAME 優先，退回 SALES_ID）
-  shipped_at: string | null           // null = 排程製作中
+  buyer: string | null                // 承辦人姓名（SALES_NAME 優先，退回 erp_so_lines 對照表）
+  buyer_id: string | null             // 承辦人工號（SALES_ID）
+  sent_at: string | null              // null = 未發出；有值 = 已發給廠商（製作中）
+  shipped_at: string | null           // null = 尚未出貨；有值 = 已出貨
   ship_method: ShipMethod | null
   expected_ship_date: string | null
   payment_pct: PaymentPct             // 表頭層級（同 doc_no 各行相同）
@@ -57,9 +76,10 @@ export interface PublicPoLine {
   description: string | null
   qty: number | null
   unit: string | null
+  received_qty: number | null         // 已入庫量（非供應商敏感資訊）
   po_status: string | null
   due_date: string | null
-  progress: '排程製作中' | '已出貨'
+  progress: Progress
   ship_method: ShipMethod | null
   expected_ship_date: string | null
 }
@@ -89,11 +109,11 @@ export function daysUntil(dueDate: string | null, todayIso: string): number | nu
   return Math.round((due - today) / 86400000)
 }
 
-/** 依未出貨明細計算到期提醒統計 */
-export function computeDueCounts(lines: Pick<PoTrackingLine, 'shipped_at' | 'due_days'>[]): DueCounts {
+/** 依未出貨明細計算到期提醒統計（已出貨或已到倉不計入） */
+export function computeDueCounts(lines: Pick<PoTrackingLine, 'shipped_at' | 'due_days' | 'qty' | 'received_qty'>[]): DueCounts {
   const counts: DueCounts = { due2: 0, due5: 0, due10: 0, total: 0 }
   for (const l of lines) {
-    if (l.shipped_at || l.due_days == null || l.due_days > 10) continue
+    if (l.shipped_at || arrivedFull(l) || l.due_days == null || l.due_days > 10) continue
     if (l.due_days <= 2) counts.due2++
     else if (l.due_days <= 5) counts.due5++
     else counts.due10++

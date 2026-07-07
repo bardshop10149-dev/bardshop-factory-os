@@ -57,3 +57,27 @@
 
 新增：`sql/20260703_purchasing_tracking.sql`、`lib/purchasing/types.ts`、`lib/purchasing/data.ts`、`app/api/purchasing/{list,status,po-public}/route.ts`、`app/purchasing/page.tsx`、本檔
 既有微修（皆 additive）：`app/api/argoerp/route.ts`（action union、SALES_NAME、sync_vendor 區塊）、`app/api/webhook/sync/route.ts`（allowlist 一行）、`app/api/auth/login/route.ts`（ADMIN_PERMISSIONS 一行）、`app/admin/team/page.tsx`（權限選項一行）、`app/page.tsx`（canPurchasing＋徽章＋一張卡片）、`app/design-studio/so-query/page.tsx`（採購欄＋modal）
+
+---
+
+## 後續增修（2026-07-04 ~ 07-07，同一 PR）
+
+**進度模型改三里程碑**：OPEN 不代表已發給廠商，改為 **已發單 → 已出貨**（採購手動點）＋ **已到倉**（入庫量 ≥ 採購量自動亮）。三段連續光條由左往右填。到期提醒：已出貨或已到倉都不再提醒。需執行 `sql/20260705_po_line_sent.sql`（po_line_tracking 加 sent_at）。
+
+**入庫量**：sync_po 由 ARGO `ACTUAL_QTY_ORU` 帶入 `extra.RECEIVED_QTY`，列表「入庫」欄顯示已入庫/採購數與狀態；業務查詢 POC 明細也帶進度＋入庫。⚠️ 正式站部署後每小時同步才會穩定回填（本機補同步會被線上舊碼覆蓋）。
+
+**供應商同步**：`sync_vendor` 查詢條件更正為 `SUPPLIER='Y'`（原誤用 VENDOR）；寫入 `erp_vendors`（service_role-only）。承辦人姓名取自 sync_po 的 `SALES_NAME`（移除無效的 erp_so_lines 全表掃描）。
+
+**查詢/檢視強化**：預設查近兩月下單日、伺服器端先收斂加速、每頁 100 筆分頁；交期可點表頭排序；欄寬可拖拉、精簡（一屏）模式、深色捲軸（`.eip-scrollbar`）；料號輸入跳查詢視窗、承辦人建議清單；「排除已全部到倉」「只看常平／只看非常平」（常平＝供應商 C01510）三顆快篩；點採購單號開整張明細視窗。
+
+**加速索引**：`sql/20260707_purchasing_indexes.sql`（PR/MO 比對、下單日過濾用欄位建索引）。
+
+新增檔：`sql/20260705_po_line_sent.sql`、`sql/20260707_purchasing_indexes.sql`、`app/api/purchasing/lookups/route.ts`
+增修：`app/info-board/order-records/page.tsx`（POC 明細加進度＋入庫欄）、`app/globals.css`（深色捲軸）、`lib/purchasing/*`、`app/purchasing/page.tsx`
+
+### 部署後必跑 SQL（Supabase SQL Editor，依序）
+1. `sql/20260703_purchasing_tracking.sql`（po_line_tracking / po_payment / erp_vendors）
+2. `sql/20260705_po_line_sent.sql`（sent_at 欄位）
+3. `sql/20260707_purchasing_indexes.sql`（查詢加速索引）
+4. 觸發一次 `sync_vendor`（灌供應商名稱）；`sync_po` 排程跑過一輪帶入承辦人姓名與入庫量
+5. 團隊管理勾「採購專區」權限給採購人員

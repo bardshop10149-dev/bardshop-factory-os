@@ -6,13 +6,15 @@ import { PAYMENT_PCTS, SHIP_METHODS, type PaymentPct, type ShipMethod } from '@/
 export const dynamic = 'force-dynamic'
 
 // POST：更新採購追蹤狀態（覆蓋層，不動 erp_pj_sync）。
-//   { type:'line', doc_no, sub_no, shipped?, ship_method?, expected_ship_date? } → po_line_tracking upsert
+//   { type:'line', doc_no, sub_no, sent?, shipped?, ship_method?, expected_ship_date? } → po_line_tracking upsert
 //   { type:'payment', doc_no, payment_pct } → po_payment upsert（表頭層級）
+// 里程碑：已發單(sent_at) / 已出貨(shipped_at) 皆採購手動 toggle；已到倉由入庫量自動判定（不存此表）
 type LineBody = {
   type: 'line'
   doc_no: string
   sub_no: string
-  shipped?: boolean
+  sent?: boolean               // true=標記已發單；false=取消
+  shipped?: boolean            // true=標記已出貨；false=取消
   ship_method?: ShipMethod | null
   expected_ship_date?: string | null
 }
@@ -54,38 +56,44 @@ export async function POST(request: NextRequest) {
       const subNo = String(body.sub_no ?? '').trim()
       if (!subNo) return NextResponse.json({ success: false, error: '缺少 sub_no' }, { status: 400 })
 
-      const row: Record<string, unknown> = { doc_no: docNo, sub_no: subNo, updated_by: updatedBy, updated_at: now }
-      if (body.shipped !== undefined) row.shipped_at = body.shipped ? now : null
+      // upsert 為整列覆蓋 → 先讀既有值當基準，再套用狀態轉移，避免洗掉其他欄位
+      const { data: existing, error: readErr } = await supabase
+        .from('po_line_tracking')
+        .select('sent_at, shipped_at, ship_method, expected_ship_date')
+        .eq('doc_no', docNo)
+        .eq('sub_no', subNo)
+        .maybeSingle()
+      if (readErr) throw new Error(readErr.message)
+
+      let sentAt: string | null = existing?.sent_at ?? null
+      let shippedAt: string | null = existing?.shipped_at ?? null
+      let shipMethod: string | null = existing?.ship_method ?? null
+      let expectedShip: string | null = existing?.expected_ship_date ?? null
+
+      // 已發單 / 已出貨為兩個獨立里程碑，各自 toggle（保留原時戳、互不牽連）
+      if (body.sent !== undefined) sentAt = body.sent ? (sentAt ?? now) : null
+      if (body.shipped !== undefined) shippedAt = body.shipped ? now : null
       if (body.ship_method !== undefined) {
         if (body.ship_method !== null && !SHIP_METHODS.includes(body.ship_method)) {
           return NextResponse.json({ success: false, error: `ship_method 必須是 ${SHIP_METHODS.join('/')}` }, { status: 400 })
         }
-        row.ship_method = body.ship_method
+        shipMethod = body.ship_method
       }
       if (body.expected_ship_date !== undefined) {
         if (body.expected_ship_date !== null && !isDateText(String(body.expected_ship_date))) {
           return NextResponse.json({ success: false, error: 'expected_ship_date 格式須為 YYYY-MM-DD' }, { status: 400 })
         }
-        row.expected_ship_date = body.expected_ship_date
-      }
-
-      // upsert 為整列覆蓋：未帶的欄位需先讀既有值合併，避免部分更新洗掉其他狀態
-      const { data: existing, error: readErr } = await supabase
-        .from('po_line_tracking')
-        .select('shipped_at, ship_method, expected_ship_date')
-        .eq('doc_no', docNo)
-        .eq('sub_no', subNo)
-        .maybeSingle()
-      if (readErr) throw new Error(readErr.message)
-      if (existing) {
-        if (row.shipped_at === undefined) row.shipped_at = existing.shipped_at
-        if (row.ship_method === undefined) row.ship_method = existing.ship_method
-        if (row.expected_ship_date === undefined) row.expected_ship_date = existing.expected_ship_date
+        expectedShip = body.expected_ship_date
       }
 
       const { error } = await supabase
         .from('po_line_tracking')
-        .upsert(row, { onConflict: 'doc_no,sub_no' })
+        .upsert({
+          doc_no: docNo, sub_no: subNo,
+          sent_at: sentAt, shipped_at: shippedAt,
+          ship_method: shipMethod, expected_ship_date: expectedShip,
+          updated_by: updatedBy, updated_at: now,
+        }, { onConflict: 'doc_no,sub_no' })
       if (error) throw new Error(error.message)
       return NextResponse.json({ success: true })
     }

@@ -966,7 +966,7 @@ export async function POST(request: NextRequest) {
         SEGMENT,
         TABLE: 'PJ_PROJECTDETAIL',
         SHOWNULLCOLUMN: 'Y',
-        CUSTOMCOLUMN: 'PJT_PROJECT_ID,LINE_NO,MBP_PART,MBP_LOT_NO,ORDER_QTY_ORU,UNIT_OF_MEASURE_ORU,DUEDATE,REMARK,REMARK2,PACKING,UNIT_PRICE_ORU,MBP_VER,PDL_SEQ_SO,TPN_PART_NO,SO_PROJECT_ID',
+        CUSTOMCOLUMN: 'PJT_PROJECT_ID,LINE_NO,MBP_PART,MBP_LOT_NO,ORDER_QTY_ORU,ACTUAL_QTY_ORU,UNIT_OF_MEASURE_ORU,DUEDATE,REMARK,REMARK2,PACKING,UNIT_PRICE_ORU,MBP_VER,PDL_SEQ_SO,TPN_PART_NO,SO_PROJECT_ID',
         PJT_TYPE: "= 'PO'",
         LINE_NO: '>= 1',
       })
@@ -1013,6 +1013,7 @@ export async function POST(request: NextRequest) {
         remark:          String(getRecordValue(dtl, 'REMARK2') ?? '').trim() || null,
         extra: {
           UNIT_PRICE_ORU: getRecordValue(dtl, 'UNIT_PRICE_ORU') ?? null,
+          RECEIVED_QTY:   toNumber(getRecordValue(dtl, 'ACTUAL_QTY_ORU')),   // 已入庫量（進貨單入庫後 ARGO 回寫）
           MBP_VER:        getRecordValue(dtl, 'MBP_VER') ?? null,
           MBP_LOT_NO:     String(getRecordValue(dtl, 'MBP_LOT_NO') ?? '').trim() || null,
           SO_PROJECT_ID:  String(getRecordValue(dtl, 'SO_PROJECT_ID') ?? '').trim() || null,
@@ -1957,7 +1958,7 @@ export async function POST(request: NextRequest) {
     }
 
     if (action === 'sync_vendor') {
-      // ── 供應商主檔同步（與 sync_customer 同模式，改抓 VENDOR='Y' 寫 erp_vendors）──
+      // ── 供應商主檔同步（與 sync_customer 同模式，改抓 SUPPLIER='Y' 寫 erp_vendors）──
       // erp_vendors 為 service_role 專用（供應商資料不可外流），僅採購 API 讀取。
       const sparam = JSON.stringify({
         APIKEY1: keys.APIKEY1,
@@ -1967,7 +1968,7 @@ export async function POST(request: NextRequest) {
         TABLE: 'GL_TRADINGPARTNER',
         SHOWNULLCOLUMN: 'N',
         CUSTOMCOLUMN: 'PARTNER_ID,CNAME,FULL_CNAME',
-        VENDOR: "= 'Y'",
+        SUPPLIER: "= 'Y'",   // GL_TRADINGPARTNER 的供應商旗標欄位（客戶為 CUSTOMER，實查確認）
       })
 
       const res = await fetch(`${API_BASE}/S_QUERY`, {
