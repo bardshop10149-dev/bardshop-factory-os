@@ -30,6 +30,7 @@ interface GroupRow {
   receiver: string
   mo_status: '已匯入製令' | '暫緩區' | null
   mo_number?: string
+  match_line_no?: string | null
   sheet_date: string
 }
 
@@ -116,6 +117,25 @@ function genMotNumber(date: Date, seq: number): string {
   return `MOT${y}${m}${d}${String(seq).padStart(2, '0')}`
 }
 
+// 集單製令單號類型
+const MOS_TYPES: Array<{ label: string; code: string }> = [
+  { label: '0.8mm 集單', code: '08MM' },
+  { label: '2mm 集單',   code: '2MM'  },
+  { label: '3mm 集單',   code: '3MM'  },
+  { label: '5mm 集單',   code: '5MM'  },
+  { label: '8mm 集單',   code: '8MM'  },
+  { label: 'PVC 卡片',   code: 'PVC'  },
+]
+
+// MOS 集單製令單號格式：MOS + 訂單號數字部分 + 序號(2碼) + -類型- + MMDD
+// 例：SOB260629503 序號1 8mm → MOS26062950301-8MM-0707
+function genMosNumber(orderNumber: string, matchLineNo: string | null | undefined, typeCode: string, date: Date): string {
+  const numericPart = orderNumber.replace(/^[A-Za-z]+/, '')
+  const seq = String(parseInt(String(matchLineNo ?? '1'), 10) || 1).padStart(2, '0')
+  const mmdd = `${String(date.getMonth() + 1).padStart(2, '0')}${String(date.getDate()).padStart(2, '0')}`
+  return `MOS${numericPart}${seq}-${typeCode}-${mmdd}`
+}
+
 // ==================== 頁面元件 ====================
 export default function GroupOrderExportPage() {
   const [rows, setRows] = useState<GroupRow[]>([])
@@ -135,6 +155,7 @@ export default function GroupOrderExportPage() {
   const [postSyncModal, setPostSyncModal] = useState<{ show: boolean; steps: PostSyncStep[]; error: string | null } | null>(null)
   const [searchQuery, setSearchQuery] = useState('')
   const [forceReimport, setForceReimport] = useState(false)
+  const [mosType, setMosType] = useState<string>('8MM')
 
   // ==================== 載入 ====================
   const loadRows = useCallback(async () => {
@@ -407,6 +428,32 @@ export default function GroupOrderExportPage() {
     setAutoMatchMsg(`✅ 已自動產生 ${toGenerate.length} 個 MOT 單號${note}`)
     setTimeout(() => setAutoMatchMsg(''), 6000)
   }, [filteredRows, selectedKeys, getMo, moInputs, rows])
+
+  // ==================== 自動產生 MOS 集單製令單號 ====================
+  const handleAutoGenerateMOS = useCallback(async () => {
+    const toGenerate = (selectedKeys.size > 0 ? filteredRows.filter(r => selectedKeys.has(r.row_key)) : filteredRows)
+      .filter(r => r.mo_status !== '已匯入製令' && !getMo(r) && r.order_number?.trim())
+    if (toGenerate.length === 0) {
+      setAutoMatchMsg('ℹ️ 所有可見列都已有製令單號（或無訂單號）')
+      setTimeout(() => setAutoMatchMsg(''), 4000)
+      return
+    }
+    const today = new Date()
+    const usedNums = new Set([...Object.values(moInputs), ...rows.map(r => r.mo_number ?? '')].filter(Boolean))
+    const newInputs: Record<string, string> = {}
+    for (const r of toGenerate) {
+      let mos = genMosNumber(r.order_number, r.match_line_no, mosType, today)
+      // 號碼已包含訂單+序號+類型+日期，一般不會重復；如遇重複加後綴避雜
+      let suffix = 1
+      while (usedNums.has(mos)) { mos = `${genMosNumber(r.order_number, r.match_line_no, mosType, today)}-${String(suffix).padStart(2, '0')}`; suffix++ }
+      newInputs[r.row_key] = mos
+      usedNums.add(mos)
+    }
+    setMoInputs(prev => ({ ...prev, ...newInputs }))
+    const label = MOS_TYPES.find(t => t.code === mosType)?.label ?? mosType
+    setAutoMatchMsg(`✅ 已自動產生 ${toGenerate.length} 個 MOS 製令單號（${label}）`)
+    setTimeout(() => setAutoMatchMsg(''), 6000)
+  }, [filteredRows, selectedKeys, getMo, moInputs, rows, mosType])
 
   // ==================== 清除比對結果 ====================
   const handleClearMatches = useCallback(async () => {
@@ -814,6 +861,22 @@ export default function GroupOrderExportPage() {
             className="px-4 py-1.5 rounded-lg bg-violet-700 hover:bg-violet-600 text-white text-xs font-semibold disabled:opacity-50">
             ✨ 自動產生 MOT 單號
           </button>
+          <div className="flex items-center gap-1.5">
+            <select
+              value={mosType}
+              onChange={e => setMosType(e.target.value)}
+              className="bg-slate-800 border border-slate-700 text-slate-200 text-xs rounded-lg px-2 py-1.5 focus:outline-none focus:border-purple-500"
+            >
+              {MOS_TYPES.map(t => (
+                <option key={t.code} value={t.code}>{t.label}</option>
+              ))}
+            </select>
+            <button onClick={() => void handleAutoGenerateMOS()} disabled={autoMatching || loading}
+              className="px-4 py-1.5 rounded-lg bg-purple-700 hover:bg-purple-600 text-white text-xs font-semibold disabled:opacity-50"
+              title="以選定集單類型產生 MOS 製令單號">
+              🗂 產生 MOS 集單號
+            </button>
+          </div>
           <button onClick={() => void handleClearMatches()} disabled={autoMatching || loading}
             className="px-3 py-1.5 rounded-lg bg-red-900/60 hover:bg-red-800/70 text-red-300 text-xs font-semibold border border-red-700/50 disabled:opacity-50">
             🗑 清除比對結果
