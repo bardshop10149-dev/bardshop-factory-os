@@ -40,6 +40,30 @@ body {
   animation: pendingBorderBlink 1.2s ease-in-out infinite;
 }
 
+/* 深色捲軸（融入 EIP 深色主題；套在需要捲動的容器上） */
+.eip-scrollbar {
+  scrollbar-width: thin;                       /* Firefox */
+  scrollbar-color: #334155 #0f172a;            /* thumb / track */
+}
+.eip-scrollbar::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+.eip-scrollbar::-webkit-scrollbar-track {
+  background: #0f172a;
+}
+.eip-scrollbar::-webkit-scrollbar-thumb {
+  background: #334155;
+  border-radius: 5px;
+  border: 2px solid #0f172a;
+}
+.eip-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: #475569;
+}
+.eip-scrollbar::-webkit-scrollbar-corner {
+  background: #0f172a;
+}
+
 @media print {
   html {
     -webkit-filter: grayscale(100%) !important;

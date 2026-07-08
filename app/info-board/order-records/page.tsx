@@ -51,10 +51,12 @@ function PjSyncModal({ docNo, onClose }: { docNo: string; onClose: () => void })
   const [moRows, setMoRows] = useState<MoLine[]>([])
   const [loading, setLoading] = useState(true)
   const [err, setErr] = useState<string | null>(null)
+  // 採購追蹤（進度＝採購手動點的已出貨；入庫＝ARGO 回寫的實際入庫量），key = sub_no
+  const [track, setTrack] = useState<Record<string, { progress: string; received_qty: number | null }>>({})
 
   useEffect(() => {
     if (!docNo) return
-    setLoading(true); setErr(null); setPoRows([]); setMoRows([])
+    setLoading(true); setErr(null); setPoRows([]); setMoRows([]); setTrack({})
     if (isMo) {
       supabase
         .from('erp_mo_lines')
@@ -83,6 +85,24 @@ function PjSyncModal({ docNo, onClose }: { docNo: string; onClose: () => void })
         })
     }
   }, [docNo, isMo])
+
+  // 採購單才抓進度／入庫（po-public 只回進度、入庫量、交期，不含供應商與付款）
+  useEffect(() => {
+    if (!docNo || !docNo.startsWith('PO')) return
+    let alive = true
+    fetch(`/api/purchasing/po-public?po=${encodeURIComponent(docNo)}`)
+      .then(res => (res.ok ? res.json() : null))
+      .then(json => {
+        if (!alive || !json?.success) return
+        const map: Record<string, { progress: string; received_qty: number | null }> = {}
+        for (const l of json.lines as { sub_no: string; progress: string; received_qty: number | null }[]) {
+          map[String(l.sub_no)] = { progress: l.progress, received_qty: l.received_qty }
+        }
+        setTrack(map)
+      })
+      .catch(() => {})
+    return () => { alive = false }
+  }, [docNo])
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
@@ -183,6 +203,8 @@ function PjSyncModal({ docNo, onClose }: { docNo: string; onClose: () => void })
                   <th className="px-4 py-2 border-b border-slate-800 text-right">數量</th>
                   <th className="px-4 py-2 border-b border-slate-800">單位</th>
                   <th className="px-4 py-2 border-b border-slate-800">交貨日</th>
+                  {isPo && <th className="px-4 py-2 border-b border-slate-800 text-emerald-400">進度</th>}
+                  {isPo && <th className="px-4 py-2 border-b border-slate-800 text-emerald-400">入庫</th>}
                   {isPo && <th className="px-4 py-2 border-b border-slate-800 text-cyan-400">銷售單/序</th>}
                   <th className="px-4 py-2 border-b border-slate-800">備註</th>
                 </tr>
@@ -198,6 +220,33 @@ function PjSyncModal({ docNo, onClose }: { docNo: string; onClose: () => void })
                       <td className="px-4 py-2 text-right text-slate-300">{r.qty > 0 ? r.qty.toLocaleString() : '—'}</td>
                       <td className="px-4 py-2 text-slate-400">{r.unit || '—'}</td>
                       <td className="px-4 py-2 text-slate-400 whitespace-nowrap">{r.end_date || '—'}</td>
+                      {isPo && (() => {
+                        const prog = track[String(r.sub_no)]?.progress ?? '未發單'
+                        const cls = prog === '已到倉' ? 'bg-emerald-900/50 text-emerald-300 border-emerald-700/50'
+                          : prog === '已出貨' ? 'bg-amber-900/50 text-amber-300 border-amber-700/50'
+                          : prog === '已發單' ? 'bg-sky-900/50 text-sky-300 border-sky-700/50'
+                          : 'bg-slate-800 text-slate-400 border-slate-600'
+                        return (
+                          <td className="px-4 py-2 whitespace-nowrap">
+                            <span className={`text-[10px] px-1.5 py-0.5 rounded border font-semibold ${cls}`}>{prog}</span>
+                          </td>
+                        )
+                      })()}
+                      {isPo && (() => {
+                        const recv = track[String(r.sub_no)]?.received_qty ?? null
+                        const full = recv != null && r.qty > 0 && recv >= r.qty
+                        return (
+                          <td className="px-4 py-2 whitespace-nowrap text-xs">
+                            {recv == null || recv <= 0 ? (
+                              <span className="text-slate-600">未入庫</span>
+                            ) : (
+                              <span className={full ? 'text-emerald-300' : 'text-amber-300'}>
+                                {full ? '已入庫' : '部分'} {recv.toLocaleString()}{r.qty > 0 ? `/${r.qty.toLocaleString()}` : ''}
+                              </span>
+                            )}
+                          </td>
+                        )
+                      })()}
                       {isPo && (
                         <td className="px-4 py-2 text-xs">
                           <div className="font-mono text-cyan-400">{String(rx?.MBP_LOT_NO ?? '—')}</div>

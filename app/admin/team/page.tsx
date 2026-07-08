@@ -86,6 +86,7 @@ export default function TeamPage() {
         { key: 'product_dev', label: '商品開發 (Product Dev)' },
         { key: 'info_board', label: '業務資訊看板 (Info Board)' },
         { key: 'argo_tool', label: 'ARGO 外掛區 (ARGO Tool)' },
+        { key: 'purchasing', label: '採購專區 (Purchasing)' },
       ]
     }
   ]
@@ -503,6 +504,13 @@ export default function TeamPage() {
                     {member.permissions?.includes('qa') && <span className="px-2 py-1 rounded bg-teal-900/30 text-teal-400 text-[10px] border border-teal-800">品保專區</span>}
                     {member.permissions?.includes('production_admin') && <span className="px-2 py-1 rounded bg-purple-900/30 text-purple-400 text-[10px] border border-purple-800">生產管理</span>}
                     {member.permissions?.includes('system_settings') && <span className="px-2 py-1 rounded bg-orange-900/30 text-orange-400 text-[10px] border border-orange-800">系統設定</span>}
+                    {member.permissions?.includes('estimation') && <span className="px-2 py-1 rounded bg-sky-900/30 text-sky-400 text-[10px] border border-sky-800">試算</span>}
+                    {member.permissions?.includes('argo_db') && <span className="px-2 py-1 rounded bg-orange-900/30 text-orange-300 text-[10px] border border-orange-700">ARGO資料庫</span>}
+                    {member.permissions?.includes('design') && <span className="px-2 py-1 rounded bg-pink-900/30 text-pink-400 text-[10px] border border-pink-800">美編天地</span>}
+                    {member.permissions?.includes('material') && <span className="px-2 py-1 rounded bg-yellow-900/30 text-yellow-400 text-[10px] border border-yellow-800">發料/領料</span>}
+                    {member.permissions?.includes('product_dev') && <span className="px-2 py-1 rounded bg-green-900/30 text-green-400 text-[10px] border border-green-800">商品開發</span>}
+                    {member.permissions?.includes('info_board') && <span className="px-2 py-1 rounded bg-amber-900/30 text-amber-400 text-[10px] border border-amber-800">業務資訊看板</span>}
+                    {member.permissions?.includes('argo_tool') && <span className="px-2 py-1 rounded bg-cyan-900/30 text-cyan-300 text-[10px] border border-cyan-700">ARGO外掛區</span>}
                   </>
                 )}
               </div>

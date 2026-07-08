@@ -4,7 +4,7 @@ import { NextRequest, NextResponse } from 'next/server'
 // 驗證方式：Header `Authorization: Bearer <WEBHOOK_SECRET>`
 // 不需要 bardshop-token cookie
 
-const ALLOWED_ACTIONS = ['sync_so', 'sync_mo', 'sync_pj', 'sync_po', 'sync_pr', 'sync_material_prep', 'run_mo_match'] as const
+const ALLOWED_ACTIONS = ['sync_so', 'sync_mo', 'sync_pj', 'sync_po', 'sync_pr', 'sync_material_prep', 'sync_vendor', 'run_mo_match'] as const
 type AllowedAction = typeof ALLOWED_ACTIONS[number]
 
 export async function POST(request: NextRequest) {

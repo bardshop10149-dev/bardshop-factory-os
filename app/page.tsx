@@ -294,6 +294,16 @@ export default function HomePage() {
   const canArgoTool = hasFeaturePermission('argo_tool')
   const canProductDev = hasFeaturePermission('product_dev')
   const canInfoBoard = hasFeaturePermission('info_board')
+  const canPurchasing = hasFeaturePermission('purchasing')
+  // 採購到期徽章：僅具權限者抓計數（API 端亦有 guardPermission 把關）
+  const [purchasingDue, setPurchasingDue] = useState(0)
+  useEffect(() => {
+    if (!canPurchasing) return
+    fetch('/api/purchasing/list?count=1')
+      .then(res => (res.ok ? res.json() : null))
+      .then(json => { if (json?.success) setPurchasingDue(Number(json.counts?.total) || 0) })
+      .catch(() => {})
+  }, [canPurchasing])
 
   return (
     <div className="min-h-screen bg-[#050b14] text-slate-300 font-sans selection:bg-cyan-500 selection:text-white relative overflow-y-auto flex flex-col items-center justify-start md:justify-center py-4 md:py-0">
@@ -837,6 +847,40 @@ export default function HomePage() {
               拍照繳庫／報工等 ARGO 工具。<br/>(ARGO Tool)
             </p>
             <span className="hidden md:inline-block px-4 py-2 rounded border border-slate-600 text-slate-300 text-xs font-mono group-hover:bg-cyan-600 group-hover:border-cyan-600 group-hover:text-white transition-all">
+              OPEN &rarr;
+            </span>
+          </Link>
+
+          {/* 採購專區 (Indigo) — OPEN 採購單追蹤 / 到期提醒，僅開放採購人員 */}
+          <Link href="/purchasing"
+            onClick={guardFeatureAccess('purchasing', '採購專區')}
+            onMouseEnter={() => setIsHovered('none')}
+            onMouseLeave={() => setIsHovered('none')}
+            className={`
+              group relative order-14 h-40 md:h-60 lg:h-64 rounded-2xl border border-slate-700 bg-slate-900/40 backdrop-blur-sm
+              flex flex-col items-center justify-center text-center p-3 md:p-6 transition-all duration-500 cursor-pointer
+              hover:border-indigo-500 hover:bg-slate-800/60 hover:shadow-[0_0_30px_rgba(99,102,241,0.15)]
+              ${canPurchasing ? '' : 'opacity-50 grayscale'}
+            `}
+          >
+            <div className="absolute top-4 right-4 flex items-center gap-1.5 px-2 py-1 bg-indigo-500/10 rounded border border-indigo-500/20">
+              <span className="text-[10px] text-indigo-400 font-bold uppercase tracking-wider">Purchasing</span>
+            </div>
+            {canPurchasing && purchasingDue > 0 && (
+              <div className="absolute top-4 left-4 px-2 py-1 rounded-full bg-rose-600 text-white text-[10px] font-bold" title={`${purchasingDue} 筆採購明細 10 天內到期且未出貨`}>
+                {purchasingDue}
+              </div>
+            )}
+            <div className="mb-3 md:mb-6 p-3 md:p-4 rounded-full bg-slate-800 group-hover:bg-indigo-900/50 text-slate-400 group-hover:text-indigo-400 transition-colors">
+              <svg className="w-7 h-7 md:w-10 md:h-10" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M3 3h2l.4 2M7 13h10l4-8H5.4M7 13L5.4 5M7 13l-2.293 2.293c-.63.63-.184 1.707.707 1.707H17m0 0a2 2 0 100 4 2 2 0 000-4zm-8 2a2 2 0 11-4 0 2 2 0 014 0z" />
+              </svg>
+            </div>
+            <h2 className="text-base md:text-xl font-bold text-white mb-1 md:mb-2 group-hover:text-indigo-400 transition-colors">採購專區</h2>
+            <p className="text-slate-500 text-[10px] md:text-xs mb-3 md:mb-6 group-hover:text-slate-300 px-1 md:px-2 hidden md:block">
+              OPEN 採購單追蹤與到期提醒。<br/>(Purchasing)
+            </p>
+            <span className="hidden md:inline-block px-4 py-2 rounded border border-slate-600 text-slate-300 text-xs font-mono group-hover:bg-indigo-600 group-hover:border-indigo-600 group-hover:text-white transition-all">
               OPEN &rarr;
             </span>
           </Link>
