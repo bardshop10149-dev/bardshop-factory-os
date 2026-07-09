@@ -549,11 +549,28 @@ export default function DailyOrderSheetPage() {
         if (rawTextStored.trim()) {
           const { rows: parsedRows } = parseSourceRows(rawTextStored, date)
           if (parsedRows.length > 0) {
-            const enrichedMap = new Map(storedRows.map(r => [r.row_key, r]))
+            // 使用複合鍵避免同 row_key 但不同序號的列互相覆蓋
+            const enrichedMap = new Map<string, SheetRow>()
+            for (const r of storedRows) {
+              if (r.match_line_no != null && r.match_line_no !== '') {
+                enrichedMap.set(`${r.row_key}||seq:${r.match_line_no}`, r)
+              }
+              if (!enrichedMap.has(r.row_key)) enrichedMap.set(r.row_key, r)
+            }
             finalRows = parsedRows.map(r => {
               const key = createRowKey(r)
-              const stored = enrichedMap.get(key)
-              const base: SheetRow = { ...r, row_key: key, mo_status: stored?.mo_status ?? null }
+              // 原始資料有序號時優先用複合鍵查找正確的已存列
+              const seqLookupKey = r.line_no_input ? `${key}||seq:${r.line_no_input}` : null
+              const stored = (seqLookupKey ? enrichedMap.get(seqLookupKey) : null) ?? enrichedMap.get(key)
+              // 原始資料已有序號時直接套用，不讓 DB 存值覆蓋
+              const base: SheetRow = {
+                ...r,
+                row_key: key,
+                mo_status: stored?.mo_status ?? null,
+                ...(r.line_no_input
+                  ? { match_line_no: r.line_no_input, match_status: 'matched' as MatchStatus, match_reason: '原始資料直接填入' }
+                  : {}),
+              }
               if (stored) {
                 if (stored.mo_number       !== undefined) base.mo_number       = stored.mo_number
                 if (stored.po_number       !== undefined) base.po_number       = stored.po_number
@@ -564,10 +581,13 @@ export default function DailyOrderSheetPage() {
                 if (stored.pr_number       !== undefined) base.pr_number       = stored.pr_number
                 if (stored.pr_sub_no       !== undefined) base.pr_sub_no       = stored.pr_sub_no
                 if (stored.pr_status       !== undefined) base.pr_status       = stored.pr_status
-                if (stored.match_status    !== undefined) base.match_status    = stored.match_status
-                if (stored.match_line_no   !== undefined) base.match_line_no   = stored.match_line_no
-                if (stored.match_pdl_seq   !== undefined) base.match_pdl_seq   = stored.match_pdl_seq
-                if (stored.match_reason    !== undefined) base.match_reason    = stored.match_reason
+                // 原始資料有序號時不讓 DB 的 match_* 欄位覆蓋（以原始資料為主）
+                if (!r.line_no_input) {
+                  if (stored.match_status    !== undefined) base.match_status    = stored.match_status
+                  if (stored.match_line_no   !== undefined) base.match_line_no   = stored.match_line_no
+                  if (stored.match_pdl_seq   !== undefined) base.match_pdl_seq   = stored.match_pdl_seq
+                  if (stored.match_reason    !== undefined) base.match_reason    = stored.match_reason
+                }
                 if (stored.material_prep_status !== undefined) base.material_prep_status = stored.material_prep_status
                 if (stored.argo_slip_no    !== undefined) base.argo_slip_no    = stored.argo_slip_no
                 if (stored.machine         !== undefined) base.machine         = stored.machine
@@ -804,9 +824,17 @@ export default function DailyOrderSheetPage() {
     }))
 
     // 保留已有狀態（相同 row_key 的保留舊狀態）
-    const existingMap = new Map(sheetRows.map(r => [r.row_key, r]))
+    // 使用複合鍵避免同 row_key 但不同序號的列互相覆蓋（如同一工單同品號有多筆）
+    const existingMap = new Map<string, SheetRow>()
+    for (const r of sheetRows) {
+      if (r.match_line_no != null && r.match_line_no !== '') {
+        existingMap.set(`${r.row_key}||seq:${r.match_line_no}`, r)
+      }
+      if (!existingMap.has(r.row_key)) existingMap.set(r.row_key, r)
+    }
     const merged = sheetRowsNew.map(r => {
-      const old = existingMap.get(r.row_key)
+      const seqKey = r.line_no_input ? `${r.row_key}||seq:${r.line_no_input}` : null
+      const old = (seqKey ? existingMap.get(seqKey) : null) ?? existingMap.get(r.row_key)
       return old ? { ...r, mo_status: old.mo_status, mo_number: old.mo_number } : r
     })
     setSheetRows(merged)
