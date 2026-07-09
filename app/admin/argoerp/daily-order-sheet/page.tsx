@@ -1103,6 +1103,8 @@ export default function DailyOrderSheetPage() {
       }
 
       const moMap = new Map<string, { mo_number: string }>()
+      // 以末碼（末兩位數字）為 key 的精準序號查詢，解決同品號多筆 MO 時只能找到第一筆的問題
+      const moSeqMap = new Map<string, string>() // source_order|product_code|seq(padded) → mo_number
       for (const log of (moLogs ?? [])) {
         if (!log.mo_number?.startsWith('MO')) continue  // 排除非製令單號的資料
         if (!activeMoNumbers.has(log.mo_number)) continue  // 排除已刪除的製令
@@ -1111,6 +1113,12 @@ export default function DailyOrderSheetPage() {
         const k2 = `${log.source_order}|${log.product_code}`
         if (!moMap.has(k1)) moMap.set(k1, { mo_number: log.mo_number })
         if (!moMap.has(k2)) moMap.set(k2, { mo_number: log.mo_number })
+        // 以 MO 末兩碼作為序號 key（MOT...34802 → seq='02'）
+        const suffix = log.mo_number.slice(-2)
+        if (/^\d{2}$/.test(suffix)) {
+          const seqKey = `${log.source_order}|${log.product_code}|${suffix}`
+          if (!moSeqMap.has(seqKey)) moSeqMap.set(seqKey, log.mo_number)
+        }
       }
 
       // 2. 查 erp_mo_lines（ARGO 同步區），source_order = 工單編號，mbp_part = 品項編碼
@@ -1186,6 +1194,8 @@ export default function DailyOrderSheetPage() {
           }
           if (!matchSeq) return r
           const erpConfirm = erpMoMap.get(`${r.order_number}|${r.item_code}|${matchSeq}`)
+                          ?? moSeqMap.get(`${r.order_number}|${r.item_code}|${matchSeq}`)
+                          ?? null
           if (!erpConfirm) return r              // ARGO 尚無資料，保留上傳 log 結果
           if (erpConfirm === r.mo_number) return r  // 已確認正確
           return { ...r, mo_number: erpConfirm, mo_status: '已匯入製令' as const }  // 更正
@@ -1199,7 +1209,17 @@ export default function DailyOrderSheetPage() {
           if (erpHit) return { ...r, mo_number: erpHit, mo_status: '已匯入製令' as const }
         }
 
-        // ② 上傳 log：你們系統建立的 MO，末碼=序號
+        // ② 上傳 log：你們系統建立的 MO
+        //   ②-a 序號精準比對（同品號多筆 MO 時）：以 MO 末兩碼對應 matchSeq
+        if (matchSeq) {
+          const seqHit = moSeqMap.get(`${r.order_number}|${r.item_code}|${matchSeq}`)
+          if (seqHit) {
+            const erpMosForOrder = erpMoBySourceOrder.get(r.order_number)
+            const stillInArgo = !erpMosForOrder || erpMosForOrder.has(seqHit)
+            if (stillInArgo) return { ...r, mo_number: seqHit, mo_status: '已匯入製令' as const }
+          }
+        }
+        //   ②-b qty 比對（唯一 MO 或無序號時兜底）
         const k1 = `${r.order_number}|${r.item_code}|${qty}`
         const logHit = moMap.get(k1) ?? moMap.get(`${r.order_number}|${r.item_code}`)
         if (logHit) {
