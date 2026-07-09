@@ -1420,7 +1420,7 @@ export default function DailyOrderSheetPage() {
     return null
   }
 
-  type PrCandidate = { doc_no: string; sub_no: string; item_code: string | null; ro: string; mbp_lot_no: string; status: string | null; _used: boolean }
+  type PrCandidate = { doc_no: string; sub_no: string; item_code: string | null; ro: string; mbp_lot_no: string; qty: number; status: string | null; _used: boolean }
   // 對僅 factory==='O' 的列做請購單比對；rows 已是最新狀態（含採購比對結果）
   // 比對優先序：
   //   (a) 直接 SO 號比對：請購 extra.PROJECT_ID / MBP_LOT_NO 直接帶出單表 SO 號（委外 MPO 類請購常見，無 RO）
@@ -1432,25 +1432,26 @@ export default function DailyOrderSheetPage() {
     roToPr: Map<string, PrCandidate[]>, // RO → 請購候選
     soToPr: Map<string, PrCandidate[]>, // SO → 請購候選（直接 SO 號比對）
   ): SheetRow[] => {
-    const pickHit = (cands: PrCandidate[] | undefined, itemCode: string | null | undefined): PrCandidate | undefined => {
+    const pickHit = (cands: PrCandidate[] | undefined, itemCode: string | null | undefined, rowQty: number): PrCandidate | undefined => {
       if (!cands || cands.length === 0) return undefined
       const myItem = (itemCode ?? '').trim()
-      // 優先：料號精準相符且未用
-      const exactHit = cands.find(c => !c._used && (c.item_code ?? '').trim() === myItem)
+      // 優先：料號精準相符、數量相符且未用
+      const exactHit = cands.find(c => !c._used && (c.item_code ?? '').trim() === myItem && c.qty === rowQty)
       if (exactHit) return exactHit
-      // 次之：PR 本身沒有料號（整張請購，不限定品項）且未用
-      const blankItemHit = cands.find(c => !c._used && !(c.item_code ?? '').trim())
+      // 次之：PR 本身沒有料號（整張請購，不限定品項）但數量相符且未用
+      const blankItemHit = cands.find(c => !c._used && !(c.item_code ?? '').trim() && c.qty === rowQty)
       if (blankItemHit) return blankItemHit
-      // 料號不符且 PR 本身有明確料號 → 不配（避免誤配到不同品項）
+      // 料號不符、或數量不符 → 不配（避免誤配到不同品項/不同數量的請購）
       return undefined
     }
     return rows.map(row => {
       if (row.factory !== 'O') return row
       const so = String(row.order_number ?? '').trim()
       if (!so) return { ...row, pr_number: null, pr_sub_no: null, pr_status: 'no_match' }
+      const rowQty = parseFloat(String(row.quantity).replace(/,/g, '')) || 0
 
       // (a) 直接 SO 號比對（優先）
-      const directHit = pickHit(soToPr.get(so), row.item_code)
+      const directHit = pickHit(soToPr.get(so), row.item_code, rowQty)
       if (directHit) {
         directHit._used = true
         return { ...row, pr_number: directHit.doc_no, pr_sub_no: directHit.sub_no, pr_status: 'matched' }
@@ -1464,7 +1465,7 @@ export default function DailyOrderSheetPage() {
           if (!c.mbp_lot_no) return true
           return c.mbp_lot_no === ro || c.mbp_lot_no === so
         })
-        const roHit = pickHit(roCands, row.item_code)
+        const roHit = pickHit(roCands, row.item_code, rowQty)
         if (roHit) {
           roHit._used = true
           return { ...row, pr_number: roHit.doc_no, pr_sub_no: roHit.sub_no, pr_status: 'matched' }
@@ -1484,25 +1485,25 @@ export default function DailyOrderSheetPage() {
     // 1) 直接 SO 號比對：請購 extra.PROJECT_ID 或 MBP_LOT_NO 直接帶出單表 SO 號
     //    （委外 MPO 類請購常將 SO 號存於 MBP_LOT_NO，且 SO_PROJECT_ID/RO 為空，無法走 RO 橋接）
     const soToPr = new Map<string, PrCandidate[]>()
-    const pushSoPr = (so: string, r: { doc_no: string; sub_no: string; item_code: string | null; status: string | null }) => {
+    const pushSoPr = (so: string, r: { doc_no: string; sub_no: string; item_code: string | null; qty: number; status: string | null }) => {
       const key = so.trim()
       if (!key) return
       if (!soToPr.has(key)) soToPr.set(key, [])
       const list = soToPr.get(key)!
       // 去重：同 doc_no#sub_no 只留一筆
       if (list.some(c => c.doc_no === r.doc_no && c.sub_no === r.sub_no)) return
-      list.push({ doc_no: r.doc_no, sub_no: r.sub_no, item_code: r.item_code, ro: '', mbp_lot_no: so, status: r.status, _used: false })
+      list.push({ doc_no: r.doc_no, sub_no: r.sub_no, item_code: r.item_code, ro: '', mbp_lot_no: so, qty: r.qty, status: r.status, _used: false })
     }
     for (const field of ['MBP_LOT_NO', 'PROJECT_ID'] as const) {
       const { data: prDirect, error: prDirectErr } = await supabase
         .from('erp_pj_sync')
-        .select('doc_no, sub_no, item_code, status, extra')
+        .select('doc_no, sub_no, item_code, qty, status, extra')
         .eq('doc_type', '請購單號')
         .in(`extra->>${field}`, soNos)
       if (prDirectErr) throw prDirectErr
       for (const r of prDirect ?? []) {
         const so = String((r.extra as Record<string, unknown> | null)?.[field] ?? '').trim()
-        pushSoPr(so, r)
+        pushSoPr(so, { doc_no: r.doc_no, sub_no: r.sub_no, item_code: r.item_code, qty: Number(r.qty ?? 0), status: r.status })
       }
     }
 
@@ -1529,7 +1530,7 @@ export default function DailyOrderSheetPage() {
     if (ros.length > 0) {
       const { data: prRows, error: prErr } = await supabase
         .from('erp_pj_sync')
-        .select('doc_no, sub_no, item_code, status, extra')
+        .select('doc_no, sub_no, item_code, qty, status, extra')
         .eq('doc_type', '請購單號')
         .in('extra->>SO_PROJECT_ID', ros)
       if (prErr) throw prErr
@@ -1538,7 +1539,7 @@ export default function DailyOrderSheetPage() {
         if (!ro) continue
         if (!roToPr.has(ro)) roToPr.set(ro, [])
         const mbpLotNo = String((r.extra as Record<string, unknown> | null)?.MBP_LOT_NO ?? '').trim()
-        roToPr.get(ro)!.push({ doc_no: r.doc_no, sub_no: r.sub_no, item_code: r.item_code, ro, mbp_lot_no: mbpLotNo, status: r.status, _used: false })
+        roToPr.get(ro)!.push({ doc_no: r.doc_no, sub_no: r.sub_no, item_code: r.item_code, ro, mbp_lot_no: mbpLotNo, qty: Number(r.qty ?? 0), status: r.status, _used: false })
       }
     }
 
