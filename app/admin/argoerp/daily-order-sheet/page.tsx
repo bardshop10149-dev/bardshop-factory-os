@@ -1196,7 +1196,15 @@ export default function DailyOrderSheetPage() {
           const erpConfirm = erpMoMap.get(`${r.order_number}|${r.item_code}|${matchSeq}`)
                           ?? moSeqMap.get(`${r.order_number}|${r.item_code}|${matchSeq}`)
                           ?? null
-          if (!erpConfirm) return r              // ARGO 尚無資料，保留上傳 log 結果
+          if (!erpConfirm) {
+            // 無法由 ARGO/上傳 log 確認正確 MO，以末碼驗證序號是否符合
+            const moSuffix = r.mo_number.slice(-2)
+            if (/^\d{2}$/.test(moSuffix) && moSuffix !== matchSeq) {
+              // 末碼與序號不符 → 清除錯誤比對結果
+              return { ...r, mo_number: undefined, mo_status: null, material_prep_status: null }
+            }
+            return r  // 末碼符合，保留
+          }
           if (erpConfirm === r.mo_number) return r  // 已確認正確
           return { ...r, mo_number: erpConfirm, mo_status: '已匯入製令' as const }  // 更正
         }
@@ -1241,8 +1249,19 @@ export default function DailyOrderSheetPage() {
         return r
       })
 
+      // 去重：同一製令單號只允許配對一列（以第一列為準，後續清除）
+      const usedMoSet = new Set<string>()
+      const deduped: SheetRow[] = next.map(r => {
+        if (!r.mo_number) return r
+        if (usedMoSet.has(r.mo_number)) {
+          return { ...r, mo_number: undefined, mo_status: null, material_prep_status: null }
+        }
+        usedMoSet.add(r.mo_number)
+        return r
+      })
+
       // 3. 對所有有 mo_number 的列查批備料狀態
-      const moNumbers = [...new Set(next.map(r => r.mo_number).filter((v): v is string => !!v))]
+      const moNumbers = [...new Set(deduped.map(r => r.mo_number).filter((v): v is string => !!v))]
       if (moNumbers.length > 0) {
         const { data: prepLogs, error: prepErr } = await supabase
           .from('argoerp_material_prep_log')
@@ -1264,13 +1283,13 @@ export default function DailyOrderSheetPage() {
           (erpPrepLines ?? []).map((l: { mo_number: string }) => l.mo_number).filter(Boolean)
         )
 
-        for (let i = 0; i < next.length; i++) {
-          const moNo = next[i].mo_number
+        for (let i = 0; i < deduped.length; i++) {
+          const moNo = deduped[i].mo_number
           if (!moNo) continue
           if (erpPrepSet.has(moNo)) {
-            next[i] = { ...next[i], material_prep_status: '已批備料' }
+            deduped[i] = { ...deduped[i], material_prep_status: '已批備料' }
           } else if (prepMap.has(moNo)) {
-            next[i] = { ...next[i], material_prep_status: prepMap.get(moNo)! }
+            deduped[i] = { ...deduped[i], material_prep_status: prepMap.get(moNo)! }
           }
         }
       }
@@ -1278,7 +1297,7 @@ export default function DailyOrderSheetPage() {
       // 若 row 原本已分配機台，轉換成 MO 後遷移至 moMachines
       // ⚠️ 必須在 setSheetRows 之前完成，否則 useEffect(sheetRows) 會重新 fetch
       //    mo-machine-assign 舊資料覆蓋掉剛遷移的機台
-      const toMigrate = next.filter(r => r.mo_number && r.machine)
+      const toMigrate = deduped.filter(r => r.mo_number && r.machine)
       if (toMigrate.length > 0) {
         const assignments = toMigrate.map(r => ({ mo_number: r.mo_number!, machine: r.machine! }))
         setMoMachines(prev => {
@@ -1293,19 +1312,19 @@ export default function DailyOrderSheetPage() {
         }).catch(() => {})
       }
 
-      setSheetRows(next)
+      setSheetRows(deduped)
 
       // 立即儲存
       const res = await fetch('/api/argoerp/daily-order-sheet', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sheet_date: selectedDate, raw_text: currentRawText, rows: next }),
+        body: JSON.stringify({ sheet_date: selectedDate, raw_text: currentRawText, rows: deduped }),
       })
       const json = await res.json()
       if (!res.ok || !json.success) throw new Error(json.error || `HTTP ${res.status}`)
-      const newMo = next.filter((r, i) => r.mo_number && !sheetRows[i]?.mo_number).length
-      const batchPrepCount = next.filter(r => r.material_prep_status === '已批備料').length
-      const prepCount = next.filter(r => r.material_prep_status && r.material_prep_status !== '已批備料').length
+      const newMo = deduped.filter((r, i) => r.mo_number && !sheetRows[i]?.mo_number).length
+      const batchPrepCount = deduped.filter(r => r.material_prep_status === '已批備料').length
+      const prepCount = deduped.filter(r => r.material_prep_status && r.material_prep_status !== '已批備料').length
       const prepMsg = batchPrepCount > 0 ? `已批備料 ${batchPrepCount} 筆${prepCount > 0 ? `、其他狀態 ${prepCount} 筆` : ''}` : prepCount > 0 ? `批備料狀態 ${prepCount} 筆` : '無批備料紀錄'
       setSaveMsg(`✅ 製令狀態同步完成：新增 ${newMo} 筆製令連結，${prepMsg}`)
       setTimeout(() => setSaveMsg(''), 5000)
