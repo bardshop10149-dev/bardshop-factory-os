@@ -43,6 +43,20 @@ function detectFactory(docType: string): 'T' | 'C' | 'O' {
   return 'T'
 }
 
+// 與每日出單表 createRowKey 一致的識別鍵，用於對應出單表已比對的序號
+function sheetRowIdentityKey(r: Record<string, unknown>): string {
+  return [
+    r.order_number ?? '',
+    r.doc_type ?? '',
+    r.factory ?? '',
+    r.item_code ?? '',
+    r.item_name ?? '',
+    r.note ?? '',
+    r.quantity ?? '',
+    r.delivery_date ?? '',
+  ].map(v => String(v)).join('||')
+}
+
 // ==================== ArgoERP 匯出欄位定義 ====================
 interface ExportColumn {
   key: string
@@ -650,10 +664,56 @@ export default function OrderBatchExportPage() {
   const [postSyncModal, setPostSyncModal] = useState<{ show: boolean; steps: PostSyncStep[]; error: string | null } | null>(null)
 
   // ---- ERP 销售訂單 比對（品項編碼 + 數量 對源單號 + 行號）----
-  const buildSoMatches = useCallback(async (rows: SourceRow[]) => {
+  const buildSoMatches = useCallback(async (rows: SourceRow[], sheetDateOverride?: string | null) => {
     if (rows.length === 0) { setSoMatchResults([]); return }
     setSoMatchLoading(true)
     try {
+      // ── 優先：直接從每日出單表取得已比對序號 ────────────────────────
+      // 每日出單表已套用嚴謹的序號比對/末碼驗證/去重邏輯，此處以出單表為準，
+      // 不再自行重算。同 identity key 的多筆（如序號 1/2）依出單表順序逐一取用。
+      const date = sheetDateOverride !== undefined ? sheetDateOverride : loadedFromSheetDate
+      if (date) {
+        try {
+          const res = await fetch(`/api/argoerp/daily-order-sheet?date=${date}`)
+          const json = await res.json()
+          const sheetRows = (json?.success && json.sheet && Array.isArray(json.sheet.rows))
+            ? json.sheet.rows as Array<Record<string, unknown>>
+            : []
+          const storedByKey = new Map<string, SoMatchResult[]>()
+          for (const sr of sheetRows) {
+            if (sr.match_status == null && sr.match_line_no == null) continue
+            const key = sheetRowIdentityKey(sr)
+            const arr = storedByKey.get(key) ?? []
+            arr.push({
+              line_no: (sr.match_line_no as string | null) ?? null,
+              pdl_seq: (sr.match_pdl_seq as number | null) ?? null,
+              status: (sr.match_status as SoMatchResult['status']) ?? 'no_order',
+              reason: (sr.match_reason as string | null) ?? '',
+            })
+            storedByKey.set(key, arr)
+          }
+          if (storedByKey.size > 0) {
+            const consume = new Map<string, number>()
+            const results: SoMatchResult[] = rows.map(src => {
+              const key = sheetRowIdentityKey(src as unknown as Record<string, unknown>)
+              const queue = storedByKey.get(key)
+              if (queue && queue.length > 0) {
+                const idx = consume.get(key) ?? 0
+                const hit = queue[Math.min(idx, queue.length - 1)]
+                consume.set(key, idx + 1)
+                return hit
+              }
+              return { line_no: null, pdl_seq: null, status: 'no_order' as const, reason: '出單表尚無此列的比對結果，請至每日出單表執行一鍵全同步' }
+            })
+            setSoMatchResults(results)
+            return
+          }
+        } catch (e) {
+          console.warn('讀取出單表序號失敗，改用即時比對：', e)
+        }
+      }
+
+      // ── 後備：出單表無比對結果時，即時以品號+數量比對 erp_so_lines ──
       const orderNumbers = [...new Set(rows.map(r => r.order_number).filter(Boolean))]
       if (orderNumbers.length === 0) {
         setSoMatchResults(rows.map(() => ({ line_no: null, pdl_seq: null, status: 'no_order' as const, reason: '無比對到對應的來源單號' })))
@@ -701,7 +761,7 @@ export default function OrderBatchExportPage() {
     } finally {
       setSoMatchLoading(false)
     }
-  }, [])
+  }, [loadedFromSheetDate])
 
   // 載入每日出單表日期清單
   useEffect(() => {
@@ -756,34 +816,10 @@ export default function OrderBatchExportPage() {
       setSelectedRows(new Set())
       setLoadedFromSheetDate(date)
 
-      // 若每日出單表已有預先比對結果，直接套用，不必重跑
-      // 但若出單表上次更新超過 3 天，視為結果可能過時，自動重新比對
-      const hasPrematched = sheetRows.some(r => r.match_status)
-      const sheetUpdatedAt = json.sheet.updated_at as string | null
-      const isStale = sheetUpdatedAt
-        ? (Date.now() - new Date(sheetUpdatedAt).getTime()) > 3 * 24 * 60 * 60 * 1000
-        : false
-      if (hasPrematched && !isStale) {
-        const presetMatches: SoMatchResult[] = sheetRows
-          .filter(r => r.factory === 'T' && (includeAlreadyImported || r.mo_status !== '已匯入製令'))
-          .map(r => {
-            const status = (r.match_status as SoMatchResult['status']) || 'no_order'
-            return {
-              line_no: r.match_line_no ?? null,
-              pdl_seq: r.match_pdl_seq ?? null,
-              status,
-              reason: r.match_reason ?? '',
-            }
-          })
-        setSoMatchResults(presetMatches)
-      } else {
-        if (hasPrematched && isStale) {
-          const updatedDate = sheetUpdatedAt ? new Date(sheetUpdatedAt).toLocaleDateString('zh-TW') : '未知'
-          setSaveMsg(`⚠️ 出單表比對結果已超過 3 天（${updatedDate}），自動重新比對中…`)
-          setTimeout(() => setSaveMsg(''), 4000)
-        }
-        buildSoMatches(rows)
-      }
+      // 直接以出單表已比對的序號為準（buildSoMatches 會以 identity key 對應，
+      // 同 key 多筆依出單表順序逐一取用，序號 1/2 不會互相蓋掉）。
+      // 出單表尚無比對結果時，buildSoMatches 內部會後備即時比對。
+      await buildSoMatches(rows, date)
     } catch (e) {
       alert(`載入出單表失敗：${e}`)
     }
