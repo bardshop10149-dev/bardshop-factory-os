@@ -34,6 +34,12 @@ interface SourceRow {
   upload_ro: string       // 上傳RO
   order_status: string    // 訂單狀態
   pm_note: string         // 生管/物管備註
+  // 從每日出單表載入時，直接帶上該列自己的比對序號（每列各自保存，
+  // 移除其他同品號列時不會互相影響）
+  match_line_no?: string | null
+  match_pdl_seq?: number | null
+  match_status?: 'matched' | 'no_order' | 'no_qty_match'
+  match_reason?: string
 }
 
 // 根據單據種類自動判斷廠別
@@ -668,9 +674,24 @@ export default function OrderBatchExportPage() {
     if (rows.length === 0) { setSoMatchResults([]); return }
     setSoMatchLoading(true)
     try {
-      // ── 優先：直接從每日出單表取得已比對序號 ────────────────────────
-      // 每日出單表已套用嚴謹的序號比對/末碼驗證/去重邏輯，此處以出單表為準，
-      // 不再自行重算。同 identity key 的多筆（如序號 1/2）依出單表順序逐一取用。
+      // ── 最優先：各列自己帶的出單表序號 ──────────────────────────
+      // 每列從出單表載入時已保存自己的 match_line_no，移除其他同品號列時
+      // 各列序號不會互相影響（序號 2/4 永遠是 2/4）。
+      if (rows.some(r => r.match_status != null)) {
+        setSoMatchResults(rows.map(r => r.match_status != null
+          ? {
+              line_no: r.match_line_no ?? null,
+              pdl_seq: r.match_pdl_seq ?? null,
+              status: r.match_status,
+              reason: r.match_reason ?? '',
+            }
+          : { line_no: null, pdl_seq: null, status: 'no_order' as const, reason: '出單表尚無此列的比對結果，請至每日出單表執行一鍵全同步' }
+        ))
+        return
+      }
+
+      // ── 次優先：以 identity key 從出單表取得已比對序號 ─────────────
+      // （沒有逐列帶序號時，如舊暫存資料）
       const date = sheetDateOverride !== undefined ? sheetDateOverride : loadedFromSheetDate
       if (date) {
         try {
@@ -811,13 +832,17 @@ export default function OrderBatchExportPage() {
           item_name: r.item_name, note: r.note, quantity: r.quantity,
           delivery_date: r.delivery_date, plate_count: r.plate_count,
           upload_ro: r.upload_ro, order_status: r.order_status, pm_note: r.pm_note,
+          // 帶上每列自己的出單表比對序號（每列各自保存）
+          match_line_no: r.match_line_no ?? null,
+          match_pdl_seq: r.match_pdl_seq ?? null,
+          match_status: (r.match_status as SourceRow['match_status']) ?? undefined,
+          match_reason: r.match_reason ?? undefined,
         }))
       setSourceRows(rows)
       setSelectedRows(new Set())
       setLoadedFromSheetDate(date)
 
-      // 直接以出單表已比對的序號為準（buildSoMatches 會以 identity key 對應，
-      // 同 key 多筆依出單表順序逐一取用，序號 1/2 不會互相蓋掉）。
+      // 直接以每列自己帶的出單表序號為準（移除其他列不影響各列序號）。
       // 出單表尚無比對結果時，buildSoMatches 內部會後備即時比對。
       await buildSoMatches(rows, date)
     } catch (e) {
@@ -1724,6 +1749,8 @@ export default function OrderBatchExportPage() {
         updateSheetRowStatuses(loadedFromSheetDate, moving, '暫緩區')
       }
       setSourceRows(prev => prev.filter((_, i) => !selectedRows.has(i)))
+      // 同步移除對應的比對結果，保持與 sourceRows 索引對齊（各列序號不變）
+      setSoMatchResults(prev => prev.filter((_, i) => !selectedRows.has(i)))
       setSelectedRows(new Set())
     } catch (e) {
       const msg = e instanceof Error ? e.message : (typeof e === 'object' ? JSON.stringify(e) : String(e))
@@ -1735,6 +1762,8 @@ export default function OrderBatchExportPage() {
     if (selectedRows.size === 0) return
     if (!confirm(`確定要刪除選取的 ${selectedRows.size} 筆資料？此操作不可復原。`)) return
     setSourceRows(prev => prev.filter((_, i) => !selectedRows.has(i)))
+    // 同步移除對應的比對結果，保持與 sourceRows 索引對齊（各列序號不變）
+    setSoMatchResults(prev => prev.filter((_, i) => !selectedRows.has(i)))
     setSelectedRows(new Set())
   }, [selectedRows])
 
@@ -2029,7 +2058,7 @@ export default function OrderBatchExportPage() {
                           </button>
                         </td>
                         {SOURCE_DISPLAY_COLS.filter(c => c.key !== 'order_number' && c.key !== 'doc_type').map(col => (
-                          <td key={col.key} className={`px-3 py-2 text-slate-300 whitespace-nowrap truncate text-xs ${col.key === 'customer' ? 'max-w-[100px]' : 'max-w-[250px]'}`} title={row[col.key] || ''}>
+                          <td key={col.key} className={`px-3 py-2 text-slate-300 whitespace-nowrap truncate text-xs ${col.key === 'customer' ? 'max-w-[100px]' : 'max-w-[250px]'}`} title={String(row[col.key] ?? '')}>
                             {row[col.key] || <span className="text-slate-700">—</span>}
                           </td>
                         ))}
