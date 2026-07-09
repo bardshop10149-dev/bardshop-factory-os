@@ -1901,6 +1901,8 @@ export default function DailyOrderSheetPage() {
       const normalizeTextAll = (v: string): string => v.replace(/\s+/g, '').trim()
       const usedLineNosByKeyAll = new Map<string, Set<string>>()
       currentRows = currentRows.map(src => {
+        // 原始資料已填入序號（B欄）→ 以原始資料為主，跳過比對
+        if (src.line_no_input) return src
         if (!src.order_number || !soProjectIds.has(src.order_number)) {
           return { ...src, match_status: 'no_order', match_line_no: null, match_pdl_seq: null, match_reason: '無對應來源單號' }
         }
@@ -1958,6 +1960,7 @@ export default function DailyOrderSheetPage() {
         activeMoNumbers = new Set((summaryRows ?? []).map(r => r.mo_number))
       }
       const moMap = new Map<string, { mo_number: string }>()
+      const moSeqMapAll = new Map<string, string>() // source_order|product_code|seq(padded) → mo_number
       for (const log of (moLogs ?? [])) {
         if (!log.mo_number?.startsWith('MO') || !activeMoNumbers.has(log.mo_number)) continue
         const qty = String(log.planned_qty ?? '').trim()
@@ -1965,6 +1968,11 @@ export default function DailyOrderSheetPage() {
         const k2 = `${log.source_order}|${log.product_code}`
         if (!moMap.has(k1)) moMap.set(k1, { mo_number: log.mo_number })
         if (!moMap.has(k2)) moMap.set(k2, { mo_number: log.mo_number })
+        const suffix = log.mo_number.slice(-2)
+        if (/^\d{2}$/.test(suffix)) {
+          const seqKey = `${log.source_order}|${log.product_code}|${suffix}`
+          if (!moSeqMapAll.has(seqKey)) moSeqMapAll.set(seqKey, log.mo_number)
+        }
       }
       const erpMoMap = new Map<string, string>()
       const erpMoBaseMap = new Map<string, string[]>()
@@ -1990,15 +1998,33 @@ export default function DailyOrderSheetPage() {
           const erpMosForOrder = erpMoBySourceOrder.get(r.order_number)
           if (erpMosForOrder && !erpMosForOrder.has(r.mo_number))
             return { ...r, mo_number: undefined, mo_status: null, material_prep_status: null }
+          if (!erpMosForOrder && !activeMoNumbers.has(r.mo_number))
+            return { ...r, mo_number: undefined, mo_status: null, material_prep_status: null }
           if (!matchSeq) return r
           const erpConfirm = erpMoMap.get(`${r.order_number}|${r.item_code}|${matchSeq}`)
-          if (!erpConfirm || erpConfirm === r.mo_number) return r
+                          ?? moSeqMapAll.get(`${r.order_number}|${r.item_code}|${matchSeq}`)
+                          ?? null
+          if (!erpConfirm) {
+            const moSuffix = r.mo_number.slice(-2)
+            if (/^\d{2}$/.test(moSuffix) && moSuffix !== matchSeq)
+              return { ...r, mo_number: undefined, mo_status: null, material_prep_status: null }
+            return r
+          }
+          if (erpConfirm === r.mo_number) return r
           return { ...r, mo_number: erpConfirm, mo_status: '已匯入製令' as const }
         }
         const qty = String(r.quantity).trim()
         if (matchSeq) {
           const erpHit = erpMoMap.get(`${r.order_number}|${r.item_code}|${matchSeq}`)
           if (erpHit) return { ...r, mo_number: erpHit, mo_status: '已匯入製令' as const }
+        }
+        if (matchSeq) {
+          const seqHit = moSeqMapAll.get(`${r.order_number}|${r.item_code}|${matchSeq}`)
+          if (seqHit) {
+            const erpMosForOrder = erpMoBySourceOrder.get(r.order_number)
+            const stillInArgo = !erpMosForOrder || erpMosForOrder.has(seqHit)
+            if (stillInArgo) return { ...r, mo_number: seqHit, mo_status: '已匯入製令' as const }
+          }
         }
         const logHit = moMap.get(`${r.order_number}|${r.item_code}|${qty}`) ?? moMap.get(`${r.order_number}|${r.item_code}`)
         if (logHit) {
@@ -2011,6 +2037,15 @@ export default function DailyOrderSheetPage() {
         if (baseHits.length === 1) return { ...r, mo_number: baseHits[0], mo_status: '已匯入製令' as const }
         if (r.mo_number && !r.mo_number.startsWith('MO'))
           return { ...r, mo_number: undefined, mo_status: null, material_prep_status: null }
+        return r
+      })
+      // 去重：同一製令單號只允許配對一列
+      const usedMoSetAll = new Set<string>()
+      currentRows = currentRows.map(r => {
+        if (!r.mo_number) return r
+        if (usedMoSetAll.has(r.mo_number))
+          return { ...r, mo_number: undefined, mo_status: null, material_prep_status: null }
+        usedMoSetAll.add(r.mo_number)
         return r
       })
       const moNumbers = [...new Set(currentRows.map(r => r.mo_number).filter((v): v is string => !!v))]
