@@ -65,7 +65,7 @@ export type MatchStatus = 'matched' | 'no_order' | 'no_qty_match'
 
 export interface SheetRow extends SourceRow {
   row_key: string
-  mo_status: '已匯入製令' | '暫緩區' | null
+  mo_status: '已匯入製令' | null
   mo_number?: string
   // 常平採購單比對結果（對應 erp_pj_sync）
   po_number?: string | null
@@ -309,7 +309,6 @@ function downloadCsv(fileName: string, headers: string[], rows: unknown[][]): vo
 const STATUS_LABELS: Record<string, { label: string; cls: string }> = {
   '已匯入製令': { label: '已匯入製令', cls: 'bg-emerald-900/50 text-emerald-300 border-emerald-700/50' },
   '已匯入採單': { label: '已匯入採單', cls: 'bg-orange-900/50 text-orange-300 border-orange-700/50' },
-  '暫緩區': { label: '暫緩區', cls: 'bg-amber-900/50 text-amber-300 border-amber-700/50' },
 }
 
 // ── 交期檢查工具函式 ──────────────────────────────────────────────────────────
@@ -2904,7 +2903,6 @@ export default function DailyOrderSheetPage() {
                   <span className="text-slate-300 text-sm font-medium">共 <span className="text-cyan-300 font-bold">{sheetRows.length}</span> 筆</span>
                   <span className="text-xs text-slate-500">
                     已匯入製令：<span className="text-emerald-400">{sheetRows.filter(r => r.mo_status === '已匯入製令').length}</span>
-                    ／暫緩區：<span className="text-amber-400">{sheetRows.filter(r => r.mo_status === '暫緩區').length}</span>
                     ／尚未轉單：<span className="text-slate-400">{sheetRows.filter(r => !r.mo_status).length}</span>
                     {sheetRows.some(r => (r.doc_type ?? '').includes('集單')) && (
                       <span className="ml-2 text-violet-400">
@@ -3044,8 +3042,6 @@ export default function DailyOrderSheetPage() {
                             className={`border-b border-slate-800/60 transition-colors ${
                               row.mo_status === '已匯入製令'
                                 ? 'bg-emerald-950/20'
-                                : row.mo_status === '暫緩區'
-                                ? 'bg-amber-950/20'
                                 : row.factory === 'C' && row.po_status === 'matched'
                                 ? 'bg-orange-950/20'
                                 : row.factory === 'O' && (row.po_status === 'matched' || row.mo_number)

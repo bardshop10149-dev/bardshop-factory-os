@@ -28,7 +28,7 @@ interface GroupRow {
   order_status: string
   pm_note: string
   receiver: string
-  mo_status: '已匯入製令' | '暫緩區' | null
+  mo_status: '已匯入製令' | null
   mo_number?: string
   match_line_no?: string | null
   sheet_date: string

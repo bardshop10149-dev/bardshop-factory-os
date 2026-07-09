@@ -1,6 +1,6 @@
 ﻿'use client'
 
-import { useState, useCallback, useEffect, useMemo } from 'react'
+import { useState, useCallback, useEffect, useMemo, useRef } from 'react'
 import * as XLSX from 'xlsx'
 import { supabase } from '../../../../lib/supabaseClient'
 import SoOrderModal from '../../../../components/SoOrderModal'
@@ -192,14 +192,6 @@ interface SoMatchResult {
   pdl_seq: number | null
   status: 'matched' | 'no_order' | 'no_qty_match'
   reason: string
-}
-
-interface FailedImportItem {
-  key: string
-  row: SourceRow
-  factory: 'T' | 'C' | 'O'
-  error: string
-  attemptedAt: string
 }
 
 // ==================== 工具函式 ====================
@@ -521,34 +513,6 @@ function createSourceRowKey(row: SourceRow): string {
   ].join('||')
 }
 
-function mergeSourceRows(existing: SourceRow[], additions: SourceRow[]): SourceRow[] {
-  const rowMap = new Map(existing.map(row => [createSourceRowKey(row), row]))
-  additions.forEach(row => {
-    rowMap.set(createSourceRowKey(row), row)
-  })
-  return [...rowMap.values()]
-}
-
-function mergeFailedImports(existing: FailedImportItem[], rows: SourceRow[], error: string, attemptedAt: string): FailedImportItem[] {
-  const itemMap = new Map(existing.map(item => [item.key, item]))
-  rows.forEach(row => {
-    const key = createSourceRowKey(row)
-    itemMap.set(key, {
-      key,
-      row,
-      factory: row.factory,
-      error,
-      attemptedAt,
-    })
-  })
-  return [...itemMap.values()]
-}
-
-function removeFailedImportsByRows(existing: FailedImportItem[], rows: SourceRow[]): FailedImportItem[] {
-  const keys = new Set(rows.map(createSourceRowKey))
-  return existing.filter(item => !keys.has(item.key))
-}
-
 function sourceRowsToTsv(rows: SourceRow[]): string {
   const header = INPUT_COLUMNS.join('\t')
   const lines = rows.map(row => [
@@ -577,7 +541,6 @@ function sourceRowsToTsv(rows: SourceRow[]): string {
 }
 
 const SOURCE_ROWS_STORAGE_KEY = 'argoerp_order_batch_source_rows'
-const FAILED_IMPORTS_STORAGE_KEY = 'argoerp_order_batch_failed_imports'
 
 function saveToStorage(rows: SourceRow[]): void {
   if (typeof window === 'undefined') return
@@ -585,27 +548,6 @@ function saveToStorage(rows: SourceRow[]): void {
     localStorage.setItem(SOURCE_ROWS_STORAGE_KEY, JSON.stringify(rows))
   } catch {
     // ignore local cache failure
-  }
-}
-
-function saveFailedImports(items: FailedImportItem[]): void {
-  if (typeof window === 'undefined') return
-  try {
-    localStorage.setItem(FAILED_IMPORTS_STORAGE_KEY, JSON.stringify(items))
-  } catch {
-    // ignore local cache failure
-  }
-}
-
-function loadFailedImportsFromStorage(): FailedImportItem[] {
-  if (typeof window === 'undefined') return []
-  try {
-    const raw = localStorage.getItem(FAILED_IMPORTS_STORAGE_KEY)
-    if (!raw) return []
-    const parsed = JSON.parse(raw)
-    return Array.isArray(parsed) ? (parsed as FailedImportItem[]) : []
-  } catch {
-    return []
   }
 }
 
@@ -626,11 +568,9 @@ export default function OrderBatchExportPage() {
   const [sheetDatesLoading, setSheetDatesLoading] = useState(false)
   const [loadedFromSheetDate, setLoadedFromSheetDate] = useState<string | null>(null)
   const [sheetPickerDate, setSheetPickerDate] = useState<string>('')
-  const [includeAlreadyImported, setIncludeAlreadyImported] = useState(false)
   const [exportFormat, setExportFormat] = useState<'csv' | 'xlsx'>('csv')
   const [saveMsg, setSaveMsg] = useState('')
   const [importingFactory, setImportingFactory] = useState<'T' | 'C' | 'O' | null>(null)
-  const [failedImports, setFailedImports] = useState<FailedImportItem[]>([])
   const [importPreview, setImportPreview] = useState<{
     factory: 'T' | 'C' | 'O'
     dbMax: number
@@ -660,10 +600,6 @@ export default function OrderBatchExportPage() {
   const [manualMoErrors, setManualMoErrors] = useState<Record<string, string>>({})
   const [manualMoImporting, setManualMoImporting] = useState(false)
   const [manualMoMsg, setManualMoMsg] = useState('')
-
-  useEffect(() => {
-    setFailedImports(loadFailedImportsFromStorage())
-  }, [])
 
   // ---- 匯入後自動同步進度 Modal ----
   type PostSyncStep = { label: string; status: 'pending' | 'running' | 'done' | 'error' }
@@ -784,16 +720,21 @@ export default function OrderBatchExportPage() {
     }
   }, [loadedFromSheetDate])
 
-  // 載入每日出單表日期清單
+  // 載入每日出單表日期清單（預設選今天）
+  const autoLoadedRef = useRef(false)
   useEffect(() => {
     setSheetDatesLoading(true)
     fetch('/api/argoerp/daily-order-sheet')
       .then(r => r.json())
       .then(json => {
         if (json.success) {
-          setAvailableSheetDates(json.sheets ?? [])
-          if (!sheetPickerDate && json.sheets?.length > 0) {
-            setSheetPickerDate(json.sheets[0].sheet_date)
+          const sheets = (json.sheets ?? []) as { sheet_date: string; row_count: number }[]
+          setAvailableSheetDates(sheets)
+          if (!sheetPickerDate && sheets.length > 0) {
+            const t = new Date()
+            const todayStr = `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, '0')}-${String(t.getDate()).padStart(2, '0')}`
+            const hasToday = sheets.some(s => s.sheet_date === todayStr)
+            setSheetPickerDate(hasToday ? todayStr : sheets[0].sheet_date)
           }
         }
       })
@@ -807,10 +748,6 @@ export default function OrderBatchExportPage() {
     if (sourceRows.length > 0) saveToStorage(sourceRows)
   }, [sourceRows])
 
-  useEffect(() => {
-    saveFailedImports(failedImports)
-  }, [failedImports])
-
   // ---- 從每日出單表載入資料 ----
   const handleLoadFromSheet = useCallback(async (date: string) => {
     if (!date) return
@@ -823,7 +760,7 @@ export default function OrderBatchExportPage() {
       }
       const sheetRows = (json.sheet.rows ?? []) as Array<SourceRow & { mo_status?: string; match_status?: string; match_line_no?: string | null; match_pdl_seq?: number | null; match_reason?: string | null }>
       const rows: SourceRow[] = sheetRows
-        .filter(r => r.factory === 'T' && !(r.doc_type ?? '').includes('集單') && (includeAlreadyImported || r.mo_status !== '已匯入製令'))
+        .filter(r => r.factory === 'T' && !(r.doc_type ?? '').includes('集單') && r.mo_status !== '已匯入製令')
         .map(r => ({
           order_number: r.order_number, doc_type: r.doc_type, factory: r.factory,
           receiver: r.receiver, is_sample: r.is_sample, has_material: r.has_material,
@@ -848,13 +785,21 @@ export default function OrderBatchExportPage() {
     } catch (e) {
       alert(`載入出單表失敗：${e}`)
     }
-  }, [buildSoMatches, includeAlreadyImported])
+  }, [buildSoMatches])
+
+  // 頁面首次取得預設日期後，自動載入當日未匹配製令的訂單
+  useEffect(() => {
+    if (sheetPickerDate && !autoLoadedRef.current) {
+      autoLoadedRef.current = true
+      void handleLoadFromSheet(sheetPickerDate)
+    }
+  }, [sheetPickerDate, handleLoadFromSheet])
 
   // 更新每日出單表列狀態
   const updateSheetRowStatuses = useCallback(async (
     sheetDate: string,
     rows: SourceRow[],
-    status: '已匯入製令' | '暫緩區',
+    status: '已匯入製令',
     moNumbers?: string[]
   ) => {
     try {
@@ -1241,21 +1186,15 @@ export default function OrderBatchExportPage() {
     if (withIdx.length === 0) return
     const allMatch = withIdx.map(({ i }) => soMatchResults[i])
 
-    // 分離有序號 vs 無序號 — 無序號不可匯入，移入暫緩區
+    // 分離有序號 vs 無序號 — 無序號不可匯入（保留在清單中，重新比對後再試）
     const withSeqIdx = withIdx.filter((_, j) => !!allMatch[j]?.line_no)
     const noSeqIdx = withIdx.filter((_, j) => !allMatch[j]?.line_no)
-    if (noSeqIdx.length > 0) {
-      const attemptedAt = new Date().toLocaleString('zh-TW')
-      setFailedImports(prev => mergeFailedImports(
-        prev,
-        noSeqIdx.map(({ r }) => r),
-        '來源訂單序號未比對到，請確認 ERP 同步後重新比對',
-        attemptedAt
-      ))
-    }
     if (withSeqIdx.length === 0) {
-      alert('⚠️ 本批次所有列均無法比對序號，已移入暫緩區，無資料可匯入。')
+      alert('⚠️ 本批次所有列均無法比對序號，無資料可匯入。\n請至每日出單表執行一鍵全同步後重新載入。')
       return
+    }
+    if (noSeqIdx.length > 0) {
+      setSaveMsg(`⚠️ ${noSeqIdx.length} 筆無序號略過，僅匯入已比對序號的 ${withSeqIdx.length} 筆`)
     }
 
     const filteredRows = withSeqIdx.map(({ r }) => r)
@@ -1307,7 +1246,6 @@ export default function OrderBatchExportPage() {
           try {
             await saveRecordsToSummaryDbUpsert(records)
             try { saveRecordsToSummaryLocal(records) } catch {}
-            setFailedImports(prev => removeFailedImportsByRows(prev, filteredRows))
             const importedKeys = new Set(filteredRows.map(createSourceRowKey))
             setSourceRows(prev => prev.filter(r => !importedKeys.has(createSourceRowKey(r))))
             setSelectedRows(new Set())
@@ -1321,9 +1259,7 @@ export default function OrderBatchExportPage() {
             setTimeout(() => setSaveMsg(''), 6000)
           } catch (saveErr) {
             const sm = saveErr instanceof Error ? saveErr.message : '未知錯誤'
-            const attemptedAt = new Date().toLocaleString('zh-TW')
-            setFailedImports(prev => mergeFailedImports(prev, filteredRows, `製令已在ARGO，補存Supabase失敗：${sm}`, attemptedAt))
-            alert(`⚠️ 製令已在 ERP，但補存總表（Supabase）失敗：${sm}\n${filteredRows.length} 筆已移至失敗區`)
+            alert(`⚠️ 製令已在 ERP，但補存總表（Supabase）失敗：${sm}\n${filteredRows.length} 筆保留在清單中，請稍後重試`)
           }
           return
         }
@@ -1402,9 +1338,6 @@ export default function OrderBatchExportPage() {
               }),
             }).catch(err => console.warn('[製令上傳紀錄] 寫入失敗', err))
 
-            // 從失敗區移除這些（如果原本在的話）
-            setFailedImports(prev => removeFailedImportsByRows(prev, successRows))
-
             // 更新出單表狀態
             if (loadedFromSheetDate) {
               updateSheetRowStatuses(loadedFromSheetDate, successRows, '已匯入製令',
@@ -1417,22 +1350,12 @@ export default function OrderBatchExportPage() {
             setSelectedRows(new Set())
           }
 
-          // 失敗的逐筆寫入失敗區（每筆帶自己的錯誤訊息）
-          if (failedRowsAndErrors.length > 0) {
-            const attemptedAt = new Date().toLocaleString('zh-TW')
-            setFailedImports(prev => {
-              let next = prev
-              for (const { row, error } of failedRowsAndErrors) {
-                next = mergeFailedImports(next, [row], error, attemptedAt)
-              }
-              return next
-            })
-          }
+          // 失敗的列保留在清單中（未取得製令號，重新載入時會再次出現）
 
           // 摘要訊息
           const summaryMsg = `${factoryLabel(factory)} ${targetLabel}匯入完成：✅ 成功 ${successRows.length} 筆 / ❌ 失敗 ${failedRowsAndErrors.length} 筆`
           setSaveMsg(summaryMsg)
-          alert(`${summaryMsg}${failedRowsAndErrors.length > 0 ? `\n\n失敗明細：\n${failedRowsAndErrors.slice(0, 10).map(f => `${f.row.order_number} [${f.row.item_code}]: ${f.error}`).join('\n')}${failedRowsAndErrors.length > 10 ? `\n...（其餘 ${failedRowsAndErrors.length - 10} 筆請至失敗區查看）` : ''}` : ''}`)
+          alert(`${summaryMsg}${failedRowsAndErrors.length > 0 ? `\n\n失敗明細：\n${failedRowsAndErrors.slice(0, 10).map(f => `${f.row.order_number} [${f.row.item_code}]: ${f.error}`).join('\n')}${failedRowsAndErrors.length > 10 ? `\n...（其餘 ${failedRowsAndErrors.length - 10} 筆保留在清單中）` : ''}` : ''}`)
           setTimeout(() => setSaveMsg(''), 8000)
           return
         }
@@ -1473,7 +1396,6 @@ export default function OrderBatchExportPage() {
           })),
         }),
       }).catch(err => console.warn('[製令上傳紀錄] 寫入失敗（不影響主流程）', err))
-      setFailedImports(prev => removeFailedImportsByRows(prev, filteredRows))
 
       // 更新每日出單表列狀態
       if (loadedFromSheetDate) {
@@ -1497,9 +1419,7 @@ export default function OrderBatchExportPage() {
     } catch (error) {
       const message = error instanceof Error ? error.message : 'ArgoERP 匯入失敗'
       console.error('[ArgoERP 匯入] 失敗', error)
-      const attemptedAt = new Date().toLocaleString('zh-TW')
-      setFailedImports(prev => mergeFailedImports(prev, filteredRows, message, attemptedAt))
-      const errMsg = `❌ ${factoryLabel(factory)} ${targetLabel}匯入失敗：${message}\n${filteredRows.length} 筆已移至失敗區`
+      const errMsg = `❌ ${factoryLabel(factory)} ${targetLabel}匯入失敗：${message}\n${filteredRows.length} 筆保留在清單中，請稍後重試`
       setSaveMsg(errMsg)
       alert(errMsg)
       setTimeout(() => setSaveMsg(''), 8000)
@@ -1514,24 +1434,13 @@ export default function OrderBatchExportPage() {
     if (withIdx.length === 0) return
     const filteredMatch = withIdx.map(({ i }) => soMatchResults[i])
 
-    // 分離有序號（來源訂單項號已比對）vs 無序號（移入暫緩區）
+    // 分離有序號（來源訂單項號已比對）vs 無序號（略過）
     const withSeqIdx = withIdx.filter((_, j) => !!filteredMatch[j]?.line_no)
     const noSeqIdx = withIdx.filter((_, j) => !filteredMatch[j]?.line_no)
     const noSeqCount = noSeqIdx.length
 
-    // 無序號的列移入暫緩區（failedImports）
-    if (noSeqIdx.length > 0) {
-      const attemptedAt = new Date().toLocaleString('zh-TW')
-      setFailedImports(prev => mergeFailedImports(
-        prev,
-        noSeqIdx.map(({ r }) => r),
-        '來源訂單序號未比對到，請確認 ERP 同步後重新比對',
-        attemptedAt
-      ))
-    }
-
     if (withSeqIdx.length === 0) {
-      alert(`⚠️ ${noSeqCount} 筆均無法比對序號，已全數移入暫緩區。\n請重新同步 SO 後再比對序號。`)
+      alert(`⚠️ ${noSeqCount} 筆均無法比對序號，無資料可匯入。\n請至每日出單表執行一鍵全同步後重新載入。`)
       return
     }
 
@@ -1565,42 +1474,6 @@ export default function OrderBatchExportPage() {
       })),
     })
   }, [sourceRows, soMatchResults])
-
-  const handleRestoreFailedToSource = useCallback((mode: 'append' | 'replace') => {
-    if (failedImports.length === 0) return
-
-    const failedRows = failedImports.map(item => item.row)
-    setSourceRows(prev => mode === 'replace' ? failedRows : mergeSourceRows(prev, failedRows))
-    setSelectedRows(new Set())
-    setViewMode('source')
-    setSaveMsg(mode === 'replace' ? `✅ 已載入 ${failedRows.length} 筆失敗資料到主清單` : `✅ 已將 ${failedRows.length} 筆失敗資料加入主清單`)
-    setTimeout(() => setSaveMsg(''), 4000)
-  }, [failedImports])
-
-  const handleRemoveFailedItem = useCallback((key: string) => {
-    setFailedImports(prev => prev.filter(item => item.key !== key))
-  }, [])
-
-  const handleClearFailedImports = useCallback(() => {
-    setFailedImports([])
-  }, [])
-
-  const handleDirectTransferFailedToSummary = useCallback(async () => {
-    if (failedImports.length === 0) return
-    const nowStr = new Date().toISOString()
-    const failedRows = failedImports.map(item => item.row)
-    const records = buildSummaryRecords(failedRows, nowStr)
-    try {
-      await saveRecordsToSummaryDbUpsert(records)
-      try { saveRecordsToSummaryLocal(records) } catch {}
-      setFailedImports(prev => removeFailedImportsByRows(prev, failedRows))
-      setSaveMsg(`✅ 已直接轉入製令總表 ${records.length} 筆`)
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e)
-      setSaveMsg(`❌ 轉入失敗：${msg}`)
-    }
-    setTimeout(() => setSaveMsg(''), 5000)
-  }, [failedImports])
 
   // ---- 手動新增製令：驗證 → 建 ExportRow → 上傳 ARGO → 寫總表 ----
   const handleManualMoImport = useCallback(async () => {
@@ -1732,31 +1605,6 @@ export default function OrderBatchExportPage() {
       setPoLinksLoading(false)
     }
   }, [])
-  // ---- 移至暫緩區 / 清空 ----
-  const handleMoveToStaging = useCallback(async () => {
-    if (selectedRows.size === 0) return
-    const moving = sourceRows.filter((_, i) => selectedRows.has(i))
-    try {
-      const res = await fetch('/api/argoerp/staging', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ rows: moving }),
-      })
-      const json = await res.json()
-      const errText = typeof json.error === 'string' ? json.error : (json.error ? JSON.stringify(json.error) : `HTTP ${res.status}`)
-      if (!res.ok || !json.success) throw new Error(errText)
-      if (loadedFromSheetDate) {
-        updateSheetRowStatuses(loadedFromSheetDate, moving, '暫緩區')
-      }
-      setSourceRows(prev => prev.filter((_, i) => !selectedRows.has(i)))
-      // 同步移除對應的比對結果，保持與 sourceRows 索引對齊（各列序號不變）
-      setSoMatchResults(prev => prev.filter((_, i) => !selectedRows.has(i)))
-      setSelectedRows(new Set())
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : (typeof e === 'object' ? JSON.stringify(e) : String(e))
-      alert(`移至暫緩區失敗：${msg}`)
-    }
-  }, [selectedRows, sourceRows])
 
   const handleDeleteSelected = useCallback(() => {
     if (selectedRows.size === 0) return
@@ -1843,15 +1691,6 @@ export default function OrderBatchExportPage() {
                 >
                   📋 載入出單表
                 </button>
-                <label className="flex items-center gap-1.5 text-xs text-slate-400 cursor-pointer select-none">
-                  <input
-                    type="checkbox"
-                    checked={includeAlreadyImported}
-                    onChange={e => setIncludeAlreadyImported(e.target.checked)}
-                    className="accent-amber-500 cursor-pointer"
-                  />
-                  包含已建製令
-                </label>
                 {loadedFromSheetDate && (
                   <span className="text-cyan-400 text-xs px-2 py-1 bg-cyan-900/30 rounded border border-cyan-700/40">
                     已載入 {loadedFromSheetDate}
@@ -1896,9 +1735,6 @@ export default function OrderBatchExportPage() {
                       <option value="C">選取 → 常平 (C)</option>
                       <option value="O">選取 → 委外 (O)</option>
                     </select>
-                    <button onClick={handleMoveToStaging} className="px-4 py-2 rounded-lg bg-amber-900/60 border border-amber-700/50 text-amber-300 hover:bg-amber-800 hover:text-white transition-colors text-sm">
-                      移至暫緩區 ({selectedRows.size})
-                    </button>
                     <button onClick={handleDeleteSelected} className="px-4 py-2 rounded-lg bg-red-900/60 border border-red-700/50 text-red-300 hover:bg-red-800 hover:text-white transition-colors text-sm">
                       🗑 刪除選取 ({selectedRows.size})
                     </button>
@@ -1914,7 +1750,7 @@ export default function OrderBatchExportPage() {
 
         <div className="mb-6 bg-slate-900 border border-slate-800 rounded-lg p-4">
           <h2 className="text-base font-semibold text-white mb-3">流程狀態</h2>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-sm">
+          <div className="grid grid-cols-2 md:grid-cols-3 gap-2 text-sm">
             <div className="rounded-lg bg-slate-950/60 border border-slate-800 px-3 py-2">
               <div className="text-xs text-slate-500 mb-1">出單表</div>
               <div className={`font-semibold truncate ${loadedFromSheetDate ? 'text-cyan-300' : 'text-slate-600'}`}>
@@ -1931,12 +1767,6 @@ export default function OrderBatchExportPage() {
                 {soMatchResults.length > 0
                   ? `${soMatchResults.filter(r => r.status === 'matched').length} / ${soMatchResults.length}`
                   : '尚未比對'}
-              </div>
-            </div>
-            <div className="rounded-lg bg-slate-950/60 border border-slate-800 px-3 py-2">
-              <div className="text-xs text-slate-500 mb-1">匠入失敗</div>
-              <div className={`font-bold ${failedImports.length > 0 ? 'text-red-400' : 'text-slate-600'}`}>
-                {failedImports.length > 0 ? `${failedImports.length} 筆` : '—'}
               </div>
             </div>
           </div>
@@ -2145,83 +1975,6 @@ export default function OrderBatchExportPage() {
         ) : (
           <div className="bg-slate-900 border border-slate-800 rounded-lg p-12 text-center">
             <p className="text-slate-500">尚無資料，請從上方選擇出單日期並載入</p>
-          </div>
-        )}
-
-        {failedImports.length > 0 && (
-          <div className="mt-6 bg-red-950/20 border border-red-800/40 rounded-lg overflow-hidden">
-            <div className="px-4 py-4 border-b border-red-800/30 flex flex-col lg:flex-row lg:items-center justify-between gap-3">
-              <div>
-                <h3 className="text-base font-semibold text-red-300">匯入失敗集中區</h3>
-                <p className="text-sm text-red-200/70 mt-1">失敗資料會集中保留在這裡，方便你修正後重新上傳。</p>
-              </div>
-              <div className="flex flex-wrap gap-2">
-                <button
-                  onClick={() => handleRestoreFailedToSource('append')}
-                  className="px-3 py-2 rounded-lg bg-slate-800 border border-slate-700 text-slate-200 hover:bg-slate-700 transition-colors text-sm"
-                >
-                  加入主清單編輯 ({failedImports.length} 筆)
-                </button>
-                <button
-                  onClick={() => handleRestoreFailedToSource('replace')}
-                  className="px-3 py-2 rounded-lg bg-amber-800/70 border border-amber-700/50 text-amber-100 hover:bg-amber-700 transition-colors text-sm"
-                >
-                  只保留失敗資料
-                </button>
-                <button
-                  onClick={handleDirectTransferFailedToSummary}
-                  className="px-3 py-2 rounded-lg bg-emerald-800/70 border border-emerald-700/50 text-emerald-100 hover:bg-emerald-700 transition-colors text-sm"
-                  title="跳過 ARGO 上傳，直接將失敗資料寫入製令總表（upsert，已存在會覆蓋）"
-                >
-                  直接轉入製令總表
-                </button>
-                <button
-                  onClick={handleClearFailedImports}
-                  className="px-3 py-2 rounded-lg bg-red-900/60 border border-red-700/50 text-red-200 hover:bg-red-800 transition-colors text-sm"
-                >
-                  清空失敗區
-                </button>
-              </div>
-            </div>
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="bg-red-950/30 border-b border-red-800/30">
-                    <th className="px-3 py-2.5 text-left text-red-200/80 text-xs whitespace-nowrap">工單編號</th>
-                    <th className="px-3 py-2.5 text-left text-red-200/80 text-xs whitespace-nowrap">廠別</th>
-                    <th className="px-3 py-2.5 text-left text-red-200/80 text-xs whitespace-nowrap">品項編碼</th>
-                    <th className="px-3 py-2.5 text-left text-red-200/80 text-xs whitespace-nowrap">品名/規格</th>
-                    <th className="px-3 py-2.5 text-left text-red-200/80 text-xs whitespace-nowrap">錯誤原因</th>
-                    <th className="px-3 py-2.5 text-left text-red-200/80 text-xs whitespace-nowrap">失敗時間</th>
-                    <th className="px-3 py-2.5 text-center text-red-200/80 text-xs whitespace-nowrap">操作</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {failedImports.map(item => (
-                    <tr key={item.key} className="border-b border-red-900/20 bg-slate-950/30 hover:bg-slate-900/50">
-                      <td className="px-3 py-2 text-xs whitespace-nowrap max-w-[160px] truncate" title={item.row.order_number}>
-                        <button onClick={() => setSoModalId(item.row.order_number)} className="font-mono text-slate-200 hover:text-cyan-300 hover:underline underline-offset-2 text-left">
-                          {item.row.order_number || '—'}
-                        </button>
-                      </td>
-                      <td className="px-3 py-2 text-slate-300 text-xs whitespace-nowrap">{factoryLabel(item.factory)}</td>
-                      <td className="px-3 py-2 text-slate-300 text-xs whitespace-nowrap max-w-[140px] truncate" title={item.row.item_code}>{item.row.item_code || '—'}</td>
-                      <td className="px-3 py-2 text-slate-300 text-xs whitespace-nowrap max-w-[220px] truncate" title={item.row.item_name}>{item.row.item_name || '—'}</td>
-                      <td className="px-3 py-2 text-red-200 text-xs max-w-[320px]" title={item.error}>{item.error}</td>
-                      <td className="px-3 py-2 text-slate-400 text-xs whitespace-nowrap">{item.attemptedAt}</td>
-                      <td className="px-3 py-2 text-center">
-                        <button
-                          onClick={() => handleRemoveFailedItem(item.key)}
-                          className="px-2.5 py-1 rounded-md bg-slate-800 border border-slate-700 text-slate-300 hover:text-white hover:bg-slate-700 transition-colors text-xs"
-                        >
-                          移除
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
           </div>
         )}
 
@@ -2568,7 +2321,7 @@ export default function OrderBatchExportPage() {
                   </span>
                   {importPreview.skippedCount > 0 && (
                     <span className="px-2 py-0.5 rounded text-[11px] font-mono bg-red-900/60 text-red-300">
-                      ⚠ {importPreview.skippedCount} 筆無序號已移入暫緩區
+                      ⚠ {importPreview.skippedCount} 筆無序號已略過（保留在清單中）
                     </span>
                   )}
                 </p>

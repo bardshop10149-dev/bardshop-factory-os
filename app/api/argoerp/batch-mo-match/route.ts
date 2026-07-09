@@ -13,7 +13,7 @@ interface SheetRow {
   quantity: string
   factory: string
   row_key: string
-  mo_status: '已匯入製令' | '暫緩區' | null
+  mo_status: '已匯入製令' | null
   mo_number?: string
   material_prep_status?: string | null
   match_line_no?: string | null

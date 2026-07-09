@@ -95,7 +95,7 @@ interface SheetRowBrief {
   customer: string
   quantity: string
   delivery_date: string
-  mo_status: '已匯入製令' | '暫緩區' | null
+  mo_status: '已匯入製令' | null
   mo_number?: string
   material_prep_status?: '已備料' | '無需備料' | '已批備料' | null
   // ARGO 批備料建立的單據號碼

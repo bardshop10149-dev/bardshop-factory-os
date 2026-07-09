@@ -278,7 +278,7 @@ interface SheetRow {
   plate_count: string
   customer: string
   delivery_date: string
-  mo_status: '已匯入製令' | '暫緩區' | null
+  mo_status: '已匯入製令' | null
   mo_number?: string | null
   po_number?: string | null
   po_sub_no?: string | null
@@ -300,7 +300,6 @@ interface SheetMeta {
 const STATUS_LABELS: Record<string, { label: string; cls: string }> = {
   '已匯入製令': { label: '已匯入製令', cls: 'bg-emerald-900/50 text-emerald-300 border-emerald-700/50' },
   '已匯入採單': { label: '已匯入採單', cls: 'bg-orange-900/50 text-orange-300 border-orange-700/50' },
-  '暫緩區':    { label: '暫緩區',    cls: 'bg-amber-900/50  text-amber-300  border-amber-700/50'  },
 }
 
 function factoryBadge(f: 'T' | 'C' | 'O') {
@@ -404,7 +403,6 @@ export default function OrderRecordsPage() {
     total: filteredRows.length,
     mo: filteredRows.filter(r => r.mo_status === '已匯入製令').length,
     po: filteredRows.filter(r => r.po_status === 'matched').length,
-    hold: filteredRows.filter(r => r.mo_status === '暫緩區').length,
     pending: filteredRows.filter(r => !r.mo_status && r.po_status !== 'matched').length,
   }
 
@@ -421,8 +419,6 @@ export default function OrderRecordsPage() {
         className={`border-b border-slate-800/60 text-sm transition-colors ${
           row.mo_status === '已匯入製令'
             ? 'bg-emerald-950/20'
-            : row.mo_status === '暫緩區'
-            ? 'bg-amber-950/20'
             : row.factory === 'C' && row.po_status === 'matched'
             ? 'bg-orange-950/20'
             : row.factory === 'O' && row.po_status === 'matched'
@@ -717,11 +713,6 @@ export default function OrderRecordsPage() {
                 {stat.po > 0 && (
                   <span className="px-3 py-1.5 rounded-lg bg-orange-950/40 border border-orange-800/50 text-orange-300">
                     已匯入採單 <span className="font-bold">{stat.po}</span>
-                  </span>
-                )}
-                {stat.hold > 0 && (
-                  <span className="px-3 py-1.5 rounded-lg bg-amber-950/40 border border-amber-800/50 text-amber-300">
-                    暫緩區 <span className="font-bold">{stat.hold}</span>
                   </span>
                 )}
                 <span className="px-3 py-1.5 rounded-lg bg-slate-900/60 border border-slate-700 text-slate-400">
