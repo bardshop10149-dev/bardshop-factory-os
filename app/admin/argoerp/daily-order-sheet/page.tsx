@@ -2902,8 +2902,8 @@ export default function DailyOrderSheetPage() {
                 <div className="flex items-center gap-3 flex-wrap">
                   <span className="text-slate-300 text-sm font-medium">共 <span className="text-cyan-300 font-bold">{sheetRows.length}</span> 筆</span>
                   <span className="text-xs text-slate-500">
-                    已匯入製令：<span className="text-emerald-400">{sheetRows.filter(r => r.mo_status === '已匯入製令').length}</span>
-                    ／尚未轉單：<span className="text-slate-400">{sheetRows.filter(r => !r.mo_status).length}</span>
+                    已匯入製令：<span className="text-emerald-400">{sheetRows.filter(r => r.mo_status === '已匯入製令' || !!r.mo_number?.startsWith('MO')).length}</span>
+                    ／尚未轉單：<span className="text-slate-400">{sheetRows.filter(r => !(r.mo_status === '已匯入製令' || r.mo_number?.startsWith('MO')) && !((r.factory === 'C' || r.factory === 'O') && r.po_status === 'matched')).length}</span>
                     {sheetRows.some(r => (r.doc_type ?? '').includes('集單')) && (
                       <span className="ml-2 text-violet-400">
                         ／集單：{sheetRows.filter(r => (r.doc_type ?? '').includes('集單')).length}
@@ -3026,7 +3026,11 @@ export default function DailyOrderSheetPage() {
                     </thead>
                     <tbody>
                       {visibleRows.map((row, idx) => {
-                        const effectiveStatus = row.mo_status ?? ((row.factory === 'C' || row.factory === 'O') && row.po_status === 'matched' ? '已匯入採單' : null)
+                        // 有有效製令單號即視為已匯入製令（涵蓋舊資料 mo_status 未同步的情況）
+                        const isMoImported = row.mo_status === '已匯入製令' || !!row.mo_number?.startsWith('MO')
+                        const effectiveStatus = isMoImported
+                          ? '已匯入製令'
+                          : ((row.factory === 'C' || row.factory === 'O') && row.po_status === 'matched' ? '已匯入採單' : null)
                         const statusInfo = effectiveStatus ? STATUS_LABELS[effectiveStatus] : null
                         const sk = row.row_key || String(idx)
                         const outsourcedDocNo = row.factory === 'O'
@@ -3040,7 +3044,7 @@ export default function DailyOrderSheetPage() {
                           <tr
                             key={`${row.row_key || 'row'}::${idx}`}
                             className={`border-b border-slate-800/60 transition-colors ${
-                              row.mo_status === '已匯入製令'
+                              isMoImported
                                 ? 'bg-emerald-950/20'
                                 : row.factory === 'C' && row.po_status === 'matched'
                                 ? 'bg-orange-950/20'

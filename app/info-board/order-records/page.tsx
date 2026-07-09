@@ -401,23 +401,25 @@ export default function OrderRecordsPage() {
   // ── 統計 ─────────────────────────────────────────────────
   const stat = {
     total: filteredRows.length,
-    mo: filteredRows.filter(r => r.mo_status === '已匯入製令').length,
+    mo: filteredRows.filter(r => r.mo_status === '已匯入製令' || !!r.mo_number?.startsWith('MO')).length,
     po: filteredRows.filter(r => r.po_status === 'matched').length,
-    pending: filteredRows.filter(r => !r.mo_status && r.po_status !== 'matched').length,
+    pending: filteredRows.filter(r => !(r.mo_status === '已匯入製令' || r.mo_number?.startsWith('MO')) && r.po_status !== 'matched').length,
   }
 
   // ── Row 渲染（共用於單日和跨日搜尋結果）────────────────────
   const renderRow = (row: SheetRow, idx: number) => {
-    const effectiveStatus = row.mo_status ?? (
-      (row.factory === 'C' || row.factory === 'O') && row.po_status === 'matched' ? '已匯入採單' : null
-    )
+    // 有有效製令單號即視為已匯入製令（涵蓋舊資料 mo_status 未同步的情況）
+    const isMoImported = row.mo_status === '已匯入製令' || !!row.mo_number?.startsWith('MO')
+    const effectiveStatus = isMoImported
+      ? '已匯入製令'
+      : ((row.factory === 'C' || row.factory === 'O') && row.po_status === 'matched' ? '已匯入採單' : null)
     const statusInfo = effectiveStatus ? STATUS_LABELS[effectiveStatus] : null
 
     return (
       <tr
         key={row.row_key || idx}
         className={`border-b border-slate-800/60 text-sm transition-colors ${
-          row.mo_status === '已匯入製令'
+          isMoImported
             ? 'bg-emerald-950/20'
             : row.factory === 'C' && row.po_status === 'matched'
             ? 'bg-orange-950/20'
