@@ -638,18 +638,19 @@ export default function PrBatchExportOPage() {
         <section className="bg-slate-900 border border-slate-800 rounded p-4">
           <h2 className="font-semibold mb-3">請購表頭（必填）</h2>
           <div className="grid grid-cols-1 md:grid-cols-5 gap-3 text-sm">
-            <label className="flex flex-col gap-1 md:col-span-2">請購單號（傳入 ARGO 時自動取號）
-              <div className="flex gap-2">
-                <input value={header.apply_id} readOnly placeholder="匯入時自動取號" className="px-2 py-1.5 rounded bg-slate-950 border border-slate-700 flex-1 min-w-0 font-mono text-slate-300 cursor-default" />
+            <div className="flex flex-col gap-1">
+              <div className="flex items-center justify-between gap-2">
+                <span>請購單號（自動取號）</span>
                 <button
                   onClick={() => void handleRegenerateApplyId()}
                   disabled={applyIdLoading}
-                  className="shrink-0 px-3 py-1.5 rounded bg-indigo-700 hover:bg-indigo-600 disabled:bg-slate-800 disabled:text-slate-500 text-xs whitespace-nowrap"
+                  className="shrink-0 px-2 py-0.5 rounded bg-indigo-700 hover:bg-indigo-600 disabled:bg-slate-800 disabled:text-slate-500 text-xs whitespace-nowrap"
                 >
                   {applyIdLoading ? '取號中…' : '抓最新單號'}
                 </button>
               </div>
-            </label>
+              <input value={header.apply_id} readOnly placeholder="匯入時自動取號" className="px-2 py-1.5 rounded bg-slate-950 border border-slate-700 w-full font-mono text-slate-300 cursor-default" />
+            </div>
             <label className="flex flex-col gap-1">開立日期
               <input value={header.apply_date} onChange={e => setH('apply_date', e.target.value)} className="px-2 py-1.5 rounded bg-slate-950 border border-slate-700" />
             </label>

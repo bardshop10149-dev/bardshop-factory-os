@@ -638,16 +638,16 @@ export default function PoBatchExportCPage() {
           </button>
           {headerOpen && (
             <div className="px-4 py-4 grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
-              <div className="col-span-2">
-                <label className="text-xs text-slate-400 block mb-1">採購單號 <span className="text-slate-500">（傳入 ARGO 時自動取號）</span></label>
-                <div className="flex gap-2">
-                  <input value={header.project_id} readOnly placeholder="匯入時自動取號"
-                    className="w-full min-w-0 px-3 py-1.5 rounded-lg bg-slate-800 border border-orange-600/60 text-slate-300 text-sm focus:outline-none font-mono cursor-default" />
+              <div className="col-span-2 md:col-span-1">
+                <div className="flex items-center justify-between gap-2 mb-1">
+                  <label className="text-xs text-slate-400">採購單號 <span className="text-slate-500">（自動取號）</span></label>
                   <button onClick={() => void handleFetchPoNo()} disabled={poNoLoading}
-                    className="shrink-0 px-3 py-1.5 rounded-lg bg-indigo-700 hover:bg-indigo-600 disabled:bg-slate-700 disabled:text-slate-500 text-white text-xs whitespace-nowrap">
+                    className="shrink-0 px-2 py-0.5 rounded bg-indigo-700 hover:bg-indigo-600 disabled:bg-slate-700 disabled:text-slate-500 text-white text-xs whitespace-nowrap">
                     {poNoLoading ? '取號中…' : '抓最新單號'}
                   </button>
                 </div>
+                <input value={header.project_id} readOnly placeholder="匯入時自動取號"
+                  className="w-full px-3 py-1.5 rounded-lg bg-slate-800 border border-orange-600/60 text-slate-300 text-sm focus:outline-none font-mono cursor-default" />
               </div>
               <div>
                 <label className="text-xs text-slate-400 block mb-1">開立日期 <span className="text-red-400">*</span></label>
