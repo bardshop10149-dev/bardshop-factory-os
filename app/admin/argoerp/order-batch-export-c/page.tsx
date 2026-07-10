@@ -79,14 +79,42 @@ function fmtDate(d: Date) {
   return `${d.getFullYear()}/${String(d.getMonth() + 1).padStart(2, '0')}/${String(d.getDate()).padStart(2, '0')}`
 }
 
-function genPoNo() {
+function pocPrefixToday() {
   const d = new Date()
-  return `POC${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}01`
+  return `POC${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`
+}
+
+/** 即時查 ARGO 採購主檔（PJ_PROJECT）當天既有 POC 單號，回最大流水 +1（例 POC2026070902）。
+ *  不依賴 erp_pj_sync（要手動跑同步才會新，取號會撞單）。 */
+async function fetchNextPocNo(): Promise<string> {
+  const prefix = pocPrefixToday()
+  const res = await fetch('/api/argoerp', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      action: 'query',
+      table: 'PJ_PROJECT',
+      filters: { PROJECT_ID: `LIKE '${prefix}%'` },
+      customColumn: 'PROJECT_ID',
+    }),
+  })
+  const j = await res.json()
+  if (!res.ok || !j?.success) throw new Error(j?.error || `查詢 ARGO 採購單號失敗（HTTP ${res.status}）`)
+  const apiResult = (j.apiResult ?? {}) as Record<string, unknown>
+  const rows = Array.isArray(apiResult.RESULT) ? apiResult.RESULT as Array<Record<string, unknown>> : []
+  let maxSeq = 0
+  for (const rec of rows) {
+    const docNo = String(rec?.PROJECT_ID ?? '').trim().toUpperCase()
+    if (!docNo.startsWith(prefix)) continue
+    const seq = parseInt(docNo.slice(prefix.length), 10)
+    if (!Number.isNaN(seq) && seq > maxSeq) maxSeq = seq
+  }
+  return `${prefix}${String(maxSeq + 1).padStart(2, '0')}`
 }
 
 function makeDefaultHeader(): PoHeader {
   return {
-    project_id: genPoNo(), modify_ver: '1', begin_date: fmtDate(new Date()),
+    project_id: '', modify_ver: '1', begin_date: fmtDate(new Date()),
     hold_status: 'UNSIGNED', tpn_partner_id: 'C01510', department: 'M1100',
     sales_id: '10149', po_type: 'GENERAL', payment_term: 'PM30',
     payment_mode: 'T', currency: 'CNY', exchange_rate: '4', tax_rate: '0',
@@ -133,6 +161,10 @@ export default function PoBatchExportCPage() {
         for (const k of Object.keys(def) as (keyof PoHeader)[]) {
           if ((saved[k] ?? '') === '') (merged as unknown as Record<string, unknown>)[k] = def[k]
         }
+        // 單號＝傳入時自動取號、開單日期＝一律帶當天，兩者都不還原 localStorage 舊值
+        // （委外請購頁曾因日期停在舊值，ARGO 單開立日錯置成 6/25）
+        merged.project_id = ''
+        merged.begin_date = fmtDate(new Date())
         setHeader(merged)
       }
     } catch {}
@@ -245,21 +277,50 @@ export default function PoBatchExportCPage() {
     }
   }, [payload, exportFmt, header.project_id])
 
+  // ── 手動抓最新單號（僅供預覽，實際匯入時會再重抓一次）──
+  const [poNoLoading, setPoNoLoading] = useState(false)
+  const handleFetchPoNo = useCallback(async () => {
+    setPoNoLoading(true)
+    try {
+      const next = await fetchNextPocNo()
+      setHeader(p => ({ ...p, project_id: next }))
+      setMsg(`✅ 已取得最新採購單號：${next}`)
+    } catch (e) {
+      setMsg(`❌ 取號失敗：${e instanceof Error ? e.message : String(e)}`)
+    } finally {
+      setPoNoLoading(false); setTimeout(() => setMsg(''), 8000)
+    }
+  }, [])
+
   // ── Import to ERP ──
   const handleImport = useCallback(async () => {
-    if (!header.project_id.trim()) { alert('請填寫採購單號'); return }
     if (!header.tpn_partner_id.trim()) { alert('請填寫廠商編號'); return }
     if (payload.length === 0) { alert('尚無明細資料'); return }
     setImporting(true); setMsg('')
+
+    // 按下傳入 ARGO 當下即時取號：抓當天最新 POC 單號 +1，不使用畫面上可能過期的舊值
+    let pid = ''
     try {
+      pid = await fetchNextPocNo()
+      setHeader(p => ({ ...p, project_id: pid }))
+    } catch (e) {
+      setImporting(false)
+      const m = `❌ 取號失敗，未匯入：${e instanceof Error ? e.message : String(e)}`
+      setMsg(m); alert(m)
+      setTimeout(() => setMsg(''), 10000)
+      return
+    }
+
+    try {
+      const importPayload = payload.map(r => ({ ...r, PROJECT_ID: pid }))
       const res = await fetch('/api/argoerp', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'import', interfaceId: 'IFAF024', data: payload }),
+        body: JSON.stringify({ action: 'import', interfaceId: 'IFAF024', data: importPayload }),
       })
       const result = await res.json()
       if (res.ok && result?.success) {
-        const m = `✅ 採購單 ${header.project_id} 已匯入 ERP（${payload.length} 筆明細）`
+        const m = `✅ 採購單 ${pid} 已匯入 ERP（${payload.length} 筆明細）`
         setMsg(m); alert(m)
         setSourceRows([]); setLineEdits([]); setLoadedDate(null)
       } else {
@@ -274,7 +335,7 @@ export default function PoBatchExportCPage() {
     } finally {
       setImporting(false); setTimeout(() => setMsg(''), 10000)
     }
-  }, [payload, header.project_id, header.tpn_partner_id])
+  }, [payload, header.tpn_partner_id])
 
   const setH = useCallback(<K extends keyof PoHeader>(k: K, v: PoHeader[K]) => {
     setHeader(p => ({ ...p, [k]: v }))
@@ -298,7 +359,7 @@ export default function PoBatchExportCPage() {
   const [removingImported, setRemovingImported] = useState(false)
   const removeImported = useCallback(async () => {
     const pid = header.project_id.trim()
-    if (!pid) { alert('請先填寫採購單號'); return }
+    if (!pid) { alert('請先按「抓最新單號」取得採購單號'); return }
     if (sourceRows.length === 0) return
     setRemovingImported(true)
     try {
@@ -364,7 +425,7 @@ export default function PoBatchExportCPage() {
   const [syncingPoBack, setSyncingPoBack] = useState(false)
   const syncPoNumberBack = useCallback(async () => {
     const pid = header.project_id.trim()
-    if (!pid) { alert('請先填寫採購單號'); return }
+    if (!pid) { alert('請先按「抓最新單號」或先匯入 ERP 取得採購單號'); return }
     if (!loadedDate) { alert('尚未載入出單表日期'); return }
     if (sourceRows.length === 0) return
     setSyncingPoBack(true); setMsg('')
@@ -578,9 +639,15 @@ export default function PoBatchExportCPage() {
           {headerOpen && (
             <div className="px-4 py-4 grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
               <div className="col-span-2 md:col-span-1">
-                <label className="text-xs text-slate-400 block mb-1">採購單號 <span className="text-red-400">*</span></label>
-                <input value={header.project_id} onChange={e => setH('project_id', e.target.value)}
-                  className="w-full px-3 py-1.5 rounded-lg bg-slate-800 border border-orange-600/60 text-white text-sm focus:outline-none focus:border-orange-400 font-mono" />
+                <div className="flex items-center justify-between gap-2 mb-1">
+                  <label className="text-xs text-slate-400">採購單號 <span className="text-slate-500">（自動取號）</span></label>
+                  <button onClick={() => void handleFetchPoNo()} disabled={poNoLoading}
+                    className="shrink-0 px-2 py-0.5 rounded bg-indigo-700 hover:bg-indigo-600 disabled:bg-slate-700 disabled:text-slate-500 text-white text-xs whitespace-nowrap">
+                    {poNoLoading ? '取號中…' : '抓最新單號'}
+                  </button>
+                </div>
+                <input value={header.project_id} readOnly placeholder="匯入時自動取號"
+                  className="w-full px-3 py-1.5 rounded-lg bg-slate-800 border border-orange-600/60 text-slate-300 text-sm focus:outline-none font-mono cursor-default" />
               </div>
               <div>
                 <label className="text-xs text-slate-400 block mb-1">開立日期 <span className="text-red-400">*</span></label>

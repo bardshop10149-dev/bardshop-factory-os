@@ -144,7 +144,9 @@ export default function PrBatchExportOPage() {
       const raw = localStorage.getItem(HEADER_KEY)
       if (raw) {
         const parsed = JSON.parse(raw)
-        setHeader({ ...makeDefaultHeader(), ...parsed })
+        // 單號＝傳入時自動取號、開立日期＝一律帶當天，兩者都不還原 localStorage 舊值
+        // （曾發生開立日期停在舊值 → ARGO 單 APPLY_DATE 錯置，例 MPO2026070901 開立日 6/25）
+        setHeader({ ...makeDefaultHeader(), ...parsed, apply_id: '', apply_date: fmtDate(new Date()) })
       }
     } catch {
       // ignore
@@ -207,16 +209,24 @@ export default function PrBatchExportOPage() {
       if (mo.startsWith(prefix)) candidates.push(mo)
     }
 
-    const { data, error } = await supabase
-      .from('erp_pj_sync')
-      .select('doc_no')
-      .eq('doc_type', '請購單號')
-      .ilike('doc_no', `${prefix}%`)
-
-    if (error) throw error
-
-    for (const rec of (data ?? []) as Array<{ doc_no?: string | null }>) {
-      const docNo = String(rec.doc_no ?? '').trim().toUpperCase()
+    // 即時查 ARGO 請購主檔（PJ_APPLYPROJECT）取當天既有 MPO 單號，
+    // 不依賴 erp_pj_sync（那份要手動跑同步才會新，取號會撞單）
+    const res = await fetch('/api/argoerp', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        action: 'query',
+        table: 'PJ_APPLYPROJECT',
+        filters: { APPLY_ID: `LIKE '${prefix}%'` },
+        customColumn: 'APPLY_ID',
+      }),
+    })
+    const j = await res.json()
+    if (!res.ok || !j?.success) throw new Error(j?.error || `查詢 ARGO 請購單號失敗（HTTP ${res.status}）`)
+    const apiResult = (j.apiResult ?? {}) as Record<string, unknown>
+    const argoRows = Array.isArray(apiResult.RESULT) ? apiResult.RESULT as Array<Record<string, unknown>> : []
+    for (const rec of argoRows) {
+      const docNo = String(rec?.APPLY_ID ?? '').trim().toUpperCase()
       if (docNo.startsWith(prefix)) candidates.push(docNo)
     }
 
@@ -370,10 +380,6 @@ export default function PrBatchExportOPage() {
       alert('尚無可匯入資料')
       return
     }
-    if (!header.apply_id.trim()) {
-      alert('請先產生或填寫請購單號')
-      return
-    }
     if (!header.department.trim()) {
       alert('請填寫請購部門')
       return
@@ -383,7 +389,6 @@ export default function PrBatchExportOPage() {
       alert('單據狀態「OPEN」會被 ArgoERP 退回（已開啟傳簽功能）。請改為 UNSIGNED 後再匯入。')
       return
     }
-    if (!confirm(`確認匯入請購單 ${header.apply_id}（${payload.length} 筆明細）至 ArgoERP？`)) return
 
     const unitMismatch = sourceRows
       .map((row, i) => {
@@ -402,47 +407,73 @@ export default function PrBatchExportOPage() {
 
     setImporting(true)
     setMsg('')
+
+    // 按下傳入 ARGO 當下即時取號：抓當天最新 MPO 單號 +1，不使用畫面上可能過期的舊值
+    let applyId = ''
+    try {
+      applyId = await generateApplyId(header.apply_date, [...sourceRows, ...importedMpoRows])
+      setHeader(prev => ({ ...prev, apply_id: applyId }))
+    } catch (e) {
+      setImporting(false)
+      const m = `❌ 取號失敗，未匯入：${e instanceof Error ? e.message : String(e)}`
+      setMsg(m)
+      alert(m)
+      return
+    }
+    if (!confirm(`確認匯入請購單 ${applyId}（${payload.length} 筆明細）至 ArgoERP？`)) {
+      setImporting(false)
+      return
+    }
+
     setImportProgress({ done: 0, total: 1, errors: [] })
     const errors: string[] = []
     const sheetUpdates: Array<Record<string, unknown>> = []
+    const missingRowKey: string[] = []
+    const importPayload = payload.map(r => ({ ...r, APPLY_ID: applyId }))
 
     try {
       const res = await fetch('/api/argoerp', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'import', interfaceId: 'IFAF105', data: payload }),
+        body: JSON.stringify({ action: 'import', interfaceId: 'IFAF105', data: importPayload }),
       })
       const result = await res.json()
       if (!res.ok || !result?.success) {
         const raw = typeof result?.rawText === 'string'
           ? result.rawText.slice(0, 200)
           : JSON.stringify(result?.apiResult ?? '').slice(0, 200)
-        errors.push(`${header.apply_id}: ${result?.error || `HTTP ${res.status}`} — ${raw}`)
+        errors.push(`${applyId}: ${result?.error || `HTTP ${res.status}`} — ${raw}`)
       } else {
         for (let i = 0; i < sourceRows.length; i++) {
           const src = sourceRows[i]
-          if (!loadedDate || !src?.row_key) continue
+          if (!loadedDate) continue
+          if (!src?.row_key) {
+            // 缺 row_key 的列無法回寫，不能靜默跳過：這種列匯入後仍會顯示在
+            // 待匯入清單，下次極易誤按重複匯入（2026-07-09 MPO2026070901 即此案例）
+            missingRowKey.push(`${src?.order_number ?? '?'}/${src?.item_code ?? '?'}`)
+            continue
+          }
           const hasMatchedPo = src.po_status === 'matched' && !!src.po_number
           if (hasMatchedPo) {
             sheetUpdates.push({
               row_key: src.row_key,
               mo_number: src.po_number,
-              pr_number: header.apply_id,
+              pr_number: applyId,
               po_number: src.po_number,
               po_status: 'matched',
             })
           } else {
             sheetUpdates.push({
               row_key: src.row_key,
-              mo_number: header.apply_id,
-              pr_number: header.apply_id,
+              mo_number: applyId,
+              pr_number: applyId,
               po_status: null,
             })
           }
         }
       }
     } catch (e) {
-      errors.push(`${header.apply_id}: ${e instanceof Error ? e.message : String(e)}`)
+      errors.push(`${applyId}: ${e instanceof Error ? e.message : String(e)}`)
     }
     setImportProgress({ done: 1, total: 1, errors: [...errors] })
 
@@ -463,26 +494,29 @@ export default function PrBatchExportOPage() {
         }
         sheetSyncMsg = `，已回寫出單表 ${sheetUpdates.length} 筆`
       } catch (e) {
-        sheetSyncMsg = `，但出單表回寫失敗：${e instanceof Error ? e.message : String(e)}`
+        sheetSyncMsg = `，但出單表回寫失敗：${e instanceof Error ? e.message : String(e)}\n⚠️ 請購單已在 ARGO 成立（${applyId}），這些列會持續顯示為待匯入——請勿再次匯入，先回報處理`
       }
+    }
+    if (errors.length === 0 && missingRowKey.length > 0) {
+      sheetSyncMsg += `\n⚠️ ${missingRowKey.length} 筆缺 row_key 無法回寫（${missingRowKey.slice(0, 5).join('、')}${missingRowKey.length > 5 ? '…' : ''}）。這些列之後仍會出現在待匯入清單，請勿再次匯入`
     }
 
     if (errors.length === 0) {
-      const m = `✅ 請購單 ${header.apply_id} 已匯入 ERP（${payload.length} 筆明細）${sheetSyncMsg}`
+      const m = `✅ 請購單 ${applyId} 已匯入 ERP（${payload.length} 筆明細）${sheetSyncMsg}`
       setMsg(m)
       alert(m)
       setSourceRows([])
       setLineEdits([])
       setLoadedDate(null)
     } else {
-      const m = `⚠️ 匯入完成：請購單 ${header.apply_id} 失敗${sheetSyncMsg}`
+      const m = `⚠️ 匯入完成：請購單 ${applyId} 失敗${sheetSyncMsg}`
       setMsg(m)
       alert(`${m}\n\n失敗明細：\n${errors.slice(0, 10).join('\n')}${errors.length > 10 ? `\n…（共 ${errors.length} 筆）` : ''}`)
     }
 
     setImporting(false)
     setTimeout(() => setImportProgress(null), 12000)
-  }, [payload, header.apply_id, header.department, sourceRows, loadedDate, lineEdits, unitMap])
+  }, [payload, header.apply_date, header.department, header.hold_status, sourceRows, importedMpoRows, loadedDate, lineEdits, unitMap, generateApplyId])
 
   const setH = useCallback(<K extends keyof PrHeader>(k: K, v: PrHeader[K]) => {
     setHeader(prev => ({ ...prev, [k]: v }))
@@ -575,7 +609,7 @@ export default function PrBatchExportOPage() {
         <div className="flex items-end justify-between gap-3 flex-wrap border-b border-slate-800 pb-4">
           <div>
             <h1 className="text-3xl font-bold tracking-tight">出單表➜委外請購</h1>
-            <p className="text-slate-400 text-sm mt-1">ArgoERP IFAF105（PJBF084）｜一張請購單多筆明細｜請購單號規則 MPOYYYYMMDDNN</p>
+            <p className="text-slate-400 text-sm mt-1">ArgoERP IFAF105（PJBF084）｜一張請購單多筆明細｜單號 MPOYYYYMMDDNN，傳入時查 ARGO 當天最新號自動 +1</p>
           </div>
 
           <div className="flex items-center gap-2 flex-wrap">
@@ -604,18 +638,19 @@ export default function PrBatchExportOPage() {
         <section className="bg-slate-900 border border-slate-800 rounded p-4">
           <h2 className="font-semibold mb-3">請購表頭（必填）</h2>
           <div className="grid grid-cols-1 md:grid-cols-5 gap-3 text-sm">
-            <label className="flex flex-col gap-1">請購單號
-              <div className="flex gap-2">
-                <input value={header.apply_id} onChange={e => setH('apply_id', e.target.value.toUpperCase())} className="px-2 py-1.5 rounded bg-slate-950 border border-slate-700 flex-1 font-mono" />
+            <div className="flex flex-col gap-1">
+              <div className="flex items-center justify-between gap-2">
+                <span>請購單號（自動取號）</span>
                 <button
                   onClick={() => void handleRegenerateApplyId()}
                   disabled={applyIdLoading}
-                  className="px-3 py-1.5 rounded bg-indigo-700 hover:bg-indigo-600 disabled:bg-slate-800 disabled:text-slate-500 text-xs whitespace-nowrap"
+                  className="shrink-0 px-2 py-0.5 rounded bg-indigo-700 hover:bg-indigo-600 disabled:bg-slate-800 disabled:text-slate-500 text-xs whitespace-nowrap"
                 >
-                  {applyIdLoading ? '取號中…' : '重產單號'}
+                  {applyIdLoading ? '取號中…' : '抓最新單號'}
                 </button>
               </div>
-            </label>
+              <input value={header.apply_id} readOnly placeholder="匯入時自動取號" className="px-2 py-1.5 rounded bg-slate-950 border border-slate-700 w-full font-mono text-slate-300 cursor-default" />
+            </div>
             <label className="flex flex-col gap-1">開立日期
               <input value={header.apply_date} onChange={e => setH('apply_date', e.target.value)} className="px-2 py-1.5 rounded bg-slate-950 border border-slate-700" />
             </label>
