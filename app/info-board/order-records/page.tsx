@@ -277,6 +277,8 @@ interface SheetRow {
   quantity: string
   plate_count: string
   customer: string
+  handler?: string        // J承辦人（業務）
+  issuer?: string         // K開單人員
   delivery_date: string
   mo_status: '已匯入製令' | null
   mo_number?: string | null
@@ -471,6 +473,12 @@ export default function OrderRecordsPage() {
         {/* 客戶 */}
         <td className="px-3 py-2 text-slate-400 max-w-[110px] truncate text-xs" title={row.customer}>{row.customer}</td>
 
+        {/* 業務（承辦人） */}
+        <td className="px-3 py-2 text-slate-300 whitespace-nowrap text-xs">{row.handler || '—'}</td>
+
+        {/* 開單人員 */}
+        <td className="px-3 py-2 text-slate-400 whitespace-nowrap text-xs">{row.issuer || '—'}</td>
+
         {/* 交付日 */}
         <td className="px-3 py-2 text-slate-500 whitespace-nowrap text-xs">{row.delivery_date}</td>
 
@@ -541,6 +549,8 @@ export default function OrderRecordsPage() {
         <th className="px-3 py-2 border-b border-slate-800 text-right">數量</th>
         <th className="px-3 py-2 border-b border-slate-800 text-yellow-400 text-center">盤數</th>
         <th className="px-3 py-2 border-b border-slate-800">客戶</th>
+        <th className="px-3 py-2 border-b border-slate-800">業務</th>
+        <th className="px-3 py-2 border-b border-slate-800">開單人員</th>
         <th className="px-3 py-2 border-b border-slate-800">交付日</th>
         <th className="px-3 py-2 border-b border-slate-800">製令/採購單號</th>
         <th className="px-3 py-2 border-b border-slate-800">批備料</th>
