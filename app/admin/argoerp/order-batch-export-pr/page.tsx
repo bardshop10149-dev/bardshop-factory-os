@@ -144,8 +144,9 @@ export default function PrBatchExportOPage() {
       const raw = localStorage.getItem(HEADER_KEY)
       if (raw) {
         const parsed = JSON.parse(raw)
-        // 單號改為傳入時自動取號，不還原舊值以免顯示過期單號
-        setHeader({ ...makeDefaultHeader(), ...parsed, apply_id: '' })
+        // 單號＝傳入時自動取號、開立日期＝一律帶當天，兩者都不還原 localStorage 舊值
+        // （曾發生開立日期停在舊值 → ARGO 單 APPLY_DATE 錯置，例 MPO2026070901 開立日 6/25）
+        setHeader({ ...makeDefaultHeader(), ...parsed, apply_id: '', apply_date: fmtDate(new Date()) })
       }
     } catch {
       // ignore
@@ -427,6 +428,7 @@ export default function PrBatchExportOPage() {
     setImportProgress({ done: 0, total: 1, errors: [] })
     const errors: string[] = []
     const sheetUpdates: Array<Record<string, unknown>> = []
+    const missingRowKey: string[] = []
     const importPayload = payload.map(r => ({ ...r, APPLY_ID: applyId }))
 
     try {
@@ -444,7 +446,13 @@ export default function PrBatchExportOPage() {
       } else {
         for (let i = 0; i < sourceRows.length; i++) {
           const src = sourceRows[i]
-          if (!loadedDate || !src?.row_key) continue
+          if (!loadedDate) continue
+          if (!src?.row_key) {
+            // 缺 row_key 的列無法回寫，不能靜默跳過：這種列匯入後仍會顯示在
+            // 待匯入清單，下次極易誤按重複匯入（2026-07-09 MPO2026070901 即此案例）
+            missingRowKey.push(`${src?.order_number ?? '?'}/${src?.item_code ?? '?'}`)
+            continue
+          }
           const hasMatchedPo = src.po_status === 'matched' && !!src.po_number
           if (hasMatchedPo) {
             sheetUpdates.push({
@@ -486,8 +494,11 @@ export default function PrBatchExportOPage() {
         }
         sheetSyncMsg = `，已回寫出單表 ${sheetUpdates.length} 筆`
       } catch (e) {
-        sheetSyncMsg = `，但出單表回寫失敗：${e instanceof Error ? e.message : String(e)}`
+        sheetSyncMsg = `，但出單表回寫失敗：${e instanceof Error ? e.message : String(e)}\n⚠️ 請購單已在 ARGO 成立（${applyId}），這些列會持續顯示為待匯入——請勿再次匯入，先回報處理`
       }
+    }
+    if (errors.length === 0 && missingRowKey.length > 0) {
+      sheetSyncMsg += `\n⚠️ ${missingRowKey.length} 筆缺 row_key 無法回寫（${missingRowKey.slice(0, 5).join('、')}${missingRowKey.length > 5 ? '…' : ''}）。這些列之後仍會出現在待匯入清單，請勿再次匯入`
     }
 
     if (errors.length === 0) {

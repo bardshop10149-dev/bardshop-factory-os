@@ -161,8 +161,10 @@ export default function PoBatchExportCPage() {
         for (const k of Object.keys(def) as (keyof PoHeader)[]) {
           if ((saved[k] ?? '') === '') (merged as unknown as Record<string, unknown>)[k] = def[k]
         }
-        // 單號改為傳入時自動取號，不還原舊值以免顯示過期單號
+        // 單號＝傳入時自動取號、開單日期＝一律帶當天，兩者都不還原 localStorage 舊值
+        // （委外請購頁曾因日期停在舊值，ARGO 單開立日錯置成 6/25）
         merged.project_id = ''
+        merged.begin_date = fmtDate(new Date())
         setHeader(merged)
       }
     } catch {}
