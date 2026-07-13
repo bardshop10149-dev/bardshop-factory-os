@@ -21,6 +21,7 @@ interface SoOrderMeta {
   begin_date: string | null
   sales_name: string | null
   partner_name: string | null
+  customer_remark: string | null
 }
 
 interface Props {
@@ -43,7 +44,7 @@ export default function SoOrderModal({ projectId, onClose }: Props) {
 
     supabase
       .from('erp_so_lines')
-      .select('project_id, begin_date, sales_name, partner_name, line_no, description, mbp_part, duedate, order_qty_oru, unit_of_measure_oru, remark, packing, remark2, hold_status')
+      .select('project_id, begin_date, sales_name, partner_name, customer_remark, line_no, description, mbp_part, duedate, order_qty_oru, unit_of_measure_oru, remark, packing, remark2, hold_status')
       .eq('project_id', projectId)
       .order('line_no', { ascending: true })
       .then(({ data, error: err }) => {
@@ -56,6 +57,7 @@ export default function SoOrderModal({ projectId, onClose }: Props) {
           begin_date: first.begin_date,
           sales_name: first.sales_name,
           partner_name: first.partner_name,
+          customer_remark: first.customer_remark ?? null,
         })
         setLines(data.map(r => ({
           line_no: r.line_no,
@@ -118,6 +120,14 @@ export default function SoOrderModal({ projectId, onClose }: Props) {
             ✕
           </button>
         </div>
+
+        {/* 表頭備註 CUSTOMER_REMARK（整張單共用，有值才顯示）*/}
+        {meta?.customer_remark && (
+          <div className="px-6 py-3 border-b border-slate-800 bg-amber-950/20 flex-shrink-0">
+            <span className="text-xs text-amber-500/80 mr-2">表頭備註</span>
+            <span className="text-amber-200/90 text-sm whitespace-pre-wrap align-middle">{meta.customer_remark}</span>
+          </div>
+        )}
 
         {/* Body */}
         <div className="p-5 overflow-y-auto flex-1">

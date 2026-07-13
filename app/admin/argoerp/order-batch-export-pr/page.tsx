@@ -12,6 +12,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import * as XLSX from 'xlsx'
 import { supabase } from '../../../../lib/supabaseClient'
 import PoOrderModal from '../../../../components/PoOrderModal'
+import SoOrderModal from '../../../../components/SoOrderModal'
 
 interface SourceRow {
   row_key?: string
@@ -138,6 +139,7 @@ export default function PrBatchExportOPage() {
   const [prSearching, setPrSearching] = useState(false)
   const [prSyncRows, setPrSyncRows] = useState<Array<Record<string, unknown>> | null>(null)
   const [poModalId, setPoModalId] = useState<string | null>(null)
+  const [soModalId, setSoModalId] = useState<string | null>(null)
 
   useEffect(() => {
     try {
@@ -738,7 +740,11 @@ export default function PrBatchExportOPage() {
                     <td className="px-2 py-1.5 text-slate-500">{i + 1}</td>
                     <td className="px-2 py-1.5 font-mono text-emerald-300">{header.apply_id || '—'}</td>
                     <td className="px-2 py-1.5 font-mono">{i + 1}</td>
-                    <td className="px-2 py-1.5 text-cyan-300">{row.order_number}</td>
+                    <td className="px-2 py-1.5">
+                      {row.order_number
+                        ? <button onClick={() => setSoModalId(row.order_number)} className="font-mono text-cyan-300 hover:text-cyan-100 hover:underline underline-offset-2 text-left">{row.order_number}</button>
+                        : <span className="text-slate-700">—</span>}
+                    </td>
                     <td className="px-2 py-1.5">{row.doc_type}</td>
                     <td className="px-2 py-1.5 font-mono">{row.item_code}</td>
                     <td className="px-2 py-1.5">{row.item_name}</td>
@@ -795,7 +801,11 @@ export default function PrBatchExportOPage() {
                                 className="hover:underline underline-offset-2 text-emerald-300 hover:text-emerald-100 transition-colors text-left"
                               >{row.pr_number || row.mo_number}</button>
                             : '—'}</td>
-                        <td className="px-2 py-1.5 text-cyan-300">{row.order_number}</td>
+                        <td className="px-2 py-1.5">
+                          {row.order_number
+                            ? <button onClick={() => setSoModalId(row.order_number)} className="font-mono text-cyan-300 hover:text-cyan-100 hover:underline underline-offset-2 text-left">{row.order_number}</button>
+                            : <span className="text-slate-700">—</span>}
+                        </td>
                         <td className="px-2 py-1.5">{row.doc_type}</td>
                         <td className="px-2 py-1.5 font-mono">{row.item_code}</td>
                         <td className="px-2 py-1.5">{row.item_name}</td>
@@ -850,6 +860,7 @@ export default function PrBatchExportOPage() {
         </section>
       </div>
       <PoOrderModal docNo={poModalId} onClose={() => setPoModalId(null)} />
+      <SoOrderModal projectId={soModalId} onClose={() => setSoModalId(null)} />
     </main>
   )
 }
