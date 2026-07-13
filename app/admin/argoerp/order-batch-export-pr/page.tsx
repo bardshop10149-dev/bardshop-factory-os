@@ -860,7 +860,7 @@ export default function PrBatchExportOPage() {
         </section>
       </div>
       <PoOrderModal docNo={poModalId} onClose={() => setPoModalId(null)} />
-      <SoOrderModal projectId={soModalId} onClose={() => setSoModalId(null)} />
+      <SoOrderModal projectId={soModalId} liveRefresh onClose={() => setSoModalId(null)} />
     </main>
   )
 }
