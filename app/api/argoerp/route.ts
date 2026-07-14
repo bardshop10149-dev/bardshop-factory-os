@@ -354,7 +354,7 @@ export async function POST(request: NextRequest) {
   try {
     const body = await request.json()
     const { action, data, interfaceId } = body as {
-      action: 'import' | 'query' | 'sync_inventory' | 'sync_customer' | 'sync_vendor' | 'fetch_po_pdl_links' | 'explore_so_columns' | 'test_so_detail' | 'test_po_detail' | 'sync_so' | 'sync_mo' | 'sync_pj' | 'sync_po' | 'sync_pr' | 'sync_bom_units' | 'sync_bom_structure' | 'sync_material_prep'
+      action: 'import' | 'query' | 'query_so_detail' | 'sync_inventory' | 'sync_customer' | 'sync_vendor' | 'fetch_po_pdl_links' | 'explore_so_columns' | 'test_so_detail' | 'test_po_detail' | 'sync_so' | 'sync_mo' | 'sync_pj' | 'sync_po' | 'sync_pr' | 'sync_bom_units' | 'sync_bom_structure' | 'sync_material_prep'
       data?: Record<string, unknown>[]
       interfaceId?: string
     }
@@ -456,6 +456,100 @@ export async function POST(request: NextRequest) {
         apiResult: parsed,
         rawText,
       }, { status: success ? 200 : 502 })
+    }
+
+    if (action === 'query_so_detail') {
+      // ── 單張 SO 即時明細（供 SoOrderModal 即時回 ARGO 撈規格用）──────────────
+      // 直接查 ARGO（PJ_PROJECT 表頭 + PJ_PROJECTDETAIL 明細，JS 端 JOIN），
+      // 不經 erp_so_lines 同步表，確保「當天新單／剛更新的單」也看得到最新規格。
+      const rawProjectId = String((body as { projectId?: unknown }).projectId ?? '').trim()
+      // 防注入：SO 單號只會是英數（如 SO260709018、SOB260707517），其餘字元一律剔除
+      const projectId = rawProjectId.replace(/[^A-Za-z0-9]/g, '').toUpperCase()
+      if (!projectId) {
+        return NextResponse.json({ status: 'error', error: '缺少 projectId' }, { status: 400 })
+      }
+
+      // 表頭：取 CUSTOMER_REMARK（表頭備註）＋基本資訊
+      const headSparam = JSON.stringify({
+        APIKEY1: keys.APIKEY1, APIKEY2: keys.APIKEY2, APIKEY3: keys.APIKEY3,
+        SEGMENT, TABLE: 'PJ_PROJECT', SHOWNULLCOLUMN: 'Y',
+        PROJECT_ID: `= '${projectId}'`,
+      })
+      const headRes = await fetch(`${API_BASE}/S_QUERY`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sparam: headSparam }),
+      })
+      const { parsed: parsedHead, rawText: rawHead } = await readApiResponse(headRes)
+      if (!headRes.ok || !isArgoSuccess(parsedHead)) {
+        return NextResponse.json({
+          status: 'error',
+          error: extractApiError(parsedHead) || 'ARGO PJ_PROJECT 查詢失敗',
+          rawText: rawHead,
+        }, { status: 502 })
+      }
+      const headerRow = findObjectRows(parsedHead).find(
+        r => String(getRecordValue(r, 'PROJECT_ID') ?? '').trim().toUpperCase() === projectId,
+      )
+
+      // 明細：規格(REMARK)／商品備註(REMARK2)／包裝(PACKING)／等
+      const detailSparam = JSON.stringify({
+        APIKEY1: keys.APIKEY1, APIKEY2: keys.APIKEY2, APIKEY3: keys.APIKEY3,
+        SEGMENT, TABLE: 'PJ_PROJECTDETAIL', SHOWNULLCOLUMN: 'N',
+        CUSTOMCOLUMN: 'PJT_PROJECT_ID,LINE_NO,MBP_PART,MBP_VER,DUEDATE,ORDER_QTY_ORU,UNIT_OF_MEASURE_ORU,REMARK,PACKING,REMARK2,GRADE',
+        PJT_PROJECT_ID: `= '${projectId}'`,
+      })
+      const detailRes = await fetch(`${API_BASE}/S_QUERY`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sparam: detailSparam }),
+      })
+      const { parsed: parsedDetail, rawText: rawDetail } = await readApiResponse(detailRes)
+      if (!detailRes.ok || !isArgoSuccess(parsedDetail)) {
+        return NextResponse.json({
+          status: 'error',
+          error: extractApiError(parsedDetail) || 'ARGO PJ_PROJECTDETAIL 查詢失敗',
+          rawText: rawDetail,
+        }, { status: 502 })
+      }
+
+      // 只留該 project 的明細，並依 LINE_NO 去重
+      const dedupe = new Map<string, Record<string, unknown>>()
+      for (const row of findObjectRows(parsedDetail)) {
+        const pid = String(getRecordValue(row, 'PJT_PROJECT_ID') ?? '').trim().toUpperCase()
+        if (pid !== projectId) continue
+        const lineNo = String(getRecordValue(row, 'LINE_NO') ?? '').trim()
+        if (!dedupe.has(lineNo)) dedupe.set(lineNo, row)
+      }
+
+      const holdStatus = String(getRecordValue(headerRow, 'HOLD_STATUS') ?? '').trim() || null
+      const lines = Array.from(dedupe.values())
+        .map(row => ({
+          line_no: getRecordValue(row, 'LINE_NO') != null ? Number(getRecordValue(row, 'LINE_NO')) : null,
+          description: String(getRecordValue(row, 'REMARK') ?? '').trim() || null,   // 規格（長串 REMARK）
+          mbp_part: String(getRecordValue(row, 'MBP_PART') ?? '').trim() || null,
+          duedate: String(getRecordValue(row, 'DUEDATE') ?? '').trim() || null,
+          order_qty_oru: toNumber(getRecordValue(row, 'ORDER_QTY_ORU')),
+          unit_of_measure_oru: String(getRecordValue(row, 'UNIT_OF_MEASURE_ORU') ?? '').trim() || null,
+          remark: String(getRecordValue(row, 'REMARK2') ?? '').trim() || null,       // 商品備註 = REMARK2（沿用 sync_so 對應）
+          packing: String(getRecordValue(row, 'PACKING') ?? '').trim() || null,
+          remark2: String(getRecordValue(row, 'REMARK2') ?? '').trim() || null,
+          grade: String(getRecordValue(row, 'GRADE') ?? '').trim() || null,
+          hold_status: holdStatus,
+        }))
+        .sort((a, b) => (a.line_no ?? 0) - (b.line_no ?? 0))
+
+      return NextResponse.json({
+        status: 'ok',
+        success: true,
+        meta: {
+          project_id: projectId,
+          begin_date: String(getRecordValue(headerRow, 'BEGIN_DATE') ?? '').trim() || null,
+          sales_name: String(getRecordValue(headerRow, 'SALES_NAME') ?? '').trim() || null,
+          partner_name: String(getRecordValue(headerRow, 'PARTNER_NAME') ?? '').trim() || null,
+          hold_status: holdStatus,
+          customer_remark: getFirstNonEmptyRecordValue(headerRow, ['CUSTOMER_REMARK', 'REMARK']),
+        },
+        lines,
+      })
     }
 
     if (action === 'sync_inventory') {
