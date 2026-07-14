@@ -159,6 +159,20 @@ function matchFilters(l: PoTrackingLine, f: Filters): boolean {
   return true
 }
 
+/** 相對時間標籤（上次更新顯示用）：HH:mm（N 分鐘前） */
+function fmtSyncTime(iso: string): { clock: string; ago: string; staleMins: number } {
+  const t = new Date(iso)
+  if (Number.isNaN(t.getTime())) return { clock: iso, ago: '', staleMins: 0 }
+  const mins = Math.max(0, Math.floor((Date.now() - t.getTime()) / 60000))
+  const clock = `${String(t.getHours()).padStart(2, '0')}:${String(t.getMinutes()).padStart(2, '0')}`
+  let ago: string
+  if (mins < 1) ago = '剛剛'
+  else if (mins < 60) ago = `${mins} 分鐘前`
+  else if (mins < 1440) ago = `${Math.floor(mins / 60)} 小時 ${mins % 60} 分前`
+  else ago = `${Math.floor(mins / 1440)} 天前`
+  return { clock, ago, staleMins: mins }
+}
+
 export default function PurchasingPage() {
   const [lines, setLines]       = useState<PoTrackingLine[]>([])
   const [counts, setCounts]     = useState<DueCounts | null>(null)
@@ -180,6 +194,24 @@ export default function PurchasingPage() {
   const [itemOptions, setItemOptions]   = useState<{ code: string; name: string | null }[]>([])
   const [itemPickerOpen, setItemPickerOpen] = useState(false)   // 料號查詢視窗：點欄位打字/按 Enter 才開
   const [poDetailNo, setPoDetailNo] = useState<string | null>(null)  // 點採購單號 → 整張單明細
+  const [dbSyncing, setDbSyncing]   = useState(false)  // 「更新資料庫」（sync_po）執行中
+  const [lastSync, setLastSync]     = useState<{ at: string; ok: boolean } | null>(null)  // 上次 sync_po 時間
+  const [lastSyncErr, setLastSyncErr] = useState(false)  // sync-status 讀取失敗
+
+  // 上次更新時間（erp_sync_logs 最近一次 sync_po；進頁面載入，手動更新後刷新）
+  const loadSyncStatus = useCallback(async () => {
+    try {
+      const res = await fetch('/api/purchasing/sync-status')
+      const json = await res.json().catch(() => null)
+      if (!res.ok || !json?.success) { setLastSyncErr(true); return }
+      setLastSyncErr(false)
+      setLastSync(json.last ? { at: json.last.created_at, ok: json.last.ok !== false } : null)
+    } catch {
+      setLastSyncErr(true)
+    }
+  }, [])
+
+  useEffect(() => { void loadSyncStatus() }, [loadSyncStatus])
 
   // 建議清單（承辦人/料號 datalist）：進頁面先載，查詢前就能用
   useEffect(() => {
@@ -226,6 +258,34 @@ export default function PurchasingPage() {
     setMsg(text)
     setTimeout(() => setMsg(''), 3000)
   }
+
+  /** 「更新資料庫」：手動觸發 sync_po（同每小時排程做的事），完成後刷新上次更新時間與列表 */
+  const handleDbSync = useCallback(async () => {
+    if (dbSyncing) return
+    setDbSyncing(true)
+    try {
+      const res = await fetch('/api/argoerp', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'sync_po' }),
+      })
+      const json = await res.json().catch(() => ({}))
+      if (!res.ok || (json.status !== 'ok' && json.success !== true)) {
+        throw new Error(json.error || `HTTP ${res.status}`)
+      }
+      const changed = (json.inserted ?? 0) + (json.updated ?? 0) + (json.deleted ?? 0)
+      flash(`✅ 採購單資料庫已更新（新增 ${json.inserted ?? 0}／更新 ${json.updated ?? 0}／刪除 ${json.deleted ?? 0}）`)
+      void loadSyncStatus()
+      // 列表已查詢過且有變動才重撈，避免多打一次重 API
+      if (searched && changed > 0) {
+        void load(tab === 'due' ? undefined : { from: appliedFilters.orderFrom, to: appliedFilters.orderTo })
+      }
+    } catch (e) {
+      flash(`❌ 更新失敗：${e instanceof Error ? e.message : String(e)}`)
+    } finally {
+      setDbSyncing(false)
+    }
+  }, [dbSyncing, searched, tab, appliedFilters.orderFrom, appliedFilters.orderTo, load, loadSyncStatus])
 
   const markSaving = (key: string, on: boolean) => {
     setSavingKeys(prev => {
@@ -476,6 +536,30 @@ export default function PurchasingPage() {
         <span className="text-[10px] text-slate-600">OPEN 採購單追蹤（每小時自 ARGO 同步）</span>
         <div className="ml-auto flex items-center gap-3">
           {msg && <span className="text-xs text-rose-300">{msg}</span>}
+          {/* 上次更新時間（erp_sync_logs 最近一次 sync_po；排程每小時自動跑，>75 分鐘未跑標黃提醒） */}
+          <span className="text-[10px] text-slate-500 whitespace-nowrap" title="採購單資料庫（erp_pj_sync）最近一次自 ARGO 同步的時間；排程每小時自動執行">
+            {lastSyncErr
+              ? '上次更新：無法取得'
+              : lastSync
+                ? (() => {
+                    const { clock, ago, staleMins } = fmtSyncTime(lastSync.at)
+                    return (
+                      <>
+                        上次更新：{clock}（{ago}）
+                        {!lastSync.ok && <span className="text-rose-400 ml-1">⚠ 上次同步失敗</span>}
+                        {lastSync.ok && staleMins > 75 && <span className="text-amber-400 ml-1">⚠ 逾時，排程可能未跑</span>}
+                      </>
+                    )
+                  })()
+                : '上次更新：—'}
+          </span>
+          <button
+            type="button"
+            onClick={() => void handleDbSync()}
+            disabled={dbSyncing}
+            title="立即從 ARGO 重新同步採購單資料庫（與每小時排程相同動作）"
+            className="px-3 py-1.5 rounded bg-emerald-800 hover:bg-emerald-700 disabled:bg-slate-800 disabled:text-slate-600 text-xs font-semibold text-emerald-100 transition-colors"
+          >{dbSyncing ? '⏳ 同步中…' : '⬇ 更新資料庫'}</button>
           <button
             type="button"
             onClick={() => void load(tab === 'due' ? undefined : { from: appliedFilters.orderFrom, to: appliedFilters.orderTo })}
