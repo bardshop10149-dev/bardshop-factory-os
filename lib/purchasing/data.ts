@@ -333,9 +333,18 @@ export async function loadPoTrackingLines(supabase: SupabaseAdmin, opts: LoadOpt
 
   // 覆蓋層：po_line_tracking / po_payment（表都有界，整表抓）
   const loadTracking = async () => {
-    const { data, error } = await supabase
+    let { data, error } = await supabase
       .from('po_line_tracking')
       .select('doc_no, sub_no, sent_at, shipped_at, ship_method, expected_ship_date, note, updated_by, updated_at')
+    if (error && /note/i.test(error.message)) {
+      // 降級相容：note 欄位 migration（20260714_po_line_note.sql）尚未執行時，
+      // 改抓舊欄位讓列表照常運作（備註欄暫顯示空白），不讓整個查詢掛掉
+      const legacy = await supabase
+        .from('po_line_tracking')
+        .select('doc_no, sub_no, sent_at, shipped_at, ship_method, expected_ship_date, updated_by, updated_at')
+      data = (legacy.data ?? []).map((r) => ({ ...r, note: null }))
+      error = legacy.error
+    }
     if (error) throw new Error(error.message)
     for (const r of data ?? []) trackingMap.set(`${r.doc_no}|${r.sub_no}`, r)
   }
