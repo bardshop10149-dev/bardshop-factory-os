@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import MigrationBanner from '../components/MigrationBanner';
+import SessionKeeper from '../components/SessionKeeper';
 // import TaskFloatingWidget from '../components/TaskFloatingWidget'; // 🔥 1. 引入元件
 
 const geistSans = Geist({
@@ -29,6 +30,8 @@ export default function RootLayout({
       <body
         className={`${geistSans.variable} ${geistMono.variable} antialiased`}
       >
+        {/* Session 自動續期：token 快到期時用 refresh token 換新，根治「開著的頁面 token 失效鬼打牆」 */}
+        <SessionKeeper />
         {process.env.NEXT_PUBLIC_SHOW_MIGRATION_BANNER === 'true'
           ? <MigrationBanner />
           : children

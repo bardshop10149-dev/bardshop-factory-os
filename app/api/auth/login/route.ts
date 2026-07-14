@@ -1,27 +1,7 @@
 import { NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
 import { getSupabaseAdminClient } from '../../../../lib/supabaseAdmin'
-
-// 管理員固定擁有所有權限
-const ADMIN_PERMISSIONS = [
-  'dashboard', 'notice', 'estimation', 'tasks',
-  'qa_report', 'qa', 'production_admin', 'system_settings',
-  'argo_db', 'design', 'material', 'product_dev', 'info_board', 'argo_tool',
-  'purchasing',
-]
-
-/**
- * 舊格式 permissions 正規化（與 login/page.tsx 原邏輯一致）
- */
-function normalizeLegacyPermissions(raw: string[]): string[] {
-  const out = new Set<string>()
-  for (const p of raw) {
-    if (p === 'production') out.add('dashboard')
-    else if (p === 'admin') { out.add('production_admin'); out.add('system_settings') }
-    else out.add(p)
-  }
-  return Array.from(out)
-}
+import { buildSessionCookies, derivePermissions } from '../../../../lib/authShared'
 
 export async function POST(request: Request) {
   try {
@@ -60,12 +40,8 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: '找不到對應成員，請聯絡管理員' }, { status: 403 })
     }
 
-    // ── Step 3: 計算 role + permissions
-    const finalPermissions = Boolean(member.is_admin)
-      ? ADMIN_PERMISSIONS
-      : normalizeLegacyPermissions(Array.isArray(member.permissions) ? member.permissions : [])
-    const isAdmin = Boolean(member.is_admin) || finalPermissions.includes('production_admin')
-    const role = isAdmin ? 'admin' : 'ops'
+    // ── Step 3: 計算 role + permissions（與 refresh endpoint 共用 lib/authShared）
+    const { role, permissions: finalPermissions } = derivePermissions(member)
 
     // ── Step 4: 回寫 auth_user_id（若尚未設定）
     if (!member.auth_user_id && authData.user?.id) {
@@ -75,34 +51,23 @@ export async function POST(request: Request) {
         .eq('id', member.id)
     }
 
-    // ── Step 5: 設定 cookies
+    // ── Step 5: 設定 cookies（與 /api/auth/refresh 共用 buildSessionCookies）
     //   - bardshop-token   → httpOnly（防 JS 竄改，middleware 可讀）
-    //   - bardshop-refresh → httpOnly（Token refresh 用）
+    //   - bardshop-refresh → httpOnly（/api/auth/refresh 續期用）
     //   - bardshop-role / bardshop-permissions → 非 httpOnly（前端 RBAC 顯示用）
-    const maxAge = expires_in ?? 3600     // Supabase access_token 預設 1h
-    const refreshMaxAge = 60 * 60 * 24 * 7  // refresh_token 7 天
-
     const response = NextResponse.json({
       ok: true,
       name: member.real_name,
       email: member.email,
       role,
     })
-
-    // 正式環境加上 Secure（HTTPS-only）；本機 dev 走 http 故不加，避免登入 cookie 不被送出
-    const secure = process.env.NODE_ENV === 'production' ? '; Secure' : ''
-
-    // httpOnly cookies（安全憑證）
-    response.headers.append('Set-Cookie',
-      `bardshop-token=${access_token}; Path=/; Max-Age=${maxAge}; SameSite=Lax; HttpOnly${secure}`)
-    response.headers.append('Set-Cookie',
-      `bardshop-refresh=${refresh_token}; Path=/; Max-Age=${refreshMaxAge}; SameSite=Lax; HttpOnly${secure}`)
-
-    // 前端可讀 cookies（僅 UI 邏輯用）
-    response.headers.append('Set-Cookie',
-      `bardshop-role=${role}; Path=/; Max-Age=${maxAge}; SameSite=Lax${secure}`)
-    response.headers.append('Set-Cookie',
-      `bardshop-permissions=${encodeURIComponent(finalPermissions.join(','))}; Path=/; Max-Age=${maxAge}; SameSite=Lax${secure}`)
+    for (const c of buildSessionCookies({
+      accessToken: access_token,
+      refreshToken: refresh_token,
+      expiresIn: expires_in,
+      role,
+      permissions: finalPermissions,
+    })) response.headers.append('Set-Cookie', c)
 
     return response
   } catch (err) {
