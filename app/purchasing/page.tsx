@@ -652,10 +652,14 @@ export default function PurchasingPage() {
                 )}
               </div>
             ))}
-            {/* 承辦人建議：輸入部分姓名/工號跳出符合選項 */}
+            {/* 承辦人建議（EIP 採購部門成員）：有對到工號顯示「姓名（工號）」，沒有就純姓名 */}
             <datalist id="purchasing-buyer-list">
               {buyerOptions.map(b => (
-                <option key={b.id} value={b.name ? `${b.name}（${b.id}）` : b.id} label={b.name ? undefined : `工號 ${b.id}`} />
+                <option
+                  key={b.id || b.name || ''}
+                  value={b.name ? (b.id ? `${b.name}（${b.id}）` : b.name) : b.id}
+                  label={b.name ? undefined : `工號 ${b.id}`}
+                />
               ))}
             </datalist>
             {([
