@@ -22,12 +22,13 @@ export async function GET(request: NextRequest) {
   const supabase = getSupabaseAdminClient()
 
   try {
-    const lines = await loadPoTrackingLines(supabase, countOnly ? { countOnly } : { orderFrom, orderTo })
+    const timings: Record<string, number> = {}
+    const lines = await loadPoTrackingLines(supabase, countOnly ? { countOnly } : { orderFrom, orderTo }, timings)
     const counts = computeDueCounts(lines)
     if (countOnly) {
       return NextResponse.json({ success: true, counts, openLines: lines.length })
     }
-    return NextResponse.json({ success: true, counts, lines })
+    return NextResponse.json({ success: true, counts, lines, timings })
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)
     return NextResponse.json({ success: false, error: formatSupabaseAdminError(msg) }, { status: 500 })

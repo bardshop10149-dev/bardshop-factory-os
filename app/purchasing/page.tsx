@@ -197,6 +197,7 @@ export default function PurchasingPage() {
   const [dbSyncing, setDbSyncing]   = useState(false)  // 「更新資料庫」（sync_po）執行中
   const [lastSync, setLastSync]     = useState<{ at: string; ok: boolean } | null>(null)  // 上次 sync_po 時間
   const [lastSyncErr, setLastSyncErr] = useState(false)  // sync-status 讀取失敗
+  const [queryMs, setQueryMs]       = useState<{ client: number; server: number | null } | null>(null)  // 查詢耗時（診斷）
 
   // 上次更新時間（erp_sync_logs 最近一次 sync_po；進頁面載入，手動更新後刷新）
   const loadSyncStatus = useCallback(async () => {
@@ -229,6 +230,7 @@ export default function PurchasingPage() {
   const load = useCallback(async (range?: { from: string; to: string }) => {
     setLoading(true)
     setError(null)
+    const t0 = performance.now()
     try {
       const qs = new URLSearchParams()
       if (range?.from) qs.set('from', range.from)
@@ -239,6 +241,8 @@ export default function PurchasingPage() {
       if (!res.ok || !json.success) throw new Error(json.error || `HTTP ${res.status}`)
       setLines(json.lines as PoTrackingLine[])
       setCounts(json.counts as DueCounts)
+      // 耗時診斷：client=按下到資料進畫面；server=後端組裝（差值≈網路傳輸+解析）
+      setQueryMs({ client: Math.round(performance.now() - t0), server: json.timings?.total_ms ?? null })
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
     } finally {
@@ -536,6 +540,12 @@ export default function PurchasingPage() {
         <span className="text-[10px] text-slate-600">OPEN 採購單追蹤（每小時自 ARGO 同步）</span>
         <div className="ml-auto flex items-center gap-3">
           {msg && <span className="text-xs text-rose-300">{msg}</span>}
+          {/* 查詢耗時（診斷用）：client=按下到上畫面、伺服器=後端組裝；差值大代表卡在網路傳輸 */}
+          {queryMs && (
+            <span className="text-[10px] text-slate-600 whitespace-nowrap" title="上次查詢耗時：總（伺服器組裝）">
+              查詢 {(queryMs.client / 1000).toFixed(1)}s{queryMs.server != null ? `（伺服器 ${(queryMs.server / 1000).toFixed(1)}s）` : ''}
+            </span>
+          )}
           {/* 上次更新時間（erp_sync_logs 最近一次 sync_po；排程每小時自動跑，>75 分鐘未跑標黃提醒） */}
           <span className="text-[10px] text-slate-500 whitespace-nowrap" title="採購單資料庫（erp_pj_sync）最近一次自 ARGO 同步的時間；排程每小時自動執行">
             {lastSyncErr

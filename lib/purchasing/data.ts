@@ -21,6 +21,8 @@ import {
 
 type SupabaseAdmin = ReturnType<typeof getSupabaseAdminClient>
 
+// 只取需要的 extra 欄位（PostgREST alias:extra->>KEY 展開）——
+// 整包 extra JSONB 有數十欄，幾千列全抓是列表 5 秒+ 的主因之一
 interface PjSyncRow {
   doc_no: string
   sub_no: string
@@ -32,8 +34,17 @@ interface PjSyncRow {
   start_date: string | null
   end_date: string | null
   customer_vendor: string | null
-  extra: Record<string, unknown> | null
+  so_project_id: string | null
+  mbp_lot_no: string | null
+  sales_id: string | null
+  sales_name: string | null
+  so_line_no: string | null
+  received_qty: string | null
 }
+
+const PO_SELECT = 'doc_no, sub_no, item_code, description, qty, unit, status, start_date, end_date, customer_vendor, '
+  + 'so_project_id:extra->>SO_PROJECT_ID, mbp_lot_no:extra->>MBP_LOT_NO, sales_id:extra->>SALES_ID, '
+  + 'sales_name:extra->>SALES_NAME, so_line_no:extra->>SO_LINE_NO, received_qty:extra->>RECEIVED_QTY'
 
 interface PrCandidate {
   doc_no: string
@@ -59,42 +70,50 @@ function toSlashDate(d?: string | null): string | null {
 }
 
 /**
- * 1000 行批次抓 OPEN 採購明細；可用下單日(start_date)區間先在伺服器端收斂，
- * 大幅減少後續 PR/MO/供應商 enrich 的資料量（下單日為 YYYY/MM/DD，字典序可比）。
+ * 抓 OPEN 採購明細；可用下單日(start_date)區間先在伺服器端收斂。
+ * 第一頁帶 exact count，其餘頁並行抓（每頁都帶 order 確保 range 分頁穩定）。
  */
 async function fetchAllOpenPoRows(supabase: SupabaseAdmin, range?: { orderFrom?: string | null; orderTo?: string | null }): Promise<PjSyncRow[]> {
   const from = toSlashDate(range?.orderFrom)
   const to = toSlashDate(range?.orderTo)
-  const rows: PjSyncRow[] = []
-  for (let offset = 0; ; offset += BATCH) {
+  const buildQuery = (withCount: boolean) => {
     let q = supabase
       .from('erp_pj_sync')
-      .select('doc_no, sub_no, item_code, description, qty, unit, status, start_date, end_date, customer_vendor, extra')
+      .select(PO_SELECT, withCount ? { count: 'exact' } : undefined)
       .eq('doc_type', '採購單號')
       .eq('status', 'OPEN')
     if (from) q = q.gte('start_date', from)
     if (to) q = q.lte('start_date', to)
-    const { data, error } = await q
-      .order('doc_no', { ascending: true })
-      .order('sub_no', { ascending: true })
-      .range(offset, offset + BATCH - 1)
-    if (error) throw new Error(error.message)
-    rows.push(...((data ?? []) as PjSyncRow[]))
-    if (!data || data.length < BATCH) break
+    return q.order('doc_no', { ascending: true }).order('sub_no', { ascending: true })
+  }
+
+  const first = await buildQuery(true).range(0, BATCH - 1)
+  if (first.error) throw new Error(first.error.message)
+  const rows: PjSyncRow[] = [...((first.data ?? []) as unknown as PjSyncRow[])]
+  const total = first.count ?? rows.length
+  if (total > BATCH) {
+    const offsets: number[] = []
+    for (let offset = BATCH; offset < total; offset += BATCH) offsets.push(offset)
+    const pages = await Promise.all(offsets.map(async (offset) => {
+      const { data, error } = await buildQuery(false).range(offset, offset + BATCH - 1)
+      if (error) throw new Error(error.message)
+      return (data ?? []) as unknown as PjSyncRow[]
+    }))
+    for (const p of pages) rows.push(...p)
   }
   return rows
 }
 
-const strField = (extra: Record<string, unknown> | null, key: string): string | null => {
-  const v = String(extra?.[key] ?? '').trim()
-  return v || null
+const trimOrNull = (v: string | null | undefined): string | null => {
+  const s = String(v ?? '').trim()
+  return s || null
 }
 
 /** PO 明細的來源單號（SO/RO）：SO_PROJECT_ID 優先，常平 PO 批號（MBP_LOT_NO）看起來像單號時退用 */
-function sourceOrderOf(extra: Record<string, unknown> | null): string | null {
-  const so = strField(extra, 'SO_PROJECT_ID')
+function sourceOrderOf(row: PjSyncRow): string | null {
+  const so = trimOrNull(row.so_project_id)
   if (so) return so
-  const lot = strField(extra, 'MBP_LOT_NO')
+  const lot = trimOrNull(row.mbp_lot_no)
   if (lot && /^(SO|RO)[A-Z0-9-]{4,}$/i.test(lot)) return lot.toUpperCase()
   return null
 }
@@ -117,18 +136,26 @@ interface PrRawRow {
  *  取代原本「3 欄位 × SO 分塊」的多次 jsonb .in() 查詢——那條路在
  *  expression index 未建時會反覆全表掃描，是列表 10 秒+ 的主因。 */
 async function fetchAllPrRows(supabase: SupabaseAdmin): Promise<PrRawRow[]> {
-  const rows: PrRawRow[] = []
-  for (let offset = 0; ; offset += BATCH) {
-    const { data, error } = await supabase
-      .from('erp_pj_sync')
-      .select('doc_no, sub_no, item_code, pj:extra->>PROJECT_ID, lot:extra->>MBP_LOT_NO, so:extra->>SO_PROJECT_ID')
-      .eq('doc_type', '請購單號')
-      .order('doc_no', { ascending: true })
-      .order('sub_no', { ascending: true })
-      .range(offset, offset + BATCH - 1)
-    if (error) throw new Error(error.message)
-    rows.push(...((data ?? []) as unknown as PrRawRow[]))
-    if (!data || data.length < BATCH) break
+  const buildQuery = (withCount: boolean) => supabase
+    .from('erp_pj_sync')
+    .select('doc_no, sub_no, item_code, pj:extra->>PROJECT_ID, lot:extra->>MBP_LOT_NO, so:extra->>SO_PROJECT_ID', withCount ? { count: 'exact' } : undefined)
+    .eq('doc_type', '請購單號')
+    .order('doc_no', { ascending: true })
+    .order('sub_no', { ascending: true })
+
+  const first = await buildQuery(true).range(0, BATCH - 1)
+  if (first.error) throw new Error(first.error.message)
+  const rows: PrRawRow[] = [...((first.data ?? []) as unknown as PrRawRow[])]
+  const total = first.count ?? rows.length
+  if (total > BATCH) {
+    const offsets: number[] = []
+    for (let offset = BATCH; offset < total; offset += BATCH) offsets.push(offset)
+    const pages = await Promise.all(offsets.map(async (offset) => {
+      const { data, error } = await buildQuery(false).range(offset, offset + BATCH - 1)
+      if (error) throw new Error(error.message)
+      return (data ?? []) as unknown as PrRawRow[]
+    }))
+    for (const p of pages) rows.push(...p)
   }
   return rows
 }
@@ -230,8 +257,8 @@ export async function loadLookups(supabase: SupabaseAdmin): Promise<{
   const nameToId = new Map<string, string>()   // SALES_NAME → SALES_ID（取自 OPEN PO extra）
   const itemMap = new Map<string, string | null>()
   for (const r of poRows) {
-    const id = strField(r.extra, 'SALES_ID')
-    const name = strField(r.extra, 'SALES_NAME')
+    const id = trimOrNull(r.sales_id)
+    const name = trimOrNull(r.sales_name)
     if (id && name && !nameToId.has(name)) nameToId.set(name, id)
     const code = (r.item_code ?? '').trim()
     if (code && !itemMap.has(code)) itemMap.set(code, r.description)
@@ -289,7 +316,7 @@ export interface LoadOptions {
 
 /** 讀取 OPEN 採購明細（可依下單日區間收斂）並組裝追蹤資訊。
  *  各資料來源盡量並行查詢；耗時分段記在 console（Vercel function log 可見）。 */
-export async function loadPoTrackingLines(supabase: SupabaseAdmin, opts: LoadOptions = {}): Promise<PoTrackingLine[]> {
+export async function loadPoTrackingLines(supabase: SupabaseAdmin, opts: LoadOptions = {}, timings?: Record<string, number>): Promise<PoTrackingLine[]> {
   const t0 = Date.now()
   const poRows = await fetchAllOpenPoRows(supabase, { orderFrom: opts.orderFrom, orderTo: opts.orderTo })
   const tPo = Date.now()
@@ -322,12 +349,12 @@ export async function loadPoTrackingLines(supabase: SupabaseAdmin, opts: LoadOpt
     await Promise.all([loadTracking(), loadPayment()])
   } else {
     for (const r of poRows) {
-      const id = strField(r.extra, 'SALES_ID')
-      const name = strField(r.extra, 'SALES_NAME')
+      const id = trimOrNull(r.sales_id)
+      const name = trimOrNull(r.sales_name)
       if (id && name && !buyerMap.has(id)) buyerMap.set(id, name)
     }
     const vendorCodes = [...new Set(poRows.map((r) => (r.customer_vendor ?? '').trim()).filter(Boolean))]
-    const soNos = [...new Set(poRows.map((r) => sourceOrderOf(r.extra)).filter((v): v is string => Boolean(v)))]
+    const soNos = [...new Set(poRows.map((r) => sourceOrderOf(r)).filter((v): v is string => Boolean(v)))]
 
     const loadVendors = async () => {
       const parts = await Promise.all(chunk(vendorCodes, IN_CHUNK).map(async (part) => {
@@ -347,11 +374,18 @@ export async function loadPoTrackingLines(supabase: SupabaseAdmin, opts: LoadOpt
       buildMoIndex(supabase, soNos),
     ])
   }
-  console.log(`[purchasing/list] po=${poRows.length} rows ${tPo - t0}ms, enrich ${Date.now() - tPo}ms, total ${Date.now() - t0}ms${opts.countOnly ? ' (countOnly)' : ''}`)
+  const tEnrich = Date.now()
+  if (timings) {
+    timings.po_ms = tPo - t0
+    timings.enrich_ms = tEnrich - tPo
+    timings.total_ms = tEnrich - t0
+    timings.rows = poRows.length
+  }
+  console.log(`[purchasing/list] po=${poRows.length} rows ${tPo - t0}ms, enrich ${tEnrich - tPo}ms, total ${tEnrich - t0}ms${opts.countOnly ? ' (countOnly)' : ''}`)
 
   return poRows.map((r) => {
     const tracking = trackingMap.get(`${r.doc_no}|${r.sub_no}`)
-    const so = sourceOrderOf(r.extra)
+    const so = sourceOrderOf(r)
     const dueDate = normalizeDateText(r.end_date)
     const pr = opts.countOnly ? null : pickPr(prIndex, so, r.item_code)
     return {
@@ -362,8 +396,8 @@ export async function loadPoTrackingLines(supabase: SupabaseAdmin, opts: LoadOpt
       qty: r.qty,
       unit: r.unit,
       received_qty: (() => {
-        const v = Number(r.extra?.RECEIVED_QTY)
-        return Number.isFinite(v) ? v : null
+        const v = Number(r.received_qty)
+        return r.received_qty != null && r.received_qty !== '' && Number.isFinite(v) ? v : null
       })(),
       po_status: r.status,
       order_date: normalizeDateText(r.start_date),
@@ -372,12 +406,12 @@ export async function loadPoTrackingLines(supabase: SupabaseAdmin, opts: LoadOpt
       vendor_code: r.customer_vendor,
       vendor_name: r.customer_vendor ? vendorMap.get(r.customer_vendor.trim()) ?? null : null,
       so_no: so,
-      so_line: strField(r.extra, 'SO_LINE_NO'),
+      so_line: trimOrNull(r.so_line_no),
       pr_no: pr?.doc_no ?? null,
       pr_sub: pr?.sub_no ?? null,
       mo_no: opts.countOnly ? null : pickMo(moIndex, so, r.item_code),
-      buyer: strField(r.extra, 'SALES_NAME') ?? (() => { const id = strField(r.extra, 'SALES_ID'); return id ? buyerMap.get(id) ?? null : null })(),
-      buyer_id: strField(r.extra, 'SALES_ID'),
+      buyer: trimOrNull(r.sales_name) ?? (() => { const id = trimOrNull(r.sales_id); return id ? buyerMap.get(id) ?? null : null })(),
+      buyer_id: trimOrNull(r.sales_id),
       sent_at: tracking?.sent_at ?? null,
       shipped_at: tracking?.shipped_at ?? null,
       ship_method: (tracking?.ship_method ?? null) as ShipMethod | null,
