@@ -19,7 +19,7 @@ const lineKey = (l: Pick<PoTrackingLine, 'doc_no' | 'sub_no'>) => `${l.doc_no}|$
 
 const fmt = (v: string | null) => v ?? '—'
 
-type LinePatch = { sent?: boolean; shipped?: boolean; ship_method?: ShipMethod | null; expected_ship_date?: string | null }
+type LinePatch = { sent?: boolean; shipped?: boolean; ship_method?: ShipMethod | null; expected_ship_date?: string | null; note?: string | null }
 
 /** 客戶端樂觀更新：已發單 / 已出貨為兩個獨立里程碑（各自 toggle），比照後端 status route */
 function applyLineTransition(x: PoTrackingLine, patch: LinePatch): PoTrackingLine {
@@ -34,6 +34,7 @@ function applyLineTransition(x: PoTrackingLine, patch: LinePatch): PoTrackingLin
     shipped_at,
     ship_method: patch.ship_method === undefined ? x.ship_method : patch.ship_method,
     expected_ship_date: patch.expected_ship_date === undefined ? x.expected_ship_date : patch.expected_ship_date,
+    note: patch.note === undefined ? x.note : patch.note,
   }
 }
 
@@ -63,6 +64,28 @@ function ReceiveCell({ l }: { l: PoTrackingLine }) {
       </span>
       <span className={`block w-fit mt-0.5 text-[10px] px-1.5 py-0.5 rounded font-semibold border ${cls}`}>{label}</span>
     </div>
+  )
+}
+
+/** 備註輸入格：手打、自動換行（textarea 原生換行）、右下角可拖拉調高度；
+ *  失焦才儲存（打字中不打 API），Escape 還原成上次儲存值 */
+function NoteCell({ value, saving, onSave }: { value: string | null; saving: boolean; onSave: (next: string) => void }) {
+  const [draft, setDraft] = useState(value ?? '')
+  // 重新查詢／他列儲存回寫後，同步外部值
+  useEffect(() => { setDraft(value ?? '') }, [value])
+  return (
+    <textarea
+      value={draft}
+      onChange={e => setDraft(e.target.value)}
+      onBlur={() => { if (draft.trim() !== (value ?? '').trim()) onSave(draft) }}
+      onKeyDown={e => { if (e.key === 'Escape') setDraft(value ?? '') }}
+      placeholder="輸入備註…"
+      maxLength={500}
+      rows={2}
+      disabled={saving}
+      title="失焦自動儲存；Escape 還原；右下角可拖拉調整高度"
+      className="w-full min-h-[3em] px-2 py-1 rounded bg-slate-950/80 border border-slate-700/70 focus:border-cyan-600 focus:outline-none text-slate-200 text-xs leading-snug resize-y disabled:opacity-60 placeholder:text-slate-600"
+    />
   )
 }
 
@@ -111,6 +134,7 @@ const LIST_COLS = [
   { key: 'received',  label: '入庫',       w: 104, wc: 82 },
   { key: 'payment',   label: '付款',       w: 88,  wc: 74 },
   { key: 'ship',      label: '貨運/預計出貨', w: 140, wc: 112 },
+  { key: 'note',      label: '備註',       w: 200, wc: 140 },
 ]
 const STD_W: Record<string, number> = Object.fromEntries(LIST_COLS.map(c => [c.key, c.w]))
 const COMPACT_W: Record<string, number> = Object.fromEntries(LIST_COLS.map(c => [c.key, c.wc]))
@@ -159,6 +183,20 @@ function matchFilters(l: PoTrackingLine, f: Filters): boolean {
   return true
 }
 
+/** 相對時間標籤（上次更新顯示用）：HH:mm（N 分鐘前） */
+function fmtSyncTime(iso: string): { clock: string; ago: string; staleMins: number } {
+  const t = new Date(iso)
+  if (Number.isNaN(t.getTime())) return { clock: iso, ago: '', staleMins: 0 }
+  const mins = Math.max(0, Math.floor((Date.now() - t.getTime()) / 60000))
+  const clock = `${String(t.getHours()).padStart(2, '0')}:${String(t.getMinutes()).padStart(2, '0')}`
+  let ago: string
+  if (mins < 1) ago = '剛剛'
+  else if (mins < 60) ago = `${mins} 分鐘前`
+  else if (mins < 1440) ago = `${Math.floor(mins / 60)} 小時 ${mins % 60} 分前`
+  else ago = `${Math.floor(mins / 1440)} 天前`
+  return { clock, ago, staleMins: mins }
+}
+
 export default function PurchasingPage() {
   const [lines, setLines]       = useState<PoTrackingLine[]>([])
   const [counts, setCounts]     = useState<DueCounts | null>(null)
@@ -174,12 +212,32 @@ export default function PurchasingPage() {
   const [sortDue, setSortDue]   = useState<'asc' | 'desc' | null>(null)  // 依交期排序
   const [hideArrived, setHideArrived] = useState(false)  // 排除已全部到倉
   const [cpFilter, setCpFilter] = useState<'all' | 'only' | 'exclude'>('all')  // 常平／非常平
+  const [poStatus, setPoStatus] = useState<'OPEN' | 'CLOSE' | 'VOID'>('OPEN')  // 單據狀態（伺服器端過濾，切換即重查）
   const [savingKeys, setSavingKeys] = useState<Set<string>>(new Set())
   const [msg, setMsg]           = useState('')
   const [buyerOptions, setBuyerOptions] = useState<{ id: string; name: string | null }[]>([])
   const [itemOptions, setItemOptions]   = useState<{ code: string; name: string | null }[]>([])
   const [itemPickerOpen, setItemPickerOpen] = useState(false)   // 料號查詢視窗：點欄位打字/按 Enter 才開
   const [poDetailNo, setPoDetailNo] = useState<string | null>(null)  // 點採購單號 → 整張單明細
+  const [dbSyncing, setDbSyncing]   = useState(false)  // 「更新資料庫」（sync_po）執行中
+  const [lastSync, setLastSync]     = useState<{ at: string; ok: boolean } | null>(null)  // 上次 sync_po 時間
+  const [lastSyncErr, setLastSyncErr] = useState(false)  // sync-status 讀取失敗
+  const [queryMs, setQueryMs]       = useState<{ client: number; server: number | null } | null>(null)  // 查詢耗時（診斷）
+
+  // 上次更新時間（erp_sync_logs 最近一次 sync_po；進頁面載入，手動更新後刷新）
+  const loadSyncStatus = useCallback(async () => {
+    try {
+      const res = await fetch('/api/purchasing/sync-status')
+      const json = await res.json().catch(() => null)
+      if (!res.ok || !json?.success) { setLastSyncErr(true); return }
+      setLastSyncErr(false)
+      setLastSync(json.last ? { at: json.last.created_at, ok: json.last.ok !== false } : null)
+    } catch {
+      setLastSyncErr(true)
+    }
+  }, [])
+
+  useEffect(() => { void loadSyncStatus() }, [loadSyncStatus])
 
   // 建議清單（承辦人/料號 datalist）：進頁面先載，查詢前就能用
   useEffect(() => {
@@ -193,20 +251,26 @@ export default function PurchasingPage() {
       .catch(() => {})
   }, [])
 
-  // 下單日區間送伺服器端收斂（加速）；其餘細條件仍在前端過濾
-  const load = useCallback(async (range?: { from: string; to: string }) => {
+  // 下單日區間 + 單據狀態送伺服器端收斂（加速）；其餘細條件仍在前端過濾
+  const load = useCallback(async (opts?: { from?: string; to?: string; status?: string }) => {
     setLoading(true)
     setError(null)
+    const t0 = performance.now()
+    const status = opts?.status ?? 'OPEN'
     try {
       const qs = new URLSearchParams()
-      if (range?.from) qs.set('from', range.from)
-      if (range?.to) qs.set('to', range.to)
-      const res = await fetch(`/api/purchasing/list${qs.toString() ? `?${qs}` : ''}`)
+      if (opts?.from) qs.set('from', opts.from)
+      if (opts?.to) qs.set('to', opts.to)
+      qs.set('status', status)
+      const res = await fetch(`/api/purchasing/list?${qs}`)
       if (res.status === 403) { setForbidden(true); return }
       const json = await res.json()
       if (!res.ok || !json.success) throw new Error(json.error || `HTTP ${res.status}`)
       setLines(json.lines as PoTrackingLine[])
-      setCounts(json.counts as DueCounts)
+      // 到期提醒統計只在 OPEN 檢視更新（CLOSE/VOID 檢視不覆蓋徽章數字）
+      if (status === 'OPEN') setCounts(json.counts as DueCounts)
+      // 耗時診斷：client=按下到資料進畫面；server=後端組裝（差值≈網路傳輸+解析）
+      setQueryMs({ client: Math.round(performance.now() - t0), server: json.timings?.total_ms ?? null })
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
     } finally {
@@ -219,13 +283,41 @@ export default function PurchasingPage() {
     setAppliedFilters(filters)
     setSearched(true)
     setPage(1)
-    void load({ from: filters.orderFrom, to: filters.orderTo })
-  }, [filters, load])
+    void load({ from: filters.orderFrom, to: filters.orderTo, status: poStatus })
+  }, [filters, load, poStatus])
 
   const flash = (text: string) => {
     setMsg(text)
     setTimeout(() => setMsg(''), 3000)
   }
+
+  /** 「更新資料庫」：手動觸發 sync_po（同每小時排程做的事），完成後刷新上次更新時間與列表 */
+  const handleDbSync = useCallback(async () => {
+    if (dbSyncing) return
+    setDbSyncing(true)
+    try {
+      const res = await fetch('/api/argoerp', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'sync_po' }),
+      })
+      const json = await res.json().catch(() => ({}))
+      if (!res.ok || (json.status !== 'ok' && json.success !== true)) {
+        throw new Error(json.error || `HTTP ${res.status}`)
+      }
+      const changed = (json.inserted ?? 0) + (json.updated ?? 0) + (json.deleted ?? 0)
+      flash(`✅ 採購單資料庫已更新（新增 ${json.inserted ?? 0}／更新 ${json.updated ?? 0}／刪除 ${json.deleted ?? 0}）`)
+      void loadSyncStatus()
+      // 列表已查詢過且有變動才重撈，避免多打一次重 API
+      if (searched && changed > 0) {
+        void load(tab === 'due' ? { status: 'OPEN' } : { from: appliedFilters.orderFrom, to: appliedFilters.orderTo, status: poStatus })
+      }
+    } catch (e) {
+      flash(`❌ 更新失敗：${e instanceof Error ? e.message : String(e)}`)
+    } finally {
+      setDbSyncing(false)
+    }
+  }, [dbSyncing, searched, tab, appliedFilters.orderFrom, appliedFilters.orderTo, poStatus, load, loadSyncStatus])
 
   const markSaving = (key: string, on: boolean) => {
     setSavingKeys(prev => {
@@ -375,7 +467,9 @@ export default function PurchasingPage() {
   const renderProgressCell = (l: PoTrackingLine) => {
     const key = lineKey(l)
     const saving = savingKeys.has(key)
-    const sent = Boolean(l.sent_at)
+    // ARGO 單據狀態 OPEN＝採購單已成立發出 → 「發單」自動亮（Snow 2026-07-14），不再手動點
+    const autoSent = (l.po_status ?? '').trim().toUpperCase() === 'OPEN'
+    const sent = autoSent || Boolean(l.sent_at)
     const shipped = Boolean(l.shipped_at)
     const arrived = arrivedFull(l)   // 入庫量滿足採購量 → 自動亮
 
@@ -397,10 +491,12 @@ export default function PurchasingPage() {
         <div className="flex items-center gap-0.5">
           <button
             type="button"
-            disabled={saving}
+            disabled={saving || autoSent}
             onClick={() => void updateLine(l, { sent: !sent })}
-            title={sent ? `已發單 ${l.sent_at?.slice(0, 10)}（點一下取消）` : '點一下標記已發單'}
-            className={`${chip(sent, 'bg-sky-900/60 text-sky-300 border-sky-600/60')} disabled:opacity-50 cursor-pointer`}
+            title={autoSent
+              ? 'ARGO 單據狀態 OPEN，自動視為已發單'
+              : sent ? `已發單 ${l.sent_at?.slice(0, 10)}（點一下取消）` : '點一下標記已發單'}
+            className={`${chip(sent, 'bg-sky-900/60 text-sky-300 border-sky-600/60')} ${saving ? 'opacity-50' : ''} ${autoSent ? 'cursor-default' : 'cursor-pointer'}`}
           >發單</button>
           <button
             type="button"
@@ -476,9 +572,39 @@ export default function PurchasingPage() {
         <span className="text-[10px] text-slate-600">OPEN 採購單追蹤（每小時自 ARGO 同步）</span>
         <div className="ml-auto flex items-center gap-3">
           {msg && <span className="text-xs text-rose-300">{msg}</span>}
+          {/* 查詢耗時（診斷用）：client=按下到上畫面、伺服器=後端組裝；差值大代表卡在網路傳輸 */}
+          {queryMs && (
+            <span className="text-[10px] text-slate-600 whitespace-nowrap" title="上次查詢耗時：總（伺服器組裝）">
+              查詢 {(queryMs.client / 1000).toFixed(1)}s{queryMs.server != null ? `（伺服器 ${(queryMs.server / 1000).toFixed(1)}s）` : ''}
+            </span>
+          )}
+          {/* 上次更新時間（erp_sync_logs 最近一次 sync_po；排程每小時自動跑，>75 分鐘未跑標黃提醒） */}
+          <span className="text-[10px] text-slate-500 whitespace-nowrap" title="採購單資料庫（erp_pj_sync）最近一次自 ARGO 同步的時間；排程每小時自動執行">
+            {lastSyncErr
+              ? '上次更新：無法取得'
+              : lastSync
+                ? (() => {
+                    const { clock, ago, staleMins } = fmtSyncTime(lastSync.at)
+                    return (
+                      <>
+                        上次更新：{clock}（{ago}）
+                        {!lastSync.ok && <span className="text-rose-400 ml-1">⚠ 上次同步失敗</span>}
+                        {lastSync.ok && staleMins > 75 && <span className="text-amber-400 ml-1">⚠ 逾時，排程可能未跑</span>}
+                      </>
+                    )
+                  })()
+                : '上次更新：—'}
+          </span>
           <button
             type="button"
-            onClick={() => void load(tab === 'due' ? undefined : { from: appliedFilters.orderFrom, to: appliedFilters.orderTo })}
+            onClick={() => void handleDbSync()}
+            disabled={dbSyncing}
+            title="立即從 ARGO 重新同步採購單資料庫（與每小時排程相同動作）"
+            className="px-3 py-1.5 rounded bg-emerald-800 hover:bg-emerald-700 disabled:bg-slate-800 disabled:text-slate-600 text-xs font-semibold text-emerald-100 transition-colors"
+          >{dbSyncing ? '⏳ 同步中…' : '⬇ 更新資料庫'}</button>
+          <button
+            type="button"
+            onClick={() => void load(tab === 'due' ? { status: 'OPEN' } : { from: appliedFilters.orderFrom, to: appliedFilters.orderTo, status: poStatus })}
             disabled={loading}
             className="px-3 py-1.5 rounded bg-slate-800 hover:bg-slate-700 disabled:text-slate-600 text-xs font-semibold text-slate-300 transition-colors"
           >{loading ? '載入中…' : '🔄 重新整理'}</button>
@@ -496,7 +622,11 @@ export default function PurchasingPage() {
         >追蹤列表</button>
         <button
           type="button"
-          onClick={() => { setTab('due'); if (!searched) { setSearched(true); void load() } }}
+          onClick={() => {
+            setTab('due')
+            // 到期提醒只對 OPEN 有意義：目前檢視非 OPEN 時切回並重載，避免用 CLOSE/VOID 資料算提醒
+            if (!searched || poStatus !== 'OPEN') { setSearched(true); setPoStatus('OPEN'); void load({ status: 'OPEN' }) }
+          }}
           className={`px-4 py-2 rounded-t text-xs font-semibold transition-colors border-b-2 flex items-center gap-1.5 ${
             tab === 'due' ? 'text-cyan-300 border-cyan-500' : 'text-slate-500 border-transparent hover:text-slate-300'
           }`}
@@ -568,10 +698,14 @@ export default function PurchasingPage() {
                 )}
               </div>
             ))}
-            {/* 承辦人建議：輸入部分姓名/工號跳出符合選項 */}
+            {/* 承辦人建議（EIP 採購部門成員）：有對到工號顯示「姓名（工號）」，沒有就純姓名 */}
             <datalist id="purchasing-buyer-list">
               {buyerOptions.map(b => (
-                <option key={b.id} value={b.name ? `${b.name}（${b.id}）` : b.id} label={b.name ? undefined : `工號 ${b.id}`} />
+                <option
+                  key={b.id || b.name || ''}
+                  value={b.name ? (b.id ? `${b.name}（${b.id}）` : b.name) : b.id}
+                  label={b.name ? undefined : `工號 ${b.id}`}
+                />
               ))}
             </datalist>
             {([
@@ -638,6 +772,27 @@ export default function PurchasingPage() {
               onClick={() => { setCpFilter(f => f === 'exclude' ? 'all' : 'exclude'); setPage(1) }}
               className={`px-2.5 py-1 rounded border transition-colors ${cpFilter === 'exclude' ? 'bg-fuchsia-900/50 border-fuchsia-600/60 text-fuchsia-300' : 'bg-slate-800 border-slate-700 text-slate-400 hover:text-slate-200'}`}
             >{cpFilter === 'exclude' ? '✓ 只看非常平' : '只看非常平'}</button>
+            <span className="w-px h-4 bg-slate-700" />
+            {/* 單據狀態（ARGO HOLD_STATUS）：伺服器端過濾，切換立即重查 */}
+            {(['OPEN', 'CLOSE', 'VOID'] as const).map(s => (
+              <button
+                key={s}
+                type="button"
+                onClick={() => {
+                  if (poStatus === s || loading) return
+                  setPoStatus(s); setPage(1)
+                  if (searched) void load({ from: appliedFilters.orderFrom, to: appliedFilters.orderTo, status: s })
+                }}
+                title={`查詢 ${s} 狀態的採購單（切換後立即重新查詢）`}
+                className={`px-2.5 py-1 rounded border transition-colors font-mono ${
+                  poStatus === s
+                    ? s === 'OPEN' ? 'bg-emerald-900/50 border-emerald-600/60 text-emerald-300'
+                    : s === 'CLOSE' ? 'bg-slate-700 border-slate-500 text-slate-200'
+                    : 'bg-rose-900/50 border-rose-600/60 text-rose-300'
+                    : 'bg-slate-800 border-slate-700 text-slate-400 hover:text-slate-200'
+                }`}
+              >{poStatus === s ? `✓ ${s}` : s}</button>
+            ))}
             <span>點「交期」表頭可排序；拖表頭右緣調欄寬</span>
           </div>
 
@@ -744,6 +899,13 @@ export default function PurchasingPage() {
                           {renderShipMethodCell(l)}
                           {renderExpectedShipCell(l)}
                         </div>
+                      </td>
+                      <td className="px-2 py-2 overflow-hidden">
+                        <NoteCell
+                          value={l.note}
+                          saving={savingKeys.has(lineKey(l))}
+                          onSave={(next) => void updateLine(l, { note: next.trim() || null })}
+                        />
                       </td>
                     </tr>
                   )

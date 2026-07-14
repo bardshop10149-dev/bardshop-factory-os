@@ -17,7 +17,10 @@ type LineBody = {
   shipped?: boolean            // true=標記已出貨；false=取消
   ship_method?: ShipMethod | null
   expected_ship_date?: string | null
+  note?: string | null         // 逐行手打備註（trim 後空字串視為清除；上限 500 字）
 }
+
+const NOTE_MAX_LEN = 500
 type PaymentBody = { type: 'payment'; doc_no: string; payment_pct: PaymentPct }
 
 const isDateText = (s: string) => /^\d{4}-\d{2}-\d{2}$/.test(s)
@@ -59,7 +62,7 @@ export async function POST(request: NextRequest) {
       // upsert 為整列覆蓋 → 先讀既有值當基準，再套用狀態轉移，避免洗掉其他欄位
       const { data: existing, error: readErr } = await supabase
         .from('po_line_tracking')
-        .select('sent_at, shipped_at, ship_method, expected_ship_date')
+        .select('sent_at, shipped_at, ship_method, expected_ship_date, note')
         .eq('doc_no', docNo)
         .eq('sub_no', subNo)
         .maybeSingle()
@@ -69,6 +72,7 @@ export async function POST(request: NextRequest) {
       let shippedAt: string | null = existing?.shipped_at ?? null
       let shipMethod: string | null = existing?.ship_method ?? null
       let expectedShip: string | null = existing?.expected_ship_date ?? null
+      let note: string | null = existing?.note ?? null
 
       // 已發單 / 已出貨為兩個獨立里程碑，各自 toggle（保留原時戳、互不牽連）
       if (body.sent !== undefined) sentAt = body.sent ? (sentAt ?? now) : null
@@ -85,6 +89,16 @@ export async function POST(request: NextRequest) {
         }
         expectedShip = body.expected_ship_date
       }
+      if (body.note !== undefined) {
+        if (body.note !== null && typeof body.note !== 'string') {
+          return NextResponse.json({ success: false, error: 'note 必須是文字' }, { status: 400 })
+        }
+        const trimmed = (body.note ?? '').trim()
+        if (trimmed.length > NOTE_MAX_LEN) {
+          return NextResponse.json({ success: false, error: `備註最多 ${NOTE_MAX_LEN} 字` }, { status: 400 })
+        }
+        note = trimmed || null
+      }
 
       const { error } = await supabase
         .from('po_line_tracking')
@@ -92,6 +106,7 @@ export async function POST(request: NextRequest) {
           doc_no: docNo, sub_no: subNo,
           sent_at: sentAt, shipped_at: shippedAt,
           ship_method: shipMethod, expected_ship_date: expectedShip,
+          note,
           updated_by: updatedBy, updated_at: now,
         }, { onConflict: 'doc_no,sub_no' })
       if (error) throw new Error(error.message)

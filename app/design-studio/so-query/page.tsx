@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import Link from 'next/link'
 import { supabase } from '../../../lib/supabaseClient'
+import PoProgressChips from '../../../components/PoProgressChips'
 import type { PublicPoLine } from '../../../lib/purchasing/types'
 
 // ─── 型別 ─────────────────────────────────────────────
@@ -556,12 +557,8 @@ export default function SoQueryPage() {
                         </td>
                         <td className="px-2 py-2 text-slate-300 whitespace-nowrap">{l.due_date ?? '—'}</td>
                         <td className="px-2 py-2 whitespace-nowrap">
-                          <span className={`text-[10px] px-1.5 py-0.5 rounded font-semibold border ${
-                            l.progress === '已到倉' ? 'bg-emerald-900/60 text-emerald-400 border-emerald-700/50'
-                            : l.progress === '已出貨' ? 'bg-amber-900/60 text-amber-400 border-amber-700/50'
-                            : l.progress === '已發單' ? 'bg-sky-900/60 text-sky-300 border-sky-700/50'
-                            : 'bg-slate-800 text-slate-400 border-slate-600'
-                          }`}>{l.progress}</span>
+                          {/* 與採購專區同視覺的三里程碑；ARGO 狀態 OPEN 自動亮「發單」 */}
+                          <PoProgressChips progress={l.progress} poStatus={l.po_status} />
                         </td>
                         <td className="px-2 py-2 text-slate-300 whitespace-nowrap">{l.ship_method ?? '—'}</td>
                         <td className="px-2 py-2 text-slate-300 whitespace-nowrap">{l.expected_ship_date ?? '—'}</td>

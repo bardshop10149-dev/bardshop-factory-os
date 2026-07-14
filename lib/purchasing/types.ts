@@ -52,6 +52,7 @@ export interface PoTrackingLine {
   shipped_at: string | null           // null = 尚未出貨；有值 = 已出貨
   ship_method: ShipMethod | null
   expected_ship_date: string | null
+  note: string | null                 // 採購手打備註（逐行，po_line_tracking.note）
   payment_pct: PaymentPct             // 表頭層級（同 doc_no 各行相同）
   updated_by: string | null
   updated_at: string | null
