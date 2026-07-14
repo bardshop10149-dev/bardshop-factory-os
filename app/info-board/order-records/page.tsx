@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback } from 'react'
 import Link from 'next/link'
 import { NavButton } from '../../../components/NavButton'
 import SoOrderModal from '../../../components/SoOrderModal'
+import PoProgressChips from '../../../components/PoProgressChips'
 import { supabase } from '../../../lib/supabaseClient'
 
 // ─── erp_pj_sync 型別 ─────────────────────────────────────
@@ -52,7 +53,7 @@ function PjSyncModal({ docNo, onClose }: { docNo: string; onClose: () => void })
   const [loading, setLoading] = useState(true)
   const [err, setErr] = useState<string | null>(null)
   // 採購追蹤（進度＝採購手動點的已出貨；入庫＝ARGO 回寫的實際入庫量），key = sub_no
-  const [track, setTrack] = useState<Record<string, { progress: string; received_qty: number | null }>>({})
+  const [track, setTrack] = useState<Record<string, { progress: string; received_qty: number | null; po_status: string | null }>>({})
 
   useEffect(() => {
     if (!docNo) return
@@ -94,9 +95,9 @@ function PjSyncModal({ docNo, onClose }: { docNo: string; onClose: () => void })
       .then(res => (res.ok ? res.json() : null))
       .then(json => {
         if (!alive || !json?.success) return
-        const map: Record<string, { progress: string; received_qty: number | null }> = {}
-        for (const l of json.lines as { sub_no: string; progress: string; received_qty: number | null }[]) {
-          map[String(l.sub_no)] = { progress: l.progress, received_qty: l.received_qty }
+        const map: Record<string, { progress: string; received_qty: number | null; po_status: string | null }> = {}
+        for (const l of json.lines as { sub_no: string; progress: string; received_qty: number | null; po_status: string | null }[]) {
+          map[String(l.sub_no)] = { progress: l.progress, received_qty: l.received_qty, po_status: l.po_status ?? null }
         }
         setTrack(map)
       })
@@ -221,14 +222,11 @@ function PjSyncModal({ docNo, onClose }: { docNo: string; onClose: () => void })
                       <td className="px-4 py-2 text-slate-400">{r.unit || '—'}</td>
                       <td className="px-4 py-2 text-slate-400 whitespace-nowrap">{r.end_date || '—'}</td>
                       {isPo && (() => {
-                        const prog = track[String(r.sub_no)]?.progress ?? '未發單'
-                        const cls = prog === '已到倉' ? 'bg-emerald-900/50 text-emerald-300 border-emerald-700/50'
-                          : prog === '已出貨' ? 'bg-amber-900/50 text-amber-300 border-amber-700/50'
-                          : prog === '已發單' ? 'bg-sky-900/50 text-sky-300 border-sky-700/50'
-                          : 'bg-slate-800 text-slate-400 border-slate-600'
+                        // 與採購專區同視覺的三里程碑（發單→出貨→到倉）；ARGO 狀態 OPEN 自動亮「發單」
+                        const t = track[String(r.sub_no)]
                         return (
                           <td className="px-4 py-2 whitespace-nowrap">
-                            <span className={`text-[10px] px-1.5 py-0.5 rounded border font-semibold ${cls}`}>{prog}</span>
+                            <PoProgressChips progress={t?.progress} poStatus={t?.po_status ?? r.status ?? null} />
                           </td>
                         )
                       })()}
