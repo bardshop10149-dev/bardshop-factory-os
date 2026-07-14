@@ -19,11 +19,16 @@ export async function GET(request: NextRequest) {
   const countOnly = params.get('count') === '1'
   const orderFrom = params.get('from')
   const orderTo = params.get('to')
+  // 單據狀態（ARGO HOLD_STATUS）白名單；count 模式（首頁徽章）固定 OPEN
+  const poStatus = (params.get('status') ?? 'OPEN').trim().toUpperCase()
+  if (!['OPEN', 'CLOSE', 'VOID'].includes(poStatus)) {
+    return NextResponse.json({ success: false, error: 'status 必須是 OPEN/CLOSE/VOID' }, { status: 400 })
+  }
   const supabase = getSupabaseAdminClient()
 
   try {
     const timings: Record<string, number> = {}
-    const lines = await loadPoTrackingLines(supabase, countOnly ? { countOnly } : { orderFrom, orderTo }, timings)
+    const lines = await loadPoTrackingLines(supabase, countOnly ? { countOnly } : { orderFrom, orderTo, poStatus }, timings)
     const counts = computeDueCounts(lines)
     if (countOnly) {
       return NextResponse.json({ success: true, counts, openLines: lines.length })

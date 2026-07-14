@@ -212,6 +212,7 @@ export default function PurchasingPage() {
   const [sortDue, setSortDue]   = useState<'asc' | 'desc' | null>(null)  // 依交期排序
   const [hideArrived, setHideArrived] = useState(false)  // 排除已全部到倉
   const [cpFilter, setCpFilter] = useState<'all' | 'only' | 'exclude'>('all')  // 常平／非常平
+  const [poStatus, setPoStatus] = useState<'OPEN' | 'CLOSE' | 'VOID'>('OPEN')  // 單據狀態（伺服器端過濾，切換即重查）
   const [savingKeys, setSavingKeys] = useState<Set<string>>(new Set())
   const [msg, setMsg]           = useState('')
   const [buyerOptions, setBuyerOptions] = useState<{ id: string; name: string | null }[]>([])
@@ -250,21 +251,24 @@ export default function PurchasingPage() {
       .catch(() => {})
   }, [])
 
-  // 下單日區間送伺服器端收斂（加速）；其餘細條件仍在前端過濾
-  const load = useCallback(async (range?: { from: string; to: string }) => {
+  // 下單日區間 + 單據狀態送伺服器端收斂（加速）；其餘細條件仍在前端過濾
+  const load = useCallback(async (opts?: { from?: string; to?: string; status?: string }) => {
     setLoading(true)
     setError(null)
     const t0 = performance.now()
+    const status = opts?.status ?? 'OPEN'
     try {
       const qs = new URLSearchParams()
-      if (range?.from) qs.set('from', range.from)
-      if (range?.to) qs.set('to', range.to)
-      const res = await fetch(`/api/purchasing/list${qs.toString() ? `?${qs}` : ''}`)
+      if (opts?.from) qs.set('from', opts.from)
+      if (opts?.to) qs.set('to', opts.to)
+      qs.set('status', status)
+      const res = await fetch(`/api/purchasing/list?${qs}`)
       if (res.status === 403) { setForbidden(true); return }
       const json = await res.json()
       if (!res.ok || !json.success) throw new Error(json.error || `HTTP ${res.status}`)
       setLines(json.lines as PoTrackingLine[])
-      setCounts(json.counts as DueCounts)
+      // 到期提醒統計只在 OPEN 檢視更新（CLOSE/VOID 檢視不覆蓋徽章數字）
+      if (status === 'OPEN') setCounts(json.counts as DueCounts)
       // 耗時診斷：client=按下到資料進畫面；server=後端組裝（差值≈網路傳輸+解析）
       setQueryMs({ client: Math.round(performance.now() - t0), server: json.timings?.total_ms ?? null })
     } catch (e) {
@@ -279,8 +283,8 @@ export default function PurchasingPage() {
     setAppliedFilters(filters)
     setSearched(true)
     setPage(1)
-    void load({ from: filters.orderFrom, to: filters.orderTo })
-  }, [filters, load])
+    void load({ from: filters.orderFrom, to: filters.orderTo, status: poStatus })
+  }, [filters, load, poStatus])
 
   const flash = (text: string) => {
     setMsg(text)
@@ -306,14 +310,14 @@ export default function PurchasingPage() {
       void loadSyncStatus()
       // 列表已查詢過且有變動才重撈，避免多打一次重 API
       if (searched && changed > 0) {
-        void load(tab === 'due' ? undefined : { from: appliedFilters.orderFrom, to: appliedFilters.orderTo })
+        void load(tab === 'due' ? { status: 'OPEN' } : { from: appliedFilters.orderFrom, to: appliedFilters.orderTo, status: poStatus })
       }
     } catch (e) {
       flash(`❌ 更新失敗：${e instanceof Error ? e.message : String(e)}`)
     } finally {
       setDbSyncing(false)
     }
-  }, [dbSyncing, searched, tab, appliedFilters.orderFrom, appliedFilters.orderTo, load, loadSyncStatus])
+  }, [dbSyncing, searched, tab, appliedFilters.orderFrom, appliedFilters.orderTo, poStatus, load, loadSyncStatus])
 
   const markSaving = (key: string, on: boolean) => {
     setSavingKeys(prev => {
@@ -463,7 +467,9 @@ export default function PurchasingPage() {
   const renderProgressCell = (l: PoTrackingLine) => {
     const key = lineKey(l)
     const saving = savingKeys.has(key)
-    const sent = Boolean(l.sent_at)
+    // ARGO 單據狀態 OPEN＝採購單已成立發出 → 「發單」自動亮（Snow 2026-07-14），不再手動點
+    const autoSent = (l.po_status ?? '').trim().toUpperCase() === 'OPEN'
+    const sent = autoSent || Boolean(l.sent_at)
     const shipped = Boolean(l.shipped_at)
     const arrived = arrivedFull(l)   // 入庫量滿足採購量 → 自動亮
 
@@ -485,10 +491,12 @@ export default function PurchasingPage() {
         <div className="flex items-center gap-0.5">
           <button
             type="button"
-            disabled={saving}
+            disabled={saving || autoSent}
             onClick={() => void updateLine(l, { sent: !sent })}
-            title={sent ? `已發單 ${l.sent_at?.slice(0, 10)}（點一下取消）` : '點一下標記已發單'}
-            className={`${chip(sent, 'bg-sky-900/60 text-sky-300 border-sky-600/60')} disabled:opacity-50 cursor-pointer`}
+            title={autoSent
+              ? 'ARGO 單據狀態 OPEN，自動視為已發單'
+              : sent ? `已發單 ${l.sent_at?.slice(0, 10)}（點一下取消）` : '點一下標記已發單'}
+            className={`${chip(sent, 'bg-sky-900/60 text-sky-300 border-sky-600/60')} ${saving ? 'opacity-50' : ''} ${autoSent ? 'cursor-default' : 'cursor-pointer'}`}
           >發單</button>
           <button
             type="button"
@@ -596,7 +604,7 @@ export default function PurchasingPage() {
           >{dbSyncing ? '⏳ 同步中…' : '⬇ 更新資料庫'}</button>
           <button
             type="button"
-            onClick={() => void load(tab === 'due' ? undefined : { from: appliedFilters.orderFrom, to: appliedFilters.orderTo })}
+            onClick={() => void load(tab === 'due' ? { status: 'OPEN' } : { from: appliedFilters.orderFrom, to: appliedFilters.orderTo, status: poStatus })}
             disabled={loading}
             className="px-3 py-1.5 rounded bg-slate-800 hover:bg-slate-700 disabled:text-slate-600 text-xs font-semibold text-slate-300 transition-colors"
           >{loading ? '載入中…' : '🔄 重新整理'}</button>
@@ -614,7 +622,11 @@ export default function PurchasingPage() {
         >追蹤列表</button>
         <button
           type="button"
-          onClick={() => { setTab('due'); if (!searched) { setSearched(true); void load() } }}
+          onClick={() => {
+            setTab('due')
+            // 到期提醒只對 OPEN 有意義：目前檢視非 OPEN 時切回並重載，避免用 CLOSE/VOID 資料算提醒
+            if (!searched || poStatus !== 'OPEN') { setSearched(true); setPoStatus('OPEN'); void load({ status: 'OPEN' }) }
+          }}
           className={`px-4 py-2 rounded-t text-xs font-semibold transition-colors border-b-2 flex items-center gap-1.5 ${
             tab === 'due' ? 'text-cyan-300 border-cyan-500' : 'text-slate-500 border-transparent hover:text-slate-300'
           }`}
@@ -760,6 +772,27 @@ export default function PurchasingPage() {
               onClick={() => { setCpFilter(f => f === 'exclude' ? 'all' : 'exclude'); setPage(1) }}
               className={`px-2.5 py-1 rounded border transition-colors ${cpFilter === 'exclude' ? 'bg-fuchsia-900/50 border-fuchsia-600/60 text-fuchsia-300' : 'bg-slate-800 border-slate-700 text-slate-400 hover:text-slate-200'}`}
             >{cpFilter === 'exclude' ? '✓ 只看非常平' : '只看非常平'}</button>
+            <span className="w-px h-4 bg-slate-700" />
+            {/* 單據狀態（ARGO HOLD_STATUS）：伺服器端過濾，切換立即重查 */}
+            {(['OPEN', 'CLOSE', 'VOID'] as const).map(s => (
+              <button
+                key={s}
+                type="button"
+                onClick={() => {
+                  if (poStatus === s || loading) return
+                  setPoStatus(s); setPage(1)
+                  if (searched) void load({ from: appliedFilters.orderFrom, to: appliedFilters.orderTo, status: s })
+                }}
+                title={`查詢 ${s} 狀態的採購單（切換後立即重新查詢）`}
+                className={`px-2.5 py-1 rounded border transition-colors font-mono ${
+                  poStatus === s
+                    ? s === 'OPEN' ? 'bg-emerald-900/50 border-emerald-600/60 text-emerald-300'
+                    : s === 'CLOSE' ? 'bg-slate-700 border-slate-500 text-slate-200'
+                    : 'bg-rose-900/50 border-rose-600/60 text-rose-300'
+                    : 'bg-slate-800 border-slate-700 text-slate-400 hover:text-slate-200'
+                }`}
+              >{poStatus === s ? `✓ ${s}` : s}</button>
+            ))}
             <span>點「交期」表頭可排序；拖表頭右緣調欄寬</span>
           </div>
 

@@ -70,10 +70,10 @@ function toSlashDate(d?: string | null): string | null {
 }
 
 /**
- * 抓 OPEN 採購明細；可用下單日(start_date)區間先在伺服器端收斂。
+ * 抓指定狀態（預設 OPEN）採購明細；可用下單日(start_date)區間先在伺服器端收斂。
  * 第一頁帶 exact count，其餘頁並行抓（每頁都帶 order 確保 range 分頁穩定）。
  */
-async function fetchAllOpenPoRows(supabase: SupabaseAdmin, range?: { orderFrom?: string | null; orderTo?: string | null }): Promise<PjSyncRow[]> {
+async function fetchAllOpenPoRows(supabase: SupabaseAdmin, range?: { orderFrom?: string | null; orderTo?: string | null; poStatus?: string | null }): Promise<PjSyncRow[]> {
   const from = toSlashDate(range?.orderFrom)
   const to = toSlashDate(range?.orderTo)
   const buildQuery = (withCount: boolean) => {
@@ -81,7 +81,7 @@ async function fetchAllOpenPoRows(supabase: SupabaseAdmin, range?: { orderFrom?:
       .from('erp_pj_sync')
       .select(PO_SELECT, withCount ? { count: 'exact' } : undefined)
       .eq('doc_type', '採購單號')
-      .eq('status', 'OPEN')
+      .eq('status', range?.poStatus || 'OPEN')
     if (from) q = q.gte('start_date', from)
     if (to) q = q.lte('start_date', to)
     return q.order('doc_no', { ascending: true }).order('sub_no', { ascending: true })
@@ -312,13 +312,15 @@ export interface LoadOptions {
   /** 下單日區間（YYYY-MM-DD）：伺服器端先收斂，加速 enrich */
   orderFrom?: string | null
   orderTo?: string | null
+  /** 單據狀態（ARGO HOLD_STATUS，OPEN/CLOSE/VOID）；未給預設 OPEN */
+  poStatus?: string | null
 }
 
 /** 讀取 OPEN 採購明細（可依下單日區間收斂）並組裝追蹤資訊。
  *  各資料來源盡量並行查詢；耗時分段記在 console（Vercel function log 可見）。 */
 export async function loadPoTrackingLines(supabase: SupabaseAdmin, opts: LoadOptions = {}, timings?: Record<string, number>): Promise<PoTrackingLine[]> {
   const t0 = Date.now()
-  const poRows = await fetchAllOpenPoRows(supabase, { orderFrom: opts.orderFrom, orderTo: opts.orderTo })
+  const poRows = await fetchAllOpenPoRows(supabase, { orderFrom: opts.orderFrom, orderTo: opts.orderTo, poStatus: opts.poStatus })
   const tPo = Date.now()
   const today = todayTaipei()
 
