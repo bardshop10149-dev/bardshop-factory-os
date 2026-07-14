@@ -322,7 +322,7 @@ export async function loadPoTrackingLines(supabase: SupabaseAdmin, opts: LoadOpt
   const tPo = Date.now()
   const today = todayTaipei()
 
-  const trackingMap = new Map<string, { sent_at: string | null; shipped_at: string | null; ship_method: string | null; expected_ship_date: string | null; updated_by: string | null; updated_at: string | null }>()
+  const trackingMap = new Map<string, { sent_at: string | null; shipped_at: string | null; ship_method: string | null; expected_ship_date: string | null; note: string | null; updated_by: string | null; updated_at: string | null }>()
   const paymentMap = new Map<string, number>()
   const vendorMap = new Map<string, string>()
   let prIndex = new Map<string, PrCandidate[]>()
@@ -335,7 +335,7 @@ export async function loadPoTrackingLines(supabase: SupabaseAdmin, opts: LoadOpt
   const loadTracking = async () => {
     const { data, error } = await supabase
       .from('po_line_tracking')
-      .select('doc_no, sub_no, sent_at, shipped_at, ship_method, expected_ship_date, updated_by, updated_at')
+      .select('doc_no, sub_no, sent_at, shipped_at, ship_method, expected_ship_date, note, updated_by, updated_at')
     if (error) throw new Error(error.message)
     for (const r of data ?? []) trackingMap.set(`${r.doc_no}|${r.sub_no}`, r)
   }
@@ -416,6 +416,7 @@ export async function loadPoTrackingLines(supabase: SupabaseAdmin, opts: LoadOpt
       shipped_at: tracking?.shipped_at ?? null,
       ship_method: (tracking?.ship_method ?? null) as ShipMethod | null,
       expected_ship_date: tracking?.expected_ship_date ?? null,
+      note: tracking?.note ?? null,
       payment_pct: (paymentMap.get(r.doc_no) ?? 0) as PaymentPct,
       updated_by: tracking?.updated_by ?? null,
       updated_at: tracking?.updated_at ?? null,

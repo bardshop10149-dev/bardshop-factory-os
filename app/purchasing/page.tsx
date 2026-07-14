@@ -19,7 +19,7 @@ const lineKey = (l: Pick<PoTrackingLine, 'doc_no' | 'sub_no'>) => `${l.doc_no}|$
 
 const fmt = (v: string | null) => v ?? '—'
 
-type LinePatch = { sent?: boolean; shipped?: boolean; ship_method?: ShipMethod | null; expected_ship_date?: string | null }
+type LinePatch = { sent?: boolean; shipped?: boolean; ship_method?: ShipMethod | null; expected_ship_date?: string | null; note?: string | null }
 
 /** 客戶端樂觀更新：已發單 / 已出貨為兩個獨立里程碑（各自 toggle），比照後端 status route */
 function applyLineTransition(x: PoTrackingLine, patch: LinePatch): PoTrackingLine {
@@ -34,6 +34,7 @@ function applyLineTransition(x: PoTrackingLine, patch: LinePatch): PoTrackingLin
     shipped_at,
     ship_method: patch.ship_method === undefined ? x.ship_method : patch.ship_method,
     expected_ship_date: patch.expected_ship_date === undefined ? x.expected_ship_date : patch.expected_ship_date,
+    note: patch.note === undefined ? x.note : patch.note,
   }
 }
 
@@ -63,6 +64,28 @@ function ReceiveCell({ l }: { l: PoTrackingLine }) {
       </span>
       <span className={`block w-fit mt-0.5 text-[10px] px-1.5 py-0.5 rounded font-semibold border ${cls}`}>{label}</span>
     </div>
+  )
+}
+
+/** 備註輸入格：手打、自動換行（textarea 原生換行）、右下角可拖拉調高度；
+ *  失焦才儲存（打字中不打 API），Escape 還原成上次儲存值 */
+function NoteCell({ value, saving, onSave }: { value: string | null; saving: boolean; onSave: (next: string) => void }) {
+  const [draft, setDraft] = useState(value ?? '')
+  // 重新查詢／他列儲存回寫後，同步外部值
+  useEffect(() => { setDraft(value ?? '') }, [value])
+  return (
+    <textarea
+      value={draft}
+      onChange={e => setDraft(e.target.value)}
+      onBlur={() => { if (draft.trim() !== (value ?? '').trim()) onSave(draft) }}
+      onKeyDown={e => { if (e.key === 'Escape') setDraft(value ?? '') }}
+      placeholder="輸入備註…"
+      maxLength={500}
+      rows={2}
+      disabled={saving}
+      title="失焦自動儲存；Escape 還原；右下角可拖拉調整高度"
+      className="w-full min-h-[3em] px-2 py-1 rounded bg-slate-950/80 border border-slate-700/70 focus:border-cyan-600 focus:outline-none text-slate-200 text-xs leading-snug resize-y disabled:opacity-60 placeholder:text-slate-600"
+    />
   )
 }
 
@@ -111,6 +134,7 @@ const LIST_COLS = [
   { key: 'received',  label: '入庫',       w: 104, wc: 82 },
   { key: 'payment',   label: '付款',       w: 88,  wc: 74 },
   { key: 'ship',      label: '貨運/預計出貨', w: 140, wc: 112 },
+  { key: 'note',      label: '備註',       w: 200, wc: 140 },
 ]
 const STD_W: Record<string, number> = Object.fromEntries(LIST_COLS.map(c => [c.key, c.w]))
 const COMPACT_W: Record<string, number> = Object.fromEntries(LIST_COLS.map(c => [c.key, c.wc]))
@@ -842,6 +866,13 @@ export default function PurchasingPage() {
                           {renderShipMethodCell(l)}
                           {renderExpectedShipCell(l)}
                         </div>
+                      </td>
+                      <td className="px-2 py-2 overflow-hidden">
+                        <NoteCell
+                          value={l.note}
+                          saving={savingKeys.has(lineKey(l))}
+                          onSave={(next) => void updateLine(l, { note: next.trim() || null })}
+                        />
                       </td>
                     </tr>
                   )
