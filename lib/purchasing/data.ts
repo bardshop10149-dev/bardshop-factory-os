@@ -43,6 +43,7 @@ interface PrCandidate {
 
 const BATCH = 1000
 const IN_CHUNK = 200
+const CHANGPING_VENDOR = 'C01510'   // 常平廠內部供應商代碼
 
 function chunk<T>(arr: T[], size: number): T[][] {
   const out: T[][] = []
@@ -116,32 +117,36 @@ async function buildPrIndex(supabase: SupabaseAdmin, soNos: string[]): Promise<M
     index.set(k, list)
   }
 
-  // 直接比對：請購 extra.PROJECT_ID / MBP_LOT_NO / SO_PROJECT_ID 帶 SO/RO 號
-  for (const field of ['PROJECT_ID', 'MBP_LOT_NO', 'SO_PROJECT_ID'] as const) {
-    for (const part of chunk(soNos, IN_CHUNK)) {
+  // 直接比對（3 欄位）＋ RO 橋接的 so_lines 查詢——彼此獨立，全部平行以省往返時間
+  const fieldChunks = (['PROJECT_ID', 'MBP_LOT_NO', 'SO_PROJECT_ID'] as const)
+    .flatMap((field) => chunk(soNos, IN_CHUNK).map((part) => ({ field, part })))
+  const [fieldResults, soLineResults] = await Promise.all([
+    Promise.all(fieldChunks.map(async ({ field, part }) => {
       const { data, error } = await supabase
-        .from('erp_pj_sync')
-        .select('doc_no, sub_no, item_code, extra')
-        .eq('doc_type', '請購單號')
-        .in(`extra->>${field}`, part)
+        .from('erp_pj_sync').select('doc_no, sub_no, item_code, extra')
+        .eq('doc_type', '請購單號').in(`extra->>${field}`, part)
       if (error) throw new Error(error.message)
-      for (const r of data ?? []) {
-        const key = String((r.extra as Record<string, unknown> | null)?.[field] ?? '').trim()
-        push(key, { doc_no: r.doc_no, sub_no: r.sub_no, item_code: r.item_code })
-      }
+      return { field, data: data ?? [] as { doc_no: string; sub_no: string; item_code: string | null; extra: Record<string, unknown> | null }[] }
+    })),
+    Promise.all(chunk(soNos, IN_CHUNK).map(async (part) => {
+      const { data, error } = await supabase
+        .from('erp_so_lines').select('project_id, mbp_part, tpn_part_no').in('project_id', part)
+      if (error) throw new Error(error.message)
+      return data ?? [] as { project_id: string; mbp_part: string | null; tpn_part_no: string | null }[]
+    })),
+  ])
+  for (const { field, data } of fieldResults) {
+    for (const r of data) {
+      const key = String((r.extra as Record<string, unknown> | null)?.[field] ?? '').trim()
+      push(key, { doc_no: r.doc_no, sub_no: r.sub_no, item_code: r.item_code })
     }
   }
 
   // RO 橋接：SO → erp_so_lines.tpn_part_no(RO) → 請購 extra.SO_PROJECT_ID(RO)
   const soToRo = new Map<string, string>()   // `${SO}|${item}` 與 SO 兩種 key
   const ros = new Set<string>()
-  for (const part of chunk(soNos, IN_CHUNK)) {
-    const { data, error } = await supabase
-      .from('erp_so_lines')
-      .select('project_id, mbp_part, tpn_part_no')
-      .in('project_id', part)
-    if (error) throw new Error(error.message)
-    for (const l of data ?? []) {
+  for (const data of soLineResults) {
+    for (const l of data) {
       const ro = extractRo(l.tpn_part_no)
       if (!ro) continue
       ros.add(ro)
@@ -265,57 +270,78 @@ export interface LoadOptions {
   orderTo?: string | null
 }
 
-/** 讀取 OPEN 採購明細（可依下單日區間收斂）並組裝追蹤資訊 */
+/** 讀取 OPEN 採購明細（可依下單日區間收斂）並組裝追蹤資訊（全量；到期提醒/統計用） */
 export async function loadPoTrackingLines(supabase: SupabaseAdmin, opts: LoadOptions = {}): Promise<PoTrackingLine[]> {
   const poRows = await fetchAllOpenPoRows(supabase, { orderFrom: opts.orderFrom, orderTo: opts.orderTo })
+  return enrichRows(supabase, poRows, opts.countOnly ? { skipPrMo: true, skipVendor: true } : {})
+}
+
+/**
+ * 對「一批」PO 列組裝 追蹤/付款/供應商/PR/MO —— 全量與分頁共用。
+ * tracking/payment/vendor 只查本批 doc_no/vendor（分頁時僅 100 筆，很快）。
+ */
+async function enrichRows(
+  supabase: SupabaseAdmin,
+  poRows: PjSyncRow[],
+  opts: { skipPrMo?: boolean; skipVendor?: boolean } = {},
+): Promise<PoTrackingLine[]> {
   const today = todayTaipei()
+  if (poRows.length === 0) return []
+  const docNos = [...new Set(poRows.map((r) => r.doc_no))]
 
-  // 覆蓋層：po_line_tracking / po_payment（表都有界，整表抓）
   const trackingMap = new Map<string, { sent_at: string | null; shipped_at: string | null; ship_method: string | null; expected_ship_date: string | null; updated_by: string | null; updated_at: string | null }>()
-  {
-    const { data, error } = await supabase
-      .from('po_line_tracking')
-      .select('doc_no, sub_no, sent_at, shipped_at, ship_method, expected_ship_date, updated_by, updated_at')
-    if (error) throw new Error(error.message)
-    for (const r of data ?? []) trackingMap.set(`${r.doc_no}|${r.sub_no}`, r)
-  }
   const paymentMap = new Map<string, number>()
-  {
-    const { data, error } = await supabase.from('po_payment').select('doc_no, payment_pct')
-    if (error) throw new Error(error.message)
-    for (const r of data ?? []) paymentMap.set(r.doc_no, Number(r.payment_pct) || 0)
-  }
-
-  let vendorMap = new Map<string, string>()
+  const vendorMap = new Map<string, string>()
   let prIndex = new Map<string, PrCandidate[]>()
   let moIndex = new Map<string, { project_id: string; mbp_part: string | null }[]>()
-  // 承辦人姓名直接取自 PO extra.SALES_NAME（sync_po 已帶入）；用本頁資料建 SALES_ID→姓名
-  // 記憶體 fallback（不查 erp_so_lines，其 sales_id 為 null 無用且是全表掃描）
   const buyerMap = new Map<string, string>()
-
-  if (!opts.countOnly) {
-    for (const r of poRows) {
-      const id = strField(r.extra, 'SALES_ID')
-      const name = strField(r.extra, 'SALES_NAME')
-      if (id && name && !buyerMap.has(id)) buyerMap.set(id, name)
-    }
-    const vendorCodes = [...new Set(poRows.map((r) => (r.customer_vendor ?? '').trim()).filter(Boolean))]
-    vendorMap = new Map<string, string>()
-    for (const part of chunk(vendorCodes, IN_CHUNK)) {
-      const { data, error } = await supabase.from('erp_vendors').select('partner_id, cname').in('partner_id', part)
-      if (error) throw new Error(error.message)
-      for (const v of data ?? []) vendorMap.set(v.partner_id, v.cname)
-    }
-
-    const soNos = [...new Set(poRows.map((r) => sourceOrderOf(r.extra)).filter((v): v is string => Boolean(v)))]
-    ;[prIndex, moIndex] = await Promise.all([buildPrIndex(supabase, soNos), buildMoIndex(supabase, soNos)])
+  for (const r of poRows) {
+    const id = strField(r.extra, 'SALES_ID'); const name = strField(r.extra, 'SALES_NAME')
+    if (id && name && !buyerMap.has(id)) buyerMap.set(id, name)
   }
+
+  const vendorCodes = [...new Set(poRows.map((r) => (r.customer_vendor ?? '').trim()).filter(Boolean))]
+  const soNos = [...new Set(poRows.map((r) => sourceOrderOf(r.extra)).filter((v): v is string => Boolean(v)))]
+
+  await Promise.all([
+    // tracking
+    (async () => {
+      for (const part of chunk(docNos, IN_CHUNK)) {
+        const { data, error } = await supabase
+          .from('po_line_tracking')
+          .select('doc_no, sub_no, sent_at, shipped_at, ship_method, expected_ship_date, updated_by, updated_at')
+          .in('doc_no', part)
+        if (error) throw new Error(error.message)
+        for (const r of data ?? []) trackingMap.set(`${r.doc_no}|${r.sub_no}`, r)
+      }
+    })(),
+    // payment
+    (async () => {
+      for (const part of chunk(docNos, IN_CHUNK)) {
+        const { data, error } = await supabase.from('po_payment').select('doc_no, payment_pct').in('doc_no', part)
+        if (error) throw new Error(error.message)
+        for (const r of data ?? []) paymentMap.set(r.doc_no, Number(r.payment_pct) || 0)
+      }
+    })(),
+    // vendor names
+    (async () => {
+      if (opts.skipVendor) return
+      for (const part of chunk(vendorCodes, IN_CHUNK)) {
+        const { data, error } = await supabase.from('erp_vendors').select('partner_id, cname').in('partner_id', part)
+        if (error) throw new Error(error.message)
+        for (const v of data ?? []) vendorMap.set(v.partner_id, v.cname)
+      }
+    })(),
+    // PR / MO 比對
+    (async () => { if (!opts.skipPrMo) prIndex = await buildPrIndex(supabase, soNos) })(),
+    (async () => { if (!opts.skipPrMo) moIndex = await buildMoIndex(supabase, soNos) })(),
+  ])
 
   return poRows.map((r) => {
     const tracking = trackingMap.get(`${r.doc_no}|${r.sub_no}`)
     const so = sourceOrderOf(r.extra)
     const dueDate = normalizeDateText(r.end_date)
-    const pr = opts.countOnly ? null : pickPr(prIndex, so, r.item_code)
+    const pr = opts.skipPrMo ? null : pickPr(prIndex, so, r.item_code)
     return {
       doc_no: r.doc_no,
       sub_no: r.sub_no,
@@ -337,7 +363,7 @@ export async function loadPoTrackingLines(supabase: SupabaseAdmin, opts: LoadOpt
       so_line: strField(r.extra, 'SO_LINE_NO'),
       pr_no: pr?.doc_no ?? null,
       pr_sub: pr?.sub_no ?? null,
-      mo_no: opts.countOnly ? null : pickMo(moIndex, so, r.item_code),
+      mo_no: opts.skipPrMo ? null : pickMo(moIndex, so, r.item_code),
       buyer: strField(r.extra, 'SALES_NAME') ?? (() => { const id = strField(r.extra, 'SALES_ID'); return id ? buyerMap.get(id) ?? null : null })(),
       buyer_id: strField(r.extra, 'SALES_ID'),
       sent_at: tracking?.sent_at ?? null,
@@ -349,4 +375,92 @@ export async function loadPoTrackingLines(supabase: SupabaseAdmin, opts: LoadOpt
       updated_at: tracking?.updated_at ?? null,
     }
   })
+}
+
+/** 分頁查詢參數（伺服器端過濾/排序/分頁，只 enrich 當頁 → 快） */
+export interface PageParams {
+  page: number
+  pageSize: number
+  orderFrom?: string | null
+  orderTo?: string | null
+  dueFrom?: string | null
+  dueTo?: string | null
+  vendorCode?: string | null
+  vendorName?: string | null
+  itemCode?: string | null
+  buyer?: string | null
+  poNo?: string | null
+  poFrom?: string | null
+  poTo?: string | null
+  cp?: 'all' | 'only' | 'exclude'
+  sortDue?: 'asc' | 'desc' | null
+}
+
+/** 伺服器端過濾/排序/分頁；只 enrich 當頁 100 筆。回傳 { lines, total }。 */
+export async function loadPoPage(supabase: SupabaseAdmin, p: PageParams): Promise<{ lines: PoTrackingLine[]; total: number }> {
+  // 廠商名稱 → 先解析成供應商代碼清單
+  let vendorNameCodes: string[] | null = null
+  if (p.vendorName && p.vendorName.trim()) {
+    const { data, error } = await supabase.from('erp_vendors').select('partner_id').ilike('cname', `%${p.vendorName.trim()}%`)
+    if (error) throw new Error(error.message)
+    vendorNameCodes = (data ?? []).map((v) => v.partner_id)
+    if (vendorNameCodes.length === 0) return { lines: [], total: 0 }
+  }
+
+  let q = supabase
+    .from('erp_pj_sync')
+    .select('doc_no, sub_no, item_code, description, qty, unit, status, start_date, end_date, customer_vendor, extra', { count: 'exact' })
+    .eq('doc_type', '採購單號')
+    .eq('status', 'OPEN')
+
+  const oFrom = toSlashDate(p.orderFrom), oTo = toSlashDate(p.orderTo)
+  if (oFrom) q = q.gte('start_date', oFrom)
+  if (oTo) q = q.lte('start_date', oTo)
+  const dFrom = toSlashDate(p.dueFrom), dTo = toSlashDate(p.dueTo)
+  if (dFrom) q = q.gte('end_date', dFrom)
+  if (dTo) q = q.lte('end_date', dTo)
+  if (p.vendorCode && p.vendorCode.trim()) q = q.ilike('customer_vendor', `%${p.vendorCode.trim()}%`)
+  if (vendorNameCodes) q = q.in('customer_vendor', vendorNameCodes)
+  if (p.itemCode && p.itemCode.trim()) q = q.ilike('item_code', `%${p.itemCode.trim()}%`)
+  if (p.poNo && p.poNo.trim()) q = q.ilike('doc_no', `%${p.poNo.trim()}%`)
+  if (p.poFrom && p.poFrom.trim()) q = q.gte('doc_no', p.poFrom.trim())
+  if (p.poTo && p.poTo.trim()) q = q.lte('doc_no', p.poTo.trim() + '￿')
+  if (p.buyer && p.buyer.trim()) {
+    const b = p.buyer.trim().replace(/[%,()*]/g, '')
+    if (b) q = q.or(`extra->>SALES_ID.ilike.*${b}*,extra->>SALES_NAME.ilike.*${b}*`)
+  }
+  if (p.cp === 'only') q = q.eq('customer_vendor', CHANGPING_VENDOR)
+  else if (p.cp === 'exclude') q = q.neq('customer_vendor', CHANGPING_VENDOR)
+
+  if (p.sortDue) q = q.order('end_date', { ascending: p.sortDue === 'asc', nullsFirst: false })
+  else q = q.order('doc_no', { ascending: true }).order('sub_no', { ascending: true })
+
+  const offset = Math.max(0, (p.page - 1) * p.pageSize)
+  const { data, error, count } = await q.range(offset, offset + p.pageSize - 1)
+  if (error) throw new Error(error.message)
+
+  const lines = await enrichRows(supabase, (data ?? []) as PjSyncRow[])
+  return { lines, total: count ?? 0 }
+}
+
+/** 到期提醒用：只抓交期在 10 天內（含逾期）的 OPEN 列，enrich 不含 PR/MO（較快）。 */
+export async function loadReminders(supabase: SupabaseAdmin): Promise<PoTrackingLine[]> {
+  const d = new Date(Date.now() + (8 * 3600 + 10 * 86400) * 1000)  // 台北 +10 天
+  const pad = (n: number) => String(n).padStart(2, '0')
+  const cutoff = `${d.getUTCFullYear()}/${pad(d.getUTCMonth() + 1)}/${pad(d.getUTCDate())}`
+  const rows: PjSyncRow[] = []
+  for (let offset = 0; ; offset += BATCH) {
+    const { data, error } = await supabase
+      .from('erp_pj_sync')
+      .select('doc_no, sub_no, item_code, description, qty, unit, status, start_date, end_date, customer_vendor, extra')
+      .eq('doc_type', '採購單號')
+      .eq('status', 'OPEN')
+      .lte('end_date', cutoff)
+      .order('end_date', { ascending: true })
+      .range(offset, offset + BATCH - 1)
+    if (error) throw new Error(error.message)
+    rows.push(...((data ?? []) as PjSyncRow[]))
+    if (!data || data.length < BATCH) break
+  }
+  return enrichRows(supabase, rows, { skipPrMo: true })
 }

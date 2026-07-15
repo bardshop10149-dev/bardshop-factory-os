@@ -75,6 +75,10 @@
 新增檔：`sql/20260705_po_line_sent.sql`、`sql/20260707_purchasing_indexes.sql`、`app/api/purchasing/lookups/route.ts`
 增修：`app/info-board/order-records/page.tsx`（POC 明細加進度＋入庫欄）、`app/globals.css`（深色捲軸）、`lib/purchasing/*`、`app/purchasing/page.tsx`
 
+**查詢提速（2026-07-08）**：列表改「資料庫端過濾/排序/分頁」——一次只撈當頁 100 筆、只對當頁做供應商/請購/製令比對（原本撈全部 1,800+ 筆再全量比對）；請購比對查詢平行化。實測單次查詢 API 由 3~4 秒降至約 1 秒內。到期提醒改獨立輕量端點（只撈交期 10 天內）。「排除已到倉」「請購單號」兩條件為當頁前端精修（PR 為比對結果，資料庫無此欄）。
+
+**頁內同步（2026-07-08）**：採購專區右上新增「⟳ 同步採購單」，呼叫與 ERP 同步區相同的 `sync_po`（更新單況/入庫量/承辦人/交期），含進度視窗，完成後自動依原條件重新查詢。
+
 ### 部署後必跑 SQL（Supabase SQL Editor，依序）
 1. `sql/20260703_purchasing_tracking.sql`（po_line_tracking / po_payment / erp_vendors）
 2. `sql/20260705_po_line_sent.sql`（sent_at 欄位）

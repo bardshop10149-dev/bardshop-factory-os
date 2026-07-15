@@ -127,40 +127,11 @@ function defaultFilters(): Filters {
 /** 每頁筆數 */
 const PAGE_SIZE = 100
 
-/** 常平廠以內部供應商代碼 C01510 記帳；用來區分常平／非常平訂單 */
-const CHANGPING_VENDOR = 'C01510'
-const isChangping = (l: PoTrackingLine) => (l.vendor_code ?? '').trim().toUpperCase() === CHANGPING_VENDOR
-
-const contains = (v: string | null, q: string) =>
-  !q || (v ?? '').toLowerCase().includes(q.trim().toLowerCase())
-
-/** 承辦人查詢：姓名或工號部分輸入皆可；datalist 選「姓名（工號）」時取括號內工號精準比對 */
-function matchBuyer(l: PoTrackingLine, q: string): boolean {
-  const s = q.trim()
-  if (!s) return true
-  const idInParen = s.match(/（([^）]+)）\s*$/)?.[1]
-  if (idInParen) return (l.buyer_id ?? '') === idInParen
-  return contains(l.buyer, s) || contains(l.buyer_id, s)
-}
-
-function matchFilters(l: PoTrackingLine, f: Filters): boolean {
-  if (!contains(l.vendor_code, f.vendorCode)) return false
-  if (!contains(l.vendor_name, f.vendorName)) return false
-  if (!contains(l.item_code, f.itemCode)) return false
-  if (!contains(l.pr_no, f.prNo)) return false
-  if (!matchBuyer(l, f.buyer)) return false
-  if (!contains(l.doc_no, f.poNo)) return false
-  if (f.poFrom && l.doc_no < f.poFrom.trim().toUpperCase()) return false
-  if (f.poTo && l.doc_no > `${f.poTo.trim().toUpperCase()}￿`) return false
-  if (f.dueFrom && (!l.due_date || l.due_date < f.dueFrom)) return false
-  if (f.dueTo && (!l.due_date || l.due_date > f.dueTo)) return false
-  if (f.orderFrom && (!l.order_date || l.order_date < f.orderFrom)) return false
-  if (f.orderTo && (!l.order_date || l.order_date > f.orderTo)) return false
-  return true
-}
-
 export default function PurchasingPage() {
-  const [lines, setLines]       = useState<PoTrackingLine[]>([])
+  const [lines, setLines]       = useState<PoTrackingLine[]>([])   // 當頁（伺服器已分頁）
+  const [total, setTotal]       = useState(0)                       // 伺服器回傳總筆數
+  const [reminderLines, setReminderLines] = useState<PoTrackingLine[]>([])  // 到期提醒分頁資料
+  const [remindersLoaded, setRemindersLoaded] = useState(false)
   const [counts, setCounts]     = useState<DueCounts | null>(null)
   const [loading, setLoading]   = useState(false)
   const [error, setError]       = useState<string | null>(null)
@@ -181,6 +152,32 @@ export default function PurchasingPage() {
   const [itemPickerOpen, setItemPickerOpen] = useState(false)   // 料號查詢視窗：點欄位打字/按 Enter 才開
   const [poDetailNo, setPoDetailNo] = useState<string | null>(null)  // 點採購單號 → 整張單明細
 
+  // 同步採購單（與 ERP 同步區同一支 sync_po；ARGO 全量約 30~120 秒）
+  const [syncing, setSyncing] = useState(false)
+  const [syncModalOpen, setSyncModalOpen] = useState(false)
+  const [syncStage, setSyncStage] = useState('')
+  const [syncElapsed, setSyncElapsed] = useState(0)
+  const [syncResult, setSyncResult] = useState<{ ok: boolean; text: string } | null>(null)
+  const syncStartRef = useRef<number>(0)
+
+  // 同步進行中的階段提示（依經過時間推測，與 so-query 同步視窗同模式）
+  useEffect(() => {
+    if (!syncing) return
+    const tick = () => {
+      const elapsed = Math.floor((Date.now() - syncStartRef.current) / 1000)
+      setSyncElapsed(elapsed)
+      if (elapsed < 3) setSyncStage('向 ARGO 請求採購單表頭…')
+      else if (elapsed < 12) setSyncStage('接收表頭並建立索引…')
+      else if (elapsed < 30) setSyncStage('向 ARGO 請求採購明細（含入庫量）…')
+      else if (elapsed < 55) setSyncStage('合併表頭 / 明細並去重…')
+      else if (elapsed < 100) setSyncStage('增量比對寫入 Supabase…')
+      else setSyncStage('仍在處理中，請稍候…')
+    }
+    tick()
+    const id = window.setInterval(tick, 1000)
+    return () => window.clearInterval(id)
+  }, [syncing])
+
   // 建議清單（承辦人/料號 datalist）：進頁面先載，查詢前就能用
   useEffect(() => {
     fetch('/api/purchasing/lookups')
@@ -193,34 +190,102 @@ export default function PurchasingPage() {
       .catch(() => {})
   }, [])
 
-  // 下單日區間送伺服器端收斂（加速）；其餘細條件仍在前端過濾
-  const load = useCallback(async (range?: { from: string; to: string }) => {
-    setLoading(true)
-    setError(null)
+  // 組查詢參數（承辦人：datalist 選「姓名（工號）」時取工號）
+  const buildParams = (pageNum: number, f: Filters, sort: 'asc' | 'desc' | null, cp: 'all' | 'only' | 'exclude') => {
+    const qs = new URLSearchParams()
+    qs.set('page', String(pageNum)); qs.set('pageSize', String(PAGE_SIZE))
+    const set = (k: string, v: string) => { if (v && v.trim()) qs.set(k, v.trim()) }
+    set('orderFrom', f.orderFrom); set('orderTo', f.orderTo)
+    set('dueFrom', f.dueFrom); set('dueTo', f.dueTo)
+    set('vendorCode', f.vendorCode); set('vendorName', f.vendorName)
+    set('itemCode', f.itemCode); set('poNo', f.poNo)
+    set('poFrom', f.poFrom); set('poTo', f.poTo)
+    const buyerTerm = f.buyer.match(/（([^）]+)）\s*$/)?.[1] ?? f.buyer
+    set('buyer', buyerTerm)
+    if (cp !== 'all') qs.set('cp', cp)
+    if (sort) qs.set('sortDue', sort)
+    return qs
+  }
+
+  // 伺服器端過濾/排序/分頁：只撈當頁 100 筆 → 快
+  const fetchList = useCallback(async (pageNum: number, f: Filters, sort: 'asc' | 'desc' | null, cp: 'all' | 'only' | 'exclude') => {
+    setLoading(true); setError(null)
     try {
-      const qs = new URLSearchParams()
-      if (range?.from) qs.set('from', range.from)
-      if (range?.to) qs.set('to', range.to)
-      const res = await fetch(`/api/purchasing/list${qs.toString() ? `?${qs}` : ''}`)
+      const res = await fetch(`/api/purchasing/list?${buildParams(pageNum, f, sort, cp)}`)
       if (res.status === 403) { setForbidden(true); return }
       const json = await res.json()
       if (!res.ok || !json.success) throw new Error(json.error || `HTTP ${res.status}`)
       setLines(json.lines as PoTrackingLine[])
-      setCounts(json.counts as DueCounts)
+      setTotal(Number(json.total) || 0)
+      setPage(pageNum)
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
-    } finally {
-      setLoading(false)
-    }
+    } finally { setLoading(false) }
   }, [])
 
-  /** 按「開始查詢」：套用目前條件並撈資料（進頁面不自動查） */
+  // 到期提醒分頁：只撈交期 10 天內的 OPEN 列（另一支輕量端點）
+  const fetchReminders = useCallback(async () => {
+    setLoading(true); setError(null)
+    try {
+      const res = await fetch('/api/purchasing/list?mode=reminders')
+      if (res.status === 403) { setForbidden(true); return }
+      const json = await res.json()
+      if (!res.ok || !json.success) throw new Error(json.error || `HTTP ${res.status}`)
+      setReminderLines(json.lines as PoTrackingLine[])
+      setCounts(json.counts as DueCounts)
+      setRemindersLoaded(true)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally { setLoading(false) }
+  }, [])
+
+  /** 按「開始查詢」：套用目前條件並從第 1 頁撈（進頁面不自動查） */
   const handleSearch = useCallback(() => {
     setAppliedFilters(filters)
     setSearched(true)
-    setPage(1)
-    void load({ from: filters.orderFrom, to: filters.orderTo })
-  }, [filters, load])
+    void fetchList(1, filters, sortDue, cpFilter)
+  }, [filters, sortDue, cpFilter, fetchList])
+
+  const goToPage = useCallback((n: number) => void fetchList(n, appliedFilters, sortDue, cpFilter), [appliedFilters, sortDue, cpFilter, fetchList])
+  const toggleSort = useCallback(() => {
+    const next = sortDue === 'asc' ? 'desc' : sortDue === 'desc' ? null : 'asc'
+    setSortDue(next)
+    if (searched) void fetchList(1, appliedFilters, next, cpFilter)
+  }, [sortDue, searched, appliedFilters, cpFilter, fetchList])
+  const setCp = useCallback((next: 'all' | 'only' | 'exclude') => {
+    setCpFilter(next)
+    if (searched) void fetchList(1, appliedFilters, sortDue, next)
+  }, [searched, appliedFilters, sortDue, fetchList])
+
+  /** 同步採購單：呼叫 ERP 同步（sync_po），完成後自動重新查詢目前頁面 */
+  const handleSyncPo = useCallback(async () => {
+    if (syncing) return
+    if (!window.confirm('確定要從 ARGO 同步採購單嗎？\n（更新單況、入庫量、承辦人等，約 30~120 秒）')) return
+    syncStartRef.current = Date.now()
+    setSyncing(true)
+    setSyncResult(null)
+    setSyncModalOpen(true)
+    setSyncElapsed(0)
+    setSyncStage('連線 ARGO…')
+    try {
+      const res = await fetch('/api/argoerp', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'sync_po' }),
+      })
+      const json = await res.json().catch(() => ({}))
+      if (!res.ok || json?.status === 'error') throw new Error(json?.error || `HTTP ${res.status}`)
+      const elapsedSec = Math.floor((Date.now() - syncStartRef.current) / 1000)
+      setSyncResult({ ok: true, text: `同步完成：${json?.syncedCount ?? '?'} 筆明細（表頭 ${json?.totalHdrRows ?? '?'} 張）\n耗時 ${elapsedSec} 秒` })
+      // 同步後自動更新目前檢視
+      if (searched) void fetchList(page, appliedFilters, sortDue, cpFilter)
+      if (remindersLoaded) void fetchReminders()
+    } catch (e) {
+      setSyncResult({ ok: false, text: e instanceof Error ? e.message : String(e) })
+    } finally {
+      setSyncing(false)
+    }
+  }, [syncing, searched, page, appliedFilters, sortDue, cpFilter, remindersLoaded, fetchList, fetchReminders])
 
   const flash = (text: string) => {
     setMsg(text)
@@ -248,7 +313,8 @@ export default function PurchasingPage() {
       })
       const json = await res.json().catch(() => ({}))
       if (!res.ok || !json.success) throw new Error(json.error || `HTTP ${res.status}`)
-      setLines(prev => prev.map(x => lineKey(x) !== key ? x : applyLineTransition(x, patch)))
+      const apply = (arr: PoTrackingLine[]) => arr.map(x => lineKey(x) !== key ? x : applyLineTransition(x, patch))
+      setLines(apply); setReminderLines(apply)
     } catch (e) {
       flash(`❌ 更新失敗：${e instanceof Error ? e.message : String(e)}`)
     } finally {
@@ -267,7 +333,8 @@ export default function PurchasingPage() {
       })
       const json = await res.json().catch(() => ({}))
       if (!res.ok || !json.success) throw new Error(json.error || `HTTP ${res.status}`)
-      setLines(prev => prev.map(x => x.doc_no === docNo ? { ...x, payment_pct: pct } : x))
+      const apply = (arr: PoTrackingLine[]) => arr.map(x => x.doc_no === docNo ? { ...x, payment_pct: pct } : x)
+      setLines(apply); setReminderLines(apply)
     } catch (e) {
       flash(`❌ 更新失敗：${e instanceof Error ? e.message : String(e)}`)
     } finally {
@@ -275,37 +342,24 @@ export default function PurchasingPage() {
     }
   }, [])
 
-  const filtered = useMemo(() => {
-    const arr = lines.filter(l =>
-      matchFilters(l, appliedFilters)
-      && !(hideArrived && arrivedFull(l))
-      && (cpFilter === 'all' || (cpFilter === 'only' ? isChangping(l) : !isChangping(l)))
-    )
-    if (sortDue) {
-      const dir = sortDue === 'asc' ? 1 : -1
-      arr.sort((a, b) => {
-        // 無交期者一律排最後
-        if (!a.due_date && !b.due_date) return 0
-        if (!a.due_date) return 1
-        if (!b.due_date) return -1
-        return a.due_date < b.due_date ? -dir : a.due_date > b.due_date ? dir : 0
-      })
-    }
-    return arr
-  }, [lines, appliedFilters, sortDue, hideArrived, cpFilter])
-  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE))
+  // 伺服器已過濾/排序/分頁；本頁再做兩個「純前端」精修：排除已到倉、請購單號（PR 為比對結果，無法在 DB 過濾）
+  const visibleLines = useMemo(() => lines.filter(l =>
+    !(hideArrived && arrivedFull(l))
+    && (!appliedFilters.prNo.trim() || (l.pr_no ?? '').toLowerCase().includes(appliedFilters.prNo.trim().toLowerCase()))
+  ), [lines, hideArrived, appliedFilters.prNo])
+  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE))
   const safePage = Math.min(page, totalPages)
-  const paged = useMemo(() => filtered.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE), [filtered, safePage])
+  const paged = visibleLines   // 當頁（已是伺服器分頁的 100 筆，扣掉前端精修）
 
   const dueGroups = useMemo(() => {
     const groups = { red: [] as PoTrackingLine[], amber: [] as PoTrackingLine[], yellow: [] as PoTrackingLine[] }
-    for (const l of lines) {
+    for (const l of reminderLines) {
       const b = dueBucket(l)
       if (b) groups[b].push(l)
     }
     for (const g of Object.values(groups)) g.sort((a, b) => (a.due_days ?? 0) - (b.due_days ?? 0))
     return groups
-  }, [lines])
+  }, [reminderLines])
 
   const dueTotal = dueGroups.red.length + dueGroups.amber.length + dueGroups.yellow.length
 
@@ -473,12 +527,19 @@ export default function PurchasingPage() {
       <div className="border-b border-slate-800 bg-slate-900/60 backdrop-blur-sm px-4 py-3 flex items-center gap-4">
         <Link href="/" className="text-xs text-slate-500 hover:text-slate-300 transition-colors shrink-0">← 回首頁</Link>
         <h1 className="text-sm font-bold text-white">採購專區</h1>
-        <span className="text-[10px] text-slate-600">OPEN 採購單追蹤（每小時自 ARGO 同步）</span>
+        <span className="text-[10px] text-slate-600">OPEN 採購單追蹤（每小時自 ARGO 同步，也可手動同步）</span>
         <div className="ml-auto flex items-center gap-3">
           {msg && <span className="text-xs text-rose-300">{msg}</span>}
           <button
             type="button"
-            onClick={() => void load(tab === 'due' ? undefined : { from: appliedFilters.orderFrom, to: appliedFilters.orderTo })}
+            onClick={() => void handleSyncPo()}
+            disabled={syncing}
+            title="從 ARGO 立即更新採購單（單況、入庫量、承辦人），與 ERP 同步區的採購單同步相同"
+            className="px-3 py-1.5 rounded bg-indigo-700 hover:bg-indigo-600 disabled:bg-slate-700 disabled:text-slate-500 text-xs font-semibold text-white transition-colors"
+          >{syncing ? '同步中…' : '⟳ 同步採購單'}</button>
+          <button
+            type="button"
+            onClick={() => { if (tab === 'due') void fetchReminders(); else if (searched) void fetchList(safePage, appliedFilters, sortDue, cpFilter) }}
             disabled={loading}
             className="px-3 py-1.5 rounded bg-slate-800 hover:bg-slate-700 disabled:text-slate-600 text-xs font-semibold text-slate-300 transition-colors"
           >{loading ? '載入中…' : '🔄 重新整理'}</button>
@@ -496,7 +557,7 @@ export default function PurchasingPage() {
         >追蹤列表</button>
         <button
           type="button"
-          onClick={() => { setTab('due'); if (!searched) { setSearched(true); void load() } }}
+          onClick={() => { setTab('due'); if (!remindersLoaded) void fetchReminders() }}
           className={`px-4 py-2 rounded-t text-xs font-semibold transition-colors border-b-2 flex items-center gap-1.5 ${
             tab === 'due' ? 'text-cyan-300 border-cyan-500' : 'text-slate-500 border-transparent hover:text-slate-300'
           }`}
@@ -624,18 +685,18 @@ export default function PurchasingPage() {
             >{compact ? '✓ 精簡模式（一屏）' : '精簡模式（一屏）'}</button>
             <button
               type="button"
-              onClick={() => { setHideArrived(v => !v); setPage(1) }}
+              onClick={() => setHideArrived(v => !v)}
               className={`px-2.5 py-1 rounded border transition-colors ${hideArrived ? 'bg-emerald-900/50 border-emerald-600/60 text-emerald-300' : 'bg-slate-800 border-slate-700 text-slate-400 hover:text-slate-200'}`}
             >{hideArrived ? '✓ 排除已全部到倉' : '排除已全部到倉'}</button>
             <span className="w-px h-4 bg-slate-700" />
             <button
               type="button"
-              onClick={() => { setCpFilter(f => f === 'only' ? 'all' : 'only'); setPage(1) }}
+              onClick={() => setCp(cpFilter === 'only' ? 'all' : 'only')}
               className={`px-2.5 py-1 rounded border transition-colors ${cpFilter === 'only' ? 'bg-orange-900/50 border-orange-600/60 text-orange-300' : 'bg-slate-800 border-slate-700 text-slate-400 hover:text-slate-200'}`}
             >{cpFilter === 'only' ? '✓ 只看常平' : '只看常平'}</button>
             <button
               type="button"
-              onClick={() => { setCpFilter(f => f === 'exclude' ? 'all' : 'exclude'); setPage(1) }}
+              onClick={() => setCp(cpFilter === 'exclude' ? 'all' : 'exclude')}
               className={`px-2.5 py-1 rounded border transition-colors ${cpFilter === 'exclude' ? 'bg-fuchsia-900/50 border-fuchsia-600/60 text-fuchsia-300' : 'bg-slate-800 border-slate-700 text-slate-400 hover:text-slate-200'}`}
             >{cpFilter === 'exclude' ? '✓ 只看非常平' : '只看非常平'}</button>
             <span>點「交期」表頭可排序；拖表頭右緣調欄寬</span>
@@ -656,7 +717,7 @@ export default function PurchasingPage() {
                     return (
                     <th
                       key={c.key}
-                      onClick={isSort ? () => setSortDue(s => s === 'asc' ? 'desc' : s === 'desc' ? null : 'asc') : undefined}
+                      onClick={isSort ? toggleSort : undefined}
                       className={`sticky top-0 z-10 bg-slate-900 border-b border-slate-700 border-r border-r-slate-700/80 px-2 py-2 whitespace-nowrap overflow-hidden text-slate-400 font-medium select-none ${c.right ? 'text-right' : c.center ? 'text-center' : 'text-left'} ${isSort ? 'cursor-pointer hover:text-cyan-300' : ''}`}
                       title={isSort ? '點擊依交期排序（升冪 / 降冪 / 取消）' : undefined}
                     >
@@ -677,12 +738,12 @@ export default function PurchasingPage() {
                 )}
                 {!loading && !searched && (
                   <tr><td colSpan={COLS} className="px-3 py-8 text-center text-slate-600">
-                    已預設帶入近三個月下單日，請確認條件後點查詢列右下角的「🔍 開始查詢」。
+                    已預設帶入近兩個月下單日，請確認條件後點查詢列右下角的「🔍 開始查詢」。
                   </td></tr>
                 )}
-                {!loading && searched && filtered.length === 0 && (
+                {!loading && searched && paged.length === 0 && (
                   <tr><td colSpan={COLS} className="px-3 py-8 text-center text-slate-600">
-                    {lines.length === 0 ? '目前沒有 OPEN 的採購單。' : '沒有符合查詢條件的明細。'}
+                    {total === 0 ? '沒有符合查詢條件的採購單。' : '本頁明細已被「排除已到倉／請購單號」條件濾掉，請翻頁或調整條件。'}
                   </td></tr>
                 )}
                 {!loading && paged.map(l => {
@@ -752,36 +813,20 @@ export default function PurchasingPage() {
             </table>
           </div>
 
-          {!loading && filtered.length > 0 && (
+          {!loading && searched && total > 0 && (
             <div className="px-4 py-3 border-t border-slate-800/60 flex items-center gap-3 text-xs text-slate-500">
-              <span>符合 {filtered.length.toLocaleString()} 筆（下單日 {appliedFilters.orderFrom || '—'} ~ {appliedFilters.orderTo || '—'}）</span>
+              <span>共 {total.toLocaleString()} 筆，本頁 {paged.length} 筆（下單日 {appliedFilters.orderFrom || '—'} ~ {appliedFilters.orderTo || '—'}）</span>
               {totalPages > 1 && (
                 <div className="ml-auto flex items-center gap-1.5">
-                  <button
-                    type="button"
-                    onClick={() => setPage(1)}
-                    disabled={safePage <= 1}
-                    className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-slate-300"
-                  >« 第一頁</button>
-                  <button
-                    type="button"
-                    onClick={() => setPage(p => Math.max(1, p - 1))}
-                    disabled={safePage <= 1}
-                    className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-slate-300"
-                  >‹ 上一頁</button>
+                  <button type="button" onClick={() => goToPage(1)} disabled={safePage <= 1}
+                    className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-slate-300">« 第一頁</button>
+                  <button type="button" onClick={() => goToPage(safePage - 1)} disabled={safePage <= 1}
+                    className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-slate-300">‹ 上一頁</button>
                   <span className="px-2 text-slate-400">第 {safePage} / {totalPages} 頁</span>
-                  <button
-                    type="button"
-                    onClick={() => setPage(p => Math.min(totalPages, p + 1))}
-                    disabled={safePage >= totalPages}
-                    className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-slate-300"
-                  >下一頁 ›</button>
-                  <button
-                    type="button"
-                    onClick={() => setPage(totalPages)}
-                    disabled={safePage >= totalPages}
-                    className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-slate-300"
-                  >最後頁 »</button>
+                  <button type="button" onClick={() => goToPage(safePage + 1)} disabled={safePage >= totalPages}
+                    className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-slate-300">下一頁 ›</button>
+                  <button type="button" onClick={() => goToPage(totalPages)} disabled={safePage >= totalPages}
+                    className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-slate-300">最後頁 »</button>
                 </div>
               )}
             </div>
@@ -840,6 +885,51 @@ export default function PurchasingPage() {
               統計：2 天內 {counts.due2}、3~5 天 {counts.due5}、6~10 天 {counts.due10}（未出貨明細）
             </p>
           )}
+        </div>
+      )}
+
+      {/* ─── 同步採購單進度視窗 ─── */}
+      {syncModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm">
+          <div className="w-[420px] max-w-[92vw] rounded-2xl bg-slate-900 border border-slate-700 shadow-2xl p-6">
+            <div className="flex items-center gap-3 mb-4">
+              {syncing ? (
+                <div className="h-6 w-6 rounded-full border-2 border-indigo-400 border-t-transparent animate-spin" />
+              ) : syncResult?.ok ? (
+                <div className="h-6 w-6 rounded-full bg-emerald-500 flex items-center justify-center text-sm">✓</div>
+              ) : (
+                <div className="h-6 w-6 rounded-full bg-rose-500 flex items-center justify-center text-sm">✕</div>
+              )}
+              <h3 className="text-lg font-semibold">
+                {syncing ? '正在同步採購單' : syncResult?.ok ? '同步完成' : '同步失敗'}
+              </h3>
+            </div>
+
+            {syncing ? (
+              <>
+                <div className="text-sm text-slate-300 mb-2">{syncStage || '準備中…'}</div>
+                <div className="text-xs text-slate-500 mb-4">已耗時 {syncElapsed} 秒</div>
+                <div className="h-1.5 w-full overflow-hidden rounded-full bg-slate-800">
+                  <div className="h-full w-1/3 animate-pulse bg-indigo-400" />
+                </div>
+                <div className="mt-4 text-xs text-slate-500">
+                  ⚠ ARGO 全量同步通常需 30~120 秒，請勿關閉視窗。
+                </div>
+              </>
+            ) : (
+              <>
+                <pre className={`whitespace-pre-wrap text-sm rounded-lg p-3 mb-4 border ${syncResult?.ok ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-200' : 'bg-rose-500/10 border-rose-500/30 text-rose-200'}`}>
+{syncResult?.text}
+                </pre>
+                <div className="flex justify-end">
+                  <button
+                    onClick={() => setSyncModalOpen(false)}
+                    className="px-4 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 text-sm"
+                  >關閉</button>
+                </div>
+              </>
+            )}
+          </div>
         </div>
       )}
 
