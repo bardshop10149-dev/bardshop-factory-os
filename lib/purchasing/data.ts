@@ -434,3 +434,210 @@ export async function loadPoTrackingLines(supabase: SupabaseAdmin, opts: LoadOpt
     }
   })
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// 伺服器端分頁（追蹤列表用）：過濾/排序/分頁都在資料庫做，只 enrich 當頁
+// 100 筆 → 查詢由「全量撈回再前端過濾」的秒級降到次秒級。
+// 到期提醒/首頁徽章仍走上面的 loadPoTrackingLines（需要全量統計）。
+// ─────────────────────────────────────────────────────────────────────
+
+const CHANGPING_VENDOR = 'C01510'   // 常平廠內部供應商代碼
+
+/** ilike / or 條件用的輸入清洗（拿掉 PostgREST 語法字元，防注入與語法錯誤） */
+const sanitizeTerm = (s: string | null | undefined) => String(s ?? '').replace(/[%_,()*\\]/g, '').trim()
+
+export interface PageParams {
+  page: number
+  pageSize: number
+  poStatus?: string | null          // OPEN/CLOSE/VOID（route 已白名單）
+  orderFrom?: string | null         // 下單日區間（YYYY-MM-DD）
+  orderTo?: string | null
+  dueFrom?: string | null           // 交期區間（YYYY-MM-DD）
+  dueTo?: string | null
+  vendorCode?: string | null
+  vendorName?: string | null        // 先查 erp_vendors 轉成代碼清單
+  itemCode?: string | null
+  buyer?: string | null             // SALES_ID / SALES_NAME 部分比對
+  poNo?: string | null
+  poFrom?: string | null            // 單號區間
+  poTo?: string | null
+  cp?: 'all' | 'only' | 'exclude'   // 常平（C01510）快篩
+  srcNo?: string | null             // 來源單號：SO/RO 直接比對；MO 先反查 erp_mo_lines 的來源訂單
+  sortDue?: 'asc' | 'desc' | null   // 依交期排序
+}
+
+/** 伺服器端過濾/排序/分頁；只 enrich 當頁列。回傳 { lines, total }。 */
+export async function loadPoPage(supabase: SupabaseAdmin, p: PageParams, timings?: Record<string, number>): Promise<{ lines: PoTrackingLine[]; total: number }> {
+  const t0 = Date.now()
+
+  // 來源單號：MO 開頭先反查製令的來源 SO/RO 清單；其餘（SO/RO/SOB…）直接部分比對
+  let srcList: string[] | null = null
+  const srcRaw = sanitizeTerm(p.srcNo).toUpperCase()
+  if (srcRaw && /^MO/.test(srcRaw)) {
+    const { data, error } = await supabase
+      .from('erp_mo_lines')
+      .select('source_order')
+      .ilike('project_id', `%${srcRaw}%`)
+      .limit(300)
+    if (error) throw new Error(error.message)
+    srcList = [...new Set((data ?? []).map((r) => String(r.source_order ?? '').trim().toUpperCase()).filter(Boolean))].slice(0, 200)
+    if (srcList.length === 0) return { lines: [], total: 0 }
+  }
+
+  // 廠商名稱 → 供應商代碼清單（erp_vendors 為 service_role-only，這裡在後端查安全）
+  let vendorNameCodes: string[] | null = null
+  const vn = sanitizeTerm(p.vendorName)
+  if (vn) {
+    const { data, error } = await supabase.from('erp_vendors').select('partner_id').ilike('cname', `%${vn}%`).limit(500)
+    if (error) throw new Error(error.message)
+    vendorNameCodes = (data ?? []).map((v) => v.partner_id)
+    if (vendorNameCodes.length === 0) return { lines: [], total: 0 }
+  }
+
+  let q = supabase
+    .from('erp_pj_sync')
+    .select(PO_SELECT, { count: 'exact' })
+    .eq('doc_type', '採購單號')
+    .eq('status', (p.poStatus || 'OPEN').toUpperCase())
+  const oFrom = toSlashDate(p.orderFrom), oTo = toSlashDate(p.orderTo)
+  if (oFrom) q = q.gte('start_date', oFrom)
+  if (oTo) q = q.lte('start_date', oTo)
+  const dFrom = toSlashDate(p.dueFrom), dTo = toSlashDate(p.dueTo)
+  if (dFrom) q = q.gte('end_date', dFrom)
+  if (dTo) q = q.lte('end_date', dTo)
+  const vc = sanitizeTerm(p.vendorCode)
+  if (vc) q = q.ilike('customer_vendor', `%${vc}%`)
+  if (vendorNameCodes) q = q.in('customer_vendor', vendorNameCodes)
+  const ic = sanitizeTerm(p.itemCode)
+  if (ic) q = q.ilike('item_code', `%${ic}%`)
+  const pn = sanitizeTerm(p.poNo)
+  if (pn) q = q.ilike('doc_no', `%${pn}%`)
+  const pf = sanitizeTerm(p.poFrom).toUpperCase()
+  if (pf) q = q.gte('doc_no', pf)
+  const pt = sanitizeTerm(p.poTo).toUpperCase()
+  if (pt) q = q.lte('doc_no', pt + '￿')
+  const by = sanitizeTerm(p.buyer)
+  if (by) q = q.or(`extra->>SALES_ID.ilike.*${by}*,extra->>SALES_NAME.ilike.*${by}*`)
+  if (p.cp === 'only') q = q.eq('customer_vendor', CHANGPING_VENDOR)
+  else if (p.cp === 'exclude') q = q.neq('customer_vendor', CHANGPING_VENDOR)
+  // 多個 .or() 之間為 AND（PostgREST 各 or= 參數彼此 AND），不影響承辦人條件
+  if (srcList) q = q.or(`extra->>SO_PROJECT_ID.in.(${srcList.join(',')}),extra->>MBP_LOT_NO.in.(${srcList.join(',')})`)
+  else if (srcRaw) q = q.or(`extra->>SO_PROJECT_ID.ilike.*${srcRaw}*,extra->>MBP_LOT_NO.ilike.*${srcRaw}*`)
+
+  if (p.sortDue) q = q.order('end_date', { ascending: p.sortDue === 'asc', nullsFirst: false })
+  q = q.order('doc_no', { ascending: true }).order('sub_no', { ascending: true })
+
+  const offset = Math.max(0, (p.page - 1) * p.pageSize)
+  const { data, error, count } = await q.range(offset, offset + p.pageSize - 1)
+  if (error) throw new Error(error.message)
+  const rows = (data ?? []) as unknown as PjSyncRow[]
+  const total = count ?? rows.length
+  const tPo = Date.now()
+  if (rows.length === 0) {
+    if (timings) { timings.po_ms = tPo - t0; timings.total_ms = tPo - t0; timings.rows = 0 }
+    return { lines: [], total }
+  }
+
+  // ── enrich 當頁（tracking/payment/vendor 只查本頁 doc_no；PR 用整批索引、MO 只查本頁 SO）──
+  const today = todayTaipei()
+  const docNos = [...new Set(rows.map((r) => r.doc_no))]
+  const vendorCodes = [...new Set(rows.map((r) => (r.customer_vendor ?? '').trim()).filter(Boolean))]
+  const soNos = [...new Set(rows.map((r) => sourceOrderOf(r)).filter((v): v is string => Boolean(v)))]
+  const buyerMap = new Map<string, string>()
+  for (const r of rows) {
+    const id = trimOrNull(r.sales_id), name = trimOrNull(r.sales_name)
+    if (id && name && !buyerMap.has(id)) buyerMap.set(id, name)
+  }
+
+  const trackingMap = new Map<string, { sent_at: string | null; shipped_at: string | null; ship_method: string | null; expected_ship_date: string | null; note: string | null; updated_by: string | null; updated_at: string | null }>()
+  const paymentMap = new Map<string, number>()
+  const vendorMap = new Map<string, string>()
+  let prIndex = new Map<string, PrCandidate[]>()
+  let moIndex = new Map<string, { project_id: string; mbp_part: string | null }[]>()
+
+  const loadTrackingScoped = async () => {
+    let { data: t, error: e } = await supabase
+      .from('po_line_tracking')
+      .select('doc_no, sub_no, sent_at, shipped_at, ship_method, expected_ship_date, note, updated_by, updated_at')
+      .in('doc_no', docNos)
+    if (e && /note/i.test(e.message)) {
+      // 降級相容：note migration 未執行時退回舊欄位（與 loadPoTrackingLines 同策略）
+      const legacy = await supabase
+        .from('po_line_tracking')
+        .select('doc_no, sub_no, sent_at, shipped_at, ship_method, expected_ship_date, updated_by, updated_at')
+        .in('doc_no', docNos)
+      t = (legacy.data ?? []).map((r) => ({ ...r, note: null }))
+      e = legacy.error
+    }
+    if (e) throw new Error(e.message)
+    for (const r of t ?? []) trackingMap.set(`${r.doc_no}|${r.sub_no}`, r)
+  }
+
+  ;[, , , prIndex, moIndex] = await Promise.all([
+    loadTrackingScoped(),
+    (async () => {
+      const { data: pay, error: e } = await supabase.from('po_payment').select('doc_no, payment_pct').in('doc_no', docNos)
+      if (e) throw new Error(e.message)
+      for (const r of pay ?? []) paymentMap.set(r.doc_no, Number(r.payment_pct) || 0)
+    })(),
+    (async () => {
+      if (vendorCodes.length === 0) return
+      const { data: v, error: e } = await supabase.from('erp_vendors').select('partner_id, cname').in('partner_id', vendorCodes)
+      if (e) throw new Error(e.message)
+      for (const x of v ?? []) vendorMap.set(x.partner_id, x.cname)
+    })(),
+    soNos.length ? fetchAllPrRows(supabase).then((prRows) => buildPrIndex(supabase, soNos, prRows)) : Promise.resolve(new Map<string, PrCandidate[]>()),
+    soNos.length ? buildMoIndex(supabase, soNos) : Promise.resolve(new Map<string, { project_id: string; mbp_part: string | null }[]>()),
+  ])
+  const tEnrich = Date.now()
+  if (timings) {
+    timings.po_ms = tPo - t0
+    timings.enrich_ms = tEnrich - tPo
+    timings.total_ms = tEnrich - t0
+    timings.rows = rows.length
+    timings.total_rows = total
+  }
+  console.log(`[purchasing/page] rows=${rows.length}/${total} po ${tPo - t0}ms, enrich ${tEnrich - tPo}ms, total ${tEnrich - t0}ms`)
+
+  // 欄位映射與 loadPoTrackingLines 保持一致（改這裡記得同步改上面）
+  const lines = rows.map((r) => {
+    const tracking = trackingMap.get(`${r.doc_no}|${r.sub_no}`)
+    const so = sourceOrderOf(r)
+    const dueDate = normalizeDateText(r.end_date)
+    const pr = pickPr(prIndex, so, r.item_code)
+    return {
+      doc_no: r.doc_no,
+      sub_no: r.sub_no,
+      item_code: r.item_code,
+      description: r.description,
+      qty: r.qty,
+      unit: r.unit,
+      received_qty: (() => {
+        const v = Number(r.received_qty)
+        return r.received_qty != null && r.received_qty !== '' && Number.isFinite(v) ? v : null
+      })(),
+      po_status: r.status,
+      order_date: normalizeDateText(r.start_date),
+      due_date: dueDate,
+      due_days: daysUntil(dueDate, today),
+      vendor_code: r.customer_vendor,
+      vendor_name: r.customer_vendor ? vendorMap.get(r.customer_vendor.trim()) ?? null : null,
+      so_no: so,
+      so_line: trimOrNull(r.so_line_no),
+      pr_no: pr?.doc_no ?? null,
+      pr_sub: pr?.sub_no ?? null,
+      mo_no: pickMo(moIndex, so, r.item_code),
+      buyer: trimOrNull(r.sales_name) ?? (() => { const id = trimOrNull(r.sales_id); return id ? buyerMap.get(id) ?? null : null })(),
+      buyer_id: trimOrNull(r.sales_id),
+      sent_at: tracking?.sent_at ?? null,
+      shipped_at: tracking?.shipped_at ?? null,
+      ship_method: (tracking?.ship_method ?? null) as ShipMethod | null,
+      expected_ship_date: tracking?.expected_ship_date ?? null,
+      note: tracking?.note ?? null,
+      payment_pct: (paymentMap.get(r.doc_no) ?? 0) as PaymentPct,
+      updated_by: tracking?.updated_by ?? null,
+      updated_at: tracking?.updated_at ?? null,
+    }
+  })
+  return { lines, total }
+}
