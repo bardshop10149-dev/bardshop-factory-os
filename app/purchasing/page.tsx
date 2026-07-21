@@ -104,6 +104,7 @@ interface Filters {
   prNo: string
   buyer: string
   poNo: string
+  srcNo: string          // 來源單號（SO/RO/MO）→ 反查對應採購單
   poFrom: string
   poTo: string
   dueFrom: string
@@ -114,7 +115,7 @@ interface Filters {
 
 const EMPTY_FILTERS: Filters = {
   vendorCode: '', vendorName: '', itemCode: '', prNo: '', buyer: '',
-  poNo: '', poFrom: '', poTo: '', dueFrom: '', dueTo: '', orderFrom: '', orderTo: '',
+  poNo: '', srcNo: '', poFrom: '', poTo: '', dueFrom: '', dueTo: '', orderFrom: '', orderTo: '',
 }
 
 /** 追蹤列表欄位（w = 預設欄寬 px，可拖拉表頭右緣調整） */
@@ -151,37 +152,10 @@ function defaultFilters(): Filters {
 /** 每頁筆數 */
 const PAGE_SIZE = 100
 
-/** 常平廠以內部供應商代碼 C01510 記帳；用來區分常平／非常平訂單 */
-const CHANGPING_VENDOR = 'C01510'
-const isChangping = (l: PoTrackingLine) => (l.vendor_code ?? '').trim().toUpperCase() === CHANGPING_VENDOR
-
+// 查詢條件已全部改由伺服器端（loadPoPage）過濾；前端只剩兩個當頁精修：
+// 「排除已到倉」與「請購單號」（PR 為比對結果，資料庫無此欄）
 const contains = (v: string | null, q: string) =>
   !q || (v ?? '').toLowerCase().includes(q.trim().toLowerCase())
-
-/** 承辦人查詢：姓名或工號部分輸入皆可；datalist 選「姓名（工號）」時取括號內工號精準比對 */
-function matchBuyer(l: PoTrackingLine, q: string): boolean {
-  const s = q.trim()
-  if (!s) return true
-  const idInParen = s.match(/（([^）]+)）\s*$/)?.[1]
-  if (idInParen) return (l.buyer_id ?? '') === idInParen
-  return contains(l.buyer, s) || contains(l.buyer_id, s)
-}
-
-function matchFilters(l: PoTrackingLine, f: Filters): boolean {
-  if (!contains(l.vendor_code, f.vendorCode)) return false
-  if (!contains(l.vendor_name, f.vendorName)) return false
-  if (!contains(l.item_code, f.itemCode)) return false
-  if (!contains(l.pr_no, f.prNo)) return false
-  if (!matchBuyer(l, f.buyer)) return false
-  if (!contains(l.doc_no, f.poNo)) return false
-  if (f.poFrom && l.doc_no < f.poFrom.trim().toUpperCase()) return false
-  if (f.poTo && l.doc_no > `${f.poTo.trim().toUpperCase()}￿`) return false
-  if (f.dueFrom && (!l.due_date || l.due_date < f.dueFrom)) return false
-  if (f.dueTo && (!l.due_date || l.due_date > f.dueTo)) return false
-  if (f.orderFrom && (!l.order_date || l.order_date < f.orderFrom)) return false
-  if (f.orderTo && (!l.order_date || l.order_date > f.orderTo)) return false
-  return true
-}
 
 /** 相對時間標籤（上次更新顯示用）：HH:mm（N 分鐘前） */
 function fmtSyncTime(iso: string): { clock: string; ago: string; staleMins: number } {
@@ -198,7 +172,10 @@ function fmtSyncTime(iso: string): { clock: string; ago: string; staleMins: numb
 }
 
 export default function PurchasingPage() {
-  const [lines, setLines]       = useState<PoTrackingLine[]>([])
+  const [lines, setLines]       = useState<PoTrackingLine[]>([])   // 追蹤列表當頁（伺服器已分頁）
+  const [total, setTotal]       = useState(0)                       // 追蹤列表總筆數（伺服器回傳）
+  const [dueLines, setDueLines] = useState<PoTrackingLine[]>([])   // 到期提醒分頁（全量 OPEN）
+  const [dueLoaded, setDueLoaded] = useState(false)
   const [counts, setCounts]     = useState<DueCounts | null>(null)
   const [loading, setLoading]   = useState(false)
   const [error, setError]       = useState<string | null>(null)
@@ -251,24 +228,32 @@ export default function PurchasingPage() {
       .catch(() => {})
   }, [])
 
-  // 下單日區間 + 單據狀態送伺服器端收斂（加速）；其餘細條件仍在前端過濾
-  const load = useCallback(async (opts?: { from?: string; to?: string; status?: string }) => {
+  // 追蹤列表：伺服器端過濾/排序/分頁（mode=page），一次只撈當頁 100 筆 → 次秒級
+  const fetchPage = useCallback(async (pageNum: number, f: Filters, opts: { sort: 'asc' | 'desc' | null; cp: 'all' | 'only' | 'exclude'; status: string }) => {
     setLoading(true)
     setError(null)
     const t0 = performance.now()
-    const status = opts?.status ?? 'OPEN'
     try {
-      const qs = new URLSearchParams()
-      if (opts?.from) qs.set('from', opts.from)
-      if (opts?.to) qs.set('to', opts.to)
-      qs.set('status', status)
+      const qs = new URLSearchParams({ mode: 'page', page: String(pageNum), pageSize: String(PAGE_SIZE), status: opts.status })
+      const set = (k: string, v: string) => { if (v && v.trim()) qs.set(k, v.trim()) }
+      set('orderFrom', f.orderFrom); set('orderTo', f.orderTo)
+      set('dueFrom', f.dueFrom); set('dueTo', f.dueTo)
+      set('vendorCode', f.vendorCode); set('vendorName', f.vendorName)
+      set('itemCode', f.itemCode); set('poNo', f.poNo)
+      set('poFrom', f.poFrom); set('poTo', f.poTo)
+      set('srcNo', f.srcNo)
+      // 承辦人：datalist 選「姓名（工號）」時取括號內工號
+      const buyerTerm = f.buyer.match(/（([^）]+)）\s*$/)?.[1] ?? f.buyer
+      set('buyer', buyerTerm)
+      if (opts.cp !== 'all') qs.set('cp', opts.cp)
+      if (opts.sort) qs.set('sortDue', opts.sort)
       const res = await fetch(`/api/purchasing/list?${qs}`)
       if (res.status === 403) { setForbidden(true); return }
       const json = await res.json()
       if (!res.ok || !json.success) throw new Error(json.error || `HTTP ${res.status}`)
       setLines(json.lines as PoTrackingLine[])
-      // 到期提醒統計只在 OPEN 檢視更新（CLOSE/VOID 檢視不覆蓋徽章數字）
-      if (status === 'OPEN') setCounts(json.counts as DueCounts)
+      setTotal(Number(json.total) || 0)
+      setPage(pageNum)
       // 耗時診斷：client=按下到資料進畫面；server=後端組裝（差值≈網路傳輸+解析）
       setQueryMs({ client: Math.round(performance.now() - t0), server: json.timings?.total_ms ?? null })
     } catch (e) {
@@ -278,13 +263,31 @@ export default function PurchasingPage() {
     }
   }, [])
 
-  /** 按「開始查詢」：套用目前條件並撈資料（進頁面不自動查） */
+  // 到期提醒分頁：全量 OPEN 載入（提醒統計需看整體，不分頁）
+  const fetchDue = useCallback(async () => {
+    setLoading(true)
+    setError(null)
+    try {
+      const res = await fetch('/api/purchasing/list?status=OPEN')
+      if (res.status === 403) { setForbidden(true); return }
+      const json = await res.json()
+      if (!res.ok || !json.success) throw new Error(json.error || `HTTP ${res.status}`)
+      setDueLines(json.lines as PoTrackingLine[])
+      setCounts(json.counts as DueCounts)
+      setDueLoaded(true)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  /** 按「開始查詢」：套用目前條件並從第 1 頁撈（進頁面不自動查） */
   const handleSearch = useCallback(() => {
     setAppliedFilters(filters)
     setSearched(true)
-    setPage(1)
-    void load({ from: filters.orderFrom, to: filters.orderTo, status: poStatus })
-  }, [filters, load, poStatus])
+    void fetchPage(1, filters, { sort: sortDue, cp: cpFilter, status: poStatus })
+  }, [filters, sortDue, cpFilter, poStatus, fetchPage])
 
   const flash = (text: string) => {
     setMsg(text)
@@ -308,16 +311,17 @@ export default function PurchasingPage() {
       const changed = (json.inserted ?? 0) + (json.updated ?? 0) + (json.deleted ?? 0)
       flash(`✅ 採購單資料庫已更新（新增 ${json.inserted ?? 0}／更新 ${json.updated ?? 0}／刪除 ${json.deleted ?? 0}）`)
       void loadSyncStatus()
-      // 列表已查詢過且有變動才重撈，避免多打一次重 API
-      if (searched && changed > 0) {
-        void load(tab === 'due' ? { status: 'OPEN' } : { from: appliedFilters.orderFrom, to: appliedFilters.orderTo, status: poStatus })
+      // 已查詢過且有變動才重撈，避免多打一次重 API
+      if (changed > 0) {
+        if (tab === 'due' && dueLoaded) void fetchDue()
+        else if (searched) void fetchPage(page, appliedFilters, { sort: sortDue, cp: cpFilter, status: poStatus })
       }
     } catch (e) {
       flash(`❌ 更新失敗：${e instanceof Error ? e.message : String(e)}`)
     } finally {
       setDbSyncing(false)
     }
-  }, [dbSyncing, searched, tab, appliedFilters.orderFrom, appliedFilters.orderTo, poStatus, load, loadSyncStatus])
+  }, [dbSyncing, searched, tab, dueLoaded, page, appliedFilters, sortDue, cpFilter, poStatus, fetchPage, fetchDue, loadSyncStatus])
 
   const markSaving = (key: string, on: boolean) => {
     setSavingKeys(prev => {
@@ -340,7 +344,8 @@ export default function PurchasingPage() {
       })
       const json = await res.json().catch(() => ({}))
       if (!res.ok || !json.success) throw new Error(json.error || `HTTP ${res.status}`)
-      setLines(prev => prev.map(x => lineKey(x) !== key ? x : applyLineTransition(x, patch)))
+      const apply = (arr: PoTrackingLine[]) => arr.map(x => lineKey(x) !== key ? x : applyLineTransition(x, patch))
+      setLines(apply); setDueLines(apply)
     } catch (e) {
       flash(`❌ 更新失敗：${e instanceof Error ? e.message : String(e)}`)
     } finally {
@@ -359,7 +364,8 @@ export default function PurchasingPage() {
       })
       const json = await res.json().catch(() => ({}))
       if (!res.ok || !json.success) throw new Error(json.error || `HTTP ${res.status}`)
-      setLines(prev => prev.map(x => x.doc_no === docNo ? { ...x, payment_pct: pct } : x))
+      const apply = (arr: PoTrackingLine[]) => arr.map(x => x.doc_no === docNo ? { ...x, payment_pct: pct } : x)
+      setLines(apply); setDueLines(apply)
     } catch (e) {
       flash(`❌ 更新失敗：${e instanceof Error ? e.message : String(e)}`)
     } finally {
@@ -367,37 +373,27 @@ export default function PurchasingPage() {
     }
   }, [])
 
-  const filtered = useMemo(() => {
-    const arr = lines.filter(l =>
-      matchFilters(l, appliedFilters)
-      && !(hideArrived && arrivedFull(l))
-      && (cpFilter === 'all' || (cpFilter === 'only' ? isChangping(l) : !isChangping(l)))
-    )
-    if (sortDue) {
-      const dir = sortDue === 'asc' ? 1 : -1
-      arr.sort((a, b) => {
-        // 無交期者一律排最後
-        if (!a.due_date && !b.due_date) return 0
-        if (!a.due_date) return 1
-        if (!b.due_date) return -1
-        return a.due_date < b.due_date ? -dir : a.due_date > b.due_date ? dir : 0
-      })
-    }
-    return arr
-  }, [lines, appliedFilters, sortDue, hideArrived, cpFilter])
-  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE))
+  // 伺服器已過濾/排序/分頁；前端只做兩個當頁精修：排除已到倉、請購單號（PR 為比對結果，DB 無此欄）
+  const paged = useMemo(() => lines.filter(l =>
+    !(hideArrived && arrivedFull(l))
+    && contains(l.pr_no, appliedFilters.prNo)
+  ), [lines, hideArrived, appliedFilters.prNo])
+  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE))
   const safePage = Math.min(page, totalPages)
-  const paged = useMemo(() => filtered.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE), [filtered, safePage])
+
+  const goToPage = useCallback((n: number) => {
+    void fetchPage(n, appliedFilters, { sort: sortDue, cp: cpFilter, status: poStatus })
+  }, [appliedFilters, sortDue, cpFilter, poStatus, fetchPage])
 
   const dueGroups = useMemo(() => {
     const groups = { red: [] as PoTrackingLine[], amber: [] as PoTrackingLine[], yellow: [] as PoTrackingLine[] }
-    for (const l of lines) {
+    for (const l of dueLines) {
       const b = dueBucket(l)
       if (b) groups[b].push(l)
     }
     for (const g of Object.values(groups)) g.sort((a, b) => (a.due_days ?? 0) - (b.due_days ?? 0))
     return groups
-  }, [lines])
+  }, [dueLines])
 
   const dueTotal = dueGroups.red.length + dueGroups.amber.length + dueGroups.yellow.length
 
@@ -413,11 +409,20 @@ export default function PurchasingPage() {
     return { shown: all.slice(0, 50), total: all.length }
   }, [filters.itemCode, itemOptions])
 
-  /** 整張採購單的明細（點單號開視窗用；同單各行狀態同批同步，載入的資料已含全部行） */
-  const poDetailLines = useMemo(
-    () => (poDetailNo ? lines.filter(l => l.doc_no === poDetailNo) : []),
-    [poDetailNo, lines],
-  )
+  /** 整張採購單的明細（點單號開視窗用）：從追蹤列表與到期提醒已載資料中找 */
+  const poDetailLines = useMemo(() => {
+    if (!poDetailNo) return []
+    const seen = new Set<string>()
+    const out: PoTrackingLine[] = []
+    for (const l of [...lines, ...dueLines]) {
+      if (l.doc_no !== poDetailNo) continue
+      const k = lineKey(l)
+      if (seen.has(k)) continue
+      seen.add(k)
+      out.push(l)
+    }
+    return out
+  }, [poDetailNo, lines, dueLines])
 
   // ── 欄寬拖拉調整：拖曳期間直接改 DOM（避免整表重繪卡頓），放開才寫回 state ──
   const [colW, setColW] = useState<Record<string, number>>(STD_W)
@@ -604,7 +609,7 @@ export default function PurchasingPage() {
           >{dbSyncing ? '⏳ 同步中…' : '⬇ 更新資料庫'}</button>
           <button
             type="button"
-            onClick={() => void load(tab === 'due' ? { status: 'OPEN' } : { from: appliedFilters.orderFrom, to: appliedFilters.orderTo, status: poStatus })}
+            onClick={() => { if (tab === 'due') void fetchDue(); else if (searched) void fetchPage(safePage, appliedFilters, { sort: sortDue, cp: cpFilter, status: poStatus }) }}
             disabled={loading}
             className="px-3 py-1.5 rounded bg-slate-800 hover:bg-slate-700 disabled:text-slate-600 text-xs font-semibold text-slate-300 transition-colors"
           >{loading ? '載入中…' : '🔄 重新整理'}</button>
@@ -624,8 +629,8 @@ export default function PurchasingPage() {
           type="button"
           onClick={() => {
             setTab('due')
-            // 到期提醒只對 OPEN 有意義：目前檢視非 OPEN 時切回並重載，避免用 CLOSE/VOID 資料算提醒
-            if (!searched || poStatus !== 'OPEN') { setSearched(true); setPoStatus('OPEN'); void load({ status: 'OPEN' }) }
+            // 到期提醒有獨立全量 OPEN 資料，與追蹤列表分頁互不干擾
+            if (!dueLoaded) void fetchDue()
           }}
           className={`px-4 py-2 rounded-t text-xs font-semibold transition-colors border-b-2 flex items-center gap-1.5 ${
             tab === 'due' ? 'text-cyan-300 border-cyan-500' : 'text-slate-500 border-transparent hover:text-slate-300'
@@ -656,6 +661,7 @@ export default function PurchasingPage() {
               ['prNo', '請購單號', '部分輸入', undefined],
               ['buyer', '承辦人', '姓名或工號', 'purchasing-buyer-list'],
               ['poNo', '採購單號', '部分輸入', undefined],
+              ['srcNo', '來源單號', 'SO/RO/MO 單號查採購單', undefined],
             ] as const).map(([key, label, ph, listId]) => (
               <div key={key} className={key === 'itemCode' ? 'relative' : undefined}>
                 <label className="block text-[10px] text-slate-500 mb-0.5">{label}</label>
@@ -758,18 +764,26 @@ export default function PurchasingPage() {
             >{compact ? '✓ 精簡模式（一屏）' : '精簡模式（一屏）'}</button>
             <button
               type="button"
-              onClick={() => { setHideArrived(v => !v); setPage(1) }}
+              onClick={() => setHideArrived(v => !v)}
               className={`px-2.5 py-1 rounded border transition-colors ${hideArrived ? 'bg-emerald-900/50 border-emerald-600/60 text-emerald-300' : 'bg-slate-800 border-slate-700 text-slate-400 hover:text-slate-200'}`}
             >{hideArrived ? '✓ 排除已全部到倉' : '排除已全部到倉'}</button>
             <span className="w-px h-4 bg-slate-700" />
             <button
               type="button"
-              onClick={() => { setCpFilter(f => f === 'only' ? 'all' : 'only'); setPage(1) }}
+              onClick={() => {
+                const next = cpFilter === 'only' ? 'all' : 'only'
+                setCpFilter(next)
+                if (searched) void fetchPage(1, appliedFilters, { sort: sortDue, cp: next, status: poStatus })
+              }}
               className={`px-2.5 py-1 rounded border transition-colors ${cpFilter === 'only' ? 'bg-orange-900/50 border-orange-600/60 text-orange-300' : 'bg-slate-800 border-slate-700 text-slate-400 hover:text-slate-200'}`}
             >{cpFilter === 'only' ? '✓ 只看常平' : '只看常平'}</button>
             <button
               type="button"
-              onClick={() => { setCpFilter(f => f === 'exclude' ? 'all' : 'exclude'); setPage(1) }}
+              onClick={() => {
+                const next = cpFilter === 'exclude' ? 'all' : 'exclude'
+                setCpFilter(next)
+                if (searched) void fetchPage(1, appliedFilters, { sort: sortDue, cp: next, status: poStatus })
+              }}
               className={`px-2.5 py-1 rounded border transition-colors ${cpFilter === 'exclude' ? 'bg-fuchsia-900/50 border-fuchsia-600/60 text-fuchsia-300' : 'bg-slate-800 border-slate-700 text-slate-400 hover:text-slate-200'}`}
             >{cpFilter === 'exclude' ? '✓ 只看非常平' : '只看非常平'}</button>
             <span className="w-px h-4 bg-slate-700" />
@@ -780,8 +794,8 @@ export default function PurchasingPage() {
                 type="button"
                 onClick={() => {
                   if (poStatus === s || loading) return
-                  setPoStatus(s); setPage(1)
-                  if (searched) void load({ from: appliedFilters.orderFrom, to: appliedFilters.orderTo, status: s })
+                  setPoStatus(s)
+                  if (searched) void fetchPage(1, appliedFilters, { sort: sortDue, cp: cpFilter, status: s })
                 }}
                 title={`查詢 ${s} 狀態的採購單（切換後立即重新查詢）`}
                 className={`px-2.5 py-1 rounded border transition-colors font-mono ${
@@ -811,7 +825,11 @@ export default function PurchasingPage() {
                     return (
                     <th
                       key={c.key}
-                      onClick={isSort ? () => setSortDue(s => s === 'asc' ? 'desc' : s === 'desc' ? null : 'asc') : undefined}
+                      onClick={isSort ? () => {
+                        const next = sortDue === 'asc' ? 'desc' : sortDue === 'desc' ? null : 'asc'
+                        setSortDue(next)
+                        if (searched) void fetchPage(1, appliedFilters, { sort: next, cp: cpFilter, status: poStatus })
+                      } : undefined}
                       className={`sticky top-0 z-10 bg-slate-900 border-b border-slate-700 border-r border-r-slate-700/80 px-2 py-2 whitespace-nowrap overflow-hidden text-slate-400 font-medium select-none ${c.right ? 'text-right' : c.center ? 'text-center' : 'text-left'} ${isSort ? 'cursor-pointer hover:text-cyan-300' : ''}`}
                       title={isSort ? '點擊依交期排序（升冪 / 降冪 / 取消）' : undefined}
                     >
@@ -832,12 +850,12 @@ export default function PurchasingPage() {
                 )}
                 {!loading && !searched && (
                   <tr><td colSpan={COLS} className="px-3 py-8 text-center text-slate-600">
-                    已預設帶入近三個月下單日，請確認條件後點查詢列右下角的「🔍 開始查詢」。
+                    已預設帶入近兩個月下單日，請確認條件後點查詢列右下角的「🔍 開始查詢」。
                   </td></tr>
                 )}
-                {!loading && searched && filtered.length === 0 && (
+                {!loading && searched && paged.length === 0 && (
                   <tr><td colSpan={COLS} className="px-3 py-8 text-center text-slate-600">
-                    {lines.length === 0 ? '目前沒有 OPEN 的採購單。' : '沒有符合查詢條件的明細。'}
+                    {total === 0 ? '沒有符合查詢條件的採購單。' : '本頁明細已被「排除已到倉／請購單號」條件濾掉，請翻頁或調整條件。'}
                   </td></tr>
                 )}
                 {!loading && paged.map(l => {
@@ -914,34 +932,34 @@ export default function PurchasingPage() {
             </table>
           </div>
 
-          {!loading && filtered.length > 0 && (
+          {!loading && searched && total > 0 && (
             <div className="px-4 py-3 border-t border-slate-800/60 flex items-center gap-3 text-xs text-slate-500">
-              <span>符合 {filtered.length.toLocaleString()} 筆（下單日 {appliedFilters.orderFrom || '—'} ~ {appliedFilters.orderTo || '—'}）</span>
+              <span>共 {total.toLocaleString()} 筆，本頁顯示 {paged.length} 筆（下單日 {appliedFilters.orderFrom || '—'} ~ {appliedFilters.orderTo || '—'}）</span>
               {totalPages > 1 && (
                 <div className="ml-auto flex items-center gap-1.5">
                   <button
                     type="button"
-                    onClick={() => setPage(1)}
-                    disabled={safePage <= 1}
+                    onClick={() => goToPage(1)}
+                    disabled={loading || safePage <= 1}
                     className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-slate-300"
                   >« 第一頁</button>
                   <button
                     type="button"
-                    onClick={() => setPage(p => Math.max(1, p - 1))}
-                    disabled={safePage <= 1}
+                    onClick={() => goToPage(safePage - 1)}
+                    disabled={loading || safePage <= 1}
                     className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-slate-300"
                   >‹ 上一頁</button>
                   <span className="px-2 text-slate-400">第 {safePage} / {totalPages} 頁</span>
                   <button
                     type="button"
-                    onClick={() => setPage(p => Math.min(totalPages, p + 1))}
-                    disabled={safePage >= totalPages}
+                    onClick={() => goToPage(safePage + 1)}
+                    disabled={loading || safePage >= totalPages}
                     className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-slate-300"
                   >下一頁 ›</button>
                   <button
                     type="button"
-                    onClick={() => setPage(totalPages)}
-                    disabled={safePage >= totalPages}
+                    onClick={() => goToPage(totalPages)}
+                    disabled={loading || safePage >= totalPages}
                     className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-slate-300"
                   >最後頁 »</button>
                 </div>

@@ -1,16 +1,17 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getSupabaseAdminClient, formatSupabaseAdminError } from '@/lib/supabaseAdmin'
 import { guardPermission } from '@/lib/requireAuth'
-import { loadPoTrackingLines } from '@/lib/purchasing/data'
+import { loadPoTrackingLines, loadPoPage, type PageParams } from '@/lib/purchasing/data'
 import { computeDueCounts } from '@/lib/purchasing/types'
 
 export const dynamic = 'force-dynamic'
 export const maxDuration = 60
 
-// GET：OPEN 採購明細 + 追蹤/付款/供應商/PR/MO 組裝。
+// GET：採購明細。三種模式：
+//   ?mode=page  → 伺服器端過濾/排序/分頁（追蹤列表用，只 enrich 當頁 → 次秒級），回 { lines, total }
+//   ?count=1    → 只回到期提醒統計（首頁卡片徽章用）
+//   預設        → 全量（到期提醒分頁用；含 counts）
 // 僅採購權限可用（含供應商與付款資訊，不可外流 → 跨區請走 /api/purchasing/po-public）。
-// ?from=YYYY-MM-DD&to=YYYY-MM-DD：依下單日先在伺服器端收斂（加速）。
-// ?count=1 只回到期提醒統計（首頁卡片徽章用，略過 enrich，且不套日期以免漏算提醒）。
 export async function GET(request: NextRequest) {
   const guard = await guardPermission('purchasing')
   if (!guard.ok) return guard.res
@@ -28,6 +29,33 @@ export async function GET(request: NextRequest) {
 
   try {
     const timings: Record<string, number> = {}
+
+    if (params.get('mode') === 'page') {
+      const cpRaw = params.get('cp')
+      const sortRaw = params.get('sortDue')
+      const p: PageParams = {
+        page: Math.max(1, Number(params.get('page')) || 1),
+        pageSize: Math.min(200, Math.max(1, Number(params.get('pageSize')) || 100)),
+        poStatus,
+        orderFrom: params.get('orderFrom'),
+        orderTo: params.get('orderTo'),
+        dueFrom: params.get('dueFrom'),
+        dueTo: params.get('dueTo'),
+        vendorCode: params.get('vendorCode'),
+        vendorName: params.get('vendorName'),
+        itemCode: params.get('itemCode'),
+        buyer: params.get('buyer'),
+        poNo: params.get('poNo'),
+        poFrom: params.get('poFrom'),
+        poTo: params.get('poTo'),
+        cp: cpRaw === 'only' || cpRaw === 'exclude' ? cpRaw : 'all',
+        srcNo: params.get('srcNo'),
+        sortDue: sortRaw === 'asc' || sortRaw === 'desc' ? sortRaw : null,
+      }
+      const { lines, total } = await loadPoPage(supabase, p, timings)
+      return NextResponse.json({ success: true, lines, total, page: p.page, pageSize: p.pageSize, timings })
+    }
+
     const lines = await loadPoTrackingLines(supabase, countOnly ? { countOnly } : { orderFrom, orderTo, poStatus }, timings)
     const counts = computeDueCounts(lines)
     if (countOnly) {
