@@ -24,6 +24,8 @@ interface SourceRow {
   item_code: string; item_name: string; note: string
   quantity: string; delivery_date: string; plate_count: string
   upload_ro: string; order_status: string; pm_note: string
+  /** 出單表原始序號（B欄），強制套用為 TPN_PART_NO */
+  line_no_input?: string
 }
 
 interface PoHeader {
@@ -209,9 +211,24 @@ export default function PoBatchExportCPage() {
         return
       }
       setSourceRows(rows)
-      setLineEdits(rows.map((row) => ({ ...DEF_EDIT, lot_no: row.order_number })))
+      setLineEdits(rows.map((row) => {
+        const seq = (row as unknown as Record<string, unknown>)['line_no_input'] as string | undefined
+          || (row as unknown as Record<string, unknown>)['match_line_no'] as string | undefined
+          || ''
+        return { ...DEF_EDIT, lot_no: row.order_number, so_line_no: seq }
+      }))
       setMatchResults([])
       setLoadedDate(date)
+
+      // 缺序號警告
+      const missingSeqRows = rows.filter(r => {
+        const seq = (r as unknown as Record<string, unknown>)['line_no_input'] as string | undefined
+        return !seq
+      })
+      if (missingSeqRows.length > 0) {
+        const examples = [...new Set(missingSeqRows.map(r => r.order_number))].slice(0, 3).join('、')
+        alert(`⚠️ ${missingSeqRows.length} 筆資料缺少 SO 序號（TPN_PART_NO 將為空）：${examples}${missingSeqRows.length > 3 ? '…' : ''}\n請先在每日出單表補齊 B欄序號，再重新載入。`)
+      }
     } catch (e) { alert(`載入失敗：${e}`) }
   }, [])
 

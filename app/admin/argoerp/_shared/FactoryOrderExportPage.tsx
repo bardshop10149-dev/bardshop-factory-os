@@ -34,6 +34,8 @@ interface SourceRow {
   upload_ro: string
   order_status: string
   pm_note: string
+  /** 出單表原始序號（B欄 line_no_input 或 DB match_line_no），強制套用為 SO 來源序號 */
+  line_no_input?: string
 }
 
 interface SoMatchResult {
@@ -294,7 +296,8 @@ function mapAllToExport(
 
     const prefix = src.factory === 'O' ? 'MOO' : `MO${src.factory}`
     const soDateDigits = parseSoDateDigits(src.order_number) ?? todayDateDigits
-    const lineNo = matchResults[rowIndex]?.line_no
+    // 原始序號優先（B欄 line_no_input / DB match_line_no），再 fallback SO 比對結果
+    const lineNo = (src.line_no_input && src.line_no_input.trim()) ? src.line_no_input.trim() : (matchResults[rowIndex]?.line_no ?? null)
     const seqStr = lineNo ? String(Number(lineNo)).padStart(2, '0') : '00'
     row.mo_number = `${prefix}${soDateDigits}${seqStr}`
 
@@ -312,7 +315,7 @@ function mapAllToExport(
     row.product_cost_ratio  = '1'
     row.material_cost_ratio = '1'
     row.source_order        = src.order_number
-    row.source_order_line   = matchResults[rowIndex]?.line_no ?? ''
+    row.source_order_line   = lineNo ?? ''
     row.mo_note             = [src.item_name, src.note].filter(Boolean).join(' ')
     row.create_date         = todayStr
     row.auto_material       = 'N'
@@ -554,10 +557,19 @@ export default function FactoryOrderExportPage({
           item_name: r.item_name, note: r.note, quantity: r.quantity,
           delivery_date: r.delivery_date, plate_count: r.plate_count,
           upload_ro: r.upload_ro, order_status: r.order_status, pm_note: r.pm_note,
+          // 優先使用原始序號（B欄），其次 DB 已比對的 match_line_no
+          line_no_input: (r.line_no_input ?? r.match_line_no ?? '') as string,
         }))
       setSourceRows(rows)
       setSelectedRows(new Set())
       setLoadedFromSheetDate(date)
+
+      // 檢查是否有缺序號的列
+      const missingSeq = rows.filter(r => !r.line_no_input)
+      if (missingSeq.length > 0) {
+        const examples = [...new Set(missingSeq.map(r => r.order_number))].slice(0, 3).join('、')
+        alert(`⚠️ ${missingSeq.length} 筆資料缺少 SO 序號：${examples}${missingSeq.length > 3 ? '…' : ''}\n請先在每日出單表中補齊 B欄序號，再重新載入。`)
+      }
 
       // 每次載入都重新查詢 erp_so_lines，確保取得最新比對結果
       buildSoMatches(rows)

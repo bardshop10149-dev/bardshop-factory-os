@@ -263,6 +263,17 @@ function parseSourceRows(text: string, sheetDate?: string): { rows: SourceRow[];
 
   if (parsed.length === 0) return { rows: [], error: '未解析到有效資料，請確認資料是從 Excel 以 Tab 分隔複製', duplicateWarnings: [] }
 
+  // 強制要求每筆訂單都要有序號（B欄）
+  const missingSeq = parsed.filter(r => r.order_number && !r.line_no_input)
+  if (missingSeq.length > 0) {
+    const examples = [...new Set(missingSeq.map(r => r.order_number))].slice(0, 4).join('、')
+    return {
+      rows: [],
+      error: `❌ ${missingSeq.length} 筆資料缺少序號（B欄）：${examples}${missingSeq.length > 4 ? '…' : ''}，請先在出單表中填入 SO 序號再貼入。`,
+      duplicateWarnings: [],
+    }
+  }
+
   // 重複訂單號+序號偵測
   const seenDupKeys = new Set<string>()
   const duplicateWarnings: string[] = []
@@ -1728,19 +1739,21 @@ export default function DailyOrderSheetPage() {
     setExportingSheetCsv(true)
     try {
       const headers = [
-        '出單日期', '工單編號', '單據種類', '生產廠別', '客戶', '品項編碼', '品名/規格', '備註',
+        '出單日期', '工單編號', '序號', '單據種類', '生產廠別', '客戶', '品項編碼', '品名/規格', '備註', '包裝/PACKING',
         '數量', '交付日期', '訂單狀態', '製令狀態', '製令單號', '採購狀態', '採購單號', '採購序號',
         '備料狀態', '批備料單號', '機台',
       ]
       const rows = sheetRows.map(r => [
         selectedDate,
         r.order_number,
+        r.match_line_no ?? r.line_no_input ?? '',
         r.doc_type,
         r.factory,
         r.customer,
         r.item_code,
         r.item_name,
         r.note,
+        r.packing ?? '',
         r.quantity,
         r.delivery_date,
         r.order_status,

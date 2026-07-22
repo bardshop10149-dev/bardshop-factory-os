@@ -104,6 +104,8 @@ export default function UploadPage() {
       const dataItemRoutes: ItemRouteInsert[] = []
       const dataRouteOps: RouteOperationInsert[] = []
       let dataOpTimes: OperationTimeInsert[] = []
+      // 記錄「途程對工序」CSV 中每個工序對應的站點，供自動補建工時使用
+      const routeOpStations = new Map<string, string>()
 
       // A. 解析：品項對途程
       if (files.itemRoutes) {
@@ -137,11 +139,17 @@ export default function UploadPage() {
           for (let i = 1; i <= 20; i++) {
             const opName = row[`工序${i}`]
             if (opName) {
+              const trimmedOp = opName.trim()
               dataRouteOps.push({
                 route_id: routeId,
                 sequence: i,
-                op_name: opName.trim()
+                op_name: trimmedOp
               })
+              // 若同列有對應站點，記錄下來（供缺漏工時自動補建）
+              const station = row[`站點${i}`]
+              if (station && station.trim() && !routeOpStations.has(trimmedOp)) {
+                routeOpStations.set(trimmedOp, station.trim())
+              }
             }
           }
         })
@@ -207,6 +215,33 @@ export default function UploadPage() {
 
       // 2-2. 再寫入 途程表 (中游，依賴工時)
       if (dataRouteOps.length > 0) {
+        // 檢查所有工序是否已存在於工時表，避免違反外鍵 route_operations_op_name_fkey
+        // （例如只上傳「途程對工序」而未上傳「工序對時間」時，可能引用到尚未定義的工序）
+        addLog('🔎 檢查工序是否已定義於工時表...')
+        const existingOps = new Set<string>()
+        const PAGE_SIZE = 1000
+        for (let from = 0; ; from += PAGE_SIZE) {
+          const { data, error } = await supabase
+            .from('operation_times')
+            .select('op_name')
+            .range(from, from + PAGE_SIZE - 1)
+          if (error) throw new Error(error.message ?? error.details ?? JSON.stringify(error))
+          data?.forEach((r: { op_name: string }) => existingOps.add(r.op_name))
+          if (!data || data.length < PAGE_SIZE) break
+        }
+
+        const neededOps = new Set(dataRouteOps.map((r) => r.op_name))
+        const missingOps = [...neededOps].filter((op) => !existingOps.has(op))
+        if (missingOps.length > 0) {
+          addLog(`⚠️ 發現 ${missingOps.length} 個工序尚未定義工時，將自動補建預設工時 (0 分鐘)`)
+          const stubOps: OperationTimeInsert[] = missingOps.map((op) => ({
+            op_name: op,
+            station: routeOpStations.get(op) || '未知',
+            std_time_min: 0
+          }))
+          await batchInsert('operation_times', stubOps, addLog)
+        }
+
         await batchInsert('route_operations', dataRouteOps, addLog)
       }
 
