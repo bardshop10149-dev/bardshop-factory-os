@@ -294,7 +294,26 @@ export async function printDeficiencySheets(
     })
   }
 
-  const now = new Date()
-  const ymd = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}`
-  XLSX.writeFile(wb, `缺失單_${ymd}.xlsx`)
+  // 檔名帶缺失人員姓名＋紀錄日期：單人=姓名、兩人=並列、三人以上=「某某等N人」；
+  // 日期同一天=YYYYMMDD、同月=YYYYMM、跨月=起迄月份
+  const uniqPersons = [...new Set(records.flatMap((r) => normalizeArray(r.qa_responsible).map((p) => p.trim()).filter(Boolean)))]
+  let personPart: string
+  if (uniqPersons.length === 0) personPart = '未指定'
+  else if (uniqPersons.length === 1) personPart = uniqPersons[0]
+  else if (uniqPersons.length === 2) personPart = `${uniqPersons[0]}_${uniqPersons[1]}`
+  else personPart = `${uniqPersons[0]}等${uniqPersons.length}人`
+  personPart = personPart.replace(/[\\/:*?"<>|]/g, '')
+
+  const days = [...new Set(records.map((r) => (r.created_at || '').slice(0, 10)).filter(Boolean))].sort()
+  const months = [...new Set(days.map((d) => d.slice(0, 7)))].sort()
+  let datePart: string
+  if (days.length === 1) datePart = days[0].replace(/-/g, '')
+  else if (months.length === 1) datePart = months[0].replace(/-/g, '')
+  else if (months.length > 1) datePart = `${months[0].replace(/-/g, '')}-${months[months.length - 1].replace(/-/g, '')}`
+  else {
+    const now = new Date()
+    datePart = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}`
+  }
+
+  XLSX.writeFile(wb, `缺失單_${personPart}_${datePart}.xlsx`)
 }
