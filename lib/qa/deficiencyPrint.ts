@@ -32,7 +32,7 @@ interface OrderInfo {
   lines: OrderLine[]
 }
 
-const COLS = 9
+const COLS = 11
 const ROWS = 25
 const FONT = '新細明體'
 
@@ -65,15 +65,20 @@ const sanitizeSheetName = (raw: string): string => {
   return (cleaned || 'sheet').slice(0, 31)
 }
 
-// 處置勾選：警告/小過/大過 對應勾（「口頭警告」含「警告」也勾警告）；
+// 處置勾選：警告/口頭申誡/小過/大過 對應勾（「口頭警告」含「警告」也勾警告）；
 // 其他非空值勾「其他」附原文；空值全留白。
+const DISP_BOXES = [
+  { label: '警告', key: '警告' },
+  { label: '口頭申誡', key: '申誡' },
+  { label: '小過', key: '小過' },
+  { label: '大過', key: '大過' },
+]
 const dispositionLine = (dispValue: string): string => {
   const val = (dispValue || '').trim()
-  const standard = ['警告', '小過', '大過']
-  const hit = standard.find((s) => val.includes(s))
-  const boxes = standard.map((s) => `${hit === s ? '☑' : '□'}${s}`)
+  const hit = DISP_BOXES.find((b) => val.includes(b.key))
+  const boxes = DISP_BOXES.map((b) => `${hit === b ? '☑' : '□'}${b.label}`)
   boxes.push(hit || !val ? '□其他：' : `☑其他：${val}`)
-  return boxes.join('　　')
+  return boxes.join('　')
 }
 
 type CellStyle = Record<string, unknown>
@@ -123,21 +128,23 @@ const buildSheet = (
   // R2 編號 / 日期
   setCell(ws, 1, 0, `編號：${serial}`, styles.meta)
   setCell(ws, 1, 5, `日期：${rocDate(record.created_at)}`, styles.metaRight)
-  // R3-R6 左：不良發生點（直向合併）
-  setCell(ws, 2, 0, '不良發生點 Occurred Point：\n□進料檢驗　□半成品檢驗\n□成品檢驗　□其它：＿＿＿＿', styles.block)
-  // R3-R6 右：訂單詳情（採購單號列已移除）
+  // R3-R6 左：不良發生點（直向合併；其它移末行、原位置改製圖失誤）
+  setCell(ws, 2, 0, '不良發生點 Occurred Point：\n□進料檢驗　□半成品檢驗\n□成品檢驗　□製圖失誤\n□其它：＿＿＿＿', styles.block)
+  // R3-R6 右：訂單詳情（右區 8 欄，四格各 2 欄等寬；採購單號列已移除）
   setCell(ws, 2, 3, '廠商/客戶名稱', styles.label)
   setCell(ws, 2, 5, partnerName, styles.value)
   setCell(ws, 3, 3, '客戶訂單單號', styles.label)
   setCell(ws, 3, 5, record.order_number || '', styles.value)
+  setCell(ws, 3, 7, '製造單號', styles.label)
+  setCell(ws, 3, 9, '', styles.value)
   setCell(ws, 4, 3, '訂單量', styles.label)
   setCell(ws, 4, 5, orderQty != null ? String(orderQty) : '', styles.value)
   setCell(ws, 4, 7, '不良數', styles.label)
-  setCell(ws, 4, 8, lossText, styles.value)
+  setCell(ws, 4, 9, lossText, styles.value)
   setCell(ws, 5, 3, '不良率', styles.label)
   setCell(ws, 5, 5, rateText, styles.value)
   setCell(ws, 5, 7, '異常數量', styles.label)
-  setCell(ws, 5, 8, lossText, styles.value)
+  setCell(ws, 5, 9, lossText, styles.value)
   // R7 品名規格
   setCell(ws, 6, 0, '品名規格物料編號', styles.label)
   setCell(ws, 6, 3, [record.item_code, record.item_name].filter(Boolean).join('　'), styles.value)
@@ -145,68 +152,75 @@ const buildSheet = (
   setCell(ws, 7, 0, '（1）發現人填寫', styles.band)
   setCell(ws, 8, 0, `異常狀況說明：\n${record.reason || ''}`, styles.block)
   setCell(ws, 9, 0, `經辦：${record.qa_reporter || ''}`, styles.metaRight)
-  // R11-R17 (2) 責任單位填寫
+  // R11-R17 (2) 責任單位填寫：標籤與人名同列（人名靠右），下方整片留白填寫區
   setCell(ws, 10, 0, '（2）責任單位填寫', styles.band)
-  setCell(ws, 11, 0, `異常原因分析：\n${record.cause_analysis || ''}`, styles.block)
-  setCell(ws, 12, 0, `責任人員：${person}`, styles.metaRight)
-  setCell(ws, 13, 0, `即時處理方式：\n${record.immediate_action || ''}`, styles.block)
-  setCell(ws, 14, 0, `人員：${handlers}`, styles.metaRight)
-  setCell(ws, 15, 0, `預防及修正方式：\n${record.corrective_action || ''}`, styles.block)
-  setCell(ws, 16, 0, '部門主管：', styles.metaRight)
+  setCell(ws, 11, 0, '異常原因分析：', styles.meta)
+  setCell(ws, 11, 5, `責任人員：${person}`, styles.metaRight)
+  setCell(ws, 12, 0, record.cause_analysis || '', styles.block)
+  setCell(ws, 13, 0, '即時處理方式：', styles.meta)
+  setCell(ws, 13, 5, `人員：${handlers}`, styles.metaRight)
+  setCell(ws, 14, 0, record.immediate_action || '', styles.block)
+  setCell(ws, 15, 0, '預防及修正方式：', styles.meta)
+  setCell(ws, 15, 5, '部門主管：', styles.metaRight)
+  setCell(ws, 16, 0, record.corrective_action || '', styles.block)
   // R18 部門 / 缺失人員（自原版上方移到處置方式正上方）
   setCell(ws, 17, 0, '部門', styles.label)
   setCell(ws, 17, 2, dept, styles.value)
-  setCell(ws, 17, 4, '缺失人員', styles.label)
-  setCell(ws, 17, 6, person, styles.value)
+  setCell(ws, 17, 5, '缺失人員', styles.label)
+  setCell(ws, 17, 7, person, styles.value)
   // R19 (3) 處置方式（縮成一排）
   setCell(ws, 18, 0, '（3）處置方式', styles.label)
   setCell(ws, 18, 2, dispositionLine(dispValue), styles.value)
-  // R20-R21 (4) 品保判定
-  setCell(ws, 19, 0, '（4）品保判定責任歸屬：', styles.block)
-  setCell(ws, 20, 0, '經辦人員：', styles.metaRight)
+  // R20-R21 (4) 品保判定：標籤與經辦人員同列，下方留白
+  setCell(ws, 19, 0, '（4）品保判定責任歸屬：', styles.meta)
+  setCell(ws, 19, 5, '經辦人員：', styles.metaRight)
+  setCell(ws, 20, 0, '', styles.block)
   // R22-R25 (5) 結案 + 簽核欄
   setCell(ws, 21, 0, '（5）結案', styles.band)
   setCell(ws, 22, 0, '責任單位：', styles.value)
   setCell(ws, 22, 3, '總經理室', styles.label)
-  setCell(ws, 22, 5, '品保主管', styles.label)
-  setCell(ws, 22, 7, '主責部門主管', styles.label)
+  setCell(ws, 22, 6, '品保主管', styles.label)
+  setCell(ws, 22, 8, '主責部門主管', styles.label)
   setCell(ws, 23, 0, '損失成本：', styles.value)
   setCell(ws, 24, 0, '其他：', styles.value)
 
   ws['!merges'] = [
-    M(0, 0, 0, 8),                          // 標題
-    M(1, 0, 1, 4), M(1, 5, 1, 8),           // 編號 / 日期
-    M(2, 0, 5, 2),                          // 不良發生點（直向）
-    M(2, 3, 2, 4), M(2, 5, 2, 8),           // 廠商/客戶名稱
-    M(3, 3, 3, 4), M(3, 5, 3, 8),           // 客戶訂單單號
-    M(4, 3, 4, 4), M(4, 5, 4, 6),           // 訂單量（H/I 為不良數）
-    M(5, 3, 5, 4), M(5, 5, 5, 6),           // 不良率（H/I 為異常數量）
-    M(6, 0, 6, 2), M(6, 3, 6, 8),           // 品名規格
-    M(7, 0, 7, 8),                          // (1) band
-    M(8, 0, 8, 8),                          // 異常狀況說明
-    M(9, 0, 9, 8),                          // 經辦
-    M(10, 0, 10, 8),                        // (2) band
-    M(11, 0, 11, 8),                        // 異常原因分析
-    M(12, 0, 12, 8),                        // 責任人員
-    M(13, 0, 13, 8),                        // 即時處理方式
-    M(14, 0, 14, 8),                        // 人員
-    M(15, 0, 15, 8),                        // 預防及修正方式
-    M(16, 0, 16, 8),                        // 部門主管
-    M(17, 0, 17, 1), M(17, 2, 17, 3), M(17, 4, 17, 5), M(17, 6, 17, 8), // 部門/缺失人員
-    M(18, 0, 18, 1), M(18, 2, 18, 8),       // (3) 處置方式
-    M(19, 0, 19, 8),                        // (4)
-    M(20, 0, 20, 8),                        // 經辦人員
-    M(21, 0, 21, 8),                        // (5) band
-    M(22, 0, 22, 2), M(22, 3, 22, 4), M(22, 5, 22, 6), M(22, 7, 22, 8), // 結案列 + 簽核表頭
-    M(23, 0, 23, 2), M(23, 3, 24, 4), M(23, 5, 24, 6), M(23, 7, 24, 8), // 損失成本 + 簽名空格
-    M(24, 0, 24, 2),                        // 其他
+    M(0, 0, 0, 10),                          // 標題
+    M(1, 0, 1, 4), M(1, 5, 1, 10),           // 編號 / 日期
+    M(2, 0, 5, 2),                           // 不良發生點（直向）
+    M(2, 3, 2, 4), M(2, 5, 2, 10),           // 廠商/客戶名稱
+    M(3, 3, 3, 4), M(3, 5, 3, 6), M(3, 7, 3, 8), M(3, 9, 3, 10),   // 客戶訂單單號 | 製造單號
+    M(4, 3, 4, 4), M(4, 5, 4, 6), M(4, 7, 4, 8), M(4, 9, 4, 10),   // 訂單量 | 不良數
+    M(5, 3, 5, 4), M(5, 5, 5, 6), M(5, 7, 5, 8), M(5, 9, 5, 10),   // 不良率 | 異常數量
+    M(6, 0, 6, 2), M(6, 3, 6, 10),           // 品名規格
+    M(7, 0, 7, 10),                          // (1) band
+    M(8, 0, 8, 10),                          // 異常狀況說明
+    M(9, 0, 9, 10),                          // 經辦
+    M(10, 0, 10, 10),                        // (2) band
+    M(11, 0, 11, 4), M(11, 5, 11, 10),       // 異常原因分析 | 責任人員
+    M(12, 0, 12, 10),                        // 填寫區
+    M(13, 0, 13, 4), M(13, 5, 13, 10),       // 即時處理方式 | 人員
+    M(14, 0, 14, 10),                        // 填寫區
+    M(15, 0, 15, 4), M(15, 5, 15, 10),       // 預防及修正方式 | 部門主管
+    M(16, 0, 16, 10),                        // 填寫區
+    M(17, 0, 17, 1), M(17, 2, 17, 4), M(17, 5, 17, 6), M(17, 7, 17, 10), // 部門/缺失人員
+    M(18, 0, 18, 1), M(18, 2, 18, 10),       // (3) 處置方式
+    M(19, 0, 19, 4), M(19, 5, 19, 10),       // (4) | 經辦人員
+    M(20, 0, 20, 10),                        // 填寫區
+    M(21, 0, 21, 10),                        // (5) band
+    M(22, 0, 22, 2), M(22, 3, 22, 5), M(22, 6, 22, 7), M(22, 8, 22, 10), // 結案列 + 簽核表頭
+    M(23, 0, 23, 2), M(23, 3, 24, 5), M(23, 6, 24, 7), M(23, 8, 24, 10), // 損失成本 + 簽名空格
+    M(24, 0, 24, 2),                         // 其他
   ]
 
-  ws['!cols'] = Array.from({ length: COLS }, () => ({ wch: 9.5 }))
-  ws['!rows'] = [28, 18, 18, 18, 18, 18, 20, 16, 80, 18, 16, 70, 18, 70, 18, 70, 18, 20, 22, 55, 18, 16, 20, 30, 30]
+  ws['!cols'] = Array.from({ length: COLS }, () => ({ wch: 7.8 }))
+  ws['!rows'] = [28, 18, 18, 18, 18, 18, 20, 16, 80, 18, 16, 18, 70, 18, 70, 18, 70, 20, 22, 18, 55, 16, 20, 30, 30]
     .map((hpt) => ({ hpt }))
   ws['!margins'] = { left: 0.4, right: 0.4, top: 0.4, bottom: 0.4, header: 0.2, footer: 0.2 }
   ws['!ref'] = `A1:${XLSX.utils.encode_cell({ r: ROWS - 1, c: COLS - 1 })}`
+
+  // 標籤列與其下方填寫區之間不畫橫線（視覺上同一大格：框線在上、人名在上、下方整片留白）
+  const NO_LINE_BELOW = new Set([11, 13, 15, 19])
 
   // 全區補實儲存格並上框線（合併範圍的框線須逐格設定才會顯示）；外框加粗
   for (let r = 0; r < ROWS; r++) {
@@ -214,16 +228,13 @@ const buildSheet = (
       const addr = XLSX.utils.encode_cell({ r, c })
       const cell = (ws[addr] as XLSX.CellObject | undefined) ?? { t: 's', v: '' }
       const existing = (cell.s ?? {}) as CellStyle
-      cell.s = {
-        font: baseFont,
-        ...existing,
-        border: {
-          top: r === 0 ? MEDIUM : THIN,
-          bottom: r === ROWS - 1 ? MEDIUM : THIN,
-          left: c === 0 ? MEDIUM : THIN,
-          right: c === COLS - 1 ? MEDIUM : THIN,
-        },
+      const border: Record<string, unknown> = {
+        left: c === 0 ? MEDIUM : THIN,
+        right: c === COLS - 1 ? MEDIUM : THIN,
       }
+      if (!NO_LINE_BELOW.has(r - 1)) border.top = r === 0 ? MEDIUM : THIN
+      if (!NO_LINE_BELOW.has(r)) border.bottom = r === ROWS - 1 ? MEDIUM : THIN
+      cell.s = { font: baseFont, ...existing, border }
       ws[addr] = cell
     }
   }
