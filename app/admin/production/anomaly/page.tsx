@@ -80,8 +80,8 @@ export default function QaZonePage() {
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z" />
             </svg>
           </div>
-          <h2 className="text-xl font-bold text-white mb-2 group-hover:text-rose-300">異常人員統計</h2>
-          <p className="text-slate-400 text-sm">依缺失人員交叉分析異常分類次數，支援排序與 XLSX 匯出。</p>
+          <h2 className="text-xl font-bold text-white mb-2 group-hover:text-rose-300">異常人員缺失單處理作業</h2>
+          <p className="text-slate-400 text-sm">查詢缺失紀錄、批量修改處置並列印品質異常處理單。</p>
           <p className="text-xs text-rose-400 font-mono mt-4">PERSONNEL STATS →</p>
         </Link>
       </div>

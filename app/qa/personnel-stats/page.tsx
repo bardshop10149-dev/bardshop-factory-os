@@ -5,6 +5,8 @@ import { useCallback, useMemo, useState } from 'react'
 import { NavButton } from '../../../components/NavButton'
 import * as XLSX from 'xlsx'
 import { supabase } from '../../../lib/supabaseClient'
+import SoOrderModal from '../../../components/SoOrderModal'
+import { printDeficiencySheets } from '../../../lib/qa/deficiencyPrint'
 
 interface AnomalyRow {
   id: number
@@ -12,11 +14,17 @@ interface AnomalyRow {
   item_code: string | null
   item_name: string | null
   reason: string | null
+  qa_reporter: string | null
+  qa_handlers: string[] | null
   qa_responsible: string[] | null
   qa_category: string | null
   qa_disposition: Record<string, string> | null
   created_at: string
   status: string | null
+  loss_qty: number | null
+  cause_analysis: string | null
+  immediate_action: string | null
+  corrective_action: string | null
 }
 
 function toDateInputValue(date: Date) {
@@ -50,6 +58,13 @@ export default function PersonnelStatsPage() {
   ])
   const [savingId, setSavingId] = useState<string | null>(null)
   const [personFilter, setPersonFilter] = useState('')
+  const [deptFilter, setDeptFilter] = useState('')
+  const [personnelOptions, setPersonnelOptions] = useState<{ option_value: string; department_value: string }[]>([])
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set())
+  const [bulkDisposition, setBulkDisposition] = useState('')
+  const [bulkApplying, setBulkApplying] = useState(false)
+  const [printing, setPrinting] = useState(false)
+  const [soModalId, setSoModalId] = useState<string | null>(null)
 
   // 排序狀態：'total' | category name
   const [sortBy, setSortBy] = useState<string>('total')
@@ -61,21 +76,28 @@ export default function PersonnelStatsPage() {
       const [reportRes, optRes] = await Promise.all([
         supabase
           .from('schedule_anomaly_reports')
-          .select('id, order_number, item_code, item_name, reason, qa_responsible, qa_category, qa_disposition, created_at, status')
+          .select('id, order_number, item_code, item_name, reason, qa_reporter, qa_handlers, qa_responsible, qa_category, qa_disposition, created_at, status, loss_qty, cause_analysis, immediate_action, corrective_action')
           .eq('report_type', 'qa')
           .gte('created_at', `${startDate}T00:00:00.000Z`)
           .lte('created_at', `${endDate}T23:59:59.999Z`),
         supabase
           .from('qa_anomaly_option_items')
-          .select('option_value')
-          .eq('option_type', 'disposition')
+          .select('option_type, option_value, department_value')
+          .in('option_type', ['disposition', 'personnel'])
           .order('option_value', { ascending: true }),
       ])
       if (reportRes.error) throw reportRes.error
       setRows((reportRes.data as AnomalyRow[]) || [])
       setSortBy('total')
-      const opts = (optRes.data || []).map((r: { option_value: string }) => r.option_value)
+      setSelectedIds(new Set())
+      const optRows = (optRes.data || []) as { option_type: string; option_value: string; department_value: string | null }[]
+      const opts = optRows.filter((r) => r.option_type === 'disposition').map((r) => r.option_value)
       if (opts.length > 0) setDispositionOptions(opts)
+      setPersonnelOptions(
+        optRows
+          .filter((r) => r.option_type === 'personnel')
+          .map((r) => ({ option_value: r.option_value, department_value: r.department_value || '' })),
+      )
     } catch (err: unknown) {
       alert(`查詢失敗：${err instanceof Error ? err.message : '未知錯誤'}`)
     } finally {
@@ -110,6 +132,17 @@ export default function PersonnelStatsPage() {
       setSavingId(null)
     }
   }
+
+  // 人員 → 部門 對照（qa_anomaly_option_items personnel 選項）
+  const personnelDeptMap = useMemo(
+    () => new Map(personnelOptions.map((p) => [p.option_value, p.department_value])),
+    [personnelOptions],
+  )
+
+  const departmentOptions = useMemo(
+    () => [...new Set(personnelOptions.map((p) => p.department_value).filter(Boolean))].sort(),
+    [personnelOptions],
+  )
 
   // 所有分類（去重排序）
   const allCategories = useMemo(() => {
@@ -162,15 +195,16 @@ export default function PersonnelStatsPage() {
   // 所有缺失人員列表（依統計排序）
   const allPersons = useMemo(() => sortedPersons, [sortedPersons])
 
-  // 個別紀錄明細（依人員篩選）
+  // 個別紀錄明細（依部門→人員篩選）
   const detailRows = useMemo(() => {
     return rows.filter((row) => {
-      const persons = normalizeArray(row.qa_responsible)
+      const persons = normalizeArray(row.qa_responsible).map((p) => p.trim())
       if (persons.length === 0) return false
-      if (personFilter && !persons.map((p) => p.trim()).includes(personFilter)) return false
+      if (personFilter && !persons.includes(personFilter)) return false
+      if (!personFilter && deptFilter && !persons.some((p) => personnelDeptMap.get(p) === deptFilter)) return false
       return true
     }).sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
-  }, [rows, personFilter])
+  }, [rows, personFilter, deptFilter, personnelDeptMap])
 
   const handleDownload = useCallback(() => {
     if (rows.length === 0) { alert('尚無資料，請先查詢'); return }
@@ -191,14 +225,72 @@ export default function PersonnelStatsPage() {
     XLSX.writeFile(wb, `異常人員統計_${startDate}_${endDate}.xlsx`)
   }, [rows, sortedPersons, personMap, allCategories, startDate, endDate])
 
+  const allDetailSelected = detailRows.length > 0 && detailRows.every((row) => selectedIds.has(row.id))
+
+  const toggleSelectAll = () => {
+    setSelectedIds(allDetailSelected ? new Set() : new Set(detailRows.map((row) => row.id)))
+  }
+
+  const toggleRow = (id: number) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  const handleBulkDisposition = async () => {
+    if (!bulkDisposition) return
+    const targets = detailRows.filter((row) => selectedIds.has(row.id))
+    if (targets.length === 0) return
+    if (!confirm(`確定將已勾選 ${targets.length} 筆紀錄的「所有缺失人員」處置設為「${bulkDisposition}」？`)) return
+
+    setBulkApplying(true)
+    try {
+      const updates = targets.map((row) => {
+        const persons = normalizeArray(row.qa_responsible).map((p) => p.trim()).filter(Boolean)
+        const updated = { ...parseDisp(row.qa_disposition) }
+        persons.forEach((person) => { updated[person] = bulkDisposition })
+        return { id: row.id, disp: updated }
+      })
+      const results = await Promise.all(
+        updates.map((u) =>
+          supabase.from('schedule_anomaly_reports').update({ qa_disposition: u.disp }).eq('id', u.id),
+        ),
+      )
+      const failed = results.filter((r) => r.error)
+      if (failed.length > 0) throw failed[0].error
+      const dispById = new Map(updates.map((u) => [u.id, u.disp]))
+      setRows((prev) => prev.map((r) => (dispById.has(r.id) ? { ...r, qa_disposition: dispById.get(r.id)! } : r)))
+      alert(`已更新 ${updates.length} 筆紀錄的缺失處置`)
+    } catch (err: unknown) {
+      alert(`批量更新失敗：${err instanceof Error ? err.message : '未知錯誤'}`)
+    } finally {
+      setBulkApplying(false)
+    }
+  }
+
+  const handlePrint = async (records: AnomalyRow[]) => {
+    if (records.length === 0) return
+    setPrinting(true)
+    try {
+      await printDeficiencySheets(records, personnelDeptMap)
+    } catch (err: unknown) {
+      alert(`列印失敗：${err instanceof Error ? err.message : '未知錯誤'}`)
+    } finally {
+      setPrinting(false)
+    }
+  }
+
   return (
     <div className="p-6 md:p-8 max-w-[1600px] mx-auto min-h-screen space-y-6">
 
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-3xl font-bold text-white tracking-tight">異常人員統計</h1>
-          <p className="text-rose-400 mt-1 font-mono text-sm uppercase">PERSONNEL STATS // 缺失人員 × 異常分類</p>
+          <h1 className="text-3xl font-bold text-white tracking-tight">異常人員缺失單處理作業</h1>
+          <p className="text-rose-400 mt-1 font-mono text-sm uppercase">PERSONNEL DEFICIENCY // 缺失處置 × 缺失單列印</p>
         </div>
         <NavButton href="/qa" direction="back" title="返回品保專區" />
       </div>
@@ -256,20 +348,33 @@ export default function PersonnelStatsPage() {
               <p className="text-xs text-violet-400 mt-0.5">可在此直接設定各筆紀錄的缺失處置</p>
             </div>
             <div className="flex items-center gap-2 flex-wrap">
-              <label className="text-xs text-slate-400">篩選缺失人員</label>
+              <label className="text-xs text-slate-400">部門</label>
+              <select
+                value={deptFilter}
+                onChange={(e) => { setDeptFilter(e.target.value); setPersonFilter('') }}
+                className="bg-slate-950 border border-slate-700 rounded px-3 py-1.5 text-white text-sm"
+              >
+                <option value="">全部部門</option>
+                {departmentOptions.map((d) => (
+                  <option key={d} value={d}>{d}</option>
+                ))}
+              </select>
+              <label className="text-xs text-slate-400">人員</label>
               <select
                 value={personFilter}
                 onChange={(e) => setPersonFilter(e.target.value)}
                 className="bg-slate-950 border border-slate-700 rounded px-3 py-1.5 text-white text-sm"
               >
                 <option value="">全部人員</option>
-                {allPersons.map((p) => (
-                  <option key={p} value={p}>{p}</option>
-                ))}
+                {allPersons
+                  .filter((p) => !deptFilter || personnelDeptMap.get(p) === deptFilter)
+                  .map((p) => (
+                    <option key={p} value={p}>{p}</option>
+                  ))}
               </select>
-              {personFilter && (
+              {(personFilter || deptFilter) && (
                 <button
-                  onClick={() => setPersonFilter('')}
+                  onClick={() => { setPersonFilter(''); setDeptFilter('') }}
                   className="px-2 py-1.5 rounded border border-slate-700 text-slate-400 hover:text-white text-xs"
                 >
                   清除
@@ -279,10 +384,58 @@ export default function PersonnelStatsPage() {
             </div>
           </div>
 
+          {selectedIds.size > 0 && (
+            <div className="px-5 py-3 border-b border-slate-700 bg-slate-950/60 flex flex-wrap items-center gap-3">
+              <span className="text-xs text-violet-300 font-bold">已選 {selectedIds.size} 筆</span>
+              <button
+                onClick={() => void handlePrint(detailRows.filter((row) => selectedIds.has(row.id)))}
+                disabled={printing}
+                className="px-3 py-1.5 rounded bg-cyan-700 hover:bg-cyan-600 text-white text-xs font-bold disabled:bg-slate-700 disabled:text-slate-400"
+              >
+                {printing ? '產生中...' : '批量列印'}
+              </button>
+              <div className="flex items-center gap-2">
+                <label className="text-xs text-slate-400">批量修改缺失處置</label>
+                <select
+                  value={bulkDisposition}
+                  onChange={(e) => setBulkDisposition(e.target.value)}
+                  className="bg-slate-950 border border-slate-700 rounded px-2 py-1.5 text-white text-xs"
+                >
+                  <option value="">選擇處置...</option>
+                  {dispositionOptions.map((opt) => (
+                    <option key={opt} value={opt}>{opt}</option>
+                  ))}
+                </select>
+                <button
+                  onClick={() => void handleBulkDisposition()}
+                  disabled={!bulkDisposition || bulkApplying}
+                  className="px-3 py-1.5 rounded bg-violet-700 hover:bg-violet-600 text-white text-xs font-bold disabled:bg-slate-700 disabled:text-slate-400"
+                >
+                  {bulkApplying ? '套用中...' : '套用'}
+                </button>
+              </div>
+              <button
+                onClick={() => setSelectedIds(new Set())}
+                className="ml-auto px-2 py-1.5 rounded border border-slate-700 text-slate-400 hover:text-white text-xs"
+              >
+                取消選取
+              </button>
+            </div>
+          )}
+
           <div className="overflow-x-auto">
-            <table className="w-full text-sm text-slate-300 min-w-[800px]">
+            <table className="w-full text-sm text-slate-300 min-w-[950px]">
               <thead className="bg-slate-950 text-slate-400 uppercase text-xs font-mono">
                 <tr>
+                  <th className="px-3 py-3 text-center sticky left-0 bg-slate-950 z-10">
+                    <input
+                      type="checkbox"
+                      checked={allDetailSelected}
+                      onChange={toggleSelectAll}
+                      className="accent-violet-500 cursor-pointer"
+                      title="全選 / 取消全選"
+                    />
+                  </th>
                   <th className="px-4 py-3 text-left">日期</th>
                   <th className="px-4 py-3 text-left">相關單號</th>
                   <th className="px-4 py-3 text-left">品項</th>
@@ -290,6 +443,7 @@ export default function PersonnelStatsPage() {
                   <th className="px-4 py-3 text-left">異常原因</th>
                   <th className="px-4 py-3 text-left">缺失人員</th>
                   <th className="px-4 py-3 text-left">缺失處置</th>
+                  <th className="px-3 py-3 text-center sticky right-0 bg-slate-950 z-10">列印</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-800">
@@ -298,11 +452,29 @@ export default function PersonnelStatsPage() {
                   const dispMap = parseDisp(row.qa_disposition)
                   return (
                     <tr key={row.id} className="hover:bg-slate-800/30 align-middle">
+                      <td className="px-3 py-3 text-center sticky left-0 bg-slate-900 z-10">
+                        <input
+                          type="checkbox"
+                          checked={selectedIds.has(row.id)}
+                          onChange={() => toggleRow(row.id)}
+                          className="accent-violet-500 cursor-pointer"
+                        />
+                      </td>
                       <td className="px-4 py-3 font-mono text-xs whitespace-nowrap text-slate-400">
                         {new Date(row.created_at).toLocaleDateString('zh-TW')}
                       </td>
-                      <td className="px-4 py-3 font-mono text-cyan-300 whitespace-nowrap text-xs">
-                        {row.order_number || '-'}
+                      <td className="px-4 py-3 font-mono whitespace-nowrap text-xs">
+                        {row.order_number ? (
+                          <button
+                            onClick={() => setSoModalId(row.order_number)}
+                            className="text-cyan-300 hover:text-cyan-100 hover:underline"
+                            title="查看訂單詳情"
+                          >
+                            {row.order_number}
+                          </button>
+                        ) : (
+                          <span className="text-slate-500">-</span>
+                        )}
                       </td>
                       <td className="px-4 py-3">
                         <div className="text-xs space-y-0.5">
@@ -352,12 +524,22 @@ export default function PersonnelStatsPage() {
                           })}
                         </div>
                       </td>
+                      <td className="px-3 py-3 text-center sticky right-0 bg-slate-900 z-10">
+                        <button
+                          onClick={() => void handlePrint([row])}
+                          disabled={printing}
+                          className="px-2.5 py-1 rounded border border-cyan-700 text-cyan-300 hover:bg-cyan-900/30 text-xs whitespace-nowrap disabled:opacity-50"
+                          title="下載此筆缺失單（一人一張）"
+                        >
+                          列印
+                        </button>
+                      </td>
                     </tr>
                   )
                 })}
                 {detailRows.length === 0 && (
                   <tr>
-                    <td colSpan={7} className="px-4 py-8 text-center text-slate-500">
+                    <td colSpan={9} className="px-4 py-8 text-center text-slate-500">
                       {personFilter ? `「${personFilter}」在此區間無缺失紀錄` : '此區間內無缺失人員資料'}
                     </td>
                   </tr>
@@ -524,6 +706,8 @@ export default function PersonnelStatsPage() {
           </div>
         </div>
       )}
+
+      {soModalId && <SoOrderModal projectId={soModalId} onClose={() => setSoModalId(null)} />}
     </div>
   )
 }

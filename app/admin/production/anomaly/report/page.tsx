@@ -53,6 +53,7 @@ export default function QaReportFormPage() {
   const [orderNumber, setOrderNumber] = useState('')
   const [itemCode, setItemCode] = useState('')
   const [itemName, setItemName] = useState('')
+  const [lossQty, setLossQty] = useState('')
   const [status] = useState<'pending'>('pending')
   const [reason, setReason] = useState('')
   const [reporterDepartment, setReporterDepartment] = useState('')
@@ -245,6 +246,7 @@ export default function QaReportFormPage() {
         handler_department: handlerDepartment.trim() || null,
         item_code: itemCode.trim() || null,
         item_name: itemName.trim() || null,
+        loss_qty: lossQty === '' ? null : Number(lossQty),
         attachments: uploadedUrls,
       }
 
@@ -255,6 +257,7 @@ export default function QaReportFormPage() {
       setOrderNumber('')
       setItemCode('')
       setItemName('')
+      setLossQty('')
       setReason('')
       setReporterDepartment('')
       setReporter('')
@@ -330,6 +333,19 @@ export default function QaReportFormPage() {
               onChange={(e) => setItemName(e.target.value)}
               placeholder="例：產品名稱"
               className="mt-1 w-full bg-slate-950 border border-slate-700 rounded px-3 py-2 text-white"
+            />
+          </div>
+
+          <div>
+            <label className="text-xs text-slate-400">異常數量（選填）</label>
+            <input
+              type="number"
+              min="0"
+              step="any"
+              value={lossQty}
+              onChange={(e) => setLossQty(e.target.value)}
+              placeholder="缺失導致損失數量"
+              className="mt-1 w-full bg-slate-950 border border-slate-700 rounded px-3 py-2 text-white placeholder:text-slate-500"
             />
           </div>
 

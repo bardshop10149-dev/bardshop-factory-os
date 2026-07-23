@@ -28,6 +28,10 @@ interface AnomalyReport {
   handler_department: string | null
   handler_record: string | null
   attachments: string[] | null
+  loss_qty: number | null
+  cause_analysis: string | null
+  immediate_action: string | null
+  corrective_action: string | null
 }
 
 interface PersonnelOption {
@@ -61,6 +65,10 @@ interface CreateFormState {
   attachFiles: File[]
   previewUrls: string[]
   existingAttachments: string[]
+  lossQty: string
+  causeAnalysis: string
+  immediateAction: string
+  correctiveAction: string
 }
 
 type OptionType = 'personnel' | 'category' | 'department' | 'disposition'
@@ -84,6 +92,10 @@ const DEFAULT_OPTIONS: OptionState = {
 }
 
 const getTodayDateInput = () => new Date().toISOString().slice(0, 10)
+
+// 以本地時區組 yyyy-MM-dd（避免 toISOString 的 UTC 換日位移）
+const toLocalDateInput = (d: Date) =>
+  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
 
 // Safely parse disposition regardless of whether DB returned object or JSON string
 const parseDisp = (val: unknown): Record<string, string> => {
@@ -114,6 +126,10 @@ const DEFAULT_CREATE_FORM: CreateFormState = {
   attachFiles: [],
   previewUrls: [],
   existingAttachments: [],
+  lossQty: '',
+  causeAnalysis: '',
+  immediateAction: '',
+  correctiveAction: '',
 }
 
 export default function QaRecordsPage() {
@@ -134,6 +150,23 @@ export default function QaRecordsPage() {
   const [selectedCategory, setSelectedCategory] = useState('')
   const [statusFilter, setStatusFilter] = useState({ pending: true, confirmed: true })
   const [orderKeyword, setOrderKeyword] = useState('')
+  const [startDateFilter, setStartDateFilter] = useState('')
+  const [endDateFilter, setEndDateFilter] = useState('')
+
+  const applyDatePreset = (preset: 'thisMonth' | 'lastMonth' | 'threeMonths' | 'sixMonths' | 'oneYear') => {
+    const now = new Date()
+    const y = now.getFullYear()
+    const m = now.getMonth()
+    let start: Date
+    let end = now
+    if (preset === 'thisMonth') start = new Date(y, m, 1)
+    else if (preset === 'lastMonth') { start = new Date(y, m - 1, 1); end = new Date(y, m, 0) }
+    else if (preset === 'threeMonths') start = new Date(y, m - 3, now.getDate())
+    else if (preset === 'sixMonths') start = new Date(y, m - 6, now.getDate())
+    else start = new Date(y - 1, m, now.getDate())
+    setStartDateFilter(toLocalDateInput(start))
+    setEndDateFilter(toLocalDateInput(end))
+  }
   const [mobileSessionId, setMobileSessionId] = useState('')
   const [showQrModal, setShowQrModal] = useState(false)
   const [mobileUrls, setMobileUrls] = useState<string[]>([])
@@ -311,6 +344,10 @@ export default function QaRecordsPage() {
       attachFiles: [],
       previewUrls: [],
       existingAttachments: Array.isArray(report.attachments) ? report.attachments : [],
+      lossQty: report.loss_qty != null ? String(report.loss_qty) : '',
+      causeAnalysis: report.cause_analysis || '',
+      immediateAction: report.immediate_action || '',
+      correctiveAction: report.corrective_action || '',
     })
   }
 
@@ -384,19 +421,16 @@ export default function QaRecordsPage() {
         if (urlData?.publicUrl) uploadedUrls.push(urlData.publicUrl)
       }
 
+      // 註：schedule_anomaly_reports 實際無 source_order_id/task_id/quantity/op_name/station/section_id 欄，
+      // 帶上會使 insert 400；QA 異常單一律以 order_number 關聯訂單。
       const payload = {
         report_type: 'qa',
         reason: createForm.reason.trim(),
         status: createForm.status,
-        source_order_id: null,
-        task_id: null,
         order_number: createForm.orderNumber.trim(),
         item_code: createForm.itemCode.trim() || null,
         item_name: createForm.itemName.trim() || null,
-        quantity: 0,
-        op_name: null,
-        station: null,
-        section_id: null,
+        loss_qty: createForm.lossQty === '' ? null : Number(createForm.lossQty),
         created_at: createForm.createdDate ? `${createForm.createdDate}T00:00:00.000Z` : new Date().toISOString(),
         qa_department: createForm.department || null,
         qa_reporter: createForm.reporter || null,
@@ -474,6 +508,10 @@ export default function QaRecordsPage() {
           handler_department: editForm.handlerDepartment || null,
           handler_record: editForm.handling.trim() || null,
           attachments: uploadedUrls,
+          loss_qty: editForm.lossQty === '' ? null : Number(editForm.lossQty),
+          cause_analysis: editForm.causeAnalysis.trim() || null,
+          immediate_action: editForm.immediateAction.trim() || null,
+          corrective_action: editForm.correctiveAction.trim() || null,
         })
         .eq('id', editingId)
 
@@ -556,8 +594,10 @@ export default function QaRecordsPage() {
       const handlerMatch = !selectedHandler || normalizeTextArray(report.qa_handlers).map((name) => name.trim()).includes(selectedHandler)
       const responsibleMatch = !selectedResponsible || normalizeTextArray(report.qa_responsible).map((name) => name.trim()).includes(selectedResponsible)
       const orderMatch = !keyword || (report.order_number || '').toLowerCase().includes(keyword)
+      const day = (report.created_at || '').slice(0, 10)
+      const dateMatch = (!startDateFilter || day >= startDateFilter) && (!endDateFilter || day <= endDateFilter)
 
-      return categoryMatch && departmentMatch && reporterMatch && handlerMatch && responsibleMatch && orderMatch
+      return categoryMatch && departmentMatch && reporterMatch && handlerMatch && responsibleMatch && orderMatch && dateMatch
     })
   }, [
     orderKeyword,
@@ -567,6 +607,8 @@ export default function QaRecordsPage() {
     selectedHandler,
     selectedReporter,
     selectedResponsible,
+    startDateFilter,
+    endDateFilter,
   ])
 
   const statusCounts = useMemo(() => {
@@ -699,6 +741,42 @@ export default function QaRecordsPage() {
           </div>
 
           <div className="lg:col-span-2">
+            <label className="text-xs text-slate-400">日期區間</label>
+            <div className="mt-1 flex items-center gap-2">
+              <input
+                type="date"
+                value={startDateFilter}
+                onChange={(e) => setStartDateFilter(e.target.value)}
+                className="flex-1 min-w-0 bg-slate-950 border border-slate-700 rounded px-3 py-2 text-white"
+              />
+              <span className="text-slate-500">~</span>
+              <input
+                type="date"
+                value={endDateFilter}
+                onChange={(e) => setEndDateFilter(e.target.value)}
+                className="flex-1 min-w-0 bg-slate-950 border border-slate-700 rounded px-3 py-2 text-white"
+              />
+            </div>
+            <div className="mt-1.5 flex flex-wrap gap-1.5">
+              {([
+                ['本月', 'thisMonth'],
+                ['上個月', 'lastMonth'],
+                ['近三個月', 'threeMonths'],
+                ['近半年', 'sixMonths'],
+                ['近一年', 'oneYear'],
+              ] as const).map(([label, preset]) => (
+                <button
+                  key={preset}
+                  onClick={() => applyDatePreset(preset)}
+                  className="text-xs px-2 py-0.5 rounded-full border border-slate-700 text-slate-400 hover:border-cyan-500 hover:text-cyan-300 transition-colors"
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="lg:col-span-2">
             <label className="text-xs text-slate-400">篩選狀態</label>
             <div className="mt-1 grid grid-cols-2 gap-2">
               <button
@@ -728,6 +806,8 @@ export default function QaRecordsPage() {
               setSelectedCategory('')
               setStatusFilter({ pending: true, confirmed: true })
               setOrderKeyword('')
+              setStartDateFilter('')
+              setEndDateFilter('')
             }}
             className="px-3 py-1.5 rounded border border-slate-700 text-slate-300 hover:bg-slate-800 text-xs"
           >
@@ -918,6 +998,19 @@ export default function QaRecordsPage() {
                   onChange={(e) => setCreateForm((prev) => ({ ...prev, itemName: e.target.value }))}
                   placeholder="例：產品名稱"
                   className="mt-1 w-full bg-slate-950 border border-slate-700 rounded px-3 py-2 text-white"
+                />
+              </div>
+
+              <div>
+                <label className="text-xs text-slate-400">異常數量（選填）</label>
+                <input
+                  type="number"
+                  min="0"
+                  step="any"
+                  value={createForm.lossQty}
+                  onChange={(e) => setCreateForm((prev) => ({ ...prev, lossQty: e.target.value }))}
+                  placeholder="缺失導致損失數量"
+                  className="mt-1 w-full bg-slate-950 border border-slate-700 rounded px-3 py-2 text-white placeholder:text-slate-500"
                 />
               </div>
 
@@ -1212,6 +1305,19 @@ export default function QaRecordsPage() {
               </div>
 
               <div>
+                <label className="text-xs text-slate-400">異常數量（選填）</label>
+                <input
+                  type="number"
+                  min="0"
+                  step="any"
+                  value={editForm.lossQty}
+                  onChange={(e) => setEditForm((prev) => ({ ...prev, lossQty: e.target.value }))}
+                  placeholder="缺失導致損失數量"
+                  className="mt-1 w-full bg-slate-950 border border-slate-700 rounded px-3 py-2 text-white placeholder:text-slate-500"
+                />
+              </div>
+
+              <div>
                 <label className="text-xs text-slate-400">狀態</label>
                 <div className="mt-1 grid grid-cols-2 gap-2">
                   <button
@@ -1325,6 +1431,36 @@ export default function QaRecordsPage() {
                 rows={2}
                 value={editForm.handling}
                 onChange={(e) => setEditForm((prev) => ({ ...prev, handling: e.target.value }))}
+                className="mt-1 w-full bg-slate-950 border border-slate-700 rounded px-3 py-1.5 text-white"
+              />
+            </div>
+
+            <div>
+              <label className="text-xs text-slate-400">異常原因分析（缺失單列印用）</label>
+              <textarea
+                rows={2}
+                value={editForm.causeAnalysis}
+                onChange={(e) => setEditForm((prev) => ({ ...prev, causeAnalysis: e.target.value }))}
+                className="mt-1 w-full bg-slate-950 border border-slate-700 rounded px-3 py-1.5 text-white"
+              />
+            </div>
+
+            <div>
+              <label className="text-xs text-slate-400">即時處理方式（缺失單列印用）</label>
+              <textarea
+                rows={2}
+                value={editForm.immediateAction}
+                onChange={(e) => setEditForm((prev) => ({ ...prev, immediateAction: e.target.value }))}
+                className="mt-1 w-full bg-slate-950 border border-slate-700 rounded px-3 py-1.5 text-white"
+              />
+            </div>
+
+            <div>
+              <label className="text-xs text-slate-400">預防及修正方式（缺失單列印用）</label>
+              <textarea
+                rows={2}
+                value={editForm.correctiveAction}
+                onChange={(e) => setEditForm((prev) => ({ ...prev, correctiveAction: e.target.value }))}
                 className="mt-1 w-full bg-slate-950 border border-slate-700 rounded px-3 py-1.5 text-white"
               />
             </div>
