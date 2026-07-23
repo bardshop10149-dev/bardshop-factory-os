@@ -826,8 +826,10 @@ export async function POST(request: NextRequest) {
         APIKEY3: keys.APIKEY3,
         SEGMENT,
         TABLE: 'PJ_PROJECT',
-        // 取全欄位，避免不同 ERP 站台地址欄位命名差異導致抓不到值。
-        SHOWNULLCOLUMN: 'Y',
+        // 只取實際使用的欄位，避免 ORA-64451（Oracle 序列化全欄位時，
+        // 遇到含特殊字元的欄位無法轉為 JSON escape 序列而失敗）。
+        SHOWNULLCOLUMN: 'N',
+        CUSTOMCOLUMN: 'PROJECT_ID,BEGIN_DATE,TPN_PARTNER_ID,PARTNER_NAME,SALES_NAME,HOLD_STATUS,DELIVERY_ADDRESS,SHIP_ADDRESS,RECEIVE_ADDRESS,ADDRESS,DELIVERY_ADDR,SHIP_ADDR,CUSTOMER_REMARK,REMARK,EXPORT_MODE,INVOICE_FORMAT',
         PJT_TYPE: "= 'SO'",
         HOLD_STATUS: "IN ('OPEN','UNSIGNED')",
       })
