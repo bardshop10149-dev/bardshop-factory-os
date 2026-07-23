@@ -318,6 +318,13 @@ export default function QaRecordsPage() {
     void fetchReports()
   }, [fetchReports])
 
+  // 新增/編輯視窗開啟時鎖定背景頁面滾動
+  useEffect(() => {
+    const anyModalOpen = creating || editingId !== null
+    document.body.style.overflow = anyModalOpen ? 'hidden' : ''
+    return () => { document.body.style.overflow = '' }
+  }, [creating, editingId])
+
   const pendingReports = reports.filter((report) => report.status === 'pending')
   const completedReports = reports.filter((report) => report.status !== 'pending')
 
@@ -955,7 +962,7 @@ export default function QaRecordsPage() {
 
       {creating && (
         <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4">
-          <div className="w-full max-w-[900px] bg-slate-900 border border-slate-700 rounded-2xl p-6 space-y-4">
+          <div className="w-full max-w-[900px] max-h-[90vh] overflow-y-auto bg-slate-900 border border-slate-700 rounded-2xl p-6 space-y-4">
             <div className="flex items-center justify-between">
               <h2 className="text-xl font-bold text-white">新增異常單</h2>
               <button onClick={closeCreateModal} className="px-2 py-1 text-slate-300 hover:text-white">✕</button>
@@ -1111,24 +1118,26 @@ export default function QaRecordsPage() {
               </div>
             </div>
 
-            <div>
-              <label className="text-xs text-slate-400">異常原因（手填）</label>
-              <textarea
-                rows={3}
-                value={createForm.reason}
-                onChange={(e) => setCreateForm((prev) => ({ ...prev, reason: e.target.value }))}
-                className="mt-1 w-full bg-slate-950 border border-slate-700 rounded px-3 py-2 text-white"
-              />
-            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 items-start">
+              <div>
+                <label className="text-xs text-slate-400">異常原因（手填）</label>
+                <textarea
+                  rows={3}
+                  value={createForm.reason}
+                  onChange={(e) => setCreateForm((prev) => ({ ...prev, reason: e.target.value }))}
+                  className="mt-1 w-full bg-slate-950 border border-slate-700 rounded px-3 py-2 text-white"
+                />
+              </div>
 
-            <div>
-              <label className="text-xs text-slate-400">異常處理（手填）</label>
-              <textarea
-                rows={3}
-                value={createForm.handling}
-                onChange={(e) => setCreateForm((prev) => ({ ...prev, handling: e.target.value }))}
-                className="mt-1 w-full bg-slate-950 border border-slate-700 rounded px-3 py-2 text-white"
-              />
+              <div>
+                <label className="text-xs text-slate-400">異常處理（手填）</label>
+                <textarea
+                  rows={3}
+                  value={createForm.handling}
+                  onChange={(e) => setCreateForm((prev) => ({ ...prev, handling: e.target.value }))}
+                  className="mt-1 w-full bg-slate-950 border border-slate-700 rounded px-3 py-2 text-white"
+                />
+              </div>
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4 items-start">
@@ -1258,7 +1267,7 @@ export default function QaRecordsPage() {
 
       {editingId && (
         <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4">
-          <div className="w-full max-w-[900px] bg-slate-900 border border-slate-700 rounded-2xl p-4 space-y-2">
+          <div className="w-full max-w-[900px] max-h-[90vh] overflow-y-auto bg-slate-900 border border-slate-700 rounded-2xl p-4 space-y-2">
             <div className="flex items-center justify-between">
               <h2 className="text-xl font-bold text-white">編輯異常單</h2>
               <button onClick={closeEditModal} className="px-2 py-1 text-slate-300 hover:text-white">✕</button>
@@ -1415,24 +1424,26 @@ export default function QaRecordsPage() {
 
             </div>
 
-            <div>
-              <label className="text-xs text-slate-400">異常原因（手填）</label>
-              <textarea
-                rows={2}
-                value={editForm.reason}
-                onChange={(e) => setEditForm((prev) => ({ ...prev, reason: e.target.value }))}
-                className="mt-1 w-full bg-slate-950 border border-slate-700 rounded px-3 py-1.5 text-white"
-              />
-            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 items-start">
+              <div>
+                <label className="text-xs text-slate-400">異常原因（手填）</label>
+                <textarea
+                  rows={2}
+                  value={editForm.reason}
+                  onChange={(e) => setEditForm((prev) => ({ ...prev, reason: e.target.value }))}
+                  className="mt-1 w-full bg-slate-950 border border-slate-700 rounded px-3 py-1.5 text-white"
+                />
+              </div>
 
-            <div>
-              <label className="text-xs text-slate-400">異常處理（手填）</label>
-              <textarea
-                rows={2}
-                value={editForm.handling}
-                onChange={(e) => setEditForm((prev) => ({ ...prev, handling: e.target.value }))}
-                className="mt-1 w-full bg-slate-950 border border-slate-700 rounded px-3 py-1.5 text-white"
-              />
+              <div>
+                <label className="text-xs text-slate-400">異常處理（手填）</label>
+                <textarea
+                  rows={2}
+                  value={editForm.handling}
+                  onChange={(e) => setEditForm((prev) => ({ ...prev, handling: e.target.value }))}
+                  className="mt-1 w-full bg-slate-950 border border-slate-700 rounded px-3 py-1.5 text-white"
+                />
+              </div>
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3 items-start">
