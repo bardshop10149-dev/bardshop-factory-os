@@ -826,10 +826,12 @@ export async function POST(request: NextRequest) {
         APIKEY3: keys.APIKEY3,
         SEGMENT,
         TABLE: 'PJ_PROJECT',
-        // 只取實際使用的欄位，避免 ORA-64451（Oracle 序列化全欄位時，
-        // 遇到含特殊字元的欄位無法轉為 JSON escape 序列而失敗）。
+        // 只取確定存在的核心欄位，避免兩種 Oracle 錯誤：
+        // - ORA-64451：SHOWNULLCOLUMN:'Y' 取全欄位時，含特殊字元的欄位無法 JSON escape
+        // - ORA-00904：CUSTOMCOLUMN 列出不存在的欄位名稱（各站台欄位命名不同）
+        // 地址/備注/發票等選填顯示欄位因各站台命名不一，不列入 CUSTOMCOLUMN；同步後為 null 屬可接受。
         SHOWNULLCOLUMN: 'N',
-        CUSTOMCOLUMN: 'PROJECT_ID,BEGIN_DATE,TPN_PARTNER_ID,PARTNER_NAME,SALES_NAME,HOLD_STATUS,DELIVERY_ADDRESS,SHIP_ADDRESS,RECEIVE_ADDRESS,ADDRESS,DELIVERY_ADDR,SHIP_ADDR,CUSTOMER_REMARK,REMARK,EXPORT_MODE,INVOICE_FORMAT',
+        CUSTOMCOLUMN: 'PROJECT_ID,BEGIN_DATE,TPN_PARTNER_ID,PARTNER_NAME,SALES_NAME,HOLD_STATUS,REMARK',
         PJT_TYPE: "= 'SO'",
         HOLD_STATUS: "IN ('OPEN','UNSIGNED')",
       })
