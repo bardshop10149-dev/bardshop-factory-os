@@ -18,6 +18,7 @@ interface QaReport {
   qa_handlers: string[] | string | null;
   reason: string;
   handler_record: string | null;
+  immediate_action: string | null;
   attachments: string[] | null;
 }
 
@@ -26,6 +27,7 @@ export default function QaHandlePage() {
   const [loading, setLoading] = useState(true);
   const [editId, setEditId] = useState<number | null>(null);
   const [handlerRecord, setHandlerRecord] = useState('');
+  const [immediateAction, setImmediateAction] = useState('');
   const [saving, setSaving] = useState(false);
   const [editAttachFiles, setEditAttachFiles] = useState<File[]>([]);
   const [editPreviewUrls, setEditPreviewUrls] = useState<string[]>([]);
@@ -95,6 +97,7 @@ export default function QaHandlePage() {
   const handleEdit = (report: QaReport) => {
     setEditId(report.id);
     setHandlerRecord(report.handler_record || '');
+    setImmediateAction(report.immediate_action || '');
     setEditAttachFiles([]);
     setEditPreviewUrls([]);
     setEditExistingAttachments(Array.isArray(report.attachments) ? report.attachments : []);
@@ -164,7 +167,7 @@ export default function QaHandlePage() {
 
       const { error } = await supabase
         .from('schedule_anomaly_reports')
-        .update({ handler_record: handlerRecord, status: 'confirmed', attachments: uploadedUrls })
+        .update({ handler_record: handlerRecord, immediate_action: immediateAction.trim() || null, status: 'confirmed', attachments: uploadedUrls })
         .eq('id', editId);
       if (error) throw error;
       if (currentReport) {
@@ -174,6 +177,7 @@ export default function QaHandlePage() {
       }
       setEditId(null);
       setHandlerRecord('');
+      setImmediateAction('');
       // 重新載入
       const { data } = await supabase
         .from('schedule_anomaly_reports')
@@ -272,6 +276,17 @@ export default function QaHandlePage() {
           />
 
           <div>
+            <label className="text-xs text-slate-400">即時處理方式（選填，缺失單列印用）</label>
+            <textarea
+              rows={3}
+              value={immediateAction}
+              onChange={(e) => setImmediateAction(e.target.value)}
+              className="mt-1 w-full bg-slate-950 border border-slate-700 rounded px-3 py-2 text-white"
+              placeholder="請填寫即時處理方式..."
+            />
+          </div>
+
+          <div>
             <label className="text-xs text-slate-400">附件圖片</label>
             {editExistingAttachments.length > 0 && (
               <div className="mt-1 flex gap-2 flex-wrap">
@@ -334,7 +349,7 @@ export default function QaHandlePage() {
           <div className="flex gap-2 justify-end">
             <button
               className="px-4 py-2 rounded border border-slate-700 text-slate-300 hover:bg-slate-800"
-              onClick={() => { setEditId(null); setHandlerRecord(''); }}
+              onClick={() => { setEditId(null); setHandlerRecord(''); setImmediateAction(''); }}
             >取消</button>
             <button
               className="px-4 py-2 rounded bg-cyan-600 hover:bg-cyan-500 text-white font-bold disabled:bg-slate-700 disabled:text-slate-400"
