@@ -65,18 +65,19 @@ const sanitizeSheetName = (raw: string): string => {
   return (cleaned || 'sheet').slice(0, 31)
 }
 
-// 處置勾選：警告/口頭申誡/小過/大過 對應勾（「口頭警告」含「警告」也勾警告）；
-// 其他非空值勾「其他」附原文；空值全留白。
-const DISP_BOXES = [
-  { label: '警告', key: '警告' },
-  { label: '口頭申誡', key: '申誡' },
-  { label: '小過', key: '小過' },
-  { label: '大過', key: '大過' },
+// 處置勾選：優先序判定——「口頭警告/申誡」勾口頭申誡、「警告」勾警告、
+// 小過/大過對應勾；其他非空值勾「其他」附原文；空值全留白。
+const DISP_MATCHERS = [
+  { label: '口頭申誡', test: (v: string) => v.includes('申誡') || v.includes('口頭警告') },
+  { label: '警告', test: (v: string) => v.includes('警告') },
+  { label: '小過', test: (v: string) => v.includes('小過') },
+  { label: '大過', test: (v: string) => v.includes('大過') },
 ]
+const DISP_ORDER = ['警告', '口頭申誡', '小過', '大過']
 const dispositionLine = (dispValue: string): string => {
   const val = (dispValue || '').trim()
-  const hit = DISP_BOXES.find((b) => val.includes(b.key))
-  const boxes = DISP_BOXES.map((b) => `${hit === b ? '☑' : '□'}${b.label}`)
+  const hit = DISP_MATCHERS.find((m) => m.test(val))?.label
+  const boxes = DISP_ORDER.map((label) => `${hit === label ? '☑' : '□'}${label}`)
   boxes.push(hit || !val ? '□其他：' : `☑其他：${val}`)
   return boxes.join('　')
 }
@@ -129,7 +130,7 @@ const buildSheet = (
   setCell(ws, 1, 0, `編號：${serial}`, styles.meta)
   setCell(ws, 1, 5, `日期：${rocDate(record.created_at)}`, styles.metaRight)
   // R3-R6 左：不良發生點（直向合併；其它移末行、原位置改製圖失誤）
-  setCell(ws, 2, 0, '不良發生點 Occurred Point：\n□進料檢驗　□半成品檢驗\n□成品檢驗　□製圖失誤\n□其它：＿＿＿＿', styles.block)
+  setCell(ws, 2, 0, '不良發生點 Occurred Point：\n□進料檢驗　□半成品檢驗\n□成品檢驗　□製圖失誤\n□其它：', styles.block)
   // R3-R6 右：訂單詳情（右區 8 欄，四格各 2 欄等寬；採購單號列已移除）
   setCell(ws, 2, 3, '廠商/客戶名稱', styles.label)
   setCell(ws, 2, 5, partnerName, styles.value)
@@ -148,10 +149,11 @@ const buildSheet = (
   // R7 品名規格
   setCell(ws, 6, 0, '品名規格物料編號', styles.label)
   setCell(ws, 6, 3, [record.item_code, record.item_name].filter(Boolean).join('　'), styles.value)
-  // R8-R10 (1) 發現人填寫
+  // R8-R10 (1) 發現人填寫：標籤與經辦同列（經辦靠右），下方整片填寫區
   setCell(ws, 7, 0, '（1）發現人填寫', styles.band)
-  setCell(ws, 8, 0, `異常狀況說明：\n${record.reason || ''}`, styles.block)
-  setCell(ws, 9, 0, `經辦：${record.qa_reporter || ''}`, styles.metaRight)
+  setCell(ws, 8, 0, '異常狀況說明：', styles.meta)
+  setCell(ws, 8, 5, `經辦：${record.qa_reporter || ''}`, styles.metaRight)
+  setCell(ws, 9, 0, record.reason || '', styles.block)
   // R11-R17 (2) 責任單位填寫：標籤與人名同列（人名靠右），下方整片留白填寫區
   setCell(ws, 10, 0, '（2）責任單位填寫', styles.band)
   setCell(ws, 11, 0, '異常原因分析：', styles.meta)
@@ -175,12 +177,12 @@ const buildSheet = (
   setCell(ws, 19, 0, '（4）品保判定責任歸屬：', styles.meta)
   setCell(ws, 19, 5, '經辦人員：', styles.metaRight)
   setCell(ws, 20, 0, '', styles.block)
-  // R22-R25 (5) 結案 + 簽核欄
+  // R22-R25 (5) 結案 + 簽核欄（三格等寬：C:E / F:H / I:K）
   setCell(ws, 21, 0, '（5）結案', styles.band)
   setCell(ws, 22, 0, '責任單位：', styles.value)
-  setCell(ws, 22, 3, '總經理室', styles.label)
-  setCell(ws, 22, 6, '品保主管', styles.label)
-  setCell(ws, 22, 8, '主責部門主管', styles.label)
+  setCell(ws, 22, 2, '總經理', styles.label)
+  setCell(ws, 22, 5, '品保部', styles.label)
+  setCell(ws, 22, 8, '部門主管', styles.label)
   setCell(ws, 23, 0, '損失成本：', styles.value)
   setCell(ws, 24, 0, '其他：', styles.value)
 
@@ -194,8 +196,8 @@ const buildSheet = (
     M(5, 3, 5, 4), M(5, 5, 5, 6), M(5, 7, 5, 8), M(5, 9, 5, 10),   // 不良率 | 異常數量
     M(6, 0, 6, 2), M(6, 3, 6, 10),           // 品名規格
     M(7, 0, 7, 10),                          // (1) band
-    M(8, 0, 8, 10),                          // 異常狀況說明
-    M(9, 0, 9, 10),                          // 經辦
+    M(8, 0, 8, 4), M(8, 5, 8, 10),           // 異常狀況說明 | 經辦
+    M(9, 0, 9, 10),                          // 填寫區
     M(10, 0, 10, 10),                        // (2) band
     M(11, 0, 11, 4), M(11, 5, 11, 10),       // 異常原因分析 | 責任人員
     M(12, 0, 12, 10),                        // 填寫區
@@ -208,19 +210,20 @@ const buildSheet = (
     M(19, 0, 19, 4), M(19, 5, 19, 10),       // (4) | 經辦人員
     M(20, 0, 20, 10),                        // 填寫區
     M(21, 0, 21, 10),                        // (5) band
-    M(22, 0, 22, 2), M(22, 3, 22, 5), M(22, 6, 22, 7), M(22, 8, 22, 10), // 結案列 + 簽核表頭
-    M(23, 0, 23, 2), M(23, 3, 24, 5), M(23, 6, 24, 7), M(23, 8, 24, 10), // 損失成本 + 簽名空格
-    M(24, 0, 24, 2),                         // 其他
+    M(22, 0, 22, 1), M(22, 2, 22, 4), M(22, 5, 22, 7), M(22, 8, 22, 10), // 結案列 + 簽核表頭（三格各3欄）
+    M(23, 0, 23, 1), M(23, 2, 24, 4), M(23, 5, 24, 7), M(23, 8, 24, 10), // 損失成本 + 簽名空格
+    M(24, 0, 24, 1),                         // 其他
   ]
 
   ws['!cols'] = Array.from({ length: COLS }, () => ({ wch: 7.8 }))
-  ws['!rows'] = [28, 18, 18, 18, 18, 18, 20, 16, 80, 18, 16, 18, 70, 18, 70, 18, 70, 20, 22, 18, 55, 16, 20, 30, 30]
+  ws['!rows'] = [28, 18, 18, 18, 18, 18, 20, 16, 18, 80, 16, 18, 70, 18, 70, 18, 70, 20, 22, 18, 55, 16, 20, 30, 30]
     .map((hpt) => ({ hpt }))
   ws['!margins'] = { left: 0.4, right: 0.4, top: 0.4, bottom: 0.4, header: 0.2, footer: 0.2 }
   ws['!ref'] = `A1:${XLSX.utils.encode_cell({ r: ROWS - 1, c: COLS - 1 })}`
 
-  // 標籤列與其下方填寫區之間不畫橫線（視覺上同一大格：框線在上、人名在上、下方整片留白）
-  const NO_LINE_BELOW = new Set([11, 13, 15, 19])
+  // 標籤列（左標籤＋右人名）：與下方填寫區之間不畫橫線、左右兩段之間不畫豎線，
+  // 視覺上與填寫區合為同一大格（框線在上、人名在上、下方整片留白）
+  const LABEL_ROWS = new Set([8, 11, 13, 15, 19])
 
   // 全區補實儲存格並上框線（合併範圍的框線須逐格設定才會顯示）；外框加粗
   for (let r = 0; r < ROWS; r++) {
@@ -228,12 +231,13 @@ const buildSheet = (
       const addr = XLSX.utils.encode_cell({ r, c })
       const cell = (ws[addr] as XLSX.CellObject | undefined) ?? { t: 's', v: '' }
       const existing = (cell.s ?? {}) as CellStyle
-      const border: Record<string, unknown> = {
-        left: c === 0 ? MEDIUM : THIN,
-        right: c === COLS - 1 ? MEDIUM : THIN,
-      }
-      if (!NO_LINE_BELOW.has(r - 1)) border.top = r === 0 ? MEDIUM : THIN
-      if (!NO_LINE_BELOW.has(r)) border.bottom = r === ROWS - 1 ? MEDIUM : THIN
+      const border: Record<string, unknown> = {}
+      if (c === 0) border.left = MEDIUM
+      else if (!LABEL_ROWS.has(r)) border.left = THIN
+      if (c === COLS - 1) border.right = MEDIUM
+      else if (!LABEL_ROWS.has(r)) border.right = THIN
+      if (!LABEL_ROWS.has(r - 1)) border.top = r === 0 ? MEDIUM : THIN
+      if (!LABEL_ROWS.has(r)) border.bottom = r === ROWS - 1 ? MEDIUM : THIN
       cell.s = { font: baseFont, ...existing, border }
       ws[addr] = cell
     }
