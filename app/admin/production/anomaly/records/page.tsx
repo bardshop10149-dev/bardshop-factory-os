@@ -1435,34 +1435,36 @@ export default function QaRecordsPage() {
               />
             </div>
 
-            <div>
-              <label className="text-xs text-slate-400">異常原因分析（缺失單列印用）</label>
-              <textarea
-                rows={2}
-                value={editForm.causeAnalysis}
-                onChange={(e) => setEditForm((prev) => ({ ...prev, causeAnalysis: e.target.value }))}
-                className="mt-1 w-full bg-slate-950 border border-slate-700 rounded px-3 py-1.5 text-white"
-              />
-            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 items-start">
+              <div>
+                <label className="text-xs text-slate-400">異常原因分析（缺失單列印用）</label>
+                <textarea
+                  rows={2}
+                  value={editForm.causeAnalysis}
+                  onChange={(e) => setEditForm((prev) => ({ ...prev, causeAnalysis: e.target.value }))}
+                  className="mt-1 w-full bg-slate-950 border border-slate-700 rounded px-3 py-1.5 text-white"
+                />
+              </div>
 
-            <div>
-              <label className="text-xs text-slate-400">即時處理方式（缺失單列印用）</label>
-              <textarea
-                rows={2}
-                value={editForm.immediateAction}
-                onChange={(e) => setEditForm((prev) => ({ ...prev, immediateAction: e.target.value }))}
-                className="mt-1 w-full bg-slate-950 border border-slate-700 rounded px-3 py-1.5 text-white"
-              />
-            </div>
+              <div>
+                <label className="text-xs text-slate-400">即時處理方式（缺失單列印用）</label>
+                <textarea
+                  rows={2}
+                  value={editForm.immediateAction}
+                  onChange={(e) => setEditForm((prev) => ({ ...prev, immediateAction: e.target.value }))}
+                  className="mt-1 w-full bg-slate-950 border border-slate-700 rounded px-3 py-1.5 text-white"
+                />
+              </div>
 
-            <div>
-              <label className="text-xs text-slate-400">預防及修正方式（缺失單列印用）</label>
-              <textarea
-                rows={2}
-                value={editForm.correctiveAction}
-                onChange={(e) => setEditForm((prev) => ({ ...prev, correctiveAction: e.target.value }))}
-                className="mt-1 w-full bg-slate-950 border border-slate-700 rounded px-3 py-1.5 text-white"
-              />
+              <div>
+                <label className="text-xs text-slate-400">預防及修正方式（缺失單列印用）</label>
+                <textarea
+                  rows={2}
+                  value={editForm.correctiveAction}
+                  onChange={(e) => setEditForm((prev) => ({ ...prev, correctiveAction: e.target.value }))}
+                  className="mt-1 w-full bg-slate-950 border border-slate-700 rounded px-3 py-1.5 text-white"
+                />
+              </div>
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3 items-start">
