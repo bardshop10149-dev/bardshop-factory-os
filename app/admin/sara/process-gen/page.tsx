@@ -570,10 +570,10 @@ export default function ProcessGenPage() {
 
   // ── 套用臨時途程至単一無途程訂單 ─────────────────────────────────────
 
-  const handleApplyTempRoute = useCallback(async (row: InputRow) => {
+  const handleApplyTempRoute = useCallback(async (row: InputRow, override?: { mode: 'item' | 'route'; code: string }) => {
     const key  = rowKey(row)
-    const raw  = (noRouteCodes[key] ?? '').trim()
-    const mode = noRouteModes[key] ?? 'item'
+    const raw  = override ? override.code : (noRouteCodes[key] ?? '').trim()
+    const mode = override ? override.mode : (noRouteModes[key] ?? 'item')
     const code = mode === 'item' ? raw.toUpperCase() : raw
     if (!code) return
     setNoRouteApplying(prev => ({ ...prev, [key]: true }))
@@ -1017,6 +1017,15 @@ export default function ProcessGenPage() {
                                   className="px-3 py-1 rounded bg-emerald-700 hover:bg-emerald-600 disabled:opacity-40 text-white text-xs font-medium transition-colors whitespace-nowrap"
                                 >
                                   {applying ? '套用中…' : '套用 →'}
+                                </button>
+                                {/* 常平一般壓克力製程 快捷鈕 */}
+                                <button
+                                  onClick={() => void handleApplyTempRoute(r, { mode: 'route', code: '常平一般壓克力製程' })}
+                                  disabled={applying}
+                                  title="套用「常平一般壓克力製程」途程"
+                                  className="px-2 py-1 rounded bg-orange-700 hover:bg-orange-600 disabled:opacity-40 text-white text-[10px] font-semibold transition-colors whitespace-nowrap"
+                                >
+                                  常平
                                 </button>
                                 {warn && <span className="text-red-400 text-[10px]">{warn}</span>}
                               </div>
