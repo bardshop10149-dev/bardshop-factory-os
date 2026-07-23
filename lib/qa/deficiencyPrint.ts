@@ -73,7 +73,7 @@ const DISP_MATCHERS = [
   { label: '小過', test: (v: string) => v.includes('小過') },
   { label: '大過', test: (v: string) => v.includes('大過') },
 ]
-const DISP_ORDER = ['警告', '口頭申誡', '小過', '大過']
+const DISP_ORDER = ['口頭申誡', '警告', '小過', '大過']
 const dispositionLine = (dispValue: string): string => {
   const val = (dispValue || '').trim()
   const hit = DISP_MATCHERS.find((m) => m.test(val))?.label
@@ -149,21 +149,21 @@ const buildSheet = (
   // R7 品名規格
   setCell(ws, 6, 0, '品名規格物料編號', styles.label)
   setCell(ws, 6, 3, [record.item_code, record.item_name].filter(Boolean).join('　'), styles.value)
-  // R8-R10 (1) 發現人填寫：標籤與經辦同列（經辦靠右），下方整片填寫區
+  // R8-R10 (1) 發現人填寫：標籤與經辦同列（經辦約 2/3 處起靠左），下方整片填寫區
   setCell(ws, 7, 0, '（1）發現人填寫', styles.band)
   setCell(ws, 8, 0, '異常狀況說明：', styles.meta)
-  setCell(ws, 8, 5, `經辦：${record.qa_reporter || ''}`, styles.metaRight)
+  setCell(ws, 8, 7, `經辦：${record.qa_reporter || ''}`, styles.meta)
   setCell(ws, 9, 0, record.reason || '', styles.block)
   // R11-R17 (2) 責任單位填寫：標籤與人名同列（人名靠右），下方整片留白填寫區
   setCell(ws, 10, 0, '（2）責任單位填寫', styles.band)
   setCell(ws, 11, 0, '異常原因分析：', styles.meta)
-  setCell(ws, 11, 5, `責任人員：${person}`, styles.metaRight)
+  setCell(ws, 11, 7, `責任人員：${person}`, styles.meta)
   setCell(ws, 12, 0, record.cause_analysis || '', styles.block)
   setCell(ws, 13, 0, '即時處理方式：', styles.meta)
-  setCell(ws, 13, 5, `人員：${handlers}`, styles.metaRight)
+  setCell(ws, 13, 7, `人員：${handlers}`, styles.meta)
   setCell(ws, 14, 0, record.immediate_action || '', styles.block)
   setCell(ws, 15, 0, '預防及修正方式：', styles.meta)
-  setCell(ws, 15, 5, '部門主管：', styles.metaRight)
+  setCell(ws, 15, 7, '部門主管：', styles.meta)
   setCell(ws, 16, 0, record.corrective_action || '', styles.block)
   // R18 部門 / 缺失人員（自原版上方移到處置方式正上方）
   setCell(ws, 17, 0, '部門', styles.label)
@@ -175,14 +175,14 @@ const buildSheet = (
   setCell(ws, 18, 2, dispositionLine(dispValue), styles.value)
   // R20-R21 (4) 品保判定：標籤與經辦人員同列，下方留白
   setCell(ws, 19, 0, '（4）品保判定責任歸屬：', styles.meta)
-  setCell(ws, 19, 5, '經辦人員：', styles.metaRight)
+  setCell(ws, 19, 7, '經辦人員：', styles.meta)
   setCell(ws, 20, 0, '', styles.block)
-  // R22-R25 (5) 結案 + 簽核欄（三格等寬：C:E / F:H / I:K）
+  // R22-R25 (5) 結案 + 簽核欄（簽名區縮小：三格各 2 欄，左側填寫區擴大至 5 欄）
   setCell(ws, 21, 0, '（5）結案', styles.band)
   setCell(ws, 22, 0, '責任單位：', styles.value)
-  setCell(ws, 22, 2, '總經理', styles.label)
-  setCell(ws, 22, 5, '品保部', styles.label)
-  setCell(ws, 22, 8, '部門主管', styles.label)
+  setCell(ws, 22, 5, '總經理', styles.label)
+  setCell(ws, 22, 7, '品保部', styles.label)
+  setCell(ws, 22, 9, '部門主管', styles.label)
   setCell(ws, 23, 0, '損失成本：', styles.value)
   setCell(ws, 24, 0, '其他：', styles.value)
 
@@ -196,23 +196,23 @@ const buildSheet = (
     M(5, 3, 5, 4), M(5, 5, 5, 6), M(5, 7, 5, 8), M(5, 9, 5, 10),   // 不良率 | 異常數量
     M(6, 0, 6, 2), M(6, 3, 6, 10),           // 品名規格
     M(7, 0, 7, 10),                          // (1) band
-    M(8, 0, 8, 4), M(8, 5, 8, 10),           // 異常狀況說明 | 經辦
+    M(8, 0, 8, 6), M(8, 7, 8, 10),           // 異常狀況說明 | 經辦
     M(9, 0, 9, 10),                          // 填寫區
     M(10, 0, 10, 10),                        // (2) band
-    M(11, 0, 11, 4), M(11, 5, 11, 10),       // 異常原因分析 | 責任人員
+    M(11, 0, 11, 6), M(11, 7, 11, 10),       // 異常原因分析 | 責任人員
     M(12, 0, 12, 10),                        // 填寫區
-    M(13, 0, 13, 4), M(13, 5, 13, 10),       // 即時處理方式 | 人員
+    M(13, 0, 13, 6), M(13, 7, 13, 10),       // 即時處理方式 | 人員
     M(14, 0, 14, 10),                        // 填寫區
-    M(15, 0, 15, 4), M(15, 5, 15, 10),       // 預防及修正方式 | 部門主管
+    M(15, 0, 15, 6), M(15, 7, 15, 10),       // 預防及修正方式 | 部門主管
     M(16, 0, 16, 10),                        // 填寫區
     M(17, 0, 17, 1), M(17, 2, 17, 4), M(17, 5, 17, 6), M(17, 7, 17, 10), // 部門/缺失人員
     M(18, 0, 18, 1), M(18, 2, 18, 10),       // (3) 處置方式
-    M(19, 0, 19, 4), M(19, 5, 19, 10),       // (4) | 經辦人員
+    M(19, 0, 19, 6), M(19, 7, 19, 10),       // (4) | 經辦人員
     M(20, 0, 20, 10),                        // 填寫區
     M(21, 0, 21, 10),                        // (5) band
-    M(22, 0, 22, 1), M(22, 2, 22, 4), M(22, 5, 22, 7), M(22, 8, 22, 10), // 結案列 + 簽核表頭（三格各3欄）
-    M(23, 0, 23, 1), M(23, 2, 24, 4), M(23, 5, 24, 7), M(23, 8, 24, 10), // 損失成本 + 簽名空格
-    M(24, 0, 24, 1),                         // 其他
+    M(22, 0, 22, 4), M(22, 5, 22, 6), M(22, 7, 22, 8), M(22, 9, 22, 10), // 結案列 + 簽核表頭（三格各2欄）
+    M(23, 0, 23, 4), M(23, 5, 24, 6), M(23, 7, 24, 8), M(23, 9, 24, 10), // 損失成本 + 簽名空格
+    M(24, 0, 24, 4),                         // 其他
   ]
 
   ws['!cols'] = Array.from({ length: COLS }, () => ({ wch: 7.8 }))
