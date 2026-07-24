@@ -432,7 +432,7 @@ function PoCard({
                 </div>
               ))}
             </div>
-            {/* 全部行項表格 — 本採購項加底色＋星號 */
+            {/* 全部行項表格 — 本採購項加底色＋星號 */}
             <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '12px', tableLayout: 'fixed' }}>
               <colgroup>
                 <col style={{ width: '32px' }} />
@@ -487,13 +487,8 @@ function PoCard({
                 )}
               </tbody>
             </table>
-          </>
-        ) : (
-          <div style={{ padding: '8px 6px', color: '#9ca3af', fontSize: '11px', fontStyle: 'italic' }}>
-            {noSourceText}
           </div>
-        )}
-      </div>
+        ) : null}
 
       {/* ── 作業確認 ── */}
       <div className="mo-card-footer" style={{ marginTop: 'auto' }}>
