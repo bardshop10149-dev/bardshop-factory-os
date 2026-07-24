@@ -940,8 +940,24 @@ export default function DailyOrderSheetPage() {
     const printRows = sheetRows.filter((r, i) => selectedKeys.has(r.row_key || String(i)))
     if (printRows.length === 0) return
 
+    // ── 列印前驗證：必須有對應單號，嚴禁讓銷售單號出現在單據左上角 ──
+    const missingDoc = printRows.filter(r => {
+      if (r.factory === 'T') return !r.mo_number
+      if (r.factory === 'C') return !r.po_number
+      if (r.factory === 'O') return !r.pr_number && !r.mo_number
+      return false
+    })
+    if (missingDoc.length > 0) {
+      const lines = missingDoc.slice(0, 4).map(r => {
+        const need = r.factory === 'T' ? '製令單號' : r.factory === 'C' ? '採購單號' : '請購單號'
+        return `・${r.order_number}（缺 ${need}）`
+      })
+      alert(`⛔ 列印前請先取得對應單號\n\n${lines.join('\n')}${missingDoc.length > 4 ? `\n…共 ${missingDoc.length} 筆` : ''}\n\n台北廠需匯入製令，常平廠需比對採購單，委外廠需比對請購單。`)
+      return
+    }
+
     const moRecords = printRows.map(r => ({
-      mo_number: r.mo_number || r.order_number,
+      mo_number: r.mo_number ?? '',
       planned_start_date: '',
       planned_end_date: r.delivery_date,
       mo_status: r.mo_status || '',

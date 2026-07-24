@@ -225,9 +225,9 @@ function SectionTitle({ children, color = '#e5e7eb' }: { children: string; color
   return (
     <div style={{
       background: color, color: '#111',
-      padding: '4px 10px', fontSize: '15px', fontWeight: 'bold',
+      padding: '2px 8px', fontSize: '12px', fontWeight: 'bold',
       borderLeft: '3px solid #8b8b8b',
-      marginBottom: '6px', letterSpacing: '0.5px',
+      marginBottom: '3px', letterSpacing: '0.5px',
     }}>
       {children}
     </div>
@@ -302,11 +302,11 @@ function PoCard({
       className="mo-card"
       style={{
         width: '210mm', background: 'white',
-        margin: '0 auto 24px', padding: '13mm 15mm 10mm',
+        margin: '0 auto 24px', padding: '5mm 12mm 5mm',
         boxSizing: 'border-box', boxShadow: '0 4px 24px rgba(0,0,0,0.35)',
         fontFamily: 'Arial, "Microsoft JhengHei", "PingFang TC", sans-serif',
         color: '#111',
-        display: 'flex', flexDirection: 'column', minHeight: 'calc(297mm - 16mm)',
+        display: 'flex', flexDirection: 'column', minHeight: 'calc(297mm - 8mm)',
       }}
     >
       {/* ── 頁首（採購單號 ｜ 採購單標題 ｜ 供應廠別）── */}
@@ -314,25 +314,25 @@ function PoCard({
         display: 'grid', gridTemplateColumns: '1fr auto 1fr',
         alignItems: 'center', gap: '8px',
         borderBottom: '2px solid #000',
-        paddingBottom: '8px', marginBottom: '10px',
+        paddingBottom: '4px', marginBottom: '6px',
       }}>
         {/* 左：採購單號／請購單號 + 急件/打樣 */}
         <div>
-          <div style={{ fontSize: '11px', color: '#555', marginBottom: '3px', fontWeight: 600, letterSpacing: '1px' }}>{docNoLabel}</div>
+          <div style={{ fontSize: '10px', color: '#555', marginBottom: '2px', fontWeight: 600, letterSpacing: '1px' }}>{docNoLabel}</div>
           <div style={{
-            fontSize: '22px', fontWeight: 'bold', letterSpacing: '1px',
-            background: '#f0f0f0', padding: '3px 8px', border: '1px solid #555',
+            fontSize: '15px', fontWeight: 'bold', letterSpacing: '1px',
+            background: '#f0f0f0', padding: '2px 6px', border: '1px solid #555',
             display: 'inline-block', borderRadius: '3px', color: '#000',
           }}>
             {docNo}
           </div>
-          <div style={{ marginTop: '6px', display: 'flex', gap: '6px' }}>
+          <div style={{ marginTop: '3px', display: 'flex', gap: '5px' }}>
             {(['急件單', '打樣單'] as const).map(label => (
               <div key={label} style={{
-                border: '1.5px solid #333', padding: '3px 8px', borderRadius: '2px',
-                fontSize: '15px', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '6px',
+                border: '1.5px solid #333', padding: '2px 6px', borderRadius: '2px',
+                fontSize: '12px', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '4px',
               }}>
-                <span style={{ display: 'inline-block', width: '14px', height: '14px', border: '1.5px solid #333', borderRadius: '2px', flexShrink: 0 }} />
+                <span style={{ display: 'inline-block', width: '11px', height: '11px', border: '1.5px solid #333', borderRadius: '2px', flexShrink: 0 }} />
                 {label}
               </div>
             ))}
@@ -341,19 +341,19 @@ function PoCard({
 
         {/* 中：採購單／請購單 大標題 */}
         <div style={{ textAlign: 'center' }}>
-          <div style={{ fontSize: '36px', fontWeight: 900, letterSpacing: '5px', color: '#000', WebkitTextStroke: '1px #000' }}>
+          <div style={{ fontSize: '22px', fontWeight: 900, letterSpacing: '2px', color: '#000', WebkitTextStroke: '1px #000' }}>
             {cardTitle}
           </div>
-          <div style={{ fontSize: '14px', color: '#666', marginTop: '3px', letterSpacing: '1px' }}>
+          <div style={{ fontSize: '10px', color: '#666', marginTop: '1px', letterSpacing: '1px' }}>
             {cardTitleEn}
           </div>
         </div>
 
         {/* 右：供應廠別 */}
         <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center' }}>
-          <div style={{ border: '2px solid #222', borderRadius: '4px', padding: '8px 14px', minWidth: '160px', textAlign: 'center' }}>
-            <div style={{ fontSize: '11px', color: '#555', marginBottom: '4px', fontWeight: 600, letterSpacing: '1px' }}>供應廠別</div>
-            <div style={{ fontSize: '22px', fontWeight: 800, color: '#000', letterSpacing: '1px' }}>
+          <div style={{ border: '2px solid #222', borderRadius: '4px', padding: '4px 10px', minWidth: '110px', textAlign: 'center' }}>
+            <div style={{ fontSize: '10px', color: '#555', marginBottom: '2px', fontWeight: 600, letterSpacing: '1px' }}>供應廠別</div>
+            <div style={{ fontSize: '16px', fontWeight: 800, color: '#000', letterSpacing: '1px' }}>
               {factoryLabel}
             </div>
           </div>
@@ -367,13 +367,13 @@ function PoCard({
           <SectionTitle color="#e5e7eb">{infoTitle}</SectionTitle>
           <table style={{ width: '100%', borderCollapse: 'collapse' }}>
             <tbody>
-              <tr style={{ height: '76px' }}>
+              <tr style={{ height: '44px' }}>
                 <td style={{ ...labelTd, verticalAlign: 'middle' }}>來源訂單</td>
-                <td style={{ ...valueTd, fontSize: '24px', fontWeight: 600, verticalAlign: 'middle' }}>{mo.source_order || '—'}</td>
+                <td style={{ ...valueTd, fontSize: '18px', fontWeight: 600, verticalAlign: 'middle' }}>{mo.source_order || '—'}</td>
               </tr>
-              <tr style={{ height: '76px' }}>
+              <tr style={{ height: '44px' }}>
                 <td style={{ ...labelTd, verticalAlign: 'middle' }}>{qtyLabel}</td>
-                <td style={{ ...valueTd, fontSize: '24px', fontWeight: 600, verticalAlign: 'middle' }}>{poQtyDisplay}</td>
+                <td style={{ ...valueTd, fontSize: '18px', fontWeight: 600, verticalAlign: 'middle' }}>{poQtyDisplay}</td>
               </tr>
             </tbody>
           </table>
@@ -394,7 +394,7 @@ function PoCard({
               </tr>
               <tr>
                 <td style={{ ...labelTd, verticalAlign: 'middle' }}>要求到料日</td>
-                <td style={{ ...valueTd, fontWeight: 700, fontSize: '34px', height: '76px', verticalAlign: 'middle' }}>
+                <td style={{ ...valueTd, fontWeight: 700, fontSize: '26px', height: '44px', verticalAlign: 'middle' }}>
                   {(() => {
                     const d = so?.duedate || mo.planned_end_date
                     return d ? <>{d} <span style={{ fontSize: '24px' }}>{dayOfWeekZh(d)}</span></> : '—'
@@ -747,7 +747,7 @@ function MoPrintContent() {
     <>
       {/* ── 全域列印 CSS ───────────────────────────────────── */}
       <style dangerouslySetInnerHTML={{ __html: `
-        @page { size: A4 portrait; margin: 8mm 0; }
+        @page { size: A4 portrait; margin: 4mm 0; }
         @media screen {
           html, body { background: #fff !important; color: #000 !important; }
           .mo-pages-wrapper { background: #efefef !important; }
@@ -795,7 +795,7 @@ function MoPrintContent() {
             page-break-after: always;
             break-after: page;
             break-inside: auto;
-            min-height: calc(297mm - 16mm) !important;
+            min-height: calc(297mm - 8mm) !important;
             display: flex !important;
             flex-direction: column !important;
           }
@@ -906,12 +906,12 @@ function MoPrintContent() {
                 width: '210mm',
                 background: 'white',
                 margin: '0 auto 24px',
-                padding: '13mm 15mm 10mm',
+                padding: '5mm 12mm 5mm',
                 boxSizing: 'border-box',
                 boxShadow: '0 4px 24px rgba(0,0,0,0.35)',
                 fontFamily: 'Arial, "Microsoft JhengHei", "PingFang TC", sans-serif',
                 color: '#111',
-                display: 'flex', flexDirection: 'column', minHeight: 'calc(297mm - 16mm)',
+                display: 'flex', flexDirection: 'column', minHeight: 'calc(297mm - 8mm)',
               }}
             >
               {/* ── 頁首（3欄：製令號+急打樣 ｜ 置中標題 ｜ 廠別+日期）── */}
@@ -921,28 +921,28 @@ function MoPrintContent() {
                 alignItems: 'center',
                 gap: '8px',
                 borderBottom: '2px solid #000',
-                paddingBottom: '8px',
-                marginBottom: '10px',
+                paddingBottom: '4px',
+                marginBottom: '6px',
               }}>
                 {/* 左：製令號 + 急件/打樣 checkbox */}
                 <div>
                   <div style={{
-                    fontFamily: 'Arial, "Microsoft JhengHei", "PingFang TC", sans-serif', fontSize: '22px', fontWeight: 'bold',
+                    fontFamily: 'Arial, "Microsoft JhengHei", "PingFang TC", sans-serif', fontSize: '15px', fontWeight: 'bold',
                     letterSpacing: '1px', background: '#f0f0f0',
-                    padding: '3px 8px', border: '1px solid #555',
+                    padding: '2px 6px', border: '1px solid #555',
                     display: 'inline-block', borderRadius: '3px', color: '#000',
                   }}>
                     {mo.mo_number}
                   </div>
-                  <div style={{ marginTop: '6px', display: 'flex', gap: '6px' }}>
+                  <div style={{ marginTop: '3px', display: 'flex', gap: '5px' }}>
                     {(['急件單', '打樣單'] as const).map(label => (
                       <div key={label} style={{
-                        border: '1.5px solid #333', padding: '3px 8px', borderRadius: '2px',
-                        fontSize: '15px', fontWeight: 700,
-                        display: 'flex', alignItems: 'center', gap: '6px',
+                        border: '1.5px solid #333', padding: '2px 6px', borderRadius: '2px',
+                        fontSize: '12px', fontWeight: 700,
+                        display: 'flex', alignItems: 'center', gap: '4px',
                       }}>
                         <span style={{
-                          display: 'inline-block', width: '14px', height: '14px',
+                          display: 'inline-block', width: '11px', height: '11px',
                           border: '1.5px solid #333', borderRadius: '2px', flexShrink: 0,
                         }} />
                         {label}
@@ -953,21 +953,21 @@ function MoPrintContent() {
 
                 {/* 中：製令工單（置中）*/}
                 <div style={{ textAlign: 'center' }}>
-                  <div style={{ fontSize: '36px', fontWeight: 900, letterSpacing: '5px', color: '#000', WebkitTextStroke: '1px #000' }}>
+                  <div style={{ fontSize: '22px', fontWeight: 900, letterSpacing: '2px', color: '#000', WebkitTextStroke: '1px #000' }}>
                     製令工單
                   </div>
-                  <div style={{ fontSize: '14px', color: '#666', marginTop: '3px', letterSpacing: '1px' }}>
+                  <div style={{ fontSize: '10px', color: '#666', marginTop: '1px', letterSpacing: '1px' }}>
                     Manufacturing Order
                   </div>
                 </div>
 
                 {/* 右：印刷機台（手填框）*/}
                 <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center' }}>
-                  <div style={{ border: '2px solid #222', borderRadius: '4px', padding: '8px 14px', minWidth: '210px' }}>
-                    <div style={{ fontSize: '11px', color: '#555', marginBottom: '6px', fontWeight: 600, letterSpacing: '1px' }}>印刷機台</div>
+                  <div style={{ border: '2px solid #222', borderRadius: '4px', padding: '4px 10px', minWidth: '160px' }}>
+                    <div style={{ fontSize: '10px', color: '#555', marginBottom: '3px', fontWeight: 600, letterSpacing: '1px' }}>印刷機台</div>
                     <div style={{
                       borderBottom: mo.machine ? 'none' : '1.5px solid #888',
-                      height: '36px', fontSize: '22px', fontWeight: 800,
+                      height: '28px', fontSize: '18px', fontWeight: 800,
                       display: 'flex', alignItems: 'center', justifyContent: 'flex-end',
                       letterSpacing: '1px',
                     }}>
@@ -1034,10 +1034,10 @@ function MoPrintContent() {
                       </tr>
                       <tr>
                         <td style={{ ...labelTd, verticalAlign: 'middle' }}>出貨交期</td>
-                        <td colSpan={3} style={{ ...valueTd, fontWeight: 700, fontSize: '34px', height: '57px', verticalAlign: 'middle' }}>
+                        <td colSpan={3} style={{ ...valueTd, fontWeight: 700, fontSize: '26px', height: '40px', verticalAlign: 'middle' }}>
                           {(() => {
                             const d = so?.duedate || mo.planned_end_date
-                            return d ? <>{d} <span style={{ fontSize: '24px' }}>{dayOfWeekZh(d)}</span></> : '—'
+                            return d ? <>{d} <span style={{ fontSize: '20px' }}>{dayOfWeekZh(d)}</span></> : '—'
                           })()}
                         </td>
                       </tr>
