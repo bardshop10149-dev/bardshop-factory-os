@@ -73,6 +73,9 @@ export default function QaReportFormPage() {
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const [notifyPreview, setNotifyPreview] = useState<string | null>(null)
   const [copied, setCopied] = useState(false)
+  // MOT 製令自動帶出：查 erp_mo_lines 導出 SO 單號與品項，再查 erp_so_lines 帶品名
+  const [moLookup, setMoLookup] = useState<{ mot: string; so: string; itemCode: string; itemName: string; orderQty: number | null } | null>(null)
+  const [moLookupState, setMoLookupState] = useState<'idle' | 'loading' | 'notfound'>('idle')
   // QA 部門欄位：以 reporterDepartment 為主
   // handlers 欄位補上，預設為單一人員
   const handlers = handlerPersonnel ? [handlerPersonnel] : [];
@@ -193,6 +196,68 @@ export default function QaReportFormPage() {
     }
   }
 
+  // 輸入 MOT 開頭單號時自動查詢製令並帶出 SO 單號／品項編碼／品名
+  useEffect(() => {
+    const raw = orderNumber.trim().toUpperCase()
+    if (!raw.startsWith('MOT')) {
+      setMoLookup(null)
+      setMoLookupState('idle')
+      return
+    }
+    let cancelled = false
+    setMoLookupState('loading')
+    const timer = setTimeout(async () => {
+      try {
+        const exact = await supabase
+          .from('erp_mo_lines')
+          .select('project_id, source_order, mbp_part, order_qty')
+          .eq('project_id', raw)
+          .limit(1)
+        let row = (exact.data || [])[0] as { project_id: string; source_order: string | null; mbp_part: string | null; order_qty: number | null } | undefined
+        if (!row) {
+          // 未含行號時以前綴查第一行（例：MOT260714007 → MOT26071400701）
+          const prefix = await supabase
+            .from('erp_mo_lines')
+            .select('project_id, source_order, mbp_part, order_qty')
+            .like('project_id', `${raw}%`)
+            .order('project_id')
+            .limit(1)
+          row = (prefix.data || [])[0]
+        }
+        if (cancelled) return
+        if (!row || !row.source_order) {
+          setMoLookup(null)
+          setMoLookupState('notfound')
+          return
+        }
+        let name = ''
+        if (row.mbp_part) {
+          const { data: soRows } = await supabase
+            .from('erp_so_lines')
+            .select('description')
+            .eq('project_id', row.source_order)
+            .eq('mbp_part', row.mbp_part)
+            .limit(1)
+          if (cancelled) return
+          name = (soRows?.[0] as { description: string | null } | undefined)?.description || ''
+        }
+        setMoLookup({ mot: raw, so: row.source_order, itemCode: row.mbp_part || '', itemName: name, orderQty: row.order_qty ?? null })
+        setMoLookupState('idle')
+        if (row.mbp_part) setItemCode(row.mbp_part)
+        if (name) setItemName(name)
+      } catch {
+        if (!cancelled) {
+          setMoLookup(null)
+          setMoLookupState('notfound')
+        }
+      }
+    }, 600)
+    return () => {
+      cancelled = true
+      clearTimeout(timer)
+    }
+  }, [orderNumber])
+
   const handleSubmit = async () => {
     if (!orderNumber.trim()) {
       alert('請填寫相關單號')
@@ -236,7 +301,8 @@ export default function QaReportFormPage() {
         report_type: 'qa',
         reason: reason.trim(),
         status,
-        order_number: orderNumber.trim(),
+        // 填 MOT 且查得到時存導出的 SO 單號（訂單詳情／缺失單列印均以 SO 對接）
+        order_number: (moLookup?.so || orderNumber).trim(),
         created_at: createdDate ? `${createdDate}T00:00:00.000Z` : new Date().toISOString(),
         qa_department: reporterDepartment.trim() || null,
         qa_reporter: reporter.trim() || null,
@@ -308,12 +374,27 @@ export default function QaReportFormPage() {
           </div>
 
           <div>
-            <label className="text-xs text-slate-400">相關單號</label>
+            <label className="text-xs text-slate-400">相關單號（建議填 MOT 製令單號，自動帶出訂單資訊）</label>
             <input
               value={orderNumber}
               onChange={(e) => setOrderNumber(e.target.value)}
+              placeholder="例：MOT26071400701，也可填其他單號"
               className="mt-1 w-full bg-slate-950 border border-slate-700 rounded px-3 py-2 text-white"
             />
+            {moLookupState === 'loading' && (
+              <p className="mt-1 text-xs text-slate-400">查詢製令中…</p>
+            )}
+            {moLookup && (
+              <p className="mt-1 text-xs text-emerald-400">
+                已帶出 SO 單號：{moLookup.so}
+                {moLookup.itemCode ? `｜品項：${moLookup.itemCode}` : ''}
+                {moLookup.itemName ? `｜${moLookup.itemName}` : ''}
+                （存檔將使用此 SO 單號）
+              </p>
+            )}
+            {moLookupState === 'notfound' && (
+              <p className="mt-1 text-xs text-amber-400">查無此製令單號，將以輸入值存檔</p>
+            )}
           </div>
 
           <div>
@@ -347,6 +428,15 @@ export default function QaReportFormPage() {
               placeholder="缺失導致損失數量"
               className="mt-1 w-full bg-slate-950 border border-slate-700 rounded px-3 py-2 text-white placeholder:text-slate-500"
             />
+          </div>
+
+          <div>
+            <label className="text-xs text-slate-400">本單數量（自動帶出）</label>
+            <div className="mt-1 w-full bg-slate-950/60 border border-slate-700 rounded px-3 py-2 text-white" style={{ height: '42px', display: 'flex', alignItems: 'center' }}>
+              {moLookup?.orderQty != null
+                ? <span className="font-bold text-cyan-300">{moLookup.orderQty}</span>
+                : <span className="text-slate-500 text-sm">填入 MOT 製令單號後自動顯示</span>}
+            </div>
           </div>
 
           <div className="md:col-span-2 flex gap-4">
