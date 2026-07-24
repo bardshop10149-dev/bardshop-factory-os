@@ -487,8 +487,9 @@ function PoCard({
                 )}
               </tbody>
             </table>
-          </div>
+          </>
         ) : null}
+      </div>
 
       {/* ── 作業確認 ── */}
       <div className="mo-card-footer" style={{ marginTop: 'auto' }}>
