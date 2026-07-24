@@ -1,0 +1,252 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>品保專區 缺失單處理 — 操作說明書</title>
+<style>
+  :root{
+    --indigo:#0d9488; --cyan:#0891b2; --ink:#1f2937; --muted:#6b7280;
+    --line:#e5e7eb; --page:#eef2f7; --card:#ffffff;
+    --tip:#0f766e; --tip-bg:#ecfdf5; --tip-line:#5eead4;
+    --note:#b45309; --note-bg:#fffbeb; --note-line:#fcd34d;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; background:var(--page); color:var(--ink);
+    font-family:"Microsoft JhengHei","PingFang TC","Noto Sans TC",-apple-system,"Segoe UI",sans-serif;
+    line-height:1.75; font-size:16px;
+  }
+  .wrap{max-width:880px; margin:32px auto; padding:0 16px}
+  .card{background:var(--card); border:1px solid var(--line); border-radius:16px; overflow:hidden;
+        box-shadow:0 1px 3px rgba(0,0,0,.06)}
+  /* Header */
+  header{background:linear-gradient(135deg,var(--indigo),var(--cyan)); color:#fff; padding:28px 32px}
+  header h1{margin:0 0 6px; font-size:26px; letter-spacing:.5px}
+  header .sub{opacity:.92; font-size:15px}
+  .meta{display:flex; flex-wrap:wrap; gap:8px 18px; margin-top:16px; font-size:14px}
+  .meta span{background:rgba(255,255,255,.16); padding:4px 12px; border-radius:999px; white-space:nowrap}
+  /* Body */
+  .body{padding:8px 32px 32px}
+  h2{font-size:20px; margin:34px 0 12px; padding-left:12px; border-left:5px solid var(--indigo)}
+  h2 .num{color:var(--indigo); font-weight:800; margin-right:6px}
+  h3{font-size:17px; margin:22px 0 8px; color:#0f766e}
+  p{margin:10px 0}
+  ul{margin:10px 0; padding-left:22px}
+  li{margin:6px 0}
+  code{background:#f3f4f6; border:1px solid var(--line); border-radius:6px; padding:1px 7px;
+       font-family:"Consolas","Courier New",monospace; font-size:.92em}
+  /* Flow steps */
+  .flow{list-style:none; margin:18px 0; padding:0}
+  .flow li{position:relative; padding:0 0 18px 52px; margin:0}
+  .flow li:not(:last-child)::before{content:""; position:absolute; left:17px; top:34px; bottom:-2px;
+       width:2px; background:var(--line)}
+  .flow .n{position:absolute; left:0; top:0; width:36px; height:36px; border-radius:50%;
+       background:var(--indigo); color:#fff; font-weight:700; display:flex; align-items:center; justify-content:center}
+  .flow b{display:block; font-size:16.5px}
+  .flow small{color:var(--muted); font-size:14px}
+  /* Tables */
+  table{width:100%; border-collapse:collapse; margin:14px 0; font-size:15px}
+  th,td{border:1px solid var(--line); padding:9px 12px; text-align:left; vertical-align:top}
+  thead th{background:#f1f5f9; font-weight:700}
+  tbody tr:nth-child(even){background:#fafbfc}
+  .hl{color:var(--indigo); font-weight:700}
+  /* Callouts */
+  .callout{border-radius:12px; padding:14px 16px; margin:16px 0; border:1px solid; font-size:15px}
+  .callout b{display:inline-block; margin-right:4px}
+  .tip{background:var(--tip-bg); border-color:var(--tip-line); color:var(--tip)}
+  .note{background:var(--note-bg); border-color:var(--note-line); color:var(--note)}
+  /* FAQ */
+  .faq{margin:14px 0}
+  .faq .q{font-weight:700; margin:16px 0 4px; color:var(--ink)}
+  .faq .q::before{content:"Q"; display:inline-block; width:22px; height:22px; line-height:22px;
+       text-align:center; background:var(--cyan); color:#fff; border-radius:6px; font-size:13px; margin-right:8px}
+  .faq .a{margin:0 0 6px 30px; color:#374151}
+  /* Footer */
+  footer{padding:18px 32px; border-top:1px solid var(--line); color:var(--muted); font-size:13px;
+       display:flex; justify-content:space-between; flex-wrap:wrap; gap:8px}
+  @media (max-width:560px){
+    header,.body,footer{padding-left:20px; padding-right:20px}
+    body{font-size:15px}
+  }
+  @media print{
+    body{background:#fff}
+    .wrap{margin:0; max-width:none}
+    .card{border:none; box-shadow:none; border-radius:0}
+    header{-webkit-print-color-adjust:exact; print-color-adjust:exact}
+    h2{break-after:avoid}
+    table,.callout,.flow li{break-inside:avoid}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+<div class="card">
+
+  <header>
+    <h1>品保專區 缺失單處理 — 操作說明書</h1>
+    <div class="sub">回報異常 → 填處理內容 → 設定缺失處置 → 一鍵印出「品質異常處理單」Excel。</div>
+    <div class="meta">
+      <span>👤 對象：品保、生產、美編等相關同仁</span>
+      <span>📍 位置：首頁 → 異常單回報 ／ 品保專區</span>
+      <span>🗓️ 版本：2026/07/24</span>
+    </div>
+  </header>
+
+  <div class="body">
+
+    <h2><span class="num">一、</span>整體流程（先看這個）</h2>
+    <ul class="flow">
+      <li><span class="n">1</span><b>發現異常 → 填「異常回報單」</b><small>首頁「異常單回報」→ 建立異常單。填 MOT 製令單號，訂單資料自動帶出。</small></li>
+      <li><span class="n">2</span><b>責任單位填「異常單處理」</b><small>首頁「異常單回報」→ 異常單處理。填處理紀錄與即時處理方式。</small></li>
+      <li><span class="n">3</span><b>品保在「異常紀錄表」補齊資料</b><small>指定缺失人員、填原因分析／預防及修正方式、異常數量。</small></li>
+      <li><span class="n">4</span><b>到「異常人員缺失單處理作業」設定缺失處置</b><small>選口頭矯正／口頭警告／小過／大過。</small></li>
+      <li><span class="n">5</span><b>勾選要印的事件 → 按列印</b><small>下載 Excel，一位缺失人員一張單，開啟後直接列印簽核。</small></li>
+    </ul>
+
+    <h2><span class="num">二、</span>填異常回報單（新版重點）</h2>
+    <p>位置：首頁 <span class="hl">異常單回報</span> → <b>建立異常單</b>。</p>
+
+    <h3>相關單號建議填「MOT 製令單號」</h3>
+    <ul>
+      <li>在「相關單號」欄輸入 <code>MOT26071400701</code> 這類製令單號，停一下系統會自動查詢。</li>
+      <li>查到後會出現<b>綠色提示</b>，並自動帶出：<b>訂單編號（SO）、品項編碼、產品名稱</b> —— 這三項<b>都不用自己填</b>。</li>
+      <li>右邊「<span class="hl">本單數量</span>」會顯示該製令的數量，方便對照填「異常數量」。</li>
+      <li>沒打行號也可以（例：<code>MOT260714007</code>），系統會帶第一行。</li>
+    </ul>
+    <div class="callout tip"><b>也可以填別的單號：</b>填 SO、RO 或其他單號一樣可以送出，只是不會自動帶資料。出現黃字「查無此製令單號」時，代表系統查不到，會照你輸入的內容存檔，<b>不會擋住你送出</b>。</div>
+
+    <h3>異常數量怎麼填</h3>
+    <ul>
+      <li>「異常數量」＝<b>這次缺失造成的不良／損失數量</b>。</li>
+      <li>填了以後，缺失單列印時會自動帶成「不良數」，並用<b>異常數量 ÷ 訂單量</b>自動算出「不良率」。</li>
+      <li>不確定就先留空，之後可在「異常紀錄表」編輯時補填。</li>
+    </ul>
+
+    <h2><span class="num">三、</span>異常紀錄表（查詢與補資料）</h2>
+    <p>位置：<span class="hl">品保專區 → 異常紀錄表</span>。</p>
+
+    <h3>日期區間查詢（新功能）</h3>
+    <ul>
+      <li>篩選區有<b>起始日期／結束日期</b>兩個欄位，點一下會跳出小日曆。</li>
+      <li>下面五顆快選鈕：<b>本月／上個月／近三個月／近半年／近一年</b>，點了自動填好日期。</li>
+      <li>可搭配部門、回報人、缺失人員、分類、單號一起篩選；按「清除篩選」全部復原。</li>
+    </ul>
+
+    <h3>編輯視窗新增的欄位</h3>
+    <p>點任一筆右邊的「編輯」，視窗下半部新增四個欄位，<b>這些是缺失單列印要用的</b>：</p>
+    <table>
+      <thead><tr><th>欄位</th><th>填什麼</th><th>印在缺失單哪裡</th></tr></thead>
+      <tbody>
+        <tr><td><span class="hl">異常數量</span></td><td>缺失造成的不良／損失數量</td><td>不良數、異常數量（不良率自動算）</td></tr>
+        <tr><td><span class="hl">異常原因分析</span></td><td>為什麼會發生（責任單位分析）</td><td>（2）責任單位填寫 第一段</td></tr>
+        <tr><td><span class="hl">即時處理方式</span></td><td>當下怎麼處理的</td><td>（2）責任單位填寫 第二段</td></tr>
+        <tr><td><span class="hl">預防及修正方式</span></td><td>以後怎麼避免再發生</td><td>（2）責任單位填寫 第三段</td></tr>
+      </tbody>
+    </table>
+    <div class="callout note"><b>不填會怎樣：</b>缺失單一樣印得出來，只是這幾格會<b>空白</b>，要用手寫補。建議先在系統填好再印。</div>
+
+    <h2><span class="num">四、</span>異常人員缺失單處理作業</h2>
+    <p>位置：<span class="hl">品保專區 → 異常人員缺失單處理作業</span>（原名「異常人員統計」）。</p>
+
+    <h3>查詢與篩選</h3>
+    <ul>
+      <li>先選<b>起始／結束日期</b>，按「<b>開始查詢</b>」。</li>
+      <li>明細表上方可用 <b>部門 → 人員</b> 兩層篩選：先選部門，人員清單只會出現該部門的人。</li>
+    </ul>
+
+    <h3>設定缺失處置</h3>
+    <ul>
+      <li><b>單筆改：</b>「缺失處置」欄的下拉選單直接改，選了就自動存檔。</li>
+      <li><b>批量改：</b>勾選多筆 → 上方出現「批量修改缺失處置」→ 選處置 → 按<b>套用</b>，會套用到所勾選每一筆的<b>全部缺失人員</b>。</li>
+    </ul>
+    <div class="callout note"><b>批量修改請小心：</b>會一次覆蓋所選紀錄中<b>每一位</b>缺失人員的處置，套用前會跳出確認視窗，請看清楚筆數再按確定。</div>
+
+    <h3>看訂單明細</h3>
+    <p>點「相關單號」欄的單號，會跳出<b>訂單詳情視窗</b>（品名、數量、交期等），<b>不會離開目前畫面</b>，看完關掉即可。</p>
+
+    <h3>列印缺失單</h3>
+    <ul>
+      <li><b>印一筆：</b>該列<b>最右邊</b>的「列印」鈕（表格左右滑動時，這顆鈕會固定在右側不會跑掉）。</li>
+      <li><b>印多筆：</b>勾選多筆（表頭勾選框可全選）→ 上方「<b>批量列印</b>」。</li>
+      <li>按下後直接<b>下載 Excel 檔</b>，檔名例如 <code>缺失單_美編-怡妏_20260722.xlsx</code>（含人名與日期）。</li>
+    </ul>
+
+    <h2><span class="num">五、</span>缺失單 Excel 怎麼看、怎麼印</h2>
+    <ul>
+      <li><b>一位缺失人員一張單</b>：一筆異常若有 2 位缺失人員，就會產生 <b>2 個工作表</b>（Excel 下方分頁）。</li>
+      <li>批量列印時，所有單子都在<b>同一個 Excel 檔</b>裡，一個分頁一張。</li>
+      <li>每張都已排好 <b>A4 直式</b>，開啟後直接 Ctrl+P 列印即可。</li>
+    </ul>
+
+    <h3>哪些會自動帶入</h3>
+    <table>
+      <thead><tr><th>單上欄位</th><th>來源</th></tr></thead>
+      <tbody>
+        <tr><td>編號、日期</td><td>系統單號＋回報日期（民國年）</td></tr>
+        <tr><td>廠商／客戶名稱、訂單量</td><td>ERP 訂單資料自動帶入</td></tr>
+        <tr><td>客戶訂單單號</td><td>訂單編號（SO 單號）</td></tr>
+        <tr><td>不良數、異常數量、<b>不良率</b></td><td>異常數量欄；不良率＝異常數量 ÷ 訂單量<b>自動計算</b></td></tr>
+        <tr><td>異常狀況說明、經辦</td><td>異常原因（手填）、回報人員</td></tr>
+        <tr><td>（2）責任單位填寫三段</td><td>異常原因分析／即時處理方式／預防及修正方式</td></tr>
+        <tr><td>部門、缺失人員</td><td>該人員與其所屬部門</td></tr>
+        <tr><td>（3）處置方式</td><td>依缺失處置<b>自動打勾</b></td></tr>
+      </tbody>
+    </table>
+
+    <h3>需要手寫補的欄位</h3>
+    <ul>
+      <li><b>製造單號</b>（客戶訂單單號右邊那格）</li>
+      <li><b>不良發生點</b>的勾選（進料檢驗／半成品檢驗／成品檢驗／製圖失誤／其它）</li>
+      <li>（2）各段的<b>責任人員以外</b>的簽名：人員、部門主管</li>
+      <li>（4）品保判定責任歸屬、經辦人員</li>
+      <li>（5）結案：責任單位、損失成本、其他，以及<b>總經理／品保部／部門主管</b>三個簽名欄</li>
+    </ul>
+
+    <h3>處置方式怎麼自動打勾</h3>
+    <table>
+      <thead><tr><th>系統的「缺失處置」</th><th>單上勾選</th></tr></thead>
+      <tbody>
+        <tr><td>口頭警告</td><td>☑ 口頭申誡</td></tr>
+        <tr><td>小過</td><td>☑ 小過</td></tr>
+        <tr><td>大過</td><td>☑ 大過</td></tr>
+        <tr><td>口頭矯正（或其他自訂值）</td><td>☑ 其他：後面寫上該處置名稱</td></tr>
+        <tr><td>（未設定）</td><td>全部空白，請手勾</td></tr>
+      </tbody>
+    </table>
+
+    <h2><span class="num">六、</span>常見問題</h2>
+    <div class="faq">
+      <div class="q">填了 MOT 單號但沒有自動帶出資料？</div>
+      <div class="a">① 確認單號沒打錯（MOT 開頭）；② 剛開的製令可能還沒同步進系統（每小時同步一次），可稍後再試或改填 SO 單號；③ 出現黃字提示時仍可正常送出，之後由品保在異常紀錄表補上品項資料。</div>
+
+      <div class="q">缺失單印出來有些格子是空的？</div>
+      <div class="a">系統只帶「已經填過的資料」。異常原因分析、即時處理方式、預防及修正方式要先在異常紀錄表編輯時填寫；沒填就會留白給你手寫。</div>
+
+      <div class="q">不良率沒有顯示？</div>
+      <div class="a">不良率＝異常數量 ÷ 訂單量。若「異常數量」沒填，或該單號在 ERP 查不到訂單量（例如手動輸入的非 ERP 單號），就會留白。</div>
+
+      <div class="q">一筆異常有兩位缺失人員，會印成幾張？</div>
+      <div class="a">兩張（Excel 兩個分頁），因為懲處是對個人的，一人一張才好簽核。</div>
+
+      <div class="q">處置選單裡沒有「警告」這個選項？</div>
+      <div class="a">目前下拉選項是口頭矯正／口頭警告／小過／大過。若要新增「警告」，可到品保專區 →「下拉選項管理」自行新增，列印時會自動勾對應的框。</div>
+
+      <div class="q">編輯視窗太長，按不到儲存鈕？</div>
+      <div class="a">新版已修正：視窗有高度上限，內容多時<b>在視窗內捲動</b>即可，儲存鈕一定按得到；視窗開啟時背景不會亂動。</div>
+
+      <div class="q">批量修改缺失處置改錯了怎麼辦？</div>
+      <div class="a">重新勾選那幾筆，再批量改成正確的處置即可；或在明細表用單筆下拉逐筆改回。</div>
+    </div>
+
+  </div>
+
+  <footer>
+    <span>品保專區 · 缺失單處理 操作說明</span>
+    <span>有系統問題請聯絡系統管理員</span>
+  </footer>
+
+</div>
+</div>
+</body>
+</html>
