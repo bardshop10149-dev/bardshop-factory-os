@@ -594,17 +594,30 @@ export default function DailyOrderSheetPage() {
           if (parsedRows.length > 0) {
             // 使用複合鍵避免同 row_key 但不同序號的列互相覆蓋
             const enrichedMap = new Map<string, SheetRow>()
+            // 次要索引：不含 factory 欄位，供廠區手動轉換後的列回退查找
+            const enrichedMapNoFactory = new Map<string, SheetRow>()
+            const rowKeyNoFactory = (r: SheetRow) =>
+              [r.order_number, r.doc_type, r.item_code, r.item_name, r.note, r.quantity, r.delivery_date].join('||')
             for (const r of storedRows) {
               if (r.match_line_no != null && r.match_line_no !== '') {
                 enrichedMap.set(`${r.row_key}||seq:${r.match_line_no}`, r)
               }
               if (!enrichedMap.has(r.row_key)) enrichedMap.set(r.row_key, r)
+              // 有廠區轉換記錄的列加入次要索引（factory_changed）
+              if (r.factory_changed) {
+                const nfKey = rowKeyNoFactory(r)
+                if (!enrichedMapNoFactory.has(nfKey)) enrichedMapNoFactory.set(nfKey, r)
+              }
             }
             finalRows = parsedRows.map(r => {
               const key = createRowKey(r)
               // 原始資料有序號時優先用複合鍵查找正確的已存列
               const seqLookupKey = r.line_no_input ? `${key}||seq:${r.line_no_input}` : null
-              const stored = (seqLookupKey ? enrichedMap.get(seqLookupKey) : null) ?? enrichedMap.get(key)
+              // factory_changed 回退：若主鍵查無，嘗試不含 factory 的次要索引
+              const parsedNfKey = [r.order_number, r.doc_type, r.item_code, r.item_name, r.note, r.quantity, r.delivery_date].join('||')
+              const stored = (seqLookupKey ? enrichedMap.get(seqLookupKey) : null)
+                ?? enrichedMap.get(key)
+                ?? enrichedMapNoFactory.get(parsedNfKey)
               // 原始資料已有序號時直接套用，不讓 DB 存值覆蓋
               const base: SheetRow = {
                 ...r,
@@ -615,6 +628,12 @@ export default function DailyOrderSheetPage() {
                   : {}),
               }
               if (stored) {
+                // 若是廠區轉換列，用 DB 的 factory / factory_changed / row_key 覆蓋解析值
+                if (stored.factory_changed) {
+                  base.factory       = stored.factory
+                  base.factory_changed = true
+                  base.row_key       = stored.row_key  // 已含新廠別的鍵
+                }
                 if (stored.mo_number       !== undefined) base.mo_number       = stored.mo_number
                 if (stored.po_number       !== undefined) base.po_number       = stored.po_number
                 if (stored.po_sub_no       !== undefined) base.po_sub_no       = stored.po_sub_no
