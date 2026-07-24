@@ -74,7 +74,7 @@ export default function QaReportFormPage() {
   const [notifyPreview, setNotifyPreview] = useState<string | null>(null)
   const [copied, setCopied] = useState(false)
   // MOT 製令自動帶出：查 erp_mo_lines 導出 SO 單號與品項，再查 erp_so_lines 帶品名
-  const [moLookup, setMoLookup] = useState<{ mot: string; so: string; itemCode: string; itemName: string } | null>(null)
+  const [moLookup, setMoLookup] = useState<{ mot: string; so: string; itemCode: string; itemName: string; orderQty: number | null } | null>(null)
   const [moLookupState, setMoLookupState] = useState<'idle' | 'loading' | 'notfound'>('idle')
   // QA 部門欄位：以 reporterDepartment 為主
   // handlers 欄位補上，預設為單一人員
@@ -210,15 +210,15 @@ export default function QaReportFormPage() {
       try {
         const exact = await supabase
           .from('erp_mo_lines')
-          .select('project_id, source_order, mbp_part')
+          .select('project_id, source_order, mbp_part, order_qty')
           .eq('project_id', raw)
           .limit(1)
-        let row = (exact.data || [])[0] as { project_id: string; source_order: string | null; mbp_part: string | null } | undefined
+        let row = (exact.data || [])[0] as { project_id: string; source_order: string | null; mbp_part: string | null; order_qty: number | null } | undefined
         if (!row) {
           // 未含行號時以前綴查第一行（例：MOT260714007 → MOT26071400701）
           const prefix = await supabase
             .from('erp_mo_lines')
-            .select('project_id, source_order, mbp_part')
+            .select('project_id, source_order, mbp_part, order_qty')
             .like('project_id', `${raw}%`)
             .order('project_id')
             .limit(1)
@@ -241,7 +241,7 @@ export default function QaReportFormPage() {
           if (cancelled) return
           name = (soRows?.[0] as { description: string | null } | undefined)?.description || ''
         }
-        setMoLookup({ mot: raw, so: row.source_order, itemCode: row.mbp_part || '', itemName: name })
+        setMoLookup({ mot: raw, so: row.source_order, itemCode: row.mbp_part || '', itemName: name, orderQty: row.order_qty ?? null })
         setMoLookupState('idle')
         if (row.mbp_part) setItemCode(row.mbp_part)
         if (name) setItemName(name)
@@ -428,6 +428,15 @@ export default function QaReportFormPage() {
               placeholder="缺失導致損失數量"
               className="mt-1 w-full bg-slate-950 border border-slate-700 rounded px-3 py-2 text-white placeholder:text-slate-500"
             />
+          </div>
+
+          <div>
+            <label className="text-xs text-slate-400">本單數量（自動帶出）</label>
+            <div className="mt-1 w-full bg-slate-950/60 border border-slate-700 rounded px-3 py-2 text-white" style={{ height: '42px', display: 'flex', alignItems: 'center' }}>
+              {moLookup?.orderQty != null
+                ? <span className="font-bold text-cyan-300">{moLookup.orderQty}</span>
+                : <span className="text-slate-500 text-sm">填入 MOT 製令單號後自動顯示</span>}
+            </div>
           </div>
 
           <div className="md:col-span-2 flex gap-4">
