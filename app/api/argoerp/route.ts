@@ -979,10 +979,35 @@ export async function POST(request: NextRequest) {
           action: 'sync_so',
           docNoCol: 'project_id',
           subNoCol: 'line_no',
+          returnUpdates: true,
         })
       } catch (err) {
         const message = err instanceof Error ? formatSupabaseAdminError(err.message) : '寫入 erp_so_lines 失敗'
         return NextResponse.json({ status: 'error', error: message }, { status: 500 })
+      }
+
+      // ── 寫入改單通知（僅記錄業務關鍵欄位的變動，不阻斷主流程）──
+      const SO_NOTICE_FIELDS = new Set(['mbp_part', 'duedate', 'order_qty_oru', 'description', 'hold_status', 'partner_name', 'packing', 'sales_name'])
+      if (soRecon.updates && soRecon.updates.length > 0) {
+        const notices = soRecon.updates
+          .map(({ before, after, changed }) => {
+            const importantChanged = changed.filter(f => SO_NOTICE_FIELDS.has(f))
+            if (!importantChanged.length) return null
+            return {
+              project_id:     String(before.project_id ?? after.project_id ?? ''),
+              line_no:        String(before.line_no ?? after.line_no ?? ''),
+              changed_fields: importantChanged,
+              old_values:     Object.fromEntries(importantChanged.map(f => [f, before[f] ?? null])),
+              new_values:     Object.fromEntries(importantChanged.map(f => [f, after[f] ?? null])),
+            }
+          })
+          .filter((n): n is NonNullable<typeof n> => n !== null)
+        if (notices.length > 0) {
+          await getSupabaseAdminClient()
+            .from('so_change_notices')
+            .insert(notices)
+            .then(() => {}, () => { /* 表尚未建立時不阻斷同步 */ })
+        }
       }
 
       return NextResponse.json({
@@ -994,6 +1019,7 @@ export async function POST(request: NextRequest) {
         updated: soRecon.updated,
         deleted: soRecon.deleted,
         unchanged: soRecon.unchanged,
+        changeNotices: soRecon.updates?.filter(u => u.changed.some(f => SO_NOTICE_FIELDS.has(f))).length ?? 0,
       })
     }
 

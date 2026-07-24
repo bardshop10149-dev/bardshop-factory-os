@@ -47,6 +47,8 @@ export interface ReconcileOptions {
   subNoCol?: string
   /** 刪除比例門檻（0~1，預設 0.3）：要刪列數 > 現有列數×門檻 且 >50 列時跳過刪除 */
   maxDeleteRatio?: number
+  /** 為 true 時，在結果中回傳完整的更新記錄（before/after/changed），供呼叫端寫改單通知等用途 */
+  returnUpdates?: boolean
 }
 
 export interface ReconcileResult {
@@ -58,6 +60,8 @@ export interface ReconcileResult {
   duplicates: number
   /** 觸發刪除護欄而被跳過的刪除列數（0=未觸發） */
   deletesSkipped: number
+  /** 當 returnUpdates=true 時回傳；每筆更新的前後值及變動欄位清單 */
+  updates?: Array<{ before: Row; after: Row; changed: string[] }>
 }
 
 const UPSERT_BATCH = 500
@@ -194,6 +198,7 @@ async function runReconcile(
     unchanged,
     duplicates,
     deletesSkipped,
+    ...(opts.returnUpdates ? { updates } : {}),
   }
 
   // 6) Log（永不阻斷主流程）
