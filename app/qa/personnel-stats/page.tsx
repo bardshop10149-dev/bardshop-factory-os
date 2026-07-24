@@ -6,7 +6,13 @@ import { NavButton } from '../../../components/NavButton'
 import * as XLSX from 'xlsx'
 import { supabase } from '../../../lib/supabaseClient'
 import SoOrderModal from '../../../components/SoOrderModal'
-import { printDeficiencySheets } from '../../../lib/qa/deficiencyPrint'
+import {
+  resolveDeficiencySheets,
+  downloadDeficiencyWorkbook,
+  buildDeficiencyFileName,
+  type DeficiencySheetData,
+} from '../../../lib/qa/deficiencyPrint'
+import DeficiencyPreviewModal from './_deficiency-preview'
 
 interface AnomalyRow {
   id: number
@@ -57,6 +63,10 @@ export default function PersonnelStatsPage() {
     '重工', '報廢', '讓步接收', '退貨', '隔離', '待判定',
   ])
   const [savingId, setSavingId] = useState<string | null>(null)
+  const [lossDraft, setLossDraft] = useState<Record<number, string>>({})
+  const [savingLossId, setSavingLossId] = useState<number | null>(null)
+  const [previewSheets, setPreviewSheets] = useState<DeficiencySheetData[] | null>(null)
+  const [downloading, setDownloading] = useState(false)
   const [personFilter, setPersonFilter] = useState('')
   const [deptFilter, setDeptFilter] = useState('')
   const [personnelOptions, setPersonnelOptions] = useState<{ option_value: string; department_value: string }[]>([])
@@ -104,6 +114,32 @@ export default function PersonnelStatsPage() {
       setLoading(false)
     }
   }, [startDate, endDate])
+
+  // 缺失數量：離開欄位時才寫入（空值存 null）
+  const handleLossQtyChange = async (rowId: number, raw: string) => {
+    const trimmed = raw.trim()
+    const next = trimmed === '' ? null : Number(trimmed)
+    if (next != null && !Number.isFinite(next)) return
+    const current = rows.find((r) => r.id === rowId)?.loss_qty ?? null
+    if (next === current) {
+      setLossDraft((prev) => { const copy = { ...prev }; delete copy[rowId]; return copy })
+      return
+    }
+    setSavingLossId(rowId)
+    try {
+      const { error } = await supabase
+        .from('schedule_anomaly_reports')
+        .update({ loss_qty: next })
+        .eq('id', rowId)
+      if (error) throw error
+      setRows((prev) => prev.map((r) => (r.id === rowId ? { ...r, loss_qty: next } : r)))
+      setLossDraft((prev) => { const copy = { ...prev }; delete copy[rowId]; return copy })
+    } catch (err: unknown) {
+      alert(`缺失數量儲存失敗：${err instanceof Error ? err.message : '未知錯誤'}`)
+    } finally {
+      setSavingLossId(null)
+    }
+  }
 
   const handleDispositionChange = async (rowId: number, person: string, newDisposition: string) => {
     const savingKey = `${rowId}-${person}`
@@ -271,15 +307,31 @@ export default function PersonnelStatsPage() {
     }
   }
 
-  const handlePrint = async (records: AnomalyRow[]) => {
+  // 下載前先開預覽視窗；確認無誤才產生 Excel
+  const handlePreview = async (records: AnomalyRow[]) => {
     if (records.length === 0) return
     setPrinting(true)
     try {
-      await printDeficiencySheets(records, personnelDeptMap)
+      const sheets = await resolveDeficiencySheets(records, personnelDeptMap)
+      if (sheets.length === 0) { alert('查無可產生的缺失單'); return }
+      setPreviewSheets(sheets)
     } catch (err: unknown) {
-      alert(`列印失敗：${err instanceof Error ? err.message : '未知錯誤'}`)
+      alert(`預覽失敗：${err instanceof Error ? err.message : '未知錯誤'}`)
     } finally {
       setPrinting(false)
+    }
+  }
+
+  const handleConfirmDownload = () => {
+    if (!previewSheets) return
+    setDownloading(true)
+    try {
+      downloadDeficiencyWorkbook(previewSheets)
+      setPreviewSheets(null)
+    } catch (err: unknown) {
+      alert(`下載失敗：${err instanceof Error ? err.message : '未知錯誤'}`)
+    } finally {
+      setDownloading(false)
     }
   }
 
@@ -388,11 +440,11 @@ export default function PersonnelStatsPage() {
             <div className="px-5 py-3 border-b border-slate-700 bg-slate-950/60 flex flex-wrap items-center gap-3">
               <span className="text-xs text-violet-300 font-bold">已選 {selectedIds.size} 筆</span>
               <button
-                onClick={() => void handlePrint(detailRows.filter((row) => selectedIds.has(row.id)))}
+                onClick={() => void handlePreview(detailRows.filter((row) => selectedIds.has(row.id)))}
                 disabled={printing}
                 className="px-3 py-1.5 rounded bg-cyan-700 hover:bg-cyan-600 text-white text-xs font-bold disabled:bg-slate-700 disabled:text-slate-400"
               >
-                {printing ? '產生中...' : '批量列印'}
+                {printing ? '產生中...' : '批量下載'}
               </button>
               <div className="flex items-center gap-2">
                 <label className="text-xs text-slate-400">批量修改缺失處置</label>
@@ -441,9 +493,10 @@ export default function PersonnelStatsPage() {
                   <th className="px-4 py-3 text-left">品項</th>
                   <th className="px-4 py-3 text-left">異常分類</th>
                   <th className="px-4 py-3 text-left">異常原因</th>
+                  <th className="px-4 py-3 text-left whitespace-nowrap">缺失數量</th>
                   <th className="px-4 py-3 text-left">缺失人員</th>
                   <th className="px-4 py-3 text-left">缺失處置</th>
-                  <th className="px-3 py-3 text-center sticky right-0 bg-slate-950 z-10">列印</th>
+                  <th className="px-3 py-3 text-center sticky right-0 bg-slate-950 z-10">下載</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-800">
@@ -478,8 +531,8 @@ export default function PersonnelStatsPage() {
                       </td>
                       <td className="px-4 py-3">
                         <div className="text-xs space-y-0.5">
-                          <div className="text-slate-400">{row.item_code || '-'}</div>
-                          <div className="text-slate-200">{row.item_name || '-'}</div>
+                          {row.item_code && <div className="text-slate-400">{row.item_code}</div>}
+                          <div className="text-slate-200">{row.item_name || (row.item_code ? '' : '-')}</div>
                         </div>
                       </td>
                       <td className="px-4 py-3">
@@ -487,6 +540,21 @@ export default function PersonnelStatsPage() {
                       </td>
                       <td className="px-4 py-3">
                         <span className="text-xs text-slate-300">{row.reason || '-'}</span>
+                      </td>
+                      <td className="px-4 py-3">
+                        <input
+                          type="number"
+                          min="0"
+                          step="any"
+                          value={lossDraft[row.id] ?? (row.loss_qty != null ? String(row.loss_qty) : '')}
+                          disabled={savingLossId === row.id}
+                          onChange={(e) => setLossDraft((prev) => ({ ...prev, [row.id]: e.target.value }))}
+                          onBlur={(e) => void handleLossQtyChange(row.id, e.target.value)}
+                          placeholder="—"
+                          className={`w-20 bg-slate-950 border rounded px-2 py-0.5 text-xs transition-colors ${
+                            row.loss_qty != null ? 'border-cyan-700 text-cyan-200' : 'border-slate-700 text-slate-400'
+                          } ${savingLossId === row.id ? 'opacity-50' : ''}`}
+                        />
                       </td>
                       <td className="px-4 py-3">
                         <div className="flex flex-wrap gap-1">
@@ -526,12 +594,12 @@ export default function PersonnelStatsPage() {
                       </td>
                       <td className="px-3 py-3 text-center sticky right-0 bg-slate-900 z-10">
                         <button
-                          onClick={() => void handlePrint([row])}
+                          onClick={() => void handlePreview([row])}
                           disabled={printing}
                           className="px-2.5 py-1 rounded border border-cyan-700 text-cyan-300 hover:bg-cyan-900/30 text-xs whitespace-nowrap disabled:opacity-50"
-                          title="下載此筆缺失單（一人一張）"
+                          title="預覽後下載此筆缺失單（一人一張）"
                         >
-                          列印
+                          下載
                         </button>
                       </td>
                     </tr>
@@ -708,6 +776,16 @@ export default function PersonnelStatsPage() {
       )}
 
       {soModalId && <SoOrderModal projectId={soModalId} onClose={() => setSoModalId(null)} />}
+
+      {previewSheets && (
+        <DeficiencyPreviewModal
+          sheets={previewSheets}
+          fileName={buildDeficiencyFileName(previewSheets)}
+          downloading={downloading}
+          onDownload={handleConfirmDownload}
+          onClose={() => setPreviewSheets(null)}
+        />
+      )}
     </div>
   )
 }

@@ -107,72 +107,81 @@ const setCell = (ws: XLSX.WorkSheet, r: number, c: number, v: string, s: CellSty
 
 const M = (r1: number, c1: number, r2: number, c2: number) => ({ s: { r: r1, c: c1 }, e: { r: r2, c: c2 } })
 
-const buildSheet = (
-  record: DeficiencyPrintRecord,
-  person: string,
-  dept: string,
-  partnerName: string,
-  orderQty: number | null,
-  serial: string,
-): XLSX.WorkSheet => {
+/** 一張缺失單（一筆紀錄 × 一位缺失人員）的完整內容；預覽與 Excel 共用同一份資料。 */
+export interface DeficiencySheetData {
+  sheetName: string
+  serial: string
+  dateText: string
+  createdDay: string
+  partnerName: string
+  orderNumber: string
+  orderQtyText: string
+  lossText: string
+  rateText: string
+  itemText: string
+  reason: string
+  reporter: string
+  causeAnalysis: string
+  immediateAction: string
+  correctiveAction: string
+  handlers: string
+  person: string
+  dept: string
+  dispositionLine: string
+}
+
+const buildSheet = (d: DeficiencySheetData): XLSX.WorkSheet => {
   const ws: XLSX.WorkSheet = {}
-  const lossQty = record.loss_qty
-  const lossText = lossQty != null ? String(lossQty) : ''
-  const rateText = lossQty != null && orderQty != null && orderQty > 0
-    ? `${((lossQty / orderQty) * 100).toFixed(1)}%`
-    : ''
-  const handlers = normalizeArray(record.qa_handlers).join('、')
-  const dispValue = parseDisp(record.qa_disposition)[person] || ''
 
   // R1 標題
   setCell(ws, 0, 0, '品質異常處理單', styles.title)
   // R2 編號 / 日期
-  setCell(ws, 1, 0, `編號：${serial}`, styles.meta)
-  setCell(ws, 1, 5, `日期：${rocDate(record.created_at)}`, styles.metaRight)
+  setCell(ws, 1, 0, `編號：${d.serial}`, styles.meta)
+  setCell(ws, 1, 5, `日期：${d.dateText}`, styles.metaRight)
   // R3-R6 左：不良發生點（直向合併；其它移末行、原位置改製圖失誤）
   setCell(ws, 2, 0, '不良發生點 Occurred Point：\n□進料檢驗　□半成品檢驗\n□成品檢驗　□製圖失誤\n□其它：', styles.block)
   // R3-R6 右：訂單詳情（右區 8 欄，四格各 2 欄等寬；採購單號列已移除）
   setCell(ws, 2, 3, '廠商/客戶名稱', styles.label)
-  setCell(ws, 2, 5, partnerName, styles.value)
+  setCell(ws, 2, 5, d.partnerName, styles.value)
   setCell(ws, 3, 3, '客戶訂單單號', styles.label)
-  setCell(ws, 3, 5, record.order_number || '', styles.value)
+  setCell(ws, 3, 5, d.orderNumber, styles.value)
   setCell(ws, 3, 7, '製造單號', styles.label)
   setCell(ws, 3, 9, '', styles.value)
   setCell(ws, 4, 3, '訂單量', styles.label)
-  setCell(ws, 4, 5, orderQty != null ? String(orderQty) : '', styles.value)
+  setCell(ws, 4, 5, d.orderQtyText, styles.value)
   setCell(ws, 4, 7, '不良數', styles.label)
-  setCell(ws, 4, 9, lossText, styles.value)
+  setCell(ws, 4, 9, d.lossText, styles.value)
   setCell(ws, 5, 3, '不良率', styles.label)
-  setCell(ws, 5, 5, rateText, styles.value)
+  setCell(ws, 5, 5, d.rateText, styles.value)
   setCell(ws, 5, 7, '異常數量', styles.label)
-  setCell(ws, 5, 9, lossText, styles.value)
+  setCell(ws, 5, 9, d.lossText, styles.value)
   // R7 品名規格
   setCell(ws, 6, 0, '品名規格物料編號', styles.label)
-  setCell(ws, 6, 3, [record.item_code, record.item_name].filter(Boolean).join('　'), styles.value)
+  setCell(ws, 6, 3, d.itemText, styles.value)
   // R8-R10 (1) 發現人填寫：標籤與經辦同列（經辦約 2/3 處起靠左），下方整片填寫區
   setCell(ws, 7, 0, '（1）發現人填寫', styles.band)
   setCell(ws, 8, 0, '異常狀況說明：', styles.meta)
-  setCell(ws, 8, 7, `經辦：${record.qa_reporter || ''}`, styles.meta)
-  setCell(ws, 9, 0, record.reason || '', styles.block)
+  setCell(ws, 8, 7, `經辦：${d.reporter}`, styles.meta)
+  setCell(ws, 9, 0, d.reason, styles.block)
   // R11-R17 (2) 責任單位填寫：標籤與人名同列（人名靠右），下方整片留白填寫區
   setCell(ws, 10, 0, '（2）責任單位填寫', styles.band)
   setCell(ws, 11, 0, '異常原因分析：', styles.meta)
-  setCell(ws, 11, 7, `責任人員：${person}`, styles.meta)
-  setCell(ws, 12, 0, record.cause_analysis || '', styles.block)
+  setCell(ws, 11, 7, `責任人員：${d.person}`, styles.meta)
+  setCell(ws, 12, 0, d.causeAnalysis, styles.block)
   setCell(ws, 13, 0, '即時處理方式：', styles.meta)
-  setCell(ws, 13, 7, `人員：${handlers}`, styles.meta)
-  setCell(ws, 14, 0, record.immediate_action || '', styles.block)
+  setCell(ws, 13, 7, `人員：${d.handlers}`, styles.meta)
+  setCell(ws, 14, 0, d.immediateAction, styles.block)
   setCell(ws, 15, 0, '預防及修正方式：', styles.meta)
   setCell(ws, 15, 7, '部門主管：', styles.meta)
-  setCell(ws, 16, 0, record.corrective_action || '', styles.block)
+  setCell(ws, 16, 0, d.correctiveAction, styles.block)
   // R18 部門 / 缺失人員（自原版上方移到處置方式正上方）
   setCell(ws, 17, 0, '部門', styles.label)
-  setCell(ws, 17, 2, dept, styles.value)
+  setCell(ws, 17, 2, d.dept, styles.value)
   setCell(ws, 17, 5, '缺失人員', styles.label)
-  setCell(ws, 17, 7, person, styles.value)
+  setCell(ws, 17, 7, d.person, styles.value)
   // R19 (3) 處置方式（縮成一排）
   setCell(ws, 18, 0, '（3）處置方式', styles.label)
-  setCell(ws, 18, 2, dispositionLine(dispValue), styles.value)
+  setCell(ws, 18, 2, d.dispositionLine, styles.value)
   // R20-R21 (4) 品保判定：標籤與經辦人員同列，下方留白
   setCell(ws, 19, 0, '（4）品保判定責任歸屬：', styles.meta)
   setCell(ws, 19, 7, '經辦人員：', styles.meta)
@@ -281,37 +290,61 @@ const resolveOrderQty = (info: OrderInfo | undefined, itemCode: string | null): 
   return qtys.reduce((s, q) => s + q, 0)
 }
 
-/** 產生缺失單工作簿並觸發下載：每筆紀錄 × 每位缺失人員一張工作表。 */
-export async function printDeficiencySheets(
+/** 解析出每張缺失單的內容（每筆紀錄 × 每位缺失人員一張），供預覽與下載共用。 */
+export async function resolveDeficiencySheets(
   records: DeficiencyPrintRecord[],
   personnelDeptMap: ReadonlyMap<string, string>,
-): Promise<void> {
-  if (records.length === 0) return
+): Promise<DeficiencySheetData[]> {
+  if (records.length === 0) return []
 
   const orderNumbers = [...new Set(records.map((r) => (r.order_number || '').trim()).filter(Boolean))]
   const orderInfoMap = await fetchOrderInfo(orderNumbers)
 
-  const wb = XLSX.utils.book_new()
+  const sheets: DeficiencySheetData[] = []
   let seq = 0
   for (const record of records) {
     const orderKey = (record.order_number || '').trim()
     const info = orderInfoMap.get(orderKey)
     const orderQty = resolveOrderQty(info, record.item_code)
+    const lossQty = record.loss_qty
+    const lossText = lossQty != null ? String(lossQty) : ''
+    const rateText = lossQty != null && orderQty != null && orderQty > 0
+      ? `${((lossQty / orderQty) * 100).toFixed(1)}%`
+      : ''
+    const dispMap = parseDisp(record.qa_disposition)
     const persons = normalizeArray(record.qa_responsible).map((p) => p.trim()).filter(Boolean)
     const sheetPersons = persons.length > 0 ? persons : ['']
     sheetPersons.forEach((person, personIdx) => {
       seq += 1
-      const serial = `QR-${orderKey || record.id}-${personIdx + 1}`
-      const dept = person ? (personnelDeptMap.get(person) || '') : ''
-      const ws = buildSheet(record, person, dept, info?.partnerName || '', orderQty, serial)
-      const name = sanitizeSheetName(`${seq}_${person.slice(0, 8) || '未指定'}_${orderKey || record.id}`)
-      XLSX.utils.book_append_sheet(wb, ws, name)
+      sheets.push({
+        sheetName: sanitizeSheetName(`${seq}_${person.slice(0, 8) || '未指定'}_${orderKey || record.id}`),
+        serial: `QR-${orderKey || record.id}-${personIdx + 1}`,
+        dateText: rocDate(record.created_at),
+        createdDay: (record.created_at || '').slice(0, 10),
+        partnerName: info?.partnerName || '',
+        orderNumber: orderKey,
+        orderQtyText: orderQty != null ? String(orderQty) : '',
+        lossText,
+        rateText,
+        itemText: [record.item_code, record.item_name].filter(Boolean).join('　'),
+        reason: record.reason || '',
+        reporter: record.qa_reporter || '',
+        causeAnalysis: record.cause_analysis || '',
+        immediateAction: record.immediate_action || '',
+        correctiveAction: record.corrective_action || '',
+        handlers: normalizeArray(record.qa_handlers).join('、'),
+        person,
+        dept: person ? (personnelDeptMap.get(person) || '') : '',
+        dispositionLine: dispositionLine(dispMap[person] || ''),
+      })
     })
   }
+  return sheets
+}
 
-  // 檔名帶缺失人員姓名＋紀錄日期：單人=姓名、兩人=並列、三人以上=「某某等N人」；
-  // 日期同一天=YYYYMMDD、同月=YYYYMM、跨月=起迄月份
-  const uniqPersons = [...new Set(records.flatMap((r) => normalizeArray(r.qa_responsible).map((p) => p.trim()).filter(Boolean)))]
+/** 檔名：缺失人員姓名＋紀錄日期（單人=姓名、兩人=並列、三人以上=某某等N人；同日=YYYYMMDD、同月=YYYYMM、跨月=起迄） */
+export const buildDeficiencyFileName = (sheets: DeficiencySheetData[]): string => {
+  const uniqPersons = [...new Set(sheets.map((s) => s.person).filter(Boolean))]
   let personPart: string
   if (uniqPersons.length === 0) personPart = '未指定'
   else if (uniqPersons.length === 1) personPart = uniqPersons[0]
@@ -319,7 +352,7 @@ export async function printDeficiencySheets(
   else personPart = `${uniqPersons[0]}等${uniqPersons.length}人`
   personPart = personPart.replace(/[\\/:*?"<>|]/g, '')
 
-  const days = [...new Set(records.map((r) => (r.created_at || '').slice(0, 10)).filter(Boolean))].sort()
+  const days = [...new Set(sheets.map((s) => s.createdDay).filter(Boolean))].sort()
   const months = [...new Set(days.map((d) => d.slice(0, 7)))].sort()
   let datePart: string
   if (days.length === 1) datePart = days[0].replace(/-/g, '')
@@ -329,6 +362,15 @@ export async function printDeficiencySheets(
     const now = new Date()
     datePart = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}`
   }
+  return `缺失單_${personPart}_${datePart}.xlsx`
+}
 
-  XLSX.writeFile(wb, `缺失單_${personPart}_${datePart}.xlsx`)
+/** 依已解析的內容產生工作簿並觸發下載。 */
+export function downloadDeficiencyWorkbook(sheets: DeficiencySheetData[]): void {
+  if (sheets.length === 0) return
+  const wb = XLSX.utils.book_new()
+  for (const sheet of sheets) {
+    XLSX.utils.book_append_sheet(wb, buildSheet(sheet), sheet.sheetName)
+  }
+  XLSX.writeFile(wb, buildDeficiencyFileName(sheets))
 }
