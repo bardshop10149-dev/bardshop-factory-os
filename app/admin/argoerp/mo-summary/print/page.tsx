@@ -1062,7 +1062,8 @@ function MoPrintContent() {
                         )}
                       </tbody>
                     </table>
-                  </div>
+                  </>
+              </div>
               ) : null}
 
               {/* ── 作業確認 ── */}
