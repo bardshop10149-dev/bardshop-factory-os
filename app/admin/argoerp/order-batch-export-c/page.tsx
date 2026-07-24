@@ -150,6 +150,8 @@ export default function PoBatchExportCPage() {
   const [poSearchId, setPoSearchId]   = useState('')
   const [poSearching, setPoSearching] = useState(false)
   const [poSyncRows, setPoSyncRows]   = useState<Array<Record<string, unknown>> | null>(null)
+  // 載入後自動執行序號比對的觸發旗標
+  const [pendingAutoMatch, setPendingAutoMatch] = useState(false)
 
   // ── Init from localStorage（僅還原表頭設定，不還原資料列）──
   useEffect(() => {
@@ -173,6 +175,14 @@ export default function PoBatchExportCPage() {
   }, [])
 
   useEffect(() => { localStorage.setItem(HEADER_KEY, JSON.stringify(header)) }, [header])
+
+  // 載入完成後自動執行序號比對（狀態已更新，可安全讀取 sourceRows）
+  useEffect(() => {
+    if (!pendingAutoMatch) return
+    setPendingAutoMatch(false)
+    void runSerialMatch()
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingAutoMatch])
 
   // ── Fetch sheet dates ──
   useEffect(() => {
@@ -219,8 +229,9 @@ export default function PoBatchExportCPage() {
       }))
       setMatchResults([])
       setLoadedDate(date)
+      setPendingAutoMatch(true)   // 載入完成後自動執行序號比對
 
-      // 缺序號警告
+      // 缺序號警告（先檢查 line_no_input；自動比對後會再從 erp_so_lines 補全）
       const missingSeqRows = rows.filter(r => {
         const seq = (r as unknown as Record<string, unknown>)['line_no_input'] as string | undefined
         return !seq
