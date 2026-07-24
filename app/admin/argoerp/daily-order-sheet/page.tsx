@@ -99,23 +99,6 @@ interface SheetMeta {
   updated_at: string
 }
 
-// ===== 改單通知型別 =====
-interface SoChangeNotice {
-  id: string
-  project_id: string
-  line_no: string
-  changed_fields: string[]
-  old_values: Record<string, string | number | null>
-  new_values: Record<string, string | number | null>
-  detected_at: string
-  confirmed_at: string | null
-}
-
-const SO_CHANGE_FIELD_LABELS: Record<string, string> = {
-  mbp_part: '料號', duedate: '交期', order_qty_oru: '數量', description: '品名/規格',
-  hold_status: '狀態', partner_name: '客戶', packing: '包裝', sales_name: '業務',
-}
-
 // ===== 採購單（erp_pj_sync）資料型別 =====
 interface PjRecord {
   id: number
@@ -448,7 +431,7 @@ export default function DailyOrderSheetPage() {
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set())
 
   // ---- 分頁 ----
-  const [activeMainTab, setActiveMainTab] = useState<'daily' | 'c-orders' | 'so-changes'>('daily')
+  const [activeMainTab, setActiveMainTab] = useState<'daily' | 'c-orders'>('daily')
 
   // ---- 常平廠訂單 ----
   const [cOrders, setCOrders] = useState<PjRecord[]>([])
@@ -494,13 +477,7 @@ export default function DailyOrderSheetPage() {
   // ---- 轉換廠區 ----
   const [convertFactoryModalOpen, setConvertFactoryModalOpen] = useState(false)
 
-  // ---- 改單提示 ----
-  const [soChangeNotices, setSoChangeNotices] = useState<SoChangeNotice[]>([])
-  const [soChangesLoading, setSoChangesLoading] = useState(false)
-  const [soChangesLocked, setSoChangesLocked] = useState(true)
-  const [soChangesPassword, setSoChangesPassword] = useState('')
-  const [soChangesPasswordError, setSoChangesPasswordError] = useState('')
-  // 快速查詢集合：含未確認改單的 project_id
+  // 快速查詢集合：含未確認改單的 project_id（供出單表列 badge 使用；詳細頁面請至「改單提示」頁）
   const [soChangesUnconfirmedSet, setSoChangesUnconfirmedSet] = useState<Set<string>>(new Set())
   // 自動補對旗標：解析後若有常平列，自動執行採購比對
   const [pendingAutoPoMatch, setPendingAutoPoMatch] = useState(false)
@@ -533,25 +510,7 @@ export default function DailyOrderSheetPage() {
     if (activeMainTab === 'c-orders') fetchCOrders()
   }, [activeMainTab, fetchCOrders])
 
-  // ---- 改單提示：切換到分頁時載入 ----
-  const fetchSoChangeNotices = useCallback(async () => {
-    setSoChangesLoading(true)
-    const { data } = await supabase
-      .from('so_change_notices')
-      .select('id,project_id,line_no,changed_fields,old_values,new_values,detected_at,confirmed_at')
-      .order('detected_at', { ascending: false })
-      .limit(500)
-    const notices = (data ?? []) as SoChangeNotice[]
-    setSoChangeNotices(notices)
-    setSoChangesUnconfirmedSet(new Set(notices.filter(n => !n.confirmed_at).map(n => n.project_id)))
-    setSoChangesLoading(false)
-  }, [])
-
-  useEffect(() => {
-    if (activeMainTab === 'so-changes') void fetchSoChangeNotices()
-  }, [activeMainTab, fetchSoChangeNotices])
-
-  // 載入 sheet 時，同步刷新所在 project_id 的改單未確認狀態（用於出單表 badge）
+  // 載入 sheet 時，同步刷新所在 project_id 的改單未確認狀態（用於出單表列 badge）
   useEffect(() => {
     if (sheetRows.length === 0) return
     const pids = [...new Set(sheetRows.map(r => r.order_number).filter(Boolean))]
@@ -565,19 +524,6 @@ export default function DailyOrderSheetPage() {
         setSoChangesUnconfirmedSet(new Set((data ?? []).map((r: { project_id: string }) => r.project_id)))
       })
   }, [sheetRows])
-
-  const handleConfirmSoChange = useCallback(async (id: string) => {
-    await supabase
-      .from('so_change_notices')
-      .update({ confirmed_at: new Date().toISOString() })
-      .eq('id', id)
-    setSoChangeNotices(prev => prev.map(n => n.id === id ? { ...n, confirmed_at: new Date().toISOString() } : n))
-    setSoChangesUnconfirmedSet(prev => {
-      const remaining = soChangeNotices.filter(n => n.id !== id && !n.confirmed_at)
-      const next = new Set(remaining.map(n => n.project_id))
-      return next
-    })
-  }, [soChangeNotices])
 
   // ---- 常平 自動採購比對：解析後若有常平列自動觸發 ----
   useEffect(() => {
@@ -2826,19 +2772,15 @@ export default function DailyOrderSheetPage() {
                 <span className="ml-1.5 px-1.5 py-0.5 rounded-full bg-orange-500 text-white text-[10px] font-bold leading-none">{pinnedCOrderKeys.size}</span>
               )}
             </button>
-            <button
-              onClick={() => setActiveMainTab('so-changes')}
-              className={`px-5 py-2.5 text-sm font-medium rounded-t-lg transition-colors border-b-2 ${
-                activeMainTab === 'so-changes'
-                  ? 'border-red-500 text-red-300 bg-slate-900'
-                  : 'border-transparent text-slate-400 hover:text-slate-200 hover:bg-slate-900/50'
-              }`}
+            <a
+              href="/admin/argoerp/so-change-notices"
+              className="px-5 py-2.5 text-sm font-medium rounded-t-lg transition-colors border-b-2 border-transparent text-slate-400 hover:text-red-300 hover:bg-slate-900/50 flex items-center gap-1"
             >
               ⚠️ 改單提示
               {soChangesUnconfirmedSet.size > 0 && (
-                <span className="ml-1.5 px-1.5 py-0.5 rounded-full bg-red-500 text-white text-[10px] font-bold leading-none">{soChangesUnconfirmedSet.size}</span>
+                <span className="px-1.5 py-0.5 rounded-full bg-red-500 text-white text-[10px] font-bold leading-none">{soChangesUnconfirmedSet.size}</span>
               )}
-            </button>
+            </a>
           </div>
 
           {/* ===== 每日出單表分頁 ===== */}
@@ -3623,118 +3565,6 @@ export default function DailyOrderSheetPage() {
             </div>
           )}
 
-          {/* ===== 改單提示分頁 ===== */}
-          {activeMainTab === 'so-changes' && (
-            <div className="space-y-4">
-              {soChangesLocked ? (
-                <div className="flex flex-col items-center justify-center py-24 gap-4">
-                  <div className="text-5xl">🔒</div>
-                  <p className="text-slate-400 text-sm">此分頁已鎖定，請輸入密碼解鎖</p>
-                  <div className="flex gap-2">
-                    <input
-                      type="password"
-                      value={soChangesPassword}
-                      onChange={e => { setSoChangesPassword(e.target.value); setSoChangesPasswordError('') }}
-                      onKeyDown={e => {
-                        if (e.key === 'Enter') {
-                          if (soChangesPassword === '666') { setSoChangesLocked(false); setSoChangesPassword('') }
-                          else setSoChangesPasswordError('密碼錯誤')
-                        }
-                      }}
-                      placeholder="請輸入密碼"
-                      className="px-3 py-2 rounded-lg bg-slate-800 border border-slate-700 text-white text-sm w-40 focus:outline-none focus:border-cyan-500"
-                    />
-                    <button
-                      onClick={() => {
-                        if (soChangesPassword === '666') { setSoChangesLocked(false); setSoChangesPassword('') }
-                        else setSoChangesPasswordError('密碼錯誤')
-                      }}
-                      className="px-4 py-2 rounded-lg bg-cyan-700 hover:bg-cyan-600 text-white text-sm font-medium"
-                    >解鎖</button>
-                  </div>
-                  {soChangesPasswordError && <p className="text-red-400 text-sm">{soChangesPasswordError}</p>}
-                </div>
-              ) : (
-                <div className="space-y-3">
-                  <div className="flex items-center gap-3">
-                    <h2 className="text-lg font-bold text-red-300">⚠️ 改單提示</h2>
-                    <span className="text-slate-400 text-sm">同步銷售訂單時偵測到的欄位變動，請逐筆確認</span>
-                    <button onClick={() => void fetchSoChangeNotices()} disabled={soChangesLoading}
-                      className="ml-auto px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-white text-xs font-medium disabled:opacity-50">
-                      {soChangesLoading ? '載入中…' : '🔄 重新載入'}
-                    </button>
-                    <button onClick={() => setSoChangesLocked(true)}
-                      className="px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-300 text-xs">🔒 鎖定</button>
-                  </div>
-
-                  {soChangesLoading ? (
-                    <div className="text-center py-20 text-slate-500">載入中…</div>
-                  ) : soChangeNotices.length === 0 ? (
-                    <div className="text-center py-20 text-slate-600">
-                      <div className="text-4xl mb-3">✅</div>
-                      <p>目前無改單記錄</p>
-                    </div>
-                  ) : (
-                    <div className="bg-slate-900 border border-slate-800 rounded-lg overflow-hidden">
-                      <div className="overflow-x-auto">
-                        <table className="w-full text-xs text-left border-collapse">
-                          <thead>
-                            <tr className="bg-slate-800/80 text-slate-400 text-[11px] uppercase tracking-wider">
-                              <th className="px-3 py-2.5 whitespace-nowrap">狀態</th>
-                              <th className="px-3 py-2.5 whitespace-nowrap">偵測時間</th>
-                              <th className="px-3 py-2.5 whitespace-nowrap">訂單號</th>
-                              <th className="px-3 py-2.5 whitespace-nowrap">行號</th>
-                              <th className="px-3 py-2.5">變動內容（舊值 → 新值）</th>
-                              <th className="px-3 py-2.5 whitespace-nowrap"></th>
-                            </tr>
-                          </thead>
-                          <tbody className="divide-y divide-slate-800/60">
-                            {soChangeNotices.map(n => (
-                              <tr key={n.id} className={`hover:bg-slate-800/30 ${n.confirmed_at ? 'opacity-50' : ''}`}>
-                                <td className="px-3 py-2 whitespace-nowrap">
-                                  {n.confirmed_at
-                                    ? <span className="px-1.5 py-0.5 rounded text-[10px] bg-slate-700 text-slate-400 border border-slate-600">已改單</span>
-                                    : <span className="px-1.5 py-0.5 rounded text-[10px] bg-red-700/50 text-red-200 border border-red-600/40">改單-未確認</span>}
-                                </td>
-                                <td className="px-3 py-2 whitespace-nowrap font-mono text-slate-400 text-[11px]">
-                                  {new Date(n.detected_at).toLocaleString('zh-TW', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })}
-                                </td>
-                                <td className="px-3 py-2 whitespace-nowrap">
-                                  <button onClick={() => setSoModalId(n.project_id)}
-                                    className="font-mono text-cyan-300 hover:text-cyan-100 hover:underline">{n.project_id}</button>
-                                </td>
-                                <td className="px-3 py-2 whitespace-nowrap font-mono text-slate-400">{n.line_no}</td>
-                                <td className="px-3 py-2">
-                                  <div className="space-y-0.5">
-                                    {n.changed_fields.map(f => (
-                                      <div key={f} className="flex items-center gap-1.5 text-[11px]">
-                                        <span className="text-slate-500 w-16 shrink-0">{SO_CHANGE_FIELD_LABELS[f] ?? f}:</span>
-                                        <span className="text-red-300 line-through">{String(n.old_values[f] ?? '—')}</span>
-                                        <span className="text-slate-500">→</span>
-                                        <span className="text-emerald-300">{String(n.new_values[f] ?? '—')}</span>
-                                      </div>
-                                    ))}
-                                  </div>
-                                </td>
-                                <td className="px-3 py-2 whitespace-nowrap">
-                                  {!n.confirmed_at && (
-                                    <button
-                                      onClick={() => void handleConfirmSoChange(n.id)}
-                                      className="px-3 py-1 rounded bg-emerald-700 hover:bg-emerald-600 text-white text-[11px] font-medium"
-                                    >確認</button>
-                                  )}
-                                </td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      </div>
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
-          )}
         </div>
       </div>
       <SoOrderModal projectId={soModalId} onClose={() => setSoModalId(null)} />
