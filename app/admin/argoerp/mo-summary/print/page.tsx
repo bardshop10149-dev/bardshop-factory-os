@@ -316,26 +316,15 @@ function PoCard({
         borderBottom: '2px solid #000',
         paddingBottom: '4px', marginBottom: '6px',
       }}>
-        {/* 左：採購單號／請購單號 + 急件/打樣 */}
+        {/* 左：採購單號／請購單號（取消急件/打樣，用空間放大單號）*/}
         <div>
-          <div style={{ fontSize: '10px', color: '#555', marginBottom: '2px', fontWeight: 600, letterSpacing: '1px' }}>{docNoLabel}</div>
+          <div style={{ fontSize: '10px', color: '#555', marginBottom: '3px', fontWeight: 600, letterSpacing: '1px' }}>{docNoLabel}</div>
           <div style={{
-            fontSize: '15px', fontWeight: 'bold', letterSpacing: '1px',
-            background: '#f0f0f0', padding: '2px 6px', border: '1px solid #555',
+            fontSize: '22px', fontWeight: 'bold', letterSpacing: '1px',
+            background: '#f0f0f0', padding: '5px 12px', border: '1.5px solid #444',
             display: 'inline-block', borderRadius: '3px', color: '#000',
           }}>
             {docNo}
-          </div>
-          <div style={{ marginTop: '3px', display: 'flex', gap: '5px' }}>
-            {(['急件單', '打樣單'] as const).map(label => (
-              <div key={label} style={{
-                border: '1.5px solid #333', padding: '2px 6px', borderRadius: '2px',
-                fontSize: '12px', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '4px',
-              }}>
-                <span style={{ display: 'inline-block', width: '11px', height: '11px', border: '1.5px solid #333', borderRadius: '2px', flexShrink: 0 }} />
-                {label}
-              </div>
-            ))}
           </div>
         </div>
 
@@ -360,74 +349,48 @@ function PoCard({
         </div>
       </div>
 
-      {/* ── 採購資訊 + 交期資訊（左右並排）── */}
-      <div className="mo-section" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px', marginBottom: '10px', alignItems: 'stretch' }}>
-        {/* 左：採購資訊／請購資訊 */}
-        <div>
-          <SectionTitle color="#e5e7eb">{infoTitle}</SectionTitle>
-          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-            <tbody>
-              <tr style={{ height: '44px' }}>
-                <td style={{ ...labelTd, verticalAlign: 'middle' }}>來源訂單</td>
-                <td style={{ ...valueTd, fontSize: '18px', fontWeight: 600, verticalAlign: 'middle' }}>{mo.source_order || '—'}</td>
-              </tr>
-              <tr style={{ height: '44px' }}>
-                <td style={{ ...labelTd, verticalAlign: 'middle' }}>{qtyLabel}</td>
-                <td style={{ ...valueTd, fontSize: '18px', fontWeight: 600, verticalAlign: 'middle' }}>{poQtyDisplay}</td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-
-        {/* 右：交期資訊 */}
-        <div>
-          <SectionTitle color="#e5e7eb">交期資訊</SectionTitle>
-          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-            <tbody>
-              <tr style={{ height: '38px' }}>
-                <td style={labelTd}>開立日</td>
-                <td style={{ ...valueTd, fontWeight: 600 }}>{mo.create_date || '—'}</td>
-              </tr>
-              <tr style={{ height: '38px' }}>
-                <td style={labelTd}>廠別</td>
-                <td style={valueTd}>{factoryLabel || '—'}</td>
-              </tr>
-              <tr>
-                <td style={{ ...labelTd, verticalAlign: 'middle' }}>要求到料日</td>
-                <td style={{ ...valueTd, fontWeight: 700, fontSize: '26px', height: '44px', verticalAlign: 'middle' }}>
-                  {(() => {
-                    const d = so?.duedate || mo.planned_end_date
-                    return d ? <>{d} <span style={{ fontSize: '24px' }}>{dayOfWeekZh(d)}</span></> : '—'
-                  })()}
-                </td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-      </div>
-
-      {/* ── 採購備註內容（無標題，直接接在採購資訊/交期資訊下方）── */}
+      {/* ── 採購資訊（合併：訂單資訊 + 交期 + 貨品備註）── */}
       <div className="mo-section" style={{ marginBottom: '10px' }}>
+        <SectionTitle color="#e5e7eb">{infoTitle}</SectionTitle>
         <table style={{ width: '100%', borderCollapse: 'collapse' }}>
           <tbody>
             <tr>
-              <td style={labelTd}>{goodsLabel}</td>
-              <td style={{ ...valueTd, fontSize: '13px' }}>{mo.product_code || '—'}</td>
+              <td style={labelTd}>來源訂單</td>
+              <td style={{ ...valueTd, fontWeight: 600 }}>{mo.source_order || '—'}</td>
+              <td style={labelTd}>開立日</td>
+              <td style={valueTd}>{mo.create_date || '—'}</td>
             </tr>
             <tr>
-              <td style={{ ...labelTd, whiteSpace: 'normal' }}>品名規格</td>
-              <td style={{ ...valueTd, fontSize: '13px' }}>{mo.mo_note || '—'}</td>
+              <td style={labelTd}>{qtyLabel}</td>
+              <td style={{ ...valueTd, fontWeight: 600 }}>{poQtyDisplay}</td>
+              <td style={labelTd}>廠別</td>
+              <td style={valueTd}>{factoryLabel}</td>
+            </tr>
+            <tr>
+              <td style={labelTd}>{goodsLabel}</td>
+              <td style={{ ...valueTd, fontSize: '13px' }}>{mo.product_code || '—'}</td>
+              <td style={labelTd}>要求到料日</td>
+              <td style={{ ...valueTd, fontWeight: 700, fontSize: '20px' }}>
+                {(() => {
+                  const d = so?.duedate || mo.planned_end_date
+                  return d ? <>{d} <span style={{ fontSize: '15px' }}>{dayOfWeekZh(d)}</span></> : '—'
+                })()}
+              </td>
+            </tr>
+            <tr>
+              <td style={{ ...labelTd, whiteSpace: 'normal' as const }}>品名規格</td>
+              <td style={{ ...valueTd, fontSize: '13px' }} colSpan={3}>{mo.mo_note || '—'}</td>
             </tr>
             {so?.customer_remark && (
               <tr>
                 <td style={labelTd}>訂單備註</td>
-                <td style={{ ...valueTd, fontSize: '13px' }}>{so.customer_remark}</td>
+                <td style={{ ...valueTd, fontSize: '13px' }} colSpan={3}>{so.customer_remark}</td>
               </tr>
             )}
             {so?.packing && (
               <tr>
                 <td style={labelTd}>包裝方式</td>
-                <td style={{ ...valueTd, fontSize: '13px' }}>{so.packing}</td>
+                <td style={{ ...valueTd, fontSize: '13px' }} colSpan={3}>{so.packing}</td>
               </tr>
             )}
           </tbody>
@@ -439,54 +402,37 @@ function PoCard({
         <SectionTitle color="#e5e7eb">來源訂單資訊</SectionTitle>
         {mo.source_order ? (
           <>
-            {([
-              [
+            {/* 銷售單號 | 製令項號 | 負責業務 | 發票型態（四欄一行）*/}
+            <div style={{ display: 'flex', border: '1px solid #e2e4e8', borderBottom: 'none', fontSize: '12px' }}>
+              {([
                 ['銷售單號', mo.source_order || '—'],
-                ['負責業務', so?.sales_name || '—'],
-              ],
-              [
                 ['製令項號', lineNo],
+                ['負責業務', so?.sales_name || '—'],
                 ['發票型態', formatExportMode(so?.invoice_format || soLines.find(l => l.invoice_format)?.invoice_format)],
-              ],
-              [
+              ] as [string, string][]).map(([lbl, val], i) => (
+                <div key={lbl} style={{ display: 'flex', alignItems: 'stretch', flex: '1 1 25%', minWidth: 0, borderRight: i < 3 ? '1px solid #e2e4e8' : 'none' }}>
+                  <div style={{ background: '#f2f2f2', padding: '3px 5px', color: '#555', whiteSpace: 'nowrap' as const, display: 'flex', alignItems: 'center', fontSize: '11px', flexShrink: 0 }}>{lbl}</div>
+                  <div style={{ padding: '3px 5px', fontWeight: 500, display: 'flex', alignItems: 'center', minWidth: 0, wordBreak: 'break-word' as const, overflowWrap: 'break-word' as const, fontSize: '12px' }}>{val || '—'}</div>
+                </div>
+              ))}
+            </div>
+            {/* 客戶名稱 | 交貨地址（兩欄一行）*/}
+            <div style={{ display: 'flex', border: '1px solid #e2e4e8', borderBottom: 'none', fontSize: '12px' }}>
+              {([
                 ['客戶名稱', (() => {
                   const name = so?.partner_name ?? mo.lot_number ?? '—'
                   const code = so?.tpn_partner_id ?? customerCodeMap.get(name) ?? null
                   return code ? `[${code}] ${name}` : name
                 })()],
                 ['交貨地址', so?.delivery_address || soLines.find(l => l.delivery_address)?.delivery_address || '—'],
-              ],
-            ] as [[string, string], [string, string]][]).map(([left, right], idx) => (
-              <div
-                key={`${left[0]}-${right[0]}`}
-                style={{
-                  display: 'flex',
-                  border: '1px solid #e2e4e8',
-                  borderTop: idx === 0 ? '1px solid #e2e4e8' : 'none',
-                  borderBottom: 'none',
-                  fontSize: '13px',
-                }}
-              >
-                {[left, right].map(([lbl, val], sideIdx) => (
-                  <div
-                    key={lbl}
-                    style={{
-                      display: 'flex',
-                      alignItems: 'stretch',
-                      flex: '1 1 50%',
-                      minWidth: 0,
-                      borderRight: sideIdx === 0 ? '1px solid #e2e4e8' : 'none',
-                    }}
-                  >
-                    <div style={{ background: '#f2f2f2', padding: '3px 6px', color: '#555', whiteSpace: 'nowrap' as const, display: 'flex', alignItems: 'center', fontSize: '12px' }}>{lbl}</div>
-                    <div style={{ padding: '3px 6px', fontWeight: 500, display: 'flex', alignItems: 'center', minWidth: 0, wordBreak: 'break-word' as const, overflowWrap: 'break-word' as const }}>
-                      {val || '—'}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            ))}
-            {/* 全部行項表格 — 本採購項加底色＋星號 */}
+              ] as [string, string][]).map(([lbl, val], i) => (
+                <div key={lbl} style={{ display: 'flex', alignItems: 'stretch', flex: '1 1 50%', minWidth: 0, borderRight: i === 0 ? '1px solid #e2e4e8' : 'none' }}>
+                  <div style={{ background: '#f2f2f2', padding: '3px 5px', color: '#555', whiteSpace: 'nowrap' as const, display: 'flex', alignItems: 'center', fontSize: '11px', flexShrink: 0 }}>{lbl}</div>
+                  <div style={{ padding: '3px 5px', fontWeight: 500, display: 'flex', alignItems: 'center', minWidth: 0, wordBreak: 'break-word' as const, overflowWrap: 'break-word' as const, fontSize: '12px' }}>{val || '—'}</div>
+                </div>
+              ))}
+            </div>
+            {/* 全部行項表格 — 本採購項加底色＋星號 */
             <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '12px', tableLayout: 'fixed' }}>
               <colgroup>
                 <col style={{ width: '32px' }} />
@@ -927,27 +873,12 @@ function MoPrintContent() {
                 {/* 左：製令號 + 急件/打樣 checkbox */}
                 <div>
                   <div style={{
-                    fontFamily: 'Arial, "Microsoft JhengHei", "PingFang TC", sans-serif', fontSize: '15px', fontWeight: 'bold',
+                    fontFamily: 'Arial, "Microsoft JhengHei", "PingFang TC", sans-serif', fontSize: '22px', fontWeight: 'bold',
                     letterSpacing: '1px', background: '#f0f0f0',
-                    padding: '2px 6px', border: '1px solid #555',
+                    padding: '5px 12px', border: '1.5px solid #444',
                     display: 'inline-block', borderRadius: '3px', color: '#000',
                   }}>
                     {mo.mo_number}
-                  </div>
-                  <div style={{ marginTop: '3px', display: 'flex', gap: '5px' }}>
-                    {(['急件單', '打樣單'] as const).map(label => (
-                      <div key={label} style={{
-                        border: '1.5px solid #333', padding: '2px 6px', borderRadius: '2px',
-                        fontSize: '12px', fontWeight: 700,
-                        display: 'flex', alignItems: 'center', gap: '4px',
-                      }}>
-                        <span style={{
-                          display: 'inline-block', width: '11px', height: '11px',
-                          border: '1.5px solid #333', borderRadius: '2px', flexShrink: 0,
-                        }} />
-                        {label}
-                      </div>
-                    ))}
                   </div>
                 </div>
 
@@ -977,136 +908,110 @@ function MoPrintContent() {
                 </div>
               </div>
 
-              {/* ── 製令資訊 + 交期資訊（左右並排）── */}
-              <div className="mo-section" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px', marginBottom: '10px', alignItems: 'stretch' }}>
-
-                {/* 左：製令資訊 */}
-                <div>
-                  <SectionTitle color="#e5e7eb">製令資訊</SectionTitle>
-                  <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-                    <tbody>
-                      {([
-                        ['生產貨號', mo.product_code],
-                        ['預訂產出量', mo.planned_qty ?? null],
-                        ['廠別', FACTORY_LABEL[mo.factory ?? ''] ?? mo.factory ?? '—'],
-                        ['開立日', mo.create_date ?? null],
-                      ] as [string, string | null | undefined][]).map(([label, val]) => (
-                        <tr key={label} style={{ height: '38px' }}>
-                          <td style={labelTd}>{label}</td>
-                          <td style={valueTd}>{val || '—'}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-
-                {/* 右：交期資訊 */}
-                <div>
-                  <SectionTitle color="#e5e7eb">交期資訊</SectionTitle>
-                  <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-                    <tbody>
-                      <tr>
-                        <td style={labelTd}>印刷交期</td>
-                        <td style={{ ...writeTd, height: '38px', width: '30%' }} />
-                        <td style={labelTd}>雷切交期</td>
-                        <td style={{ ...writeTd, height: '38px' }} />
-                      </tr>
-                      <tr>
-                        <td style={labelTd}>後加工交期</td>
-                        <td style={{ ...writeTd, height: '57px', padding: '4px 8px' }} colSpan={3}>
-                          <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-                            {/* 左：日期填寫空間 */}
-                            <div style={{ flex: '0 0 auto', width: '90px', height: '28px' }} />
-                            {/* 右：勾選項 */}
-                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap', flex: 1 }}>
-                              {(['貼合', '包邊', '車縫', '胸章'] as const).map(opt => (
-                                <span key={opt} style={{ display: 'inline-flex', alignItems: 'center', gap: '3px', fontSize: '13px', whiteSpace: 'nowrap' }}>
-                                  <span style={{
-                                    display: 'inline-block', width: '13px', height: '13px',
-                                    border: '1.5px solid #333', borderRadius: '1px', flexShrink: 0,
-                                  }} />
-                                  {opt}
-                                </span>
-                              ))}
-                            </div>
-                          </div>
-                        </td>
-                      </tr>
-                      <tr>
-                        <td style={{ ...labelTd, verticalAlign: 'middle' }}>出貨交期</td>
-                        <td colSpan={3} style={{ ...valueTd, fontWeight: 700, fontSize: '26px', height: '40px', verticalAlign: 'middle' }}>
-                          {(() => {
-                            const d = so?.duedate || mo.planned_end_date
-                            return d ? <>{d} <span style={{ fontSize: '20px' }}>{dayOfWeekZh(d)}</span></> : '—'
-                          })()}
-                        </td>
-                      </tr>
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-
-              {/* ── 生產品項商品備註（顯示本製令項） ── */}
-              <div style={{ marginBottom: '10px' }}>
-                <SectionTitle color="#e5e7eb">生產品項商品備註</SectionTitle>
-                <div style={{ border: '1px solid #ccc', padding: '6px 8px', minHeight: '56px', fontSize: '14px', lineHeight: 1.5 }}>
-                  {so?.remark || '—'}
-                </div>
-              </div>
-
-              {/* ── 來源訂單資訊 ── */}
+              {/* ── 製令資訊（含來源訂單基本資訊）── */}
               <div className="mo-section" style={{ marginBottom: '10px' }}>
-                <SectionTitle color="#e5e7eb">來源訂單資訊</SectionTitle>
-                {mo.source_order ? (
+                <SectionTitle color="#e5e7eb">製令資訊</SectionTitle>
+                {mo.source_order && (
                   <>
-                    {([
-                      [
-                        ['銷售單號', mo.source_order || '—'],
-                        ['負責業務', so?.sales_name || '—'],
-                      ],
-                      [
+                    {/* 銷售單號 | 製令項號 | 負責業務 | 發票型態 */}
+                    <div style={{ display: 'flex', border: '1px solid #e2e4e8', borderBottom: 'none', fontSize: '12px' }}>
+                      {([
+                        ['銷售單號', mo.source_order],
                         ['製令項號', lineNo],
+                        ['負責業務', so?.sales_name || '—'],
                         ['發票型態', formatExportMode(so?.invoice_format || soLines.find(l => l.invoice_format)?.invoice_format)],
-                      ],
-                      [
+                      ] as [string, string][]).map(([lbl, val], i) => (
+                        <div key={lbl} style={{ display: 'flex', alignItems: 'stretch', flex: '1 1 25%', minWidth: 0, borderRight: i < 3 ? '1px solid #e2e4e8' : 'none' }}>
+                          <div style={{ background: '#f2f2f2', padding: '3px 5px', color: '#555', whiteSpace: 'nowrap' as const, display: 'flex', alignItems: 'center', fontSize: '11px', flexShrink: 0 }}>{lbl}</div>
+                          <div style={{ padding: '3px 5px', fontWeight: 500, display: 'flex', alignItems: 'center', minWidth: 0, wordBreak: 'break-word' as const, overflowWrap: 'break-word' as const, fontSize: '12px' }}>{val || '—'}</div>
+                        </div>
+                      ))}
+                    </div>
+                    {/* 客戶名稱 | 交貨地址 */}
+                    <div style={{ display: 'flex', border: '1px solid #e2e4e8', borderBottom: 'none', fontSize: '12px' }}>
+                      {([
                         ['客戶名稱', (() => {
                           const name = so?.partner_name ?? mo.lot_number ?? '—'
                           const code = so?.tpn_partner_id ?? customerCodeMap.get(name) ?? null
                           return code ? `[${code}] ${name}` : name
                         })()],
                         ['交貨地址', so?.delivery_address || soLines.find(l => l.delivery_address)?.delivery_address || '—'],
-                      ],
-                    ] as [[string, string], [string, string]][]).map(([left, right], idx) => (
-                      <div
-                        key={`${left[0]}-${right[0]}`}
-                        style={{
-                          display: 'flex',
-                          border: '1px solid #e2e4e8',
-                          borderTop: idx === 0 ? '1px solid #e2e4e8' : 'none',
-                          borderBottom: 'none',
-                          fontSize: '13px',
-                        }}
-                      >
-                        {[left, right].map(([lbl, val], sideIdx) => (
-                          <div
-                            key={lbl}
-                            style={{
-                              display: 'flex',
-                              alignItems: 'stretch',
-                              flex: '1 1 50%',
-                              minWidth: 0,
-                              borderRight: sideIdx === 0 ? '1px solid #e2e4e8' : 'none',
-                            }}
-                          >
-                            <div style={{ background: '#f2f2f2', padding: '3px 6px', color: '#555', whiteSpace: 'nowrap' as const, display: 'flex', alignItems: 'center', fontSize: '12px' }}>{lbl}</div>
-                            <div style={{ padding: '3px 6px', fontWeight: 500, display: 'flex', alignItems: 'center', minWidth: 0, wordBreak: 'break-word' as const, overflowWrap: 'break-word' as const }}>
-                              {val || '—'}
-                            </div>
+                      ] as [string, string][]).map(([lbl, val], i) => (
+                        <div key={lbl} style={{ display: 'flex', alignItems: 'stretch', flex: '1 1 50%', minWidth: 0, borderRight: i === 0 ? '1px solid #e2e4e8' : 'none' }}>
+                          <div style={{ background: '#f2f2f2', padding: '3px 5px', color: '#555', whiteSpace: 'nowrap' as const, display: 'flex', alignItems: 'center', fontSize: '11px', flexShrink: 0 }}>{lbl}</div>
+                          <div style={{ padding: '3px 5px', fontWeight: 500, display: 'flex', alignItems: 'center', minWidth: 0, wordBreak: 'break-word' as const, overflowWrap: 'break-word' as const, fontSize: '12px' }}>{val || '—'}</div>
+                        </div>
+                      ))}
+                    </div>
+                  </>
+                )}
+                <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                  <tbody>
+                    <tr>
+                      <td style={labelTd}>生產貨號</td>
+                      <td style={valueTd}>{mo.product_code || '—'}</td>
+                      <td style={labelTd}>廠別</td>
+                      <td style={valueTd}>{FACTORY_LABEL[mo.factory ?? ''] ?? mo.factory ?? '—'}</td>
+                    </tr>
+                    <tr>
+                      <td style={labelTd}>預訂產出量</td>
+                      <td style={valueTd}>{mo.planned_qty || '—'}</td>
+                      <td style={labelTd}>開立日</td>
+                      <td style={valueTd}>{mo.create_date || '—'}</td>
+                    </tr>
+                    <tr>
+                      <td style={labelTd}>生產備註</td>
+                      <td style={{ ...valueTd, fontSize: '13px' }} colSpan={3}>{so?.remark || '—'}</td>
+                    </tr>
+                    <tr>
+                      <td style={{ ...labelTd, verticalAlign: 'middle' }}>出貨交期</td>
+                      <td colSpan={3} style={{ ...valueTd, fontWeight: 700, fontSize: '22px', verticalAlign: 'middle' }}>
+                        {(() => {
+                          const d = so?.duedate || mo.planned_end_date
+                          return d ? <>{d} <span style={{ fontSize: '18px' }}>{dayOfWeekZh(d)}</span></> : '—'
+                        })()}
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+
+              {/* ── 交期資訊（手填工序）── */}
+              <div className="mo-section" style={{ marginBottom: '10px' }}>
+                <SectionTitle color="#e5e7eb">交期資訊</SectionTitle>
+                <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                  <tbody>
+                    <tr>
+                      <td style={labelTd}>印刷交期</td>
+                      <td style={{ ...writeTd, height: '38px', width: '30%' }} />
+                      <td style={labelTd}>雷切交期</td>
+                      <td style={{ ...writeTd, height: '38px' }} />
+                    </tr>
+                    <tr>
+                      <td style={labelTd}>後加工交期</td>
+                      <td style={{ ...writeTd, height: '52px', padding: '4px 8px' }} colSpan={3}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                          <div style={{ flex: '0 0 auto', width: '90px', height: '28px' }} />
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' as const, flex: 1 }}>
+                            {(['貼合', '包邊', '車縫', '胸章'] as const).map(opt => (
+                              <span key={opt} style={{ display: 'inline-flex', alignItems: 'center', gap: '3px', fontSize: '13px', whiteSpace: 'nowrap' as const }}>
+                                <span style={{ display: 'inline-block', width: '13px', height: '13px', border: '1.5px solid #333', borderRadius: '1px', flexShrink: 0 }} />
+                                {opt}
+                              </span>
+                            ))}
                           </div>
-                        ))}
-                      </div>
-                    ))}
-                    {/* 全部行項表格 */}
+                        </div>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+
+              {/* ── 來源訂單行項 ── */}
+              {mo.source_order ? (
+              <div className="mo-section" style={{ marginBottom: '10px' }}>
+                <SectionTitle color="#e5e7eb">訂單行項</SectionTitle>
+                <>
                     <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '12px', tableLayout: 'fixed' }}>
                       <colgroup>
                         <col style={{ width: '32px' }} />
@@ -1161,13 +1066,8 @@ function MoPrintContent() {
                         )}
                       </tbody>
                     </table>
-                  </>
-                ) : (
-                  <div style={{ padding: '8px 6px', color: '#9ca3af', fontSize: '11px', fontStyle: 'italic' }}>
-                    （此製令無來源訂單）
                   </div>
-                )}
-              </div>
+              ) : null}
 
               {/* ── 作業確認 ── */}
               <div className="mo-card-footer">
