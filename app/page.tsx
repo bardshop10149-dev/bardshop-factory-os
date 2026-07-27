@@ -359,7 +359,7 @@ export default function HomePage() {
       {/* 手機版頂部：公告 + 使用者 */}
       <div className="md:hidden relative z-40 w-full px-4 pt-4 pb-2 space-y-3">
         <div className="flex items-center justify-between">
-          <div className="font-mono text-lg text-cyan-500/80 font-bold tabular-nums tracking-wider">
+          <div suppressHydrationWarning className="font-mono text-lg text-cyan-500/80 font-bold tabular-nums tracking-wider">
             {time}
           </div>
           <button 
@@ -400,7 +400,7 @@ export default function HomePage() {
 
       {/* 右上角：時間 + 登出 (桌面版) */}
       <div className="hidden md:flex absolute top-6 right-6 z-40 flex-col items-end gap-3">
-        <div className="font-mono text-2xl md:text-3xl text-cyan-500/80 font-bold tabular-nums tracking-wider">
+        <div suppressHydrationWarning className="font-mono text-2xl md:text-3xl text-cyan-500/80 font-bold tabular-nums tracking-wider">
           {time}
         </div>
         {currentUser && (
