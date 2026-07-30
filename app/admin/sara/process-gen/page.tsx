@@ -16,6 +16,7 @@ interface InputRow {
   line_seq?: string             // 銷售訂單序號（match_line_no）；C/O 廠 fallback 為採購單行號
   customer?: string             // 客戶名稱
   factory?: 'T' | 'C' | 'O'   // 廠區：T=台北 C=常平 O=委外（僅預覽，不匯出）
+  assigned_machine?: string    // 分配機台（台北廠印刷站2F/6F 才填入）
 }
 
 interface SaraRow {
@@ -38,6 +39,7 @@ interface SaraRow {
   bom: string
   mat_req_qty: string
   customer?: string
+  assigned_machine?: string   // 分配機台（僅台北廠印刷站2F/6F）
   factory?: 'T' | 'C' | 'O'   // 廠區（僅預覽，不匯出）
   _noRoute?: boolean
 }
@@ -98,8 +100,10 @@ function detectCols(header: string[]): Record<string, number> {
 
 // ── 輔助函式 ─────────────────────────────────────────────────────
 
-const isPackagingStation = (s: string) => s.includes('包裝站')
-const isTransitStation   = (s: string) => s.includes('轉運')
+const isPackagingStation  = (s: string) => s.includes('包裝站')
+const isTransitStation    = (s: string) => s.includes('轉運')
+// 只有這兩個站點需要填入分配機台（台北廠才有）
+const isPrintStation2F6F  = (s: string) => s === '印刷站2F' || s === '印刷站6F'
 
 // 工時計算：轉運站固定qty=1；計算結果不足10分鐘時補至10分鐘（std_time有值時）
 function calcEst(std: number, qty: number, panCount: number, station: string): number {
@@ -260,6 +264,8 @@ export default function ProcessGenPage() {
           line_seq:     String(r.match_line_no ?? '').trim() || undefined,
           customer:     String(r.customer  ?? '').trim() || undefined,
           factory,
+          // 分配機台：優先取 mo-machine-assign 結果（machine），其次為原始欄位（assigned_machine）
+          assigned_machine: String(r.machine ?? r.assigned_machine ?? '').trim() || undefined,
         })
       }
       if (!parsed.length) {
@@ -446,6 +452,10 @@ export default function ProcessGenPage() {
             job_qty: jobQty, outsourcing: '', est_time: est, time_unit: '分鐘',
             bom: '', mat_req_qty: '',
             customer: row.customer,
+            // 台北廠且為印刷站2F/6F 才填入分配機台，其他廠區及站點留空
+            assigned_machine: (row.factory === 'T' && isPrintStation2F6F(station) && row.assigned_machine)
+              ? row.assigned_machine
+              : '',
             factory: row.factory,
           })
         }
@@ -621,6 +631,9 @@ export default function ProcessGenPage() {
           job_qty: jobQty, outsourcing: '', est_time: est, time_unit: '分鐘',
           bom: '', mat_req_qty: '',
           customer: row.customer,
+          assigned_machine: (row.factory === 'T' && isPrintStation2F6F(station) && row.assigned_machine)
+            ? row.assigned_machine
+            : '',
           factory: row.factory,
         }
       })
@@ -658,13 +671,14 @@ export default function ProcessGenPage() {
   const handleDownload = useCallback(() => {
     const rows = saraRows.filter(r => !r._noRoute)
     if (!rows.length) return
-    const h1 = 'Order Number,Manufacturing Order Number,Product Name,Product Description,Lot Number,Production Quantity,Due,Priority Level,Earliest Start Time,Job Sequence,Workcenter,Job Name,Job Quantity,Out Sourcing,Est. Time,Time Unit,BOM Components,Material Required Quantity,customer_id'
-    const h2 = '訂單編號,(必填)工單編號,(必填)品號,規格,生產批號,(必填)生產需求數量,(必填)需求日,排程優先等級(1-99),最早可開始時間,(必填)工序,(必填)站點,(必填)製程名稱,製程數量,製程委外,(必填)預估工時,工時單位,BOM元件品號,物料需求數量,客戶名稱'
+    const h1 = 'Order Number,Manufacturing Order Number,Product Name,Product Description,Lot Number,Production Quantity,Due,Priority Level,Earliest Start Time,Job Sequence,Workcenter,Job Name,Job Quantity,Out Sourcing,Est. Time,Time Unit,BOM Components,Material Required Quantity,customer_id,assigned_machine,Rule,Parameter 1'
+    const h2 = '訂單編號,(必填)工單編號,(必填)品號,規格,生產批號,(必填)生產需求數量,(必填)需求日,排程優先等級(1-99),最早可開始時間,(必填)工序,(必填)站點,(必填)製程名稱,製程數量,製程委外,(必填)預估工時,工時單位,BOM元件品號,物料需求數量,客戶名稱,分配機台,規則,參數1'
     const data = rows.map(r =>
       [r.order_number, r.mfg_order_number, r.product_name, r.product_desc,
        r.lot_number, r.prod_qty, r.due, r.priority, r.earliest_start,
        r.job_seq, r.workcenter, r.job_name, r.job_qty, r.outsourcing,
-       r.est_time, r.time_unit, r.bom, r.mat_req_qty, r.customer ?? ''].map(escCsv).join(',')
+       r.est_time, r.time_unit, r.bom, r.mat_req_qty,
+       r.customer ?? '', r.assigned_machine ?? '', '', ''].map(escCsv).join(',')
     )
     const csv = [h1, h2, ...data].join('\r\n')
     const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' })
