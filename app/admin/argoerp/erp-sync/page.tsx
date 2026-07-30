@@ -1265,7 +1265,11 @@ ${poPages}
       }
 
       if (isSoTab) {
-        setMessage(`✅ 已同步 ${result.syncedCount ?? 0} 筆銷售訂單明細（ARGO 原始 ${result.totalRows ?? 0} 筆）`)
+        const changeNoticesCount = (result as Record<string, unknown>).changeNotices as number | undefined
+        const noticeNote = changeNoticesCount != null && changeNoticesCount > 0
+          ? `，偵測到 ${changeNoticesCount} 筆改單通知`
+          : changeNoticesCount === 0 ? '' : ''
+        setMessage(`✅ 已同步 ${result.syncedCount ?? 0} 筆銷售訂單明細（ARGO 原始 ${result.totalRows ?? 0} 筆${noticeNote}）`)
       } else if (isMoTab) {
         const detailNote = result.detailAuthorized
           ? `明細 ${result.detailTotal ?? 0} 筆`

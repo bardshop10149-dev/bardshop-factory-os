@@ -1003,10 +1003,14 @@ export async function POST(request: NextRequest) {
           })
           .filter((n): n is NonNullable<typeof n> => n !== null)
         if (notices.length > 0) {
-          await getSupabaseAdminClient()
+          const { error: noticeError } = await getSupabaseAdminClient()
             .from('so_change_notices')
             .insert(notices)
-            .then(() => {}, () => { /* 表尚未建立時不阻斷同步 */ })
+          if (noticeError) {
+            // 非致命錯誤：不阻斷同步，但記錄到 server log 供診斷
+            // 常見原因：so_change_notices 表尚未建立（需執行 sql/20260724_so_change_notices.sql）
+            console.error('[sync_so] 寫入改單通知失敗：', noticeError.message, '| 嘗試寫入筆數：', notices.length)
+          }
         }
       }
 
