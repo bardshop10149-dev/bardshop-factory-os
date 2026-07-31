@@ -21,9 +21,6 @@ interface PendingRow {
   match_line_no?: string | null
   material_prep_status?: string | null
   argo_slip_no?: string | null
-  // enriched
-  summary_prep_status?: string | null
-  is_argo_prepped?: boolean
 }
 
 interface MoLine {
@@ -49,7 +46,8 @@ function parseQty(q: unknown): number {
   return parseFloat(String(q ?? '0').replace(/,/g, '')) || 0
 }
 
-function factoryBadge(f: string) {
+// ── MO 詳細 Modal ────────────────────────────────────────────────────
+function MoDetailModal({ moNumber, onClose }: { moNumber: string; onClose: () => void }) {
   if (f === 'T') return 'bg-emerald-900/40 text-emerald-300 border-emerald-700/50'
   if (f === 'C') return 'bg-orange-900/40 text-orange-300 border-orange-700/50'
   if (f === 'O') return 'bg-fuchsia-900/40 text-fuchsia-300 border-fuchsia-700/50'
@@ -62,21 +60,7 @@ function factoryLabel(f: string) {
   return f || '?'
 }
 
-function prepStatusChip(row: PendingRow): { label: string; cls: string } | null {
-  // 已有 ARGO 批備料單號（erp_material_prep_lines 有記錄）
-  if (row.is_argo_prepped)
-    return { label: '已批備料(ARGO)', cls: 'bg-sky-900/40 text-sky-300 border-sky-700/50' }
-  // 出單表本身有標記
-  if (row.material_prep_status)
-    return { label: row.material_prep_status, cls: 'bg-emerald-900/40 text-emerald-300 border-emerald-700/50' }
-  // summary 有標記
-  if (row.summary_prep_status && row.summary_prep_status !== '未備料')
-    return { label: row.summary_prep_status, cls: 'bg-teal-900/40 text-teal-300 border-teal-700/50' }
-  return null
-}
-
-// ── MO 詳細 Modal ─────────────────────────────────────────────────────────────
-function MoDetailModal({ moNumber, onClose }: { moNumber: string; onClose: () => void }) {
+function factoryBadge(f: string) {
   const [lines, setLines]     = useState<MoLine[]>([])
   const [loading, setLoading] = useState(true)
   const [err, setErr]         = useState<string | null>(null)
@@ -172,21 +156,18 @@ export default function ShortageTrackingPage() {
   const [loading,      setLoading]      = useState(false)
   const [errMsg,       setErrMsg]       = useState('')
   const [loadedAt,     setLoadedAt]     = useState<Date | null>(null)
-  const [includeDone,  setIncludeDone]  = useState(false)
   const [filterFactory, setFilterFactory] = useState<'ALL' | 'T' | 'C' | 'O'>('ALL')
 
   // Modals
   const [soModal, setSoModal] = useState<string | null>(null)
   const [moModal, setMoModal] = useState<string | null>(null)
 
-  const loadData = useCallback(async (withDone = includeDone) => {
+  const loadData = useCallback(async () => {
     setLoading(true)
     setErrMsg('')
     setRows([])
     try {
-      const params = new URLSearchParams()
-      if (withDone) params.set('include_done', '1')
-      const res  = await fetch(`/api/argoerp/pending-prep?${params}`)
+      const res  = await fetch('/api/argoerp/pending-prep')
       const json = await res.json() as { success: boolean; rows?: PendingRow[]; error?: string }
       if (!json.success) throw new Error(json.error ?? `HTTP ${res.status}`)
       setRows(json.rows ?? [])
@@ -232,18 +213,6 @@ export default function ShortageTrackingPage() {
             </p>
           </div>
           <div className="flex items-center gap-3 flex-wrap">
-            <label className="flex items-center gap-2 text-sm text-slate-400 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={includeDone}
-                onChange={e => {
-                  setIncludeDone(e.target.checked)
-                  void loadData(e.target.checked)
-                }}
-                className="rounded border-slate-600 accent-cyan-500"
-              />
-              包含已完成
-            </label>
             <button
               onClick={() => void loadData()}
               disabled={loading}
@@ -356,15 +325,12 @@ export default function ShortageTrackingPage() {
                 <tbody>
                   {filtered.map((r, i) => {
                     const qty    = parseQty(r.quantity)
-                    const chip   = prepStatusChip(r)
                     const delivNorm = normDate(r.delivery_date)
 
                     return (
                       <tr
                         key={`${r.sheet_date}-${r.row_key ?? r.mo_number}-${i}`}
-                        className={`border-b border-slate-800 hover:bg-slate-800/40 transition-colors ${
-                          r.is_argo_prepped ? 'opacity-60' : ''
-                        }`}
+                        className="border-b border-slate-800 hover:bg-slate-800/40 transition-colors"
                       >
                         {/* # */}
                         <td className="px-3 py-2.5 text-slate-600 text-xs">{i + 1}</td>
@@ -428,15 +394,9 @@ export default function ShortageTrackingPage() {
 
                         {/* 備料狀態 */}
                         <td className="px-3 py-2.5">
-                          {chip ? (
-                            <span className={`inline-flex items-center px-1.5 py-0.5 text-xs rounded border ${chip.cls}`}>
-                              {chip.label}
-                            </span>
-                          ) : (
-                            <span className="inline-flex items-center px-1.5 py-0.5 text-xs rounded border bg-red-900/30 text-red-300 border-red-800/50">
-                              待備料
-                            </span>
-                          )}
+                          <span className="inline-flex items-center px-1.5 py-0.5 text-xs rounded border bg-red-900/30 text-red-300 border-red-800/50">
+                            待備料
+                          </span>
                         </td>
 
                         {/* 批備料單號 */}

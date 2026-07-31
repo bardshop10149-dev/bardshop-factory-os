@@ -18,7 +18,6 @@ export async function GET(request: NextRequest) {
 
   // 允許客戶端傳 ?include_done=1 讓已備料列也一起回傳（預設不含）
   const { searchParams } = new URL(request.url)
-  const includeDone = searchParams.get('include_done') === '1'
 
   try {
     const supabase = getSupabaseAdminClient()
@@ -41,7 +40,7 @@ export async function GET(request: NextRequest) {
         if (!row.mo_number) continue
         const prepStatus = row.material_prep_status as string | null
         const isDone = prepStatus && DONE_STATUSES.has(prepStatus)
-        if (!includeDone && isDone) continue
+        if (isDone) continue
         pendingRows.push({ ...row, sheet_date: sheet.sheet_date })
         moNumberSet.add(row.mo_number as string)
       }
@@ -109,20 +108,22 @@ export async function GET(request: NextRequest) {
       }
     }
 
-    // ── 5. 組裝最終結果 ────────────────────────────────────────────
-    const enriched = pendingRows.map(r => {
-      const mo = r.mo_number as string
-      const slip = (r.argo_slip_no as string | null) ?? logSlipMap[mo] ?? erpSlipMap[mo] ?? null
-      const summaryPrep = summaryMap[mo] ?? null
-      // 若 ARGO 同步或 log 已有批備料單號，標記為事實上已備料
-      const isArgoPrepped = !!(erpSlipMap[mo])
-      return {
-        ...r,
-        argo_slip_no: slip,
-        summary_prep_status: summaryPrep,
-        is_argo_prepped: isArgoPrepped,
-      }
-    })
+    // ── 5. 組裝最終結果（排除所有已有批備料單號 或 已完成的列）─────────
+    const enriched = pendingRows
+      .filter(r => {
+        const mo = r.mo_number as string
+        // 排除：出單表本身已有備料單號
+        if (r.argo_slip_no) return false
+        // 排除：系統 log 已有備料單號
+        if (logSlipMap[mo]) return false
+        // 排除：ARGO erp_material_prep_lines 已有批備料單
+        if (erpSlipMap[mo]) return false
+        // 排除：summary 已標記為已備料 / 無需備料
+        const sp = summaryMap[mo]
+        if (sp === '已備料' || sp === '無需備料') return false
+        return true
+      })
+      .map(r => ({ ...r }))
 
     // 排序：交期 ASC → 出單日 ASC
     const enrichedRaw = enriched as Array<Record<string, unknown>>
