@@ -273,6 +273,32 @@ export default function ProcessGenPage() {
         return
       }
 
+      // ── 從 argoerp_mo_machine_assign 補充台北廠製令機台（優先於 row.machine）────
+      // row.machine 只有在每日出單表點「儲存機台分配」後才會寫入 JSON；
+      // argoerp_mo_machine_assign 表才是最新且最準確的機台來源。
+      const tMoNums = [...new Set(
+        parsed.filter(r => r.factory === 'T' && r.mo_number).map(r => r.mo_number!)
+      )]
+      if (tMoNums.length > 0) {
+        const { data: machineRows } = await supabase
+          .from('argoerp_mo_machine_assign')
+          .select('mo_number, machine')
+          .in('mo_number', tMoNums)
+        if (machineRows?.length) {
+          const moMachineMap = new Map<string, string>(
+            (machineRows as { mo_number: string; machine: string }[])
+              .filter(m => m.machine)
+              .map(m => [m.mo_number, m.machine])
+          )
+          for (const r of parsed) {
+            if (r.factory === 'T' && r.mo_number) {
+              const fromTable = moMachineMap.get(r.mo_number)
+              if (fromTable) r.assigned_machine = fromTable
+            }
+          }
+        }
+      }
+
       // ── 從 erp_pj_sync 查詢 C/O 廠列的請購/採購單序號（lot_number 用）────
       const coRows = parsed.filter(r => (r.factory === 'C' || r.factory === 'O') && r.mo_number)
       if (coRows.length > 0) {
