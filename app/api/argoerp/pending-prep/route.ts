@@ -125,15 +125,16 @@ export async function GET(request: NextRequest) {
     })
 
     // 排序：交期 ASC → 出單日 ASC
-    enriched.sort((a, b) => {
+    const enrichedRaw = enriched as Array<Record<string, unknown>>
+    enrichedRaw.sort((a, b) => {
       const normD = (d: unknown) => {
         const s = String(d ?? '').split(/[ T]/)[0].replace(/\//g, '-').split('-')
         if (s.length !== 3) return ''
         return `${s[0]}-${s[1].padStart(2, '0')}-${s[2].padStart(2, '0')}`
       }
-      const da = normD(a.delivery_date), db = normD(b.delivery_date)
+      const da = normD(a['delivery_date']), db = normD(b['delivery_date'])
       if (da !== db) return da.localeCompare(db)
-      return String(a.sheet_date).localeCompare(String(b.sheet_date))
+      return String(a['sheet_date']).localeCompare(String(b['sheet_date']))
     })
 
     return NextResponse.json({ success: true, rows: enriched, total: enriched.length })
