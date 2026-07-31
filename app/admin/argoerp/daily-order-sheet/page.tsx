@@ -2274,14 +2274,14 @@ export default function DailyOrderSheetPage() {
     }
   }, [sheetRows, selectedDate, currentRawText])
 
-  // ---- 全日期批次比對（跨所有日期重新跑 MO + PO 比對後儲存）----
+  // ---- 一鍵全同步（七日內）— 對近七天所有出單表重新跑 MO + PO 比對後儲存 ----
   const [batchSyncing, setBatchSyncing] = useState(false)
   const [batchProgress, setBatchProgress] = useState<string>('')
 
-  const runBatchAllDatesSync = useCallback(async () => {
+  const runBatchRecentSync = useCallback(async () => {
     const ok = confirm(
-      '⚠️ 全日期批次比對\n\n' +
-      '將對所有日期的出單表重新執行 MO 比對 + 採購單比對，並逐張寫回資料庫。\n\n' +
+      '⚡ 一鍵全同步（七日內）\n\n' +
+      '將對近七天的出單表重新執行序號比對 + MO 比對 + 採購單比對，並逐張寫回資料庫。\n\n' +
       '建議先完成 ERP 同步頁面的全同步（MO / PO / PR），再執行本操作。\n\n' +
       '確定執行？'
     )
@@ -2290,10 +2290,12 @@ export default function DailyOrderSheetPage() {
     setBatchProgress('')
     setSaveMsg('')
     try {
-      // 0. 先撈所有出單表（供後續逐張處理用）
+      // 0. 先撈近七天出單表（供後續逐張處理用）
+      const sevenDaysAgo = new Date(Date.now() - 7 * 86_400_000).toISOString().slice(0, 10)
       const { data: allSheetsPreload, error: sheetsPreErr } = await supabase
         .from('daily_order_sheets')
         .select('sheet_date, rows, raw_text')
+        .gte('sheet_date', sevenDaysAgo)
         .order('sheet_date', { ascending: false })
       if (sheetsPreErr) throw sheetsPreErr
       const allSheetsData = allSheetsPreload ?? []
@@ -2506,11 +2508,11 @@ export default function DailyOrderSheetPage() {
       }
 
       setBatchProgress('')
-      setSaveMsg(`✅ 批次比對完成，共更新 ${totalUpdated} 張出單表`)
+      setSaveMsg(`✅ 全同步完成（七日內），共更新 ${totalUpdated} 張出單表`)
       setTimeout(() => setSaveMsg(''), 8000)
     } catch (e) {
       setBatchProgress('')
-      setSaveMsg(`❌ 批次比對失敗：${e instanceof Error ? e.message : String(e)}`)
+      setSaveMsg(`❌ 全同步失敗：${e instanceof Error ? e.message : String(e)}`)
       setTimeout(() => setSaveMsg(''), 6000)
     } finally {
       setBatchSyncing(false)
@@ -2691,15 +2693,15 @@ export default function DailyOrderSheetPage() {
             {availableSheets.length > 0 && (
               <>
                 <button
-                  onClick={() => void runBatchAllDatesSync()}
+                  onClick={() => void runBatchRecentSync()}
                   disabled={batchSyncing || exportingMissing}
                   className="px-4 py-2 rounded-lg bg-violet-900/60 border border-violet-700/50 hover:bg-violet-800 disabled:bg-slate-700 disabled:text-slate-500 disabled:border-slate-600 text-violet-200 text-sm font-medium transition-colors flex items-center gap-1.5"
-                  title="對所有日期的出單表重新執行 MO + 採購單比對，並寫回資料庫"
+                  title="對近七天的出單表重新執行序號比對 + MO + 採購單比對，並寫回資料庫"
                 >
                   <svg className="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
                   </svg>
-                  {batchSyncing ? (batchProgress ? `比對中 ${batchProgress}` : '比對中…') : '🔁 全日期批次比對'}
+                  {batchSyncing ? (batchProgress ? `同步中 ${batchProgress}` : '同步中…') : '⚡ 一鍵全同步(七日內)'}
                 </button>
               </>
             )}
