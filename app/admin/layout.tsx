@@ -83,7 +83,7 @@ function AdminNavbar() {
                   </button>
 
                   <div className="absolute left-0 top-full pt-3 w-64 opacity-0 translate-y-2 pointer-events-none group-hover/menu:opacity-100 group-hover/menu:translate-y-0 group-hover/menu:pointer-events-auto transition-all duration-200 z-50">
-                    <div className={`bg-[#0b1120] border rounded-xl shadow-2xl overflow-hidden backdrop-blur-xl flex flex-col py-2 ${colors.menuBorder}`}>
+                    <div className={`bg-[#0b1120] border rounded-xl shadow-2xl backdrop-blur-xl flex flex-col py-2 ${colors.menuBorder}`}>
                       <div className={`h-0.5 w-full bg-gradient-to-r from-transparent via-white/20 to-transparent opacity-50`}></div>
 
                       {group.items.map((item) => {
@@ -105,7 +105,7 @@ function AdminNavbar() {
                                 </div>
                                 {/* 往右展開的子選單 */}
                                 <div className="absolute left-full top-0 pl-1 w-56 opacity-0 -translate-x-2 pointer-events-none group-hover/sub:opacity-100 group-hover/sub:translate-x-0 group-hover/sub:pointer-events-auto transition-all duration-200 z-[60]">
-                                  <div className={`bg-[#0b1120] border rounded-xl shadow-2xl overflow-hidden backdrop-blur-xl flex flex-col py-2 ${colors.menuBorder}`}>
+                                  <div className={`bg-[#0b1120] border rounded-xl shadow-2xl backdrop-blur-xl flex flex-col py-2 ${colors.menuBorder}`}>
                                     {sub.children.map(child => {
                                       const isChildActive = pathname === child.path
                                       const isFav = favorites.includes(child.path)
