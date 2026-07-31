@@ -46,8 +46,7 @@ function parseQty(q: unknown): number {
   return parseFloat(String(q ?? '0').replace(/,/g, '')) || 0
 }
 
-// ── MO 詳細 Modal ────────────────────────────────────────────────────
-function MoDetailModal({ moNumber, onClose }: { moNumber: string; onClose: () => void }) {
+function factoryBadge(f: string) {
   if (f === 'T') return 'bg-emerald-900/40 text-emerald-300 border-emerald-700/50'
   if (f === 'C') return 'bg-orange-900/40 text-orange-300 border-orange-700/50'
   if (f === 'O') return 'bg-fuchsia-900/40 text-fuchsia-300 border-fuchsia-700/50'
@@ -60,7 +59,8 @@ function factoryLabel(f: string) {
   return f || '?'
 }
 
-function factoryBadge(f: string) {
+// ── MO 詳細 Modal ────────────────────────────────────────────────────
+function MoDetailModal({ moNumber, onClose }: { moNumber: string; onClose: () => void }) {
   const [lines, setLines]     = useState<MoLine[]>([])
   const [loading, setLoading] = useState(true)
   const [err, setErr]         = useState<string | null>(null)
