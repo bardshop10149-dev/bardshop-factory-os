@@ -177,7 +177,7 @@ export default function ShortageTrackingPage() {
     } finally {
       setLoading(false)
     }
-  }, [includeDone])
+  }, [])
 
   // 進頁自動載入
   useEffect(() => { void loadData() }, []) // eslint-disable-line react-hooks/exhaustive-deps
