@@ -14,8 +14,16 @@ interface ColorClasses {
 export default function AdminDashboard() {
   const { favorites, loading } = useFavorites()
 
-  // 1. 將所有選單攤平成一個陣列，方便查找
-  const allItems = NAV_GROUPS.flatMap(g => g.items.map(i => ({ ...i, theme: g.theme, groupTitle: g.title })))
+  // 1. 將所有選單攤平成一個陣列，方便查找（含子選單展開）
+  const allItems = NAV_GROUPS.flatMap(g =>
+    g.items.flatMap(i => {
+      if ('children' in i && Array.isArray(i.children)) {
+        return (i.children as Array<{ name: string; path: string; icon?: string }>).map(c => ({ ...c, theme: g.theme, groupTitle: g.title }))
+      }
+      const di = i as { name: string; path: string; icon?: string }
+      return [{ ...di, theme: g.theme, groupTitle: g.title }]
+    })
+  )
 
   // 2. 過濾出使用者設定的常用功能
   const favoriteItems = allItems.filter(item => favorites.includes(item.path))

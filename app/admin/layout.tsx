@@ -67,7 +67,13 @@ function AdminNavbar() {
           <nav className="flex items-center gap-4 overflow-visible w-full xl:w-auto">
             {NAV_GROUPS.map((group) => {
               const colors = getThemeColors(group.theme)
-              const isActiveGroup = group.items.some(item => pathname === item.path || pathname.startsWith(item.path + '?'))
+              const isActiveGroup = group.items.some(item => {
+                if ('children' in item && Array.isArray(item.children)) {
+                  return (item.children as { path: string }[]).some(c => pathname === c.path || pathname.startsWith(c.path + '?'))
+                }
+                const p = (item as { path: string }).path
+                return pathname === p || pathname.startsWith(p + '?')
+              })
 
               return (
                 <div key={group.title} className="relative group/menu">
@@ -81,29 +87,69 @@ function AdminNavbar() {
                       <div className={`h-0.5 w-full bg-gradient-to-r from-transparent via-white/20 to-transparent opacity-50`}></div>
 
                       {group.items.map((item) => {
-                          const isItemActive = pathname === item.path
-                          const isLocked = Boolean((item as { locked?: boolean }).locked)
-                          const isFav = favorites.includes(item.path)
-                          
+                          // ── 子選單群組（往右展開）
+                          if ('children' in item && Array.isArray(item.children)) {
+                            type Child = { name: string; path: string }
+                            const sub = item as { name: string; children: Child[] }
+                            const isSubActive = sub.children.some(c => pathname === c.path || pathname.startsWith(c.path + '?'))
+                            return (
+                              <div key={sub.name} className="relative group/sub">
+                                <div className={`flex items-center px-4 py-2 transition-colors border-l-4 hover:bg-slate-800/50 cursor-default select-none ${isSubActive ? `border-${group.theme}-400 bg-slate-800/80` : 'border-transparent'}`}>
+                                  <span className="mr-3 w-6 h-6 shrink-0" />
+                                  <span className={`flex-1 text-sm font-medium tracking-wide ${isSubActive ? colors.text : 'text-slate-400 group-hover/sub:text-white'}`}>
+                                    {sub.name}
+                                  </span>
+                                  <svg className="w-3 h-3 text-slate-500 ml-2 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                                  </svg>
+                                </div>
+                                {/* 往右展開的子選單 */}
+                                <div className="absolute left-full top-0 pl-1 w-56 opacity-0 -translate-x-2 pointer-events-none group-hover/sub:opacity-100 group-hover/sub:translate-x-0 group-hover/sub:pointer-events-auto transition-all duration-200 z-[60]">
+                                  <div className={`bg-[#0b1120] border rounded-xl shadow-2xl overflow-hidden backdrop-blur-xl flex flex-col py-2 ${colors.menuBorder}`}>
+                                    {sub.children.map(child => {
+                                      const isChildActive = pathname === child.path
+                                      const isFav = favorites.includes(child.path)
+                                      return (
+                                        <div key={child.path} className={`group/item flex items-center px-4 py-2 transition-colors border-l-4 hover:bg-slate-800/50 ${isChildActive ? `border-${group.theme}-400 bg-slate-800/80` : 'border-transparent'}`}>
+                                          <button
+                                            onClick={(e) => { e.preventDefault(); e.stopPropagation(); toggleFavorite(child.path) }}
+                                            className={`mr-3 p-1 rounded-full transition-all ${isFav ? 'text-yellow-400 hover:text-yellow-300 hover:bg-yellow-400/10' : 'text-slate-600 hover:text-slate-400'}`}
+                                            title={isFav ? '移除常用' : '加入常用'}
+                                          >
+                                            <svg className="w-4 h-4" fill={isFav ? 'currentColor' : 'none'} stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11.049 2.927c.3-.921 1.603-.921 1.902 0l1.519 4.674a1 1 0 00.95.69h4.915c.969 0 1.371 1.24.588 1.81l-3.976 2.888a1 1 0 00-.363 1.118l1.518 4.674c.3.922-.755 1.688-1.538 1.118l-3.976-2.888a1 1 0 00-1.176 0l-3.976 2.888c-.783.57-1.838-.197-1.538-1.118l1.518-4.674a1 1 0 00-.363-1.118l-3.976-2.888c-.784-.57-.38-1.81.588-1.81h4.914a1 1 0 00.951-.69l1.519-4.674z" /></svg>
+                                          </button>
+                                          <Link href={child.path} className={`flex-1 text-sm font-medium tracking-wide ${isChildActive ? colors.text : `text-slate-400 ${colors.hoverText} hover:text-white`}`}>
+                                            {child.name}
+                                          </Link>
+                                        </div>
+                                      )
+                                    })}
+                                  </div>
+                                </div>
+                              </div>
+                            )
+                          }
+
+                          // ── 一般直接項目
+                          const directItem = item as { name: string; path: string; locked?: boolean }
+                          const isItemActive = pathname === directItem.path
+                          const isLocked = Boolean(directItem.locked)
+                          const isFav = favorites.includes(directItem.path)
                           return (
-                            <div key={item.path} className={`group/item flex items-center px-4 py-2 transition-colors border-l-4 ${isLocked ? 'opacity-60 cursor-not-allowed' : 'hover:bg-slate-800/50'} ${isItemActive ? `border-${group.theme}-400 bg-slate-800/80` : 'border-transparent'}`}>
-                              {/* ⭐ 星星開關 */}
-                              <button 
-                                onClick={(e) => { e.preventDefault(); e.stopPropagation(); if (!isLocked) toggleFavorite(item.path); }}
+                            <div key={directItem.path} className={`group/item flex items-center px-4 py-2 transition-colors border-l-4 ${isLocked ? 'opacity-60 cursor-not-allowed' : 'hover:bg-slate-800/50'} ${isItemActive ? `border-${group.theme}-400 bg-slate-800/80` : 'border-transparent'}`}>
+                              <button
+                                onClick={(e) => { e.preventDefault(); e.stopPropagation(); if (!isLocked) toggleFavorite(directItem.path) }}
                                 disabled={isLocked}
                                 className={`mr-3 p-1 rounded-full transition-all ${isLocked ? 'text-slate-700 cursor-not-allowed' : isFav ? 'text-yellow-400 hover:text-yellow-300 hover:bg-yellow-400/10' : 'text-slate-600 hover:text-slate-400'}`}
-                                title={isFav ? "移除常用" : "加入常用"}
+                                title={isFav ? '移除常用' : '加入常用'}
                               >
-                                <svg className="w-4 h-4" fill={isFav ? "currentColor" : "none"} stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11.049 2.927c.3-.921 1.603-.921 1.902 0l1.519 4.674a1 1 0 00.95.69h4.915c.969 0 1.371 1.24.588 1.81l-3.976 2.888a1 1 0 00-.363 1.118l1.518 4.674c.3.922-.755 1.688-1.538 1.118l-3.976-2.888a1 1 0 00-1.176 0l-3.976 2.888c-.783.57-1.838-.197-1.538-1.118l1.518-4.674a1 1 0 00-.363-1.118l-3.976-2.888c-.784-.57-.38-1.81.588-1.81h4.914a1 1 0 00.951-.69l1.519-4.674z" /></svg>
+                                <svg className="w-4 h-4" fill={isFav ? 'currentColor' : 'none'} stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11.049 2.927c.3-.921 1.603-.921 1.902 0l1.519 4.674a1 1 0 00.95.69h4.915c.969 0 1.371 1.24.588 1.81l-3.976 2.888a1 1 0 00-.363 1.118l1.518 4.674c.3.922-.755 1.688-1.538 1.118l-3.976-2.888a1 1 0 00-1.176 0l-3.976 2.888c-.783.57-1.838-.197-1.538-1.118l1.518-4.674a1 1 0 00-.363-1.118l-3.976-2.888c-.784-.57-.38-1.81.588-1.81h4.914a1 1 0 00.951-.69l1.519-4.674z" /></svg>
                               </button>
-
                               {isLocked ? (
-                                <span className="flex-1 text-sm font-medium tracking-wide text-slate-500 select-none">
-                                  {item.name}（鎖定）
-                                </span>
+                                <span className="flex-1 text-sm font-medium tracking-wide text-slate-500 select-none">{directItem.name}（鎖定）</span>
                               ) : (
-                                <Link href={item.path} className={`flex-1 text-sm font-medium tracking-wide ${isItemActive ? colors.text : `text-slate-400 ${colors.hoverText} hover:text-white`}`}>
-                                  {item.name}
+                                <Link href={directItem.path} className={`flex-1 text-sm font-medium tracking-wide ${isItemActive ? colors.text : `text-slate-400 ${colors.hoverText} hover:text-white`}`}>
+                                  {directItem.name}
                                 </Link>
                               )}
                             </div>
