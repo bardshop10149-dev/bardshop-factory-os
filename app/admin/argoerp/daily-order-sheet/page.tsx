@@ -900,6 +900,9 @@ export default function DailyOrderSheetPage() {
       return old ? { ...r, mo_status: old.mo_status, mo_number: old.mo_number } : r
     })
     setSheetRows(merged)
+    // ── 同步更新 currentRawText，確保後續側存（序號比對、採購比對等）
+    // 不會把舊的 raw_text 存回 DB（否則下次重載時會從舊 raw_text 解析出已刪除的舊列）
+    setCurrentRawText(rawText)
     setShowPasteArea(false)
     setParseError('')
     if (duplicateWarnings.length > 0) {
