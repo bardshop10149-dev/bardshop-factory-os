@@ -310,7 +310,7 @@ function mapAllToExport(
     row.product_code        = src.item_code
     row.version             = '1'
     row.lot_number          = truncateByByteLength(src.order_number, 30)
-    row.planned_qty         = src.quantity
+    row.planned_qty         = src.quantity.replace(/,/g, '')
     row.bom_level           = '99'
     row.product_cost_ratio  = '1'
     row.material_cost_ratio = '1'

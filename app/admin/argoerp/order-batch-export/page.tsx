@@ -346,7 +346,7 @@ function mapAllToExport(srcRows: SourceRow[], matchResults?: SoMatchResult[]): E
     // 批號(MBP_LOT_NO)：來源訂單號截斷 30 bytes（ERP 欄位限制 32 bytes，留餘裕）
     row.lot_number = truncateByByteLength(src.order_number, 30)
     row.custom_1 = ''                                  // 自定義欄位1：暫不送出
-    row.planned_qty = src.quantity                     // 預訂產出量：數量
+    row.planned_qty = src.quantity.replace(/,/g, '')                     // 預訂產出量：數量
     row.bom_level = '99'                               // BOM製造批料階數
     row.product_cost_ratio = '1'                       // 成品工費分攤約當比例
     row.material_cost_ratio = '1'                      // 直接原料分攤約當比例
