@@ -831,7 +831,7 @@ export async function POST(request: NextRequest) {
         // - ORA-00904：CUSTOMCOLUMN 列出不存在的欄位名稱（各站台欄位命名不同）
         // 地址/備注/發票等選填顯示欄位因各站台命名不一，不列入 CUSTOMCOLUMN；同步後為 null 屬可接受。
         SHOWNULLCOLUMN: 'N',
-        CUSTOMCOLUMN: 'PROJECT_ID,BEGIN_DATE,TPN_PARTNER_ID,PARTNER_NAME,SALES_NAME,HOLD_STATUS,REMARK',
+        CUSTOMCOLUMN: 'PROJECT_ID,BEGIN_DATE,TPN_PARTNER_ID,PARTNER_NAME,SALES_NAME,HOLD_STATUS,REMARK,EXPORT_MODE,DELIVERY_ADDRESS',
         PJT_TYPE: "= 'SO'",
         HOLD_STATUS: "IN ('OPEN','UNSIGNED')",
       })
