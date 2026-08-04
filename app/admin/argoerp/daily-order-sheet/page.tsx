@@ -888,16 +888,54 @@ export default function DailyOrderSheetPage() {
     // 保留已有狀態（相同 row_key 的保留舊狀態）
     // 使用複合鍵避免同 row_key 但不同序號的列互相覆蓋（如同一工單同品號有多筆）
     const existingMap = new Map<string, SheetRow>()
+    // 次要索引：不含 factory，供廠區手動轉換後的列回退查找（同 DB 載入邏輯）
+    const existingMapNoFactory = new Map<string, SheetRow>()
+    const rowKeyNoFactory = (r: SheetRow) =>
+      [r.order_number, r.doc_type, r.item_code, r.item_name, r.note, r.quantity, r.delivery_date].join('||')
     for (const r of sheetRows) {
       if (r.match_line_no != null && r.match_line_no !== '') {
         existingMap.set(`${r.row_key}||seq:${r.match_line_no}`, r)
       }
       if (!existingMap.has(r.row_key)) existingMap.set(r.row_key, r)
+      if (r.factory_changed) {
+        const nfKey = rowKeyNoFactory(r)
+        if (!existingMapNoFactory.has(nfKey)) existingMapNoFactory.set(nfKey, r)
+      }
     }
     const merged = sheetRowsNew.map(r => {
       const seqKey = r.line_no_input ? `${r.row_key}||seq:${r.line_no_input}` : null
-      const old = (seqKey ? existingMap.get(seqKey) : null) ?? existingMap.get(r.row_key)
-      return old ? { ...r, mo_status: old.mo_status, mo_number: old.mo_number } : r
+      const parsedNfKey = [r.order_number, r.doc_type, r.item_code, r.item_name, r.note, r.quantity, r.delivery_date].join('||')
+      const old = (seqKey ? existingMap.get(seqKey) : null)
+        ?? existingMap.get(r.row_key)
+        ?? existingMapNoFactory.get(parsedNfKey)
+      if (!old) return r
+      // 若舊列有廠區轉換記錄，保留轉換後的廠別及所有比對狀態
+      if (old.factory_changed) {
+        return {
+          ...r,
+          factory:               old.factory,
+          factory_changed:       true,
+          row_key:               old.row_key,
+          mo_status:             old.mo_status,
+          mo_number:             old.mo_number,
+          po_number:             old.po_number,
+          po_sub_no:             old.po_sub_no,
+          po_status:             old.po_status,
+          po_qty_erp:            old.po_qty_erp,
+          po_confirmed:          old.po_confirmed,
+          pr_number:             old.pr_number,
+          pr_sub_no:             old.pr_sub_no,
+          pr_status:             old.pr_status,
+          match_status:          old.match_status,
+          match_line_no:         old.match_line_no,
+          match_pdl_seq:         old.match_pdl_seq,
+          match_reason:          old.match_reason,
+          material_prep_status:  old.material_prep_status,
+          argo_slip_no:          old.argo_slip_no,
+          machine:               old.machine,
+        }
+      }
+      return { ...r, mo_status: old.mo_status, mo_number: old.mo_number }
     })
     setSheetRows(merged)
     // ── 同步更新 currentRawText，確保後續側存（序號比對、採購比對等）
