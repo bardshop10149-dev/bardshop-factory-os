@@ -118,12 +118,34 @@ export async function POST(request: NextRequest) {
     }
 
     const supabase = getSupabaseAdminClient()
+
+    // 讀取現有 rows，以保留由外部 PATCH（如集單同步）寫入但本次 POST 未帶上的 mo_number / mo_status
+    const { data: existing } = await supabase
+      .from(TABLE)
+      .select('rows')
+      .eq('sheet_date', sheet_date)
+      .maybeSingle()
+    const existingRows = Array.isArray(existing?.rows) ? (existing!.rows as Record<string, unknown>[]) : []
+    const existingMap = new Map(existingRows.map(r => [r.row_key as string, r]))
+
+    // 若 incoming row 沒有 mo_number 但 DB 已有，則保留 DB 值（避免覆蓋集單同步結果）
+    const mergedRows = (rows as Record<string, unknown>[]).map(row => {
+      const ex = existingMap.get(row.row_key as string)
+      if (!ex) return row
+      const out = { ...row }
+      if (!out.mo_number && ex.mo_number) {
+        out.mo_number = ex.mo_number
+        if (!out.mo_status) out.mo_status = ex.mo_status
+      }
+      return out
+    })
+
     const { data, error } = await supabase
       .from(TABLE)
       .upsert({
         sheet_date,
         raw_text,
-        rows,
+        rows: mergedRows,
         updated_at: new Date().toISOString(),
         updated_by: guard.member.email,
         updated_by_name: guard.member.realName ?? guard.member.email,
