@@ -1449,9 +1449,13 @@ export default function DailyOrderSheetPage() {
       })
       const json = await res.json()
       if (!res.ok || !json.success) throw new Error(json.error || `HTTP ${res.status}`)
-      const newMo = deduped.filter((r, i) => r.mo_number && !sheetRows[i]?.mo_number).length
-      const batchPrepCount = deduped.filter(r => r.material_prep_status === '已批備料').length
-      const prepCount = deduped.filter(r => r.material_prep_status && r.material_prep_status !== '已批備料').length
+      // server 會將 POST 前的 PATCH（集單匯入、批備料等）合併回來；用回傳的 rows 更新 UI，
+      // 避免 state 是 stale（同步前未含 無需備料 等欄位）而蓋掉正確顯示
+      const savedRows: SheetRow[] = Array.isArray(json.sheet?.rows) ? (json.sheet.rows as SheetRow[]) : deduped
+      setSheetRows(savedRows)
+      const newMo = savedRows.filter((r, i) => r.mo_number && !sheetRows[i]?.mo_number).length
+      const batchPrepCount = savedRows.filter(r => r.material_prep_status === '已批備料').length
+      const prepCount = savedRows.filter(r => r.material_prep_status && r.material_prep_status !== '已批備料').length
       const prepMsg = batchPrepCount > 0 ? `已批備料 ${batchPrepCount} 筆${prepCount > 0 ? `、其他狀態 ${prepCount} 筆` : ''}` : prepCount > 0 ? `批備料狀態 ${prepCount} 筆` : '無批備料紀錄'
       setSaveMsg(`✅ 製令狀態同步完成：新增 ${newMo} 筆製令連結，${prepMsg}`)
       setTimeout(() => setSaveMsg(''), 5000)
@@ -1760,11 +1764,14 @@ export default function DailyOrderSheetPage() {
       })
       const json = await res.json()
       if (!res.ok || !json.success) throw new Error(json.error || `HTTP ${res.status}`)
-      const cMatched = next.filter(r => r.factory === 'C' && r.po_status === 'matched').length
-      const cNoMatch = next.filter(r => r.factory === 'C' && r.po_status === 'no_match').length
-      const oMatched = next.filter(r => r.factory === 'O' && r.po_status === 'matched').length
-      const oNoMatch = next.filter(r => r.factory === 'O' && r.po_status === 'no_match').length
-      const oPrMatched = next.filter(r => r.factory === 'O' && r.pr_status === 'matched').length
+      // 用 server 合併後的 rows 更新 UI，確保外部 PATCH（批備料等）不被 stale state 覆蓋
+      const savedNext: SheetRow[] = Array.isArray(json.sheet?.rows) ? (json.sheet.rows as SheetRow[]) : next
+      setSheetRows(savedNext)
+      const cMatched = savedNext.filter(r => r.factory === 'C' && r.po_status === 'matched').length
+      const cNoMatch = savedNext.filter(r => r.factory === 'C' && r.po_status === 'no_match').length
+      const oMatched = savedNext.filter(r => r.factory === 'O' && r.po_status === 'matched').length
+      const oNoMatch = savedNext.filter(r => r.factory === 'O' && r.po_status === 'no_match').length
+      const oPrMatched = savedNext.filter(r => r.factory === 'O' && r.pr_status === 'matched').length
       const parts: string[] = []
       if (cRows.length > 0) parts.push(`常平 ${cMatched}/${cRows.length}${cNoMatch > 0 ? `（未配 ${cNoMatch}）` : ''}`)
       if (oRows.length > 0) parts.push(`委外 ${oMatched}/${oRows.length}${oNoMatch > 0 ? `（未配 ${oNoMatch}）` : ''}${oPrMatched > 0 ? `、請購 ${oPrMatched}` : ''}`)
