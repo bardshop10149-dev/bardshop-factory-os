@@ -2171,6 +2171,8 @@ export default function DailyOrderSheetPage() {
       const prevRows = currentRows
       currentRows = currentRows.map(r => {
         const matchSeq = r.match_line_no != null ? String(parseInt(r.match_line_no, 10)).padStart(2, '0') : null
+        // 集單製令（MOS 格式）由 group-order-export 負責管理，此處完全跳過不干預
+        if (r.mo_number?.startsWith('MOS')) return r
         if (r.mo_number?.startsWith('MO')) {
           const erpMosForOrder = erpMoBySourceOrder.get(r.order_number)
           if (erpMosForOrder && !erpMosForOrder.has(r.mo_number))
@@ -2529,6 +2531,8 @@ export default function DailyOrderSheetPage() {
         // Step B: MO 比對
         rows = rows.map(r => {
           const matchSeq = r.match_line_no != null ? String(parseInt(r.match_line_no, 10)).padStart(2, '0') : null
+          // 集單製令（MOS 格式）由 group-order-export 負責管理，此處完全跳過不干預
+          if (r.mo_number?.startsWith('MOS')) return r
           if (r.mo_number?.startsWith('MO')) {
             const erpMosForOrder = erpMoBySourceOrder.get(r.order_number)
             if (erpMosForOrder && !erpMosForOrder.has(r.mo_number))
