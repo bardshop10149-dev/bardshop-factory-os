@@ -64,8 +64,10 @@ export async function POST() {
 // 有效格式：
 //   一般格式：MO[TCO] + 日期後綴(≥8碼數字) + 序號(2碼) = 共≥3後至10碼 = 整高13碼
 //   SOA 格式：MO[TCO] + YYMMDD-HHMMSS-NNN + 2碼序號 = 含連字號且後綴≥7碼
+//   MOS 格式：MOS{orderNum}{seq}-{typeCode}-{mmdd}（集單用）
 // 不符合的四不像製令號（如 MOT26070601）一律排除
 function isValidMoFormat(mo: string): boolean {
+  if (mo.startsWith('MOS')) return /^MOS\d+[0-9]{2}-[A-Z0-9]+-\d{4}$/.test(mo)  // 集單格式
   if (!/^MO[TCO]/.test(mo)) return false
   const suffix = mo.slice(3)
   if (suffix.includes('-')) {
@@ -149,6 +151,9 @@ async function matchSheet(supabase: any, sheet: DailySheet): Promise<number> {
     const matchSeq = r.match_line_no != null
       ? String(parseInt(r.match_line_no, 10)).padStart(2, '0')
       : null
+
+    // 集單製令（MOS 格式）由 group-order-export 管理，此處跳過不干預
+    if (r.mo_number?.startsWith('MOS')) return r
 
     if (r.mo_number?.startsWith('MO')) {
       // 格式驗證：不符合有效製令號編碼的對象一律清除

@@ -662,6 +662,7 @@ export default function DailyOrderSheetPage() {
         // ── 格式不符的製令號在載入時立即清除並存回 DB ──
         // 避免舊的截斷格式（如 MOT26070601）殘留顯示，不等同步按鈕觸發
         const isValidMoFmt = (mo: string): boolean => {
+          if (mo.startsWith('MOS')) return /^MOS\d+[0-9]{2}-[A-Z0-9]+-\d{4}$/.test(mo)  // 集單格式
           if (!/^MO[TCO]/.test(mo)) return false
           const s = mo.slice(3)
           if (s.includes('-')) return s.length >= 15 && /^\d{6}-/.test(s)
@@ -1282,7 +1283,9 @@ export default function DailyOrderSheetPage() {
       // 製令單號格式驗證函式
       // 一般格式：MO[TCO] + 日期後綴(≥8碼) + 序號(2碼) = 後綴≥8碼+2碼 = ≥8字元後綴
       // SOA 格式：MO[TCO] + YYMMDD-HHMMSS-NNNss（含連字號）
+      // MOS 格式：MOS{orderNum}{seq}-{typeCode}-{mmdd}（集單用，由 group-order-export 管理）
       const isValidMoFormat = (mo: string): boolean => {
+        if (mo.startsWith('MOS')) return /^MOS\d+[0-9]{2}-[A-Z0-9]+-\d{4}$/.test(mo)  // 集單格式
         if (!/^MO[TCO]/.test(mo)) return false
         const s = mo.slice(3)
         if (s.includes('-')) return s.length >= 15 && /^\d{6}-/.test(s)
@@ -1293,6 +1296,9 @@ export default function DailyOrderSheetPage() {
         const matchSeq = r.match_line_no != null
           ? String(parseInt(r.match_line_no, 10)).padStart(2, '0')
           : null
+
+        // 集單製令（MOS 格式）由 group-order-export 負責管理，此處完全跳過不干預
+        if (r.mo_number?.startsWith('MOS')) return r
 
         // 若已有 MO：先檢查是否仍存在於 ARGO erp_mo_lines
         if (r.mo_number?.startsWith('MO')) {

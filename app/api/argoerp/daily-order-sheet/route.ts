@@ -128,14 +128,24 @@ export async function POST(request: NextRequest) {
     const existingRows = Array.isArray(existing?.rows) ? (existing!.rows as Record<string, unknown>[]) : []
     const existingMap = new Map(existingRows.map(r => [r.row_key as string, r]))
 
-    // 若 incoming row 沒有 mo_number 但 DB 已有，則保留 DB 值（避免覆蓋集單同步結果）
+    // 若 incoming row 某個欄位為空但 DB 已有值，保留 DB 值
+    // （避免當 daily-order-sheet 頁面是在外部 PATCH 發生前載入時，POST 覆蓋掉 PATCH 的結果）
+    // 受保護欄位：所有可由外部 PATCH（集單同步、批備料、採購比對等）寫入的欄位
+    const PRESERVE_IF_EMPTY = [
+      'mo_number', 'mo_status',
+      'material_prep_status', 'argo_slip_no',
+      'po_number', 'po_sub_no', 'po_status', 'po_qty_erp', 'po_confirmed',
+      'pr_number', 'pr_sub_no', 'pr_status',
+      'match_status', 'match_line_no', 'match_pdl_seq', 'match_reason',
+    ] as const
     const mergedRows = (rows as Record<string, unknown>[]).map(row => {
       const ex = existingMap.get(row.row_key as string)
       if (!ex) return row
       const out = { ...row }
-      if (!out.mo_number && ex.mo_number) {
-        out.mo_number = ex.mo_number
-        if (!out.mo_status) out.mo_status = ex.mo_status
+      for (const field of PRESERVE_IF_EMPTY) {
+        if ((out[field] === null || out[field] === undefined || out[field] === '') && ex[field] != null && ex[field] !== '') {
+          out[field] = ex[field]
+        }
       }
       return out
     })
