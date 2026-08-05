@@ -143,6 +143,21 @@ function createRowKey(row: SourceRow): string {
   ].join('||')
 }
 
+/**
+ * 清除製令號欄位時，保留使用者主動設定的備料狀態（無需備料/已備料）；
+ * 僅清除衍生自 ARGO ERP 的 已批備料 狀態。
+ */
+function clearMoFields(r: SheetRow): SheetRow {
+  return {
+    ...r,
+    mo_number: undefined,
+    mo_status: null,
+    material_prep_status:
+      r.material_prep_status === '無需備料' || r.material_prep_status === '已備料'
+        ? r.material_prep_status : null,
+  }
+}
+
 function parseTSV(text: string): string[][] {
   const rows: string[][] = []
   let current = ''
@@ -672,7 +687,7 @@ export default function DailyOrderSheetPage() {
         if (invalidMoRows.length > 0) {
           finalRows = finalRows.map(r =>
             r.mo_number?.startsWith('MO') && !isValidMoFmt(r.mo_number)
-              ? { ...r, mo_number: undefined, mo_status: null, material_prep_status: null }
+              ? clearMoFields(r)
               : r
           )
           // 非同步存回 DB（不阻塞 UI）
@@ -936,7 +951,30 @@ export default function DailyOrderSheetPage() {
           machine:               old.machine,
         }
       }
-      return { ...r, mo_status: old.mo_status, mo_number: old.mo_number }
+      // 保留所有由外部 PATCH 寫入的欄位（集單匯出、批備料、採購比對等）
+      return {
+        ...r,
+        mo_status:             old.mo_status,
+        mo_number:             old.mo_number,
+        material_prep_status:  old.material_prep_status,
+        argo_slip_no:          old.argo_slip_no,
+        po_number:             old.po_number,
+        po_sub_no:             old.po_sub_no,
+        po_status:             old.po_status,
+        po_qty_erp:            old.po_qty_erp,
+        po_confirmed:          old.po_confirmed,
+        pr_number:             old.pr_number,
+        pr_sub_no:             old.pr_sub_no,
+        pr_status:             old.pr_status,
+        // 原始資料無序號輸入時才保留舊比對結果；有序號輸入時以原始資料為主
+        ...(!r.line_no_input ? {
+          match_status:        old.match_status,
+          match_line_no:       old.match_line_no,
+          match_pdl_seq:       old.match_pdl_seq,
+          match_reason:        old.match_reason,
+        } : {}),
+        machine:               old.machine,
+      }
     })
     setSheetRows(merged)
     // ── 同步更新 currentRawText，確保後續側存（序號比對、採購比對等）
@@ -964,6 +1002,8 @@ export default function DailyOrderSheetPage() {
       })
       const json = await res.json()
       if (!res.ok || !json.success) throw new Error(json.error || `HTTP ${res.status}`)
+      // server 會把外部 PATCH 欄位合併進 rows；用回傳結果更新 UI，避免 stale state 顯示錯誤
+      if (Array.isArray(json.sheet?.rows)) setSheetRows(json.sheet.rows as SheetRow[])
       setSaveMsg(`✅ 已儲存 ${sheetRows.length} 筆至 ${selectedDate}`)
       setCurrentRawText(rawText || currentRawText)
       setRawText('')
@@ -1304,20 +1344,20 @@ export default function DailyOrderSheetPage() {
         if (r.mo_number?.startsWith('MO')) {
           // 格式驗證：不符合有效製令號編碼原則的對象一律清除
           if (!isValidMoFormat(r.mo_number)) {
-            return { ...r, mo_number: undefined, mo_status: null, material_prep_status: null }
+            return clearMoFields(r)
           }
           // 本系統有此 MO 的上傳紀錄，但已從 argoerp_mo_summary 刪除（使用者主動刪除）
           // 以本系統為準，即使 erp_mo_lines 仍有此記錄也清除（避免錯誤的製令號殘留）
           if (rawLogMoSet.has(r.mo_number) && !activeMoNumbers.has(r.mo_number)) {
-            return { ...r, mo_number: undefined, mo_status: null, material_prep_status: null }
+            return clearMoFields(r)
           }
           const erpMosForOrder = erpMoBySourceOrder.get(r.order_number)
           if (erpMosForOrder && !erpMosForOrder.has(r.mo_number)) {
-            return { ...r, mo_number: undefined, mo_status: null, material_prep_status: null }
+            return clearMoFields(r)
           }
           // ERP 無此訂單製令紀錄，且製令已從 argoerp_mo_summary 刪除 → 清除殘留值
           if (!erpMosForOrder && !activeMoNumbers.has(r.mo_number)) {
-            return { ...r, mo_number: undefined, mo_status: null, material_prep_status: null }
+            return clearMoFields(r)
           }
           if (!matchSeq) return r
           const erpConfirm = erpMoMap.get(`${r.order_number}|${r.item_code}|${matchSeq}`)
@@ -1328,7 +1368,7 @@ export default function DailyOrderSheetPage() {
             const moSuffix = r.mo_number.slice(-2)
             if (/^\d{2}$/.test(moSuffix) && moSuffix !== matchSeq) {
               // 末碼與序號不符 → 清除錯誤比對結果
-              return { ...r, mo_number: undefined, mo_status: null, material_prep_status: null }
+              return clearMoFields(r)
             }
             return r  // 末碼符合，保留
           }
@@ -1371,7 +1411,7 @@ export default function DailyOrderSheetPage() {
         if (baseHits.length === 1) return { ...r, mo_number: baseHits[0], mo_status: '已匯入製令' as const }
 
         if (r.mo_number && !r.mo_number.startsWith('MO')) {
-          return { ...r, mo_number: undefined, mo_status: null, material_prep_status: null }
+          return clearMoFields(r)
         }
         return r
       })
@@ -1381,7 +1421,7 @@ export default function DailyOrderSheetPage() {
       const deduped: SheetRow[] = next.map(r => {
         if (!r.mo_number) return r
         if (usedMoSet.has(r.mo_number)) {
-          return { ...r, mo_number: undefined, mo_status: null, material_prep_status: null }
+          return clearMoFields(r)
         }
         usedMoSet.add(r.mo_number)
         return r
@@ -2134,9 +2174,9 @@ export default function DailyOrderSheetPage() {
         if (r.mo_number?.startsWith('MO')) {
           const erpMosForOrder = erpMoBySourceOrder.get(r.order_number)
           if (erpMosForOrder && !erpMosForOrder.has(r.mo_number))
-            return { ...r, mo_number: undefined, mo_status: null, material_prep_status: null }
+            return clearMoFields(r)
           if (!erpMosForOrder && !activeMoNumbers.has(r.mo_number))
-            return { ...r, mo_number: undefined, mo_status: null, material_prep_status: null }
+            return clearMoFields(r)
           if (!matchSeq) return r
           const erpConfirm = erpMoMap.get(`${r.order_number}|${r.item_code}|${matchSeq}`)
                           ?? moSeqMapAll.get(`${r.order_number}|${r.item_code}|${matchSeq}`)
@@ -2144,7 +2184,7 @@ export default function DailyOrderSheetPage() {
           if (!erpConfirm) {
             const moSuffix = r.mo_number.slice(-2)
             if (/^\d{2}$/.test(moSuffix) && moSuffix !== matchSeq)
-              return { ...r, mo_number: undefined, mo_status: null, material_prep_status: null }
+              return clearMoFields(r)
             return r
           }
           if (erpConfirm === r.mo_number) return r
@@ -2173,7 +2213,7 @@ export default function DailyOrderSheetPage() {
         const baseHits = erpMoBaseMap.get(`${r.order_number}|${r.item_code}`) ?? []
         if (baseHits.length === 1) return { ...r, mo_number: baseHits[0], mo_status: '已匯入製令' as const }
         if (r.mo_number && !r.mo_number.startsWith('MO'))
-          return { ...r, mo_number: undefined, mo_status: null, material_prep_status: null }
+          return clearMoFields(r)
         return r
       })
       // 去重：同一製令單號只允許配對一列
@@ -2181,7 +2221,7 @@ export default function DailyOrderSheetPage() {
       currentRows = currentRows.map(r => {
         if (!r.mo_number) return r
         if (usedMoSetAll.has(r.mo_number))
-          return { ...r, mo_number: undefined, mo_status: null, material_prep_status: null }
+          return clearMoFields(r)
         usedMoSetAll.add(r.mo_number)
         return r
       })
@@ -2492,7 +2532,7 @@ export default function DailyOrderSheetPage() {
           if (r.mo_number?.startsWith('MO')) {
             const erpMosForOrder = erpMoBySourceOrder.get(r.order_number)
             if (erpMosForOrder && !erpMosForOrder.has(r.mo_number))
-              return { ...r, mo_number: undefined, mo_status: null as null, material_prep_status: null as null }
+              return clearMoFields(r)
             if (!matchSeq) return r
             const erpConfirm = erpMoMap.get(`${r.order_number}|${r.item_code}|${matchSeq}`)
             if (!erpConfirm || erpConfirm === r.mo_number) return r
@@ -2513,7 +2553,7 @@ export default function DailyOrderSheetPage() {
           const baseHits = erpMoBaseMap.get(`${r.order_number}|${r.item_code}`) ?? []
           if (baseHits.length === 1) return { ...r, mo_number: baseHits[0], mo_status: '已匯入製令' as const }
           if (r.mo_number && !r.mo_number.startsWith('MO'))
-            return { ...r, mo_number: undefined, mo_status: null as null, material_prep_status: null as null }
+            return clearMoFields(r)
           return r
         })
 

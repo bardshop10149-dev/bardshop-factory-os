@@ -60,6 +60,18 @@ export async function POST() {
   return NextResponse.json({ success: true, results })
 }
 
+// 清除製令號欄位時，保留使用者主動設定的備料狀態（無需備料/已備料）；僅清除衍生自 ARGO ERP 的 已批備料 狀態
+function clearMoFields(r: SheetRow): SheetRow {
+  return {
+    ...r,
+    mo_number: undefined,
+    mo_status: null,
+    material_prep_status:
+      r.material_prep_status === '無需備料' || r.material_prep_status === '已備料'
+        ? r.material_prep_status : null,
+  }
+}
+
 // 製令單號格式驗證
 // 有效格式：
 //   一般格式：MO[TCO] + 日期後綴(≥8碼數字) + 序號(2碼) = 共≥3後至10碼 = 整高13碼
@@ -158,20 +170,20 @@ async function matchSheet(supabase: any, sheet: DailySheet): Promise<number> {
     if (r.mo_number?.startsWith('MO')) {
       // 格式驗證：不符合有效製令號編碼的對象一律清除
       if (!isValidMoFormat(r.mo_number)) {
-        return { ...r, mo_number: undefined, mo_status: null, material_prep_status: null }
+        return clearMoFields(r)
       }
       // 本系統有此 MO 的上傳紀錄，但已從 argoerp_mo_summary 刪除（使用者主動刪除）
       // 以本系統為準，即使 erp_mo_lines 仍有此記錄也清除
       if (rawLogMoSet.has(r.mo_number) && !activeMoNumbers.has(r.mo_number)) {
-        return { ...r, mo_number: undefined, mo_status: null, material_prep_status: null }
+        return clearMoFields(r)
       }
       const erpMosForOrder = erpMoBySourceOrder.get(r.order_number)
       if (erpMosForOrder && !erpMosForOrder.has(r.mo_number)) {
-        return { ...r, mo_number: undefined, mo_status: null, material_prep_status: null }
+        return clearMoFields(r)
       }
       // ERP 無此訂單製令紀錄，且製令已從 argoerp_mo_summary 刪除 → 清除殘留値
       if (!erpMosForOrder && !activeMoNumbers.has(r.mo_number)) {
-        return { ...r, mo_number: undefined, mo_status: null, material_prep_status: null }
+        return clearMoFields(r)
       }
       if (!matchSeq) return r
       const erpConfirm = erpMoMap.get(`${r.order_number}|${r.item_code}|${matchSeq}`)
@@ -200,7 +212,7 @@ async function matchSheet(supabase: any, sheet: DailySheet): Promise<number> {
     if (baseHits.length === 1) return { ...r, mo_number: baseHits[0], mo_status: '已匯入製令' as const }
 
     if (r.mo_number && !r.mo_number.startsWith('MO')) {
-      return { ...r, mo_number: undefined, mo_status: null, material_prep_status: null }
+      return clearMoFields(r)
     }
     return r
   })
@@ -245,10 +257,24 @@ async function matchSheet(supabase: any, sheet: DailySheet): Promise<number> {
     return r.mo_number !== orig.mo_number || r.mo_status !== orig.mo_status || r.material_prep_status !== orig.material_prep_status
   }).length
 
-  // 6. 寫回 DB
+  // 6. 寫回 DB：保留外部 PATCH 寫入的非 MO 欄位（argo_slip_no, po_*, pr_* 等）
+  const PRESERVE_FIELDS = ['argo_slip_no', 'po_number', 'po_sub_no', 'po_status', 'po_qty_erp', 'po_confirmed', 'pr_number', 'pr_sub_no', 'pr_status'] as const
+  const existingMap = new Map(sheetRows.map(r => [r.row_key, r]))
+  const merged = next.map(r => {
+    const ex = existingMap.get(r.row_key)
+    if (!ex) return r
+    const out = { ...r } as Record<string, unknown>
+    for (const field of PRESERVE_FIELDS) {
+      if ((out[field] == null || out[field] === '') && (ex[field] != null && ex[field] !== '')) {
+        out[field] = ex[field]
+      }
+    }
+    return out as SheetRow
+  })
+
   await supabase
     .from('daily_order_sheets')
-    .update({ rows: next, updated_at: new Date().toISOString() })
+    .update({ rows: merged, updated_at: new Date().toISOString() })
     .eq('sheet_date', sheet.sheet_date)
 
   return updatedCount
