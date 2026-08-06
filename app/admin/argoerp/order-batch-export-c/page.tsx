@@ -460,7 +460,7 @@ export default function PoBatchExportCPage() {
     try {
       const updates = sourceRows
         .filter(r => r.row_key)
-        .map(r => ({ row_key: r.row_key!, po_number: pid, po_status: 'matched' }))
+        .map(r => ({ row_key: r.row_key!, po_number: pid, po_status: 'matched', po_confirmed: true }))
       if (updates.length === 0) { setMsg('⚠️ 來源資料無 row_key，無法回寫'); setTimeout(() => setMsg(''), 5000); return }
       const res = await fetch('/api/argoerp/daily-order-sheet', {
         method: 'PATCH',
