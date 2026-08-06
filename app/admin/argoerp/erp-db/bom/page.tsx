@@ -31,6 +31,8 @@ export default function BomStructurePage() {
   const [syncing, setSyncing]   = useState(false)
   const [syncMsg, setSyncMsg]   = useState<string | null>(null)
   const [syncedAt, setSyncedAt] = useState<string | null>(null)
+  const [exploring, setExploring] = useState(false)
+  const [exploreResult, setExploreResult] = useState<{ columns: string[]; sample_rows: Record<string, unknown>[] } | null>(null)
   // browse 分頁
   const [browseRows, setBrowseRows]     = useState<BomRow[]>([])
   const [browseTotal, setBrowseTotal]   = useState(0)
@@ -134,6 +136,28 @@ export default function BomStructurePage() {
     }
   }
 
+  const handleExplore = async () => {
+    setExploring(true)
+    setExploreResult(null)
+    try {
+      const res = await fetch('/api/argoerp', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'explore_bom_structure' }),
+      })
+      const json = await res.json() as { status: string; columns?: string[]; sample_rows?: Record<string, unknown>[]; error?: string }
+      if (json.status === 'ok') {
+        setExploreResult({ columns: json.columns ?? [], sample_rows: json.sample_rows ?? [] })
+      } else {
+        setSyncMsg(`❌ 探索失敗：${json.error ?? '未知錯誤'}`)
+      }
+    } catch (e) {
+      setSyncMsg(`❌ ${e instanceof Error ? e.message : '連線錯誤'}`)
+    } finally {
+      setExploring(false)
+    }
+  }
+
   // 把結果依母件分組（正向模式有意義）
   const grouped = mode === 'forward'
     ? rows.reduce<Record<string, BomRow[]>>((acc, r) => {
@@ -162,6 +186,14 @@ export default function BomStructurePage() {
           <div className="flex gap-2 items-center flex-wrap">
             {syncMsg && <span className={`text-xs ${syncMsg.startsWith('❌') ? 'text-red-400' : 'text-emerald-400'}`}>{syncMsg}</span>}
             <button
+              onClick={() => void handleExplore()}
+              disabled={exploring || syncing}
+              className="px-4 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 disabled:opacity-50 text-white text-sm font-medium transition-colors"
+              title="查看 ARGO MM_BOM_STRUCTURE 的所有欄位名稱（用於排查替代料欄位）"
+            >
+              {exploring ? '查詢中...' : '🔬 探索欄位'}
+            </button>
+            <button
               onClick={() => void handleSync()}
               disabled={syncing}
               className="px-4 py-2 rounded-lg bg-cyan-700 hover:bg-cyan-600 disabled:opacity-50 text-white text-sm font-medium transition-colors"
@@ -170,6 +202,29 @@ export default function BomStructurePage() {
             </button>
           </div>
         </div>
+
+        {/* 欄位探索結果 */}
+        {exploreResult && (
+          <div className="mb-6 rounded-xl border border-amber-700/40 bg-amber-950/20 p-4">
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-sm font-semibold text-amber-300">MM_BOM_STRUCTURE 欄位列表（共 {exploreResult.columns.length} 個）</h3>
+              <button onClick={() => setExploreResult(null)} className="text-slate-500 hover:text-white text-xs">✕ 關閉</button>
+            </div>
+            <div className="flex flex-wrap gap-1.5 mb-4">
+              {exploreResult.columns.map(c => (
+                <span key={c} className="px-2 py-0.5 rounded bg-slate-800 border border-slate-700 font-mono text-xs text-slate-300">{c}</span>
+              ))}
+            </div>
+            {exploreResult.sample_rows.length > 0 && (
+              <details className="mt-2">
+                <summary className="text-xs text-slate-400 cursor-pointer hover:text-slate-200">▶ 前 5 筆樣本資料</summary>
+                <pre className="mt-2 text-xs text-slate-400 overflow-x-auto bg-slate-900 rounded p-3 max-h-64">
+                  {JSON.stringify(exploreResult.sample_rows, null, 2)}
+                </pre>
+              </details>
+            )}
+          </div>
+        )}
 
         {/* Tab 切換 */}
         <div className="flex gap-0 mb-6 rounded-lg overflow-hidden border border-slate-700 w-fit text-sm">

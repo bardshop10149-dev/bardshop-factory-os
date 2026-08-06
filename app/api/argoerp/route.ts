@@ -354,7 +354,7 @@ export async function POST(request: NextRequest) {
   try {
     const body = await request.json()
     const { action, data, interfaceId } = body as {
-      action: 'import' | 'query' | 'query_so_detail' | 'sync_inventory' | 'sync_customer' | 'sync_vendor' | 'fetch_po_pdl_links' | 'explore_so_columns' | 'test_so_detail' | 'test_po_detail' | 'sync_so' | 'sync_mo' | 'sync_pj' | 'sync_po' | 'sync_pr' | 'sync_bom_units' | 'sync_bom_structure' | 'sync_material_prep'
+      action: 'import' | 'query' | 'query_so_detail' | 'sync_inventory' | 'sync_customer' | 'sync_vendor' | 'fetch_po_pdl_links' | 'explore_so_columns' | 'explore_bom_structure' | 'test_so_detail' | 'test_po_detail' | 'sync_so' | 'sync_mo' | 'sync_pj' | 'sync_po' | 'sync_pr' | 'sync_bom_units' | 'sync_bom_structure' | 'sync_material_prep'
       data?: Record<string, unknown>[]
       interfaceId?: string
     }
@@ -720,6 +720,27 @@ export async function POST(request: NextRequest) {
         order_qty_oru: getRecordValue(row, 'ORDER_QTY_ORU') != null ? Number(getRecordValue(row, 'ORDER_QTY_ORU')) : null,
       }))
       return NextResponse.json({ status: 'ok', count: links.length, links })
+    }
+
+    if (action === 'explore_bom_structure') {
+      // ── 探索 MM_BOM_STRUCTURE 全部欄位（含替代料欄位）──
+      const sparam = JSON.stringify({
+        APIKEY1: keys.APIKEY1, APIKEY2: keys.APIKEY2, APIKEY3: keys.APIKEY3,
+        SEGMENT, TABLE: 'MM_BOM_STRUCTURE', SHOWNULLCOLUMN: 'Y',
+        MBP_PART: 'IS NOT NULL', ROWNUM: '<= 5',
+      })
+      const res = await fetch(`${API_BASE}/S_QUERY`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sparam }),
+      })
+      const { parsed, rawText } = await readApiResponse(res)
+      const argoError = extractApiError(parsed)
+      if (!res.ok || !isArgoSuccess(parsed)) {
+        return NextResponse.json({ status: 'error', error: argoError || 'MM_BOM_STRUCTURE query failed', rawText }, { status: 502 })
+      }
+      const sampleRows = findObjectRows(parsed).slice(0, 5)
+      const columns = sampleRows.length > 0 ? Object.keys(sampleRows[0]) : []
+      return NextResponse.json({ status: 'ok', columns, sample_rows: sampleRows })
     }
 
     if (action === 'explore_so_columns') {
