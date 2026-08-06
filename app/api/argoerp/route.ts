@@ -374,6 +374,38 @@ export async function POST(request: NextRequest) {
     // 取得金鑰（5 分鐘時效）
     const keys = await getApiKeys()
 
+    // ── 增量同步共用前置 ───────────────────────────────────────────────
+    // body.incrementalMinutes 有值時 = 只處理「近 N 分鐘內在 ARGO 有異動」的單。
+    // 先用 UPDATE_DATE 窗口查出受影響單號，之後沿用既有查詢與組資料程式碼（只多一個 IN 條件），
+    // 確保增量與全量產出的列完全一致，不會互相覆蓋。
+    // 以 ARGO 自己的 SYSDATE 為基準：免存浮水印、無時鐘誤差，窗口本身就是重疊緩衝。
+    const incMinutes = typeof (body as { incrementalMinutes?: unknown }).incrementalMinutes === 'number'
+      ? Math.max(1, Math.min(1440, (body as { incrementalMinutes: number }).incrementalMinutes))
+      : null
+    const incWindow = incMinutes ? `> SYSDATE - INTERVAL '${incMinutes}' MINUTE` : null
+    const INC_MAX_IDS = 300 // 受影響單號過多時退回全量（也避開 Oracle IN 上限）
+
+    async function fetchChangedIds(table: string, idField: string, extra: Record<string, string> = {}): Promise<string[]> {
+      const sparam = JSON.stringify({
+        APIKEY1: keys.APIKEY1, APIKEY2: keys.APIKEY2, APIKEY3: keys.APIKEY3,
+        SEGMENT, TABLE: table, SHOWNULLCOLUMN: 'N', CUSTOMCOLUMN: idField,
+        UPDATE_DATE: incWindow!, ...extra,
+      })
+      const res = await fetch(`${API_BASE}/S_QUERY`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sparam }),
+      })
+      const { parsed } = await readApiResponse(res)
+      if (!res.ok || !isArgoSuccess(parsed)) throw new Error(extractApiError(parsed) || `${table} 增量查詢失敗`)
+      const ids = new Set<string>()
+      for (const row of findObjectRows(parsed)) {
+        const v = String(getRecordValue(row, idField) ?? '').trim()
+        if (v) ids.add(v)
+      }
+      return [...ids]
+    }
+    const inClause = (ids: string[]) => `IN (${ids.map((v) => `'${v.replace(/'/g, "''")}'`).join(',')})`
+
     if (action === 'import') {
       if (!data || !interfaceId) {
         return NextResponse.json({ status: 'error', error: 'Missing data or interfaceId' }, { status: 400 })
@@ -818,6 +850,20 @@ export async function POST(request: NextRequest) {
     }
 
     if (action === 'sync_so') {
+      // 增量：先取近 N 分鐘有異動的單號（表頭 ∪ 表身）。表頭改也要連該單所有表身重抓，
+      // 否則表身列裡的表頭欄位（客戶/狀態/地址…）不會更新。
+      let soIncIds: string[] | null = null
+      if (incWindow) {
+        const [hIds, dIds] = await Promise.all([
+          fetchChangedIds('PJ_PROJECT', 'PROJECT_ID', { PJT_TYPE: "= 'SO'" }),
+          fetchChangedIds('PJ_PROJECTDETAIL', 'PJT_PROJECT_ID', {}),
+        ])
+        const ids = [...new Set([...hIds, ...dIds])]
+        if (ids.length === 0) {
+          return NextResponse.json({ status: 'ok', mode: 'incremental', syncedCount: 0, unchanged: 0, note: `近${incMinutes}分鐘無異動` })
+        }
+        if (ids.length <= INC_MAX_IDS) soIncIds = ids
+      }
       // ── 銷售訂單同步 (兩段式：先查 PJ_PROJECT 表頭，再查 PJ_PROJECTDETAIL，JS 端 JOIN) ──
       // 不使用 ARGO 端 SQL JOIN，避免 ORA-00923 / 虛擬欄位地雷（與 sync_mo 同樣模式）
       const soHeaderSparam = JSON.stringify({
@@ -831,9 +877,14 @@ export async function POST(request: NextRequest) {
         // - ORA-00904：CUSTOMCOLUMN 列出不存在的欄位名稱（各站台欄位命名不同）
         // 地址/備注/發票等選填顯示欄位因各站台命名不一，不列入 CUSTOMCOLUMN；同步後為 null 屬可接受。
         SHOWNULLCOLUMN: 'N',
-        CUSTOMCOLUMN: 'PROJECT_ID,BEGIN_DATE,TPN_PARTNER_ID,PARTNER_NAME,SALES_NAME,HOLD_STATUS,REMARK,EXPORT_MODE,DELIVERY_ADDRESS',
+        // 2026-08-06 再補 INVOICE_FORMAT / CUSTOMER_REMARK：
+        //   invoice_format 取 EXPORT_MODE→INVOICE_FORMAT，但 EXPORT_MODE 實測多為 null 且
+        //   INVOICE_FORMAT 未列入 → 發票型態每次被覆寫成 null；customer_remark 同理只能退而取 REMARK。
+        //   兩者造成每輪數千筆「假變動」，拖慢同步也污染變更紀錄。已實測 PJ_PROJECT 確有這兩欄。
+        CUSTOMCOLUMN: 'PROJECT_ID,BEGIN_DATE,TPN_PARTNER_ID,PARTNER_NAME,SALES_NAME,HOLD_STATUS,REMARK,EXPORT_MODE,DELIVERY_ADDRESS,INVOICE_FORMAT,CUSTOMER_REMARK',
         PJT_TYPE: "= 'SO'",
         HOLD_STATUS: "IN ('OPEN','UNSIGNED')",
+        ...(soIncIds ? { PROJECT_ID: inClause(soIncIds) } : {}),
       })
 
       const soHeaderRes = await fetch(`${API_BASE}/S_QUERY`, {
@@ -853,6 +904,10 @@ export async function POST(request: NextRequest) {
 
       const soHeaderRows = findObjectRows(parsedSoHeader)
       if (soHeaderRows.length === 0) {
+        // 增量：這批異動單都不是 OPEN/UNSIGNED（例如剛結案）→ 本輪無事可做，移除交給全量對帳
+        if (soIncIds) {
+          return NextResponse.json({ status: 'ok', mode: 'incremental', syncedCount: 0, unchanged: 0, note: '異動單皆非 OPEN/UNSIGNED，留待全量對帳' })
+        }
         return NextResponse.json({ status: 'error', error: 'PJ_PROJECT 查無 SO 表頭資料' }, { status: 422 })
       }
 
@@ -873,6 +928,8 @@ export async function POST(request: NextRequest) {
         SHOWNULLCOLUMN: 'N',
         CUSTOMCOLUMN: 'PJT_PROJECT_ID,LINE_NO,MBP_PART,MBP_VER,DUEDATE,ORDER_QTY_ORU,UNIT_OF_MEASURE_ORU,REMARK,PACKING,REMARK2,TPN_PART_NO,GRADE',
         LINE_NO: '>= 0',
+        // 增量：只抓受影響單的表身（含未異動行，才能正確覆蓋表頭欄位）
+        ...(soIncIds ? { PJT_PROJECT_ID: inClause(soIncIds) } : {}),
       })
       const soDetailRes = await fetch(`${API_BASE}/S_QUERY`, {
         method: 'POST',
@@ -980,6 +1037,8 @@ export async function POST(request: NextRequest) {
           docNoCol: 'project_id',
           subNoCol: 'line_no',
           returnUpdates: true,
+          // 增量：只比對受影響單、且絕不刪除（刪除交給全量對帳）
+          ...(soIncIds ? { mode: 'incremental' as const, scopeIds: { col: 'project_id', values: soIncIds } } : {}),
         })
       } catch (err) {
         const message = err instanceof Error ? formatSupabaseAdminError(err.message) : '寫入 erp_so_lines 失敗'
@@ -1067,6 +1126,20 @@ export async function POST(request: NextRequest) {
       // ── 採購單同步（與 sync_so 同模式：兩段式，JS 端 JOIN）──────────────
       // 注意：使用 CUSTOMCOLUMN（不加表格前綴）+ 各表獨立查，與 sync_so 完全相同模式
 
+      // 增量：近 N 分鐘有異動的採購單號（表頭 ∪ 表身）
+      let poIncIds: string[] | null = null
+      if (incWindow) {
+        const [hIds, dIds] = await Promise.all([
+          fetchChangedIds('PJ_PROJECT', 'PROJECT_ID', { PJT_TYPE: "= 'PO'" }),
+          fetchChangedIds('PJ_PROJECTDETAIL', 'PJT_PROJECT_ID', { PJT_TYPE: "= 'PO'" }),
+        ])
+        const ids = [...new Set([...hIds, ...dIds])]
+        if (ids.length === 0) {
+          return NextResponse.json({ status: 'ok', mode: 'incremental', syncedCount: 0, unchanged: 0, note: `近${incMinutes}分鐘無異動` })
+        }
+        if (ids.length <= INC_MAX_IDS) poIncIds = ids
+      }
+
       // Step 1: 查 PJ_PROJECT WHERE PJT_TYPE='PO'
       const poHeaderSparam = JSON.stringify({
         APIKEY1: keys.APIKEY1, APIKEY2: keys.APIKEY2, APIKEY3: keys.APIKEY3,
@@ -1075,6 +1148,7 @@ export async function POST(request: NextRequest) {
         SHOWNULLCOLUMN: 'N',
         CUSTOMCOLUMN: 'PROJECT_ID,BEGIN_DATE,HOLD_STATUS,TPN_PARTNER_ID,SALES_ID,SALES_NAME,PAYMENT_TERM,PAYMENT_MODE,CURRENCY,EXCHANGE_RATE,TAX_RATE,SEG_SEGMENT_NO,PO_TYPE,MODIFY_VER',
         PJT_TYPE: "= 'PO'",
+        ...(poIncIds ? { PROJECT_ID: inClause(poIncIds) } : {}),
       })
       const poHdrRes = await fetch(`${API_BASE}/S_QUERY`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -1086,6 +1160,9 @@ export async function POST(request: NextRequest) {
       }
       const hdrRows = findObjectRows(parsedHdr)
       if (hdrRows.length === 0) {
+        if (poIncIds) {
+          return NextResponse.json({ status: 'ok', mode: 'incremental', syncedCount: 0, unchanged: 0, note: '異動單非 PO 類型，無需處理' })
+        }
         return NextResponse.json({ status: 'error', error: 'PJ_PROJECT 查無 PO 表頭' }, { status: 422 })
       }
 
@@ -1106,6 +1183,7 @@ export async function POST(request: NextRequest) {
         CUSTOMCOLUMN: 'PJT_PROJECT_ID,LINE_NO,MBP_PART,MBP_LOT_NO,ORDER_QTY_ORU,ACTUAL_QTY_ORU,UNIT_OF_MEASURE_ORU,DUEDATE,REMARK,REMARK2,PACKING,UNIT_PRICE_ORU,MBP_VER,PDL_SEQ_SO,TPN_PART_NO,SO_PROJECT_ID',
         PJT_TYPE: "= 'PO'",
         LINE_NO: '>= 1',
+        ...(poIncIds ? { PJT_PROJECT_ID: inClause(poIncIds) } : {}),
       })
       const poDtlRes = await fetch(`${API_BASE}/S_QUERY`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -1118,6 +1196,9 @@ export async function POST(request: NextRequest) {
       const dtlRows = findObjectRows(parsedDtl)
 
       if (dtlRows.length === 0) {
+        if (poIncIds) {
+          return NextResponse.json({ status: 'ok', mode: 'incremental', syncedCount: 0, unchanged: 0, note: '受影響採購單無明細' })
+        }
         return NextResponse.json({ status: 'error', error: 'PJ_PROJECTDETAIL 查無明細' }, { status: 422 })
       }
 
@@ -1184,6 +1265,7 @@ export async function POST(request: NextRequest) {
           action: 'sync_po',
           docNoCol: 'doc_no',
           subNoCol: 'sub_no',
+          ...(poIncIds ? { mode: 'incremental' as const, scopeIds: { col: 'doc_no', values: poIncIds } } : {}),
         })
       } catch (err) {
         const message = err instanceof Error ? formatSupabaseAdminError(err.message) : '寫入 erp_pj_sync 失敗'
@@ -1204,6 +1286,21 @@ export async function POST(request: NextRequest) {
 
 
     if (action === 'sync_pr') {
+      // 增量：請購查詢有多段 fallback、聯表加 IN 易觸發 ORA-00918，且全量很輕（約 4 千筆/0.8 秒），
+      // 因此只用窗口做「有無異動」閘門：無異動直接跳過；有異動則照原流程跑（等同一次全量對帳）。
+      if (incWindow) {
+        const tryFetch = async (tb: string, f: string, ex: Record<string, string> = {}) => {
+          try { return await fetchChangedIds(tb, f, ex) } catch { return [] as string[] }
+        }
+        const [hA, hP, dIds] = await Promise.all([
+          tryFetch('PJ_APPLYPROJECT', 'APPLY_ID'),
+          tryFetch('PJ_APPLYPROJECT', 'PROJECT_ID'),
+          tryFetch('PJ_APPLYPROJECTDETAIL', 'APJ_APPLY_ID', { LINE_NO: '>= 1' }),
+        ])
+        if (hA.length + hP.length + dIds.length === 0) {
+          return NextResponse.json({ status: 'ok', mode: 'incremental', syncedCount: 0, unchanged: 0, note: `近${incMinutes}分鐘無異動` })
+        }
+      }
       // ── 請購單同步（PJ_APPLYPROJECT + PJ_APPLYPROJECTDETAIL 兩段式，JS 端 JOIN）──────────────
       const prSyncedAt = new Date().toISOString()
 
@@ -1511,6 +1608,19 @@ export async function POST(request: NextRequest) {
     }
 
     if (action === 'sync_mo') {
+      // 增量：近 N 分鐘有異動的製令單號（表頭 ∪ 表身）
+      let moIncIds: string[] | null = null
+      if (incWindow) {
+        const [hIds, dIds] = await Promise.all([
+          fetchChangedIds('PJ_PROJECT', 'PROJECT_ID', { PJT_TYPE: "= 'MO'" }),
+          fetchChangedIds('PJ_PROJECTDETAIL', 'PJT_PROJECT_ID', {}),
+        ])
+        const ids = [...new Set([...hIds, ...dIds])]
+        if (ids.length === 0) {
+          return NextResponse.json({ status: 'ok', mode: 'incremental', syncedCount: 0, unchanged: 0, note: `近${incMinutes}分鐘無異動` })
+        }
+        if (ids.length <= INC_MAX_IDS) moIncIds = ids
+      }
       // ── 製令同步 ────────────────────────────────────────────
       // 步驟一：查 PJ_PROJECT（表頭）— PROJECT_ID/BEGIN_DATE/END_DATE/HOLD_STATUS
       const moHeaderSparam = JSON.stringify({
@@ -1522,6 +1632,7 @@ export async function POST(request: NextRequest) {
         SHOWNULLCOLUMN: 'N',
         CUSTOMCOLUMN: 'PROJECT_ID,BEGIN_DATE,END_DATE,HOLD_STATUS,MO_BEGIN_DATE',
         PJT_TYPE: "= 'MO'",
+        ...(moIncIds ? { PROJECT_ID: inClause(moIncIds) } : {}),
       })
 
       const moHeaderRes = await fetch(`${API_BASE}/S_QUERY`, {
@@ -1541,6 +1652,9 @@ export async function POST(request: NextRequest) {
 
       const moHeaderRows = findObjectRows(parsedMoHeader)
       if (moHeaderRows.length === 0) {
+        if (moIncIds) {
+          return NextResponse.json({ status: 'ok', mode: 'incremental', syncedCount: 0, unchanged: 0, note: '異動單非 MO 類型，無需處理' })
+        }
         return NextResponse.json({ status: 'error', error: 'PJ_PROJECT 查無 MO 表頭資料' }, { status: 422 })
       }
 
@@ -1567,6 +1681,7 @@ export async function POST(request: NextRequest) {
           SHOWNULLCOLUMN: 'N',
           CUSTOMCOLUMN: 'PJT_PROJECT_ID,LINE_NO,MBP_PART,MBP_LOT_NO,ORDER_QTY,PJT_PROJECT_ID_MO_SO',
           LINE_NO: '>= 0',
+          ...(moIncIds ? { PJT_PROJECT_ID: inClause(moIncIds) } : {}),
         })
         const moDetailRes = await fetch(`${API_BASE}/S_QUERY`, {
           method: 'POST',
@@ -1666,6 +1781,7 @@ export async function POST(request: NextRequest) {
           action: 'sync_mo',
           docNoCol: 'project_id',
           subNoCol: 'line_no',
+          ...(moIncIds ? { mode: 'incremental' as const, scopeIds: { col: 'project_id', values: moIncIds } } : {}),
         })
       } catch (err) {
         const pgError = err as { message?: string; code?: string; details?: string; hint?: string }
@@ -2040,6 +2156,8 @@ export async function POST(request: NextRequest) {
         SHOWNULLCOLUMN: 'N',
         CUSTOMCOLUMN: 'PARTNER_ID,CNAME,FULL_CNAME',
         CUSTOMER: "= 'Y'",
+        // 增量：只抓近 N 分鐘異動的客戶（單表無表身，直接過濾）
+        ...(incWindow ? { UPDATE_DATE: incWindow } : {}),
       })
 
       const res = await fetch(`${API_BASE}/S_QUERY`, {
@@ -2062,6 +2180,10 @@ export async function POST(request: NextRequest) {
 
       const queryRows = findObjectRows(parsed)
       if (queryRows.length === 0) {
+        // 增量：0 筆＝這段時間沒有客戶異動，屬正常
+        if (incWindow) {
+          return NextResponse.json({ status: 'ok', mode: 'incremental', syncedCount: 0, unchanged: 0, note: `近${incMinutes}分鐘無異動` })
+        }
         return NextResponse.json({
           status: 'error',
           error: 'ARGO 查詢成功，但找不到客戶資料列，請確認 CUSTOMER=Y 及欄位設定。',
@@ -2095,6 +2217,9 @@ export async function POST(request: NextRequest) {
           compareCols: ['cname', 'full_cname'],
           rows: customerRows,
           action: 'sync_customer',
+          ...(incWindow
+            ? { mode: 'incremental' as const, scopeIds: { col: 'partner_id', values: customerRows.map((r) => r.partner_id) } }
+            : {}),
         })
       } catch (err) {
         const message = err instanceof Error ? formatSupabaseAdminError(err.message) : '寫入 erp_customers 失敗'
