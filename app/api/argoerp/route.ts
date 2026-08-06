@@ -1891,6 +1891,7 @@ export async function POST(request: NextRequest) {
 
     if (action === 'sync_bom_structure') {
       // ── 全量同步 MM_BOM_STRUCTURE BOM展開結構 到 Supabase mm_bom_structure ──
+      // 只同步原始 BOM（PART_ECNNBR 為 null 或 'ORIGINAL'）；有值的行屬於 ECN 變更版本，ERP UI 不顯示
       const sparam = JSON.stringify({
         APIKEY1: keys.APIKEY1,
         APIKEY2: keys.APIKEY2,
@@ -1898,7 +1899,7 @@ export async function POST(request: NextRequest) {
         SEGMENT,
         TABLE: 'MM_BOM_STRUCTURE',
         SHOWNULLCOLUMN: 'N',
-        CUSTOMCOLUMN: 'MBP_PART,MBP_VER,MBP_CHILD_PART,MBP_CHILD_VER,LINE_NO,CHILD_QTY,CHILD_SCRAP,LOT_CHILD_QTY,LOT_BASE',
+        CUSTOMCOLUMN: 'MBP_PART,MBP_VER,MBP_CHILD_PART,MBP_CHILD_VER,LINE_NO,CHILD_QTY,CHILD_SCRAP,LOT_CHILD_QTY,LOT_BASE,PART_ECNNBR',
         MBP_PART: 'IS NOT NULL',  // ARGO 需要至少一個 filter，否則 ORA-00936
       })
       const argoRes = await fetch(`${API_BASE}/S_QUERY`, {
@@ -1919,6 +1920,11 @@ export async function POST(request: NextRequest) {
 
       const syncedAt = new Date().toISOString()
       const upsertRows = bomRows
+        .filter(row => {
+          // 只保留原始 BOM：PART_ECNNBR 為 null / 空字串 / 'ORIGINAL'
+          const ecn = String(getRecordValue(row, 'PART_ECNNBR') ?? '').trim().toUpperCase()
+          return !ecn || ecn === 'ORIGINAL'
+        })
         .map(row => ({
           parent_part:   String(getRecordValue(row, 'MBP_PART')       ?? '').trim(),
           bom_ver:       Number(getRecordValue(row, 'MBP_VER')        ?? 1),
