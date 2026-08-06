@@ -1942,13 +1942,21 @@ export async function POST(request: NextRequest) {
         .filter(r => r.parent_part && r.child_part)
 
       const supabaseAdmin = getSupabaseAdminClient()
+
+      // Full refresh：先清空舊資料再插入，確保移除過濾掉的 ECN 行
+      const { error: deleteError } = await supabaseAdmin
+        .from('mm_bom_structure')
+        .delete()
+        .neq('id', 0)  // 刪除所有列
+      if (deleteError) throw deleteError
+
       const BATCH_SIZE = 500
       let upsertedCount = 0
       for (let i = 0; i < upsertRows.length; i += BATCH_SIZE) {
         const chunk = upsertRows.slice(i, i + BATCH_SIZE)
         const { error: upsertError } = await supabaseAdmin
           .from('mm_bom_structure')
-          .upsert(chunk, { onConflict: 'parent_part,bom_ver,child_part,child_ver,line_no' })
+          .insert(chunk)
         if (upsertError) throw upsertError
         upsertedCount += chunk.length
       }
