@@ -1572,7 +1572,10 @@ export default function DailyOrderSheetPage() {
           (!String(c.extra?.SO_PROJECT_ID ?? '').trim() || String(c.extra?.SO_PROJECT_ID ?? '') === (row.order_number ?? '')) &&
           isPoRecent(c)
         )
-      if (hitIdx === -1) return { ...row, po_number: null, po_sub_no: null, po_status: 'no_match', mo_status: null }
+      if (hitIdx === -1) {
+        if (row.po_number) return row  // 已有採購單號（erp_pj_sync 尚未同步新建採購單），保留現狀
+        return { ...row, po_number: null, po_sub_no: null, po_status: 'no_match', mo_status: null }
+      }
       pool[hitIdx]._used = true
       if (p3QtyMismatch)
         return { ...row, po_number: pool[hitIdx].doc_no, po_sub_no: pool[hitIdx].sub_no, po_status: 'qty_mismatch', po_qty_erp: pool[hitIdx].qty }
@@ -3277,7 +3280,7 @@ export default function DailyOrderSheetPage() {
                               row.factory_changed ? 'bg-yellow-950/30' :
                               isMoImported
                                 ? 'bg-emerald-950/20'
-                                : row.factory === 'C' && row.po_status === 'matched'
+                                : row.factory === 'C' && (row.po_status === 'matched' || (row.po_status === 'no_match' && !!row.po_number))
                                 ? 'bg-orange-950/20'
                                 : row.factory === 'O' && (row.po_status === 'matched' || row.mo_number)
                                 ? outsourcedStyles.rowBg
@@ -3400,6 +3403,15 @@ export default function DailyOrderSheetPage() {
                                         title="取消無須採購"
                                       >↺撤销</button>
                                     )}
+                                  </div>
+                                ) : row.po_status === 'no_match' && row.po_number ? (
+                                  <div>
+                                    <button
+                                      onClick={() => setPoModalId(row.po_number!)}
+                                      className={`hover:underline underline-offset-2 text-left ${row.factory === 'C' ? 'text-orange-300 hover:text-orange-100' : outsourcedStyles.text}`}
+                                    >{row.po_number}</button>
+                                    {row.po_sub_no && <span className="text-slate-500 ml-1">#{row.po_sub_no}</span>}
+                                    <div className="mt-0.5 text-[10px] text-amber-400/70">待ERP同步</div>
                                   </div>
                                 ) : row.po_status === 'no_match' ? (
                                   <div>
