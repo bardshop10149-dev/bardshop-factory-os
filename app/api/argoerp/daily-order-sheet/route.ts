@@ -147,6 +147,13 @@ export async function POST(request: NextRequest) {
           out[field] = ex[field]
         }
       }
+      // 特殊案例：同步明確找不到對應採購單（po_status='no_match'，po_number=null）時，
+      // 不保留 DB 舊的 po_number，否則該列在 order-batch-export-c 篩選中消失（有 po_number 被排除）
+      // 注意：po_confirmed=true 的列由 matchPoRows guard 保護，同步不會對其設 no_match
+      if (row.po_status === 'no_match' && (row.po_number == null || row.po_number === '')) {
+        out.po_number = null
+        out.po_sub_no = null
+      }
       return out
     })
 
