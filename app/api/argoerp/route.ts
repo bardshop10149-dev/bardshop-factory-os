@@ -727,7 +727,7 @@ export async function POST(request: NextRequest) {
       const sparam = JSON.stringify({
         APIKEY1: keys.APIKEY1, APIKEY2: keys.APIKEY2, APIKEY3: keys.APIKEY3,
         SEGMENT, TABLE: 'MM_BOM_STRUCTURE', SHOWNULLCOLUMN: 'Y',
-        MBP_PART: 'IS NOT NULL', ROWNUM: '<= 5',
+        MBP_PART: "= 'PACR-LASDD2-S1913'",
       })
       const res = await fetch(`${API_BASE}/S_QUERY`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -1899,7 +1899,7 @@ export async function POST(request: NextRequest) {
         SEGMENT,
         TABLE: 'MM_BOM_STRUCTURE',
         SHOWNULLCOLUMN: 'N',
-        CUSTOMCOLUMN: 'MBP_PART,MBP_VER,MBP_CHILD_PART,MBP_CHILD_VER,LINE_NO,CHILD_QTY,CHILD_SCRAP,LOT_CHILD_QTY,LOT_BASE,PART_ECNNBR',
+        CUSTOMCOLUMN: 'MBP_PART,MBP_VER,MBP_CHILD_PART,MBP_CHILD_VER,LINE_NO,CHILD_QTY,CHILD_SCRAP,LOT_CHILD_QTY,LOT_BASE,PART_ECNNBR,CHILD_ECNNBR',
         MBP_PART: 'IS NOT NULL',  // ARGO 需要至少一個 filter，否則 ORA-00936
       })
       const argoRes = await fetch(`${API_BASE}/S_QUERY`, {
@@ -1922,8 +1922,10 @@ export async function POST(request: NextRequest) {
       const upsertRows = bomRows
         .filter(row => {
           // 只保留原始 BOM：PART_ECNNBR 為 null / 空字串 / 'ORIGINAL'
+          // 且 CHILD_ECNNBR 也為 null / 空字串 / 'ORIGINAL'（子件也無 ECN 變更）
           const ecn = String(getRecordValue(row, 'PART_ECNNBR') ?? '').trim().toUpperCase()
-          return !ecn || ecn === 'ORIGINAL'
+          const childEcn = String(getRecordValue(row, 'CHILD_ECNNBR') ?? '').trim().toUpperCase()
+          return (!ecn || ecn === 'ORIGINAL') && (!childEcn || childEcn === 'ORIGINAL')
         })
         .map(row => ({
           parent_part:   String(getRecordValue(row, 'MBP_PART')       ?? '').trim(),
