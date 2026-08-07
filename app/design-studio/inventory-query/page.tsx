@@ -58,6 +58,7 @@ export default function InventoryQueryPage() {
   }, [inputCode, persistWatchlist])
 
   const removeCode = useCallback((code: string) => {
+    if (!confirm(`確定要解除追蹤「${code}」？`)) return
     setWatchlist(prev => {
       const next = prev.filter(c => c !== code)
       persistWatchlist(next)
