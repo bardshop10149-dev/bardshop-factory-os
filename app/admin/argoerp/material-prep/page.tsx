@@ -463,7 +463,7 @@ export default function MaterialPrepPage() {
     setSheetLoading(true)
     setMoError('')
     try {
-      const res = await fetch(`/api/argoerp/daily-order-sheet?date=${date}`)
+      const res = await fetch(`/api/argoerp/daily-order-sheet?date=${date}`, { cache: 'no-store' })
       const json = await res.json()
       let moNumbers: string[] = []
       let loadedRows: SheetRowBrief[] = []

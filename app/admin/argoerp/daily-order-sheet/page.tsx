@@ -594,7 +594,7 @@ export default function DailyOrderSheetPage() {
     setShowPasteArea(false)
     setParseError('')
     try {
-      const res = await fetch(`/api/argoerp/daily-order-sheet?date=${date}`)
+      const res = await fetch(`/api/argoerp/daily-order-sheet?date=${date}`, { cache: 'no-store' })
       const json = await res.json()
       if (json.success && json.sheet) {
         const storedRows: SheetRow[] = Array.isArray(json.sheet.rows) ? json.sheet.rows as SheetRow[] : []
@@ -757,7 +757,7 @@ export default function DailyOrderSheetPage() {
     setGlobalSearching(true)
     setGlobalResults(null)
     try {
-      const res = await fetch(`/api/argoerp/daily-order-sheet?search=${encodeURIComponent(trimmed)}`)
+      const res = await fetch(`/api/argoerp/daily-order-sheet?search=${encodeURIComponent(trimmed)}`, { cache: 'no-store' })
       const json = await res.json()
       if (json.success) setGlobalResults(json.results ?? [])
     } catch {}
@@ -1734,7 +1734,7 @@ export default function DailyOrderSheetPage() {
     setSaveMsg('')
     try {
       // 先從 DB 拉最新 rows，確保多台電腦作業時能取得其他人的人工確認結果（po_confirmed）
-      const latestRes = await fetch(`/api/argoerp/daily-order-sheet?date=${selectedDate}`)
+      const latestRes = await fetch(`/api/argoerp/daily-order-sheet?date=${selectedDate}`, { cache: 'no-store' })
       const latestJson = await latestRes.json()
       let next: SheetRow[] = latestJson.success && latestJson.sheet?.rows
         ? (latestJson.sheet.rows as SheetRow[])

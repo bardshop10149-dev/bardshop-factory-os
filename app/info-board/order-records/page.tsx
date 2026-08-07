@@ -355,7 +355,7 @@ export default function OrderRecordsPage() {
     setLoading(true)
     setSheetRows([])
     try {
-      const res = await fetch(`/api/argoerp/daily-order-sheet?date=${date}`)
+      const res = await fetch(`/api/argoerp/daily-order-sheet?date=${date}`, { cache: 'no-store' })
       const json = await res.json()
       if (json.success && json.sheet) {
         setSheetRows(Array.isArray(json.sheet.rows) ? (json.sheet.rows as SheetRow[]) : [])
@@ -374,7 +374,7 @@ export default function OrderRecordsPage() {
     setGlobalSearching(true)
     setGlobalResults(null)
     try {
-      const res = await fetch(`/api/argoerp/daily-order-sheet?search=${encodeURIComponent(trimmed)}`)
+      const res = await fetch(`/api/argoerp/daily-order-sheet?search=${encodeURIComponent(trimmed)}`, { cache: 'no-store' })
       const json = await res.json()
       if (json.success) {
         setGlobalResults((json.results ?? []) as SearchGroup[])

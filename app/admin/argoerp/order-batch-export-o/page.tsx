@@ -179,7 +179,7 @@ export default function PoBatchExportOPage() {
   const loadSheet = useCallback(async (date: string) => {
     if (!date) return
     try {
-      const r = await fetch(`/api/argoerp/daily-order-sheet?date=${date}`)
+      const r = await fetch(`/api/argoerp/daily-order-sheet?date=${date}`, { cache: 'no-store' })
       const j = await r.json()
       if (!j.success || !j.sheet) { alert(`找不到 ${date} 的出單表`); return }
       type SheetRowRaw = SourceRow & { po_status?: string; po_number?: string | null; match_line_no?: string | null }

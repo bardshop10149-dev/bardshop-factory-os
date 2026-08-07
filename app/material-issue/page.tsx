@@ -208,7 +208,7 @@ export default function MaterialIssuePage() {
     setMissingMos([])
     try {
       // 1. Load sheet for date
-      const res = await fetch(`/api/argoerp/daily-order-sheet?date=${date}`)
+      const res = await fetch(`/api/argoerp/daily-order-sheet?date=${date}`, { cache: 'no-store' })
       const json = await res.json()
       if (!json.success || !json.sheet) {
         setSheetRows([])

@@ -631,7 +631,7 @@ export default function OrderBatchExportPage() {
       const date = sheetDateOverride !== undefined ? sheetDateOverride : loadedFromSheetDate
       if (date) {
         try {
-          const res = await fetch(`/api/argoerp/daily-order-sheet?date=${date}`)
+          const res = await fetch(`/api/argoerp/daily-order-sheet?date=${date}`, { cache: 'no-store' })
           const json = await res.json()
           const sheetRows = (json?.success && json.sheet && Array.isArray(json.sheet.rows))
             ? json.sheet.rows as Array<Record<string, unknown>>
@@ -752,7 +752,7 @@ export default function OrderBatchExportPage() {
   const handleLoadFromSheet = useCallback(async (date: string) => {
     if (!date) return
     try {
-      const res = await fetch(`/api/argoerp/daily-order-sheet?date=${date}`)
+      const res = await fetch(`/api/argoerp/daily-order-sheet?date=${date}`, { cache: 'no-store' })
       const json = await res.json()
       if (!json.success || !json.sheet) {
         alert(`找不到 ${date} 的出單表，請先到「每日出單表」頁面儲存資料。`)
@@ -931,7 +931,7 @@ export default function OrderBatchExportPage() {
       setStep(0, 'done')
 
       // ── 載入當日出單表 ──────────────────────────────────────────
-      const sheetRes = await fetch(`/api/argoerp/daily-order-sheet?date=${sheetDate}`)
+      const sheetRes = await fetch(`/api/argoerp/daily-order-sheet?date=${sheetDate}`, { cache: 'no-store' })
       const sheetJson = await sheetRes.json()
       if (!sheetJson.success || !sheetJson.sheet) {
         for (let i = 1; i < steps.length; i++) setStep(i, 'done')

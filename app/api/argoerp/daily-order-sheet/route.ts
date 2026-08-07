@@ -37,7 +37,7 @@ export async function GET(request: NextRequest) {
         })
         if (matched.length > 0) results.push({ sheet_date: sheet.sheet_date, rows: matched })
       }
-      return NextResponse.json({ success: true, results })
+      return NextResponse.json({ success: true, results }, { headers: { 'Cache-Control': 'no-store' } })
     }
 
     if (!date) {
@@ -81,7 +81,7 @@ export async function GET(request: NextRequest) {
           updated_at: r.updated_at,
         }
       })
-      return NextResponse.json({ success: true, sheets: list })
+      return NextResponse.json({ success: true, sheets: list }, { headers: { 'Cache-Control': 'no-store' } })
     }
 
     const { data, error } = await supabase
@@ -91,10 +91,10 @@ export async function GET(request: NextRequest) {
       .single()
     if (error && error.code === 'PGRST116') {
       // not found
-      return NextResponse.json({ success: true, sheet: null })
+      return NextResponse.json({ success: true, sheet: null }, { headers: { 'Cache-Control': 'no-store' } })
     }
     if (error) throw error
-    return NextResponse.json({ success: true, sheet: data })
+    return NextResponse.json({ success: true, sheet: data }, { headers: { 'Cache-Control': 'no-store' } })
   } catch (e) {
     const msg = e instanceof Error ? formatSupabaseAdminError(e.message) : String(e)
     return NextResponse.json({ success: false, error: msg }, { status: 500 })

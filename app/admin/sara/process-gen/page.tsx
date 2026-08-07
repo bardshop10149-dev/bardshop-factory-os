@@ -232,7 +232,7 @@ export default function ProcessGenPage() {
     setConfirmWarns([])
     setFlaggedItems(new Set())
     try {
-      const res = await fetch(`/api/argoerp/daily-order-sheet?date=${sheetDate}`)
+      const res = await fetch(`/api/argoerp/daily-order-sheet?date=${sheetDate}`, { cache: 'no-store' })
       const json = await res.json() as { success: boolean; sheet?: { rows?: Record<string, unknown>[] } }
       if (!json.success || !json.sheet?.rows?.length) {
         setSheetLoadError(`找不到 ${sheetDate} 的出單資料，請確認日期正確`)

@@ -539,7 +539,7 @@ export default function FactoryOrderExportPage({
   const handleLoadFromSheet = useCallback(async (date: string) => {
     if (!date) return
     try {
-      const res = await fetch(`/api/argoerp/daily-order-sheet?date=${date}`)
+      const res = await fetch(`/api/argoerp/daily-order-sheet?date=${date}`, { cache: 'no-store' })
       const json = await res.json()
       if (!json.success || !json.sheet) {
         alert(`找不到 ${date} 的出單表，請先到「每日出單表」頁面儲存資料。`)
