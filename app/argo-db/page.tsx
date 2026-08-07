@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { supabase } from '../../lib/supabaseClient'
-import { ErpSyncPage } from '../admin/argoerp/erp-sync/page'
+import { ErpSyncPage } from '../admin/argoerp/erp-sync/ErpSyncPage'
 
 export default function ArgoDBPage() {
   const router = useRouter()
