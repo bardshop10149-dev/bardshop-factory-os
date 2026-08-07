@@ -702,8 +702,8 @@ function SyncCard({ docKey }: SyncCardProps) {
             const kw = keyword.trim()
             const baseOr = `doc_no.ilike.%${kw}%,item_code.ilike.%${kw}%,description.ilike.%${kw}%,customer_vendor.ilike.%${kw}%`
             query = query.or(
-              isPoTab
-                ? `${baseOr},extra->>MBP_LOT_NO.ilike.%${kw}%`
+              (isPoTab || isPrTab)
+                ? `${baseOr},extra->>MBP_LOT_NO.ilike.%${kw}%,extra->>SO_PROJECT_ID.ilike.%${kw}%`
                 : baseOr
             )
           }
