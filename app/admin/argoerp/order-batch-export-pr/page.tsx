@@ -107,10 +107,9 @@ function makeDefaultHeader(): PrHeader {
 
 function isMpoImportedRow(row: SourceRow): boolean {
   const moNo = String(row.mo_number ?? '').trim().toUpperCase()
-  const prNo = String(row.pr_number ?? '').trim()
-  // 任何非空的 pr_number 均表示已比對到請購單（無論格式，含舊格式 MP... 及新格式 MPO...）
-  // 保留舊相容：mo_number 本身是 MPO 前綴（歷史遺留資料）
-  return !!prNo || moNo.startsWith('MPO')
+  const prNo = String(row.pr_number ?? '').trim().toUpperCase()
+  // 只有本頁建立的 MPO/MP 前綴才算已匯入；PR... 是出單表比對參照，非本頁建立
+  return prNo.startsWith('MPO') || prNo.startsWith('MP') || moNo.startsWith('MPO')
 }
 
 export default function PrBatchExportOPage() {
