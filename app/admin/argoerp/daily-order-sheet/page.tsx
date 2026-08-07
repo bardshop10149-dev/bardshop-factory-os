@@ -1733,12 +1733,17 @@ export default function DailyOrderSheetPage() {
     setSyncingPo(true)
     setSaveMsg('')
     try {
-      // 先從 DB 拉最新 rows，確保多台電腦作業時能取得其他人的人工確認結果（po_confirmed）
+      // 從 DB 拉最新 rows 只為取 po_confirmed（人工確認），基底保持 sheetRows（目前解析狀態）
+      // 不可用 DB rows 整批替換，否則用戶剛貼入解析的新資料會被舊 DB rows 覆蓋
       const latestRes = await fetch(`/api/argoerp/daily-order-sheet?date=${selectedDate}`, { cache: 'no-store' })
       const latestJson = await latestRes.json()
-      let next: SheetRow[] = latestJson.success && latestJson.sheet?.rows
-        ? (latestJson.sheet.rows as SheetRow[])
-        : sheetRows
+      const dbRows: SheetRow[] = latestJson.success && Array.isArray(latestJson.sheet?.rows)
+        ? (latestJson.sheet.rows as SheetRow[]) : []
+      const dbConfirmedMap = new Map(dbRows.map(r => [r.row_key, r.po_confirmed]))
+      let next: SheetRow[] = sheetRows.map(r => ({
+        ...r,
+        po_confirmed: dbConfirmedMap.get(r.row_key) ?? r.po_confirmed,
+      }))
 
       // ── 常平（C01510）──
       if (cRows.length > 0) {
