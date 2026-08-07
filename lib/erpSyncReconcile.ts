@@ -49,6 +49,17 @@ export interface ReconcileOptions {
   maxDeleteRatio?: number
   /** 為 true 時，在結果中回傳完整的更新記錄（before/after/changed），供呼叫端寫改單通知等用途 */
   returnUpdates?: boolean
+  /**
+   * 同步模式：
+   *  - 'full'（預設）＝ rows 是該表完整的 ARGO 結果 → 比對後 upsert 變動列 + 刪除消失列。
+   *  - 'incremental' ＝ rows 只是「這段時間有異動的部分列」→
+   *      (a) **絕不刪除任何列**（沒拉到不代表被刪，只代表沒異動）；
+   *      (b) 只讀取 scopeIds 指定的既有列來比對，不讀整張表（省 Supabase 讀取量）。
+   *    刪除的偵測交給每天數次的 'full' 對帳。
+   */
+  mode?: 'full' | 'incremental'
+  /** 增量模式必填：本次涉及的單號範圍，用來限縮「既有列」的讀取（如 { col: 'project_id', values: [...] }） */
+  scopeIds?: { col: string; values: string[] }
 }
 
 export interface ReconcileResult {
@@ -67,6 +78,13 @@ export interface ReconcileResult {
 const UPSERT_BATCH = 500
 const DELETE_BATCH = 200
 const READ_PAGE = 1000
+const ID_FILTER_BATCH = 200 // 增量模式讀既有列時，單號 IN 條件一次帶幾個
+
+function chunk<T>(arr: T[], size: number): T[][] {
+  const out: T[][] = []
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size))
+  return out.length ? out : [[]]
+}
 const CHANGE_LOG_CAP = 2000 // 單次最多記這麼多筆明細，避免首輪大量變動灌爆 change_log
 
 // canonical：物件鍵排序，讓 jsonb 欄位重排不會被誤判為變動
@@ -121,6 +139,8 @@ async function runReconcile(
   const docNoCol = opts.docNoCol ?? keyCols[0]
   const subNoCol = opts.subNoCol
   const maxDeleteRatio = opts.maxDeleteRatio ?? 0.3
+  const mode = opts.mode ?? 'full'
+  const isIncremental = mode === 'incremental'
 
   // 1) 去重新列（同鍵保留第一筆；呼叫端多半已自行去重，這裡是安全網）
   const newMap = new Map<string, Row>()
@@ -131,19 +151,27 @@ async function runReconcile(
     newMap.set(k, r)
   }
 
-  // 2) 讀既有列（只取 key + compare 欄），依鍵欄+id 排序分頁，頁界穩定不漏讀
+  // 2) 讀既有列（只取 key + compare 欄），依鍵欄+id 排序分頁，頁界穩定不漏讀。
+  //    增量模式只讀 scopeIds 指定的單號（避免每 5 分鐘把整張大表讀一遍）。
   const selectCols = Array.from(new Set([...keyCols, ...compareCols])).join(',')
   const existingMap = new Map<string, Row>()
-  for (let from = 0; ; from += READ_PAGE) {
-    let q = supabase.from(table).select(selectCols).range(from, from + READ_PAGE - 1)
-    if (scope) q = q.eq(scope.col, scope.value)
-    for (const c of keyCols) q = q.order(c, { ascending: true })
-    q = q.order('id', { ascending: true })
-    const { data, error } = await q
-    if (error) throw error
-    const batch = (data ?? []) as unknown as Row[]
-    for (const r of batch) existingMap.set(keyOf(r, keyCols), r)
-    if (batch.length < READ_PAGE) break
+  const idChunks: Array<string[] | null> = opts.scopeIds
+    ? chunk(opts.scopeIds.values, ID_FILTER_BATCH)
+    : [null]
+  for (const ids of idChunks) {
+    if (ids && ids.length === 0) continue
+    for (let from = 0; ; from += READ_PAGE) {
+      let q = supabase.from(table).select(selectCols).range(from, from + READ_PAGE - 1)
+      if (scope) q = q.eq(scope.col, scope.value)
+      if (ids && opts.scopeIds) q = q.in(opts.scopeIds.col, ids)
+      for (const c of keyCols) q = q.order(c, { ascending: true })
+      q = q.order('id', { ascending: true })
+      const { data, error } = await q
+      if (error) throw error
+      const batch = (data ?? []) as unknown as Row[]
+      for (const r of batch) existingMap.set(keyOf(r, keyCols), r)
+      if (batch.length < READ_PAGE) break
+    }
   }
 
   // 3) diff
@@ -164,9 +192,13 @@ async function runReconcile(
       unchanged++
     }
   }
+  // 增量模式：「沒拉到」只代表這段時間沒異動，不代表被刪除 → 一律不刪。
+  // 刪除的偵測交給每天數次的全量對帳（mode='full'）。
   const toDelete: Row[] = []
-  for (const [k, ex] of existingMap) {
-    if (!newMap.has(k)) toDelete.push(ex)
+  if (!isIncremental) {
+    for (const [k, ex] of existingMap) {
+      if (!newMap.has(k)) toDelete.push(ex)
+    }
   }
 
   // 4) upsert 變動列（新增 + 更新）
@@ -203,7 +235,7 @@ async function runReconcile(
 
   // 6) Log（永不阻斷主流程）
   await writeLogs(supabase, {
-    action, table, docNoCol, subNoCol,
+    action, table, docNoCol, subNoCol, mode,
     elapsedMs: Date.now() - start,
     result, inserts, updates,
     deletedRows: deletesSkipped > 0 ? [] : toDelete,
@@ -262,6 +294,7 @@ interface LogContext {
   table: string
   docNoCol: string
   subNoCol?: string
+  mode: 'full' | 'incremental'
   elapsedMs: number
   result: ReconcileResult
   inserts: Row[]
@@ -288,6 +321,7 @@ async function logFailure(
 
 async function writeLogs(supabase: AdminClient, ctx: LogContext): Promise<void> {
   const { action, table, docNoCol, subNoCol, elapsedMs, result } = ctx
+  const logMode = ctx.mode
 
   const notes: string[] = []
   if (result.duplicates > 0) notes.push(`dup=${result.duplicates}`)
@@ -297,7 +331,7 @@ async function writeLogs(supabase: AdminClient, ctx: LogContext): Promise<void> 
     .from('erp_sync_logs')
     .insert({
       action,
-      mode: 'incremental',
+      mode: logMode,
       ok: true,
       count: result.total,
       inserted: result.inserted,
