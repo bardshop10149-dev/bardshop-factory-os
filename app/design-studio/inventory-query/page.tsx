@@ -41,7 +41,7 @@ export default function InventoryQueryPage() {
         key: SETTINGS_KEY,
         value: list,
         updated_at: new Date().toISOString(),
-      }).catch(() => {})
+      }).then(() => {}).catch(() => {})
     }, 600)
   }, [])
 
