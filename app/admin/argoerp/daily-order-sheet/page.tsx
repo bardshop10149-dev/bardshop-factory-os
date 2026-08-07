@@ -706,6 +706,20 @@ export default function DailyOrderSheetPage() {
         }
         setRowMachines(rmMap)
         setCurrentRawText(rawTextStored)
+
+        // DB rows 與重新解析結果不一致時立即回寫，確保轉單頁面取到正確資料
+        const storedKeySet = new Set(storedRows.map(r => r.row_key))
+        const finalKeySet  = new Set(finalRows.map(r => r.row_key))
+        const rowsDiverged = finalRows.length !== storedRows.length ||
+          finalRows.some(r => !storedKeySet.has(r.row_key)) ||
+          storedRows.some(r => !finalKeySet.has(r.row_key))
+        if (rowsDiverged) {
+          fetch('/api/argoerp/daily-order-sheet', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ sheet_date: date, raw_text: rawTextStored, rows: finalRows }),
+          }).catch(() => {})
+        }
       } else {
         setSheetRows([])
         setCurrentRawText('')
@@ -985,6 +999,22 @@ export default function DailyOrderSheetPage() {
     if (duplicateWarnings.length > 0) {
       setParseWarnings(duplicateWarnings)
     }
+    // 解析後立即存回 DB，確保所有轉單頁面都能取到最新出單表（不依賴後續採購比對才觸發）
+    setSaving(true)
+    setSaveMsg('⏳ 自動儲存中…')
+    fetch('/api/argoerp/daily-order-sheet', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sheet_date: selectedDate, raw_text: rawText, rows: merged }),
+    })
+      .then(r => r.json())
+      .then(json => {
+        if (json.success && Array.isArray(json.sheet?.rows)) setSheetRows(json.sheet.rows as SheetRow[])
+        setSaveMsg('✅ 已儲存')
+        setTimeout(() => setSaveMsg(''), 3000)
+      })
+      .catch(() => setSaveMsg('⚠️ 自動儲存失敗，請手動點「更新儲存」'))
+      .finally(() => setSaving(false))
     // 常平列自動觸發採購比對（避免手動再按一次）
     if (merged.some(r => r.factory === 'C')) setPendingAutoPoMatch(true)
   }, [rawText, sheetRows, selectedDate])
