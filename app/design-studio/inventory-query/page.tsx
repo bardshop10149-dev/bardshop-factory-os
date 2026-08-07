@@ -37,11 +37,11 @@ export default function InventoryQueryPage() {
   const persistWatchlist = useCallback((list: string[]) => {
     if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
     saveTimerRef.current = setTimeout(() => {
-      supabase.from('app_settings').upsert({
+      void supabase.from('app_settings').upsert({
         key: SETTINGS_KEY,
         value: list,
         updated_at: new Date().toISOString(),
-      }).then(() => {}).catch(() => {})
+      })
     }, 600)
   }, [])
 
