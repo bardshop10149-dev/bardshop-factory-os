@@ -1632,11 +1632,10 @@ export default function DailyOrderSheetPage() {
       // (b) RO 橋接比對（後備）
       const ro = soToRoByItem.get(`${so}|${row.item_code}`) ?? soToRoAny.get(so) ?? null
       if (ro) {
-        const roCands = (roToPr.get(ro) ?? []).filter(c => {
-          // 批號驗證：MBP_LOT_NO 必須為空、等於 RO 號、或等於當前 SO 號（三者皆合理）
-          if (!c.mbp_lot_no) return true
-          return c.mbp_lot_no === ro || c.mbp_lot_no === so
-        })
+        const roCands = (roToPr.get(ro) ?? []).filter(c =>
+          // 批號必須有值，且等於 RO 號或 SO 號（空批號不予配對）
+          !!c.mbp_lot_no && (c.mbp_lot_no === ro || c.mbp_lot_no === so)
+        )
         const roHit = pickHit(roCands, row.item_code, rowQty)
         if (roHit) {
           roHit._used = true
