@@ -14,10 +14,10 @@ import { getSupabaseAdminClient } from './supabaseAdmin'
 // 重要前提（與整批覆蓋等價、不改變按鈕行為）：
 //   * 呼叫端傳進來的 rows 必須是「這次該表完整的 ARGO 結果」（全量拉，不是增量查詢）。
 //     如此「現有鍵不在 rows」才能正確代表「已刪除」，最終表內容與整批覆蓋逐列相同。
-//   * 防呆刪除護欄：
+//   * 防呆刪除護欄（判準是「來源是否異常」，不是「要刪多少」）：
 //       - ABORT-ON-EMPTY：rows 為空時完全不刪除，避免 ARGO 短暫失敗把活資料洗光。
-//       - 刪除比例門檻：單次要刪的列超過現有列的 maxDeleteRatio（預設 30%）且超過 50 列
-//         → 跳過刪除並記 log（防 ARGO 回傳「可解析但不完整」時誤刪一大片）。
+//       - 來源縮水偵測：本次拉回筆數比「上次同單別同模式成功」的筆數驟降逾 30%
+//         → 視為 ARGO 回傳不完整，跳過刪除並記 log。
 //   * upsert 需要 onConflict 對應的 unique index 存在（migration 先行）。
 //   * log 寫入全程 try/catch，永不阻斷主流程（沿用 saraSync 慣例）；
 //     log 表尚未建立時，同步照常運作、只是沒有 log。
@@ -79,6 +79,28 @@ const UPSERT_BATCH = 500
 const DELETE_BATCH = 200
 const READ_PAGE = 1000
 const ID_FILTER_BATCH = 200 // 增量模式讀既有列時，單號 IN 條件一次帶幾個
+// 來源縮水門檻：這次拉回筆數比上次成功時少超過這個比例，視為 ARGO 回傳不完整 → 不執行刪除
+const SOURCE_DROP_LIMIT = 0.3
+
+// 上一次同單別、同模式、成功的拉回筆數（供來源縮水偵測用）
+async function lastSuccessfulCount(
+  supabase: AdminClient,
+  action: string,
+  mode: 'full' | 'incremental',
+): Promise<number | null> {
+  const { data, error } = await supabase
+    .from('erp_sync_logs')
+    .select('count')
+    .eq('action', action)
+    .eq('mode', mode)
+    .eq('ok', true)
+    .not('count', 'is', null)
+    .order('id', { ascending: false })
+    .limit(1)
+  if (error) return null
+  const row = (data ?? [])[0] as { count?: number } | undefined
+  return typeof row?.count === 'number' ? row.count : null
+}
 
 function chunk<T>(arr: T[], size: number): T[][] {
   const out: T[][] = []
@@ -209,18 +231,40 @@ async function runReconcile(
     if (error) throw error
   }
 
-  // 5) 刪除消失列（兩道護欄：空拉不刪；比例超標不刪）
+  // 5) 刪除消失列。
+  //
+  // 【2026-08-07 修正】原本的護欄是「要刪的列數超過現有列的 30% 就跳過」，
+  // 立意是防 ARGO 回傳不完整時誤刪，但判準錯了：要刪很多本來就可能是正常的
+  // （例如首次對帳、月底大量結案）。實際造成 erp_so_lines 卡住 5,696 筆已結案的
+  // 幽靈列清不掉，而且越積越多→占比越高→越會觸發護欄，形成永遠無法自清的惡性循環。
+  //
+  // 改成偵測「來源資料是否異常縮水」才是對的判準：
+  //   拿這次從 ARGO 拉回的筆數，跟「上一次同單別、同模式、成功」的筆數比，
+  //   驟降超過 SOURCE_DROP_LIMIT 才視為來源異常 → 跳過刪除。
+  // 這樣：ARGO 只回一半 → 擋住；正常但要刪很多 → 允許清理。
+  // 且若真的驟降，下一輪的比較基準也跟著降 → 兩輪內自動恢復，不會永久卡死。
   let deleted = 0
   let deletesSkipped = 0
-  const ratioTripped =
-    toDelete.length > 50 &&
-    existingMap.size > 0 &&
-    toDelete.length / existingMap.size > maxDeleteRatio
-  if (rows.length === 0 || ratioTripped) {
-    deletesSkipped = toDelete.length
-  } else if (toDelete.length > 0) {
-    deleted = await deleteRows(supabase, table, keyCols, toDelete, scope)
+  let guardNote: string | null = null
+  if (toDelete.length > 0) {
+    let sourceLooksTruncated = false
+    if (rows.length === 0) {
+      sourceLooksTruncated = true
+      guardNote = 'ARGO 回傳 0 筆'
+    } else {
+      const prevCount = await lastSuccessfulCount(supabase, action, mode).catch(() => null)
+      if (prevCount != null && prevCount > 100 && rows.length < prevCount * (1 - SOURCE_DROP_LIMIT)) {
+        sourceLooksTruncated = true
+        guardNote = `拉回 ${rows.length} 筆，較上次 ${prevCount} 筆驟降`
+      }
+    }
+    if (sourceLooksTruncated) {
+      deletesSkipped = toDelete.length
+    } else {
+      deleted = await deleteRows(supabase, table, keyCols, toDelete, scope)
+    }
   }
+  void maxDeleteRatio
 
   const result: ReconcileResult = {
     total: rows.length,
@@ -235,7 +279,7 @@ async function runReconcile(
 
   // 6) Log（永不阻斷主流程）
   await writeLogs(supabase, {
-    action, table, docNoCol, subNoCol, mode,
+    action, table, docNoCol, subNoCol, mode, guardNote,
     elapsedMs: Date.now() - start,
     result, inserts, updates,
     deletedRows: deletesSkipped > 0 ? [] : toDelete,
@@ -295,6 +339,7 @@ interface LogContext {
   docNoCol: string
   subNoCol?: string
   mode: 'full' | 'incremental'
+  guardNote?: string | null
   elapsedMs: number
   result: ReconcileResult
   inserts: Row[]
@@ -325,7 +370,7 @@ async function writeLogs(supabase: AdminClient, ctx: LogContext): Promise<void> 
 
   const notes: string[] = []
   if (result.duplicates > 0) notes.push(`dup=${result.duplicates}`)
-  if (result.deletesSkipped > 0) notes.push(`deletes_skipped=${result.deletesSkipped}(護欄觸發，未刪除)`)
+  if (result.deletesSkipped > 0) notes.push(`deletes_skipped=${result.deletesSkipped}(護欄觸發:${ctx.guardNote ?? '來源異常'}，未刪除)`)
 
   const { data: runRow, error: runErr } = await supabase
     .from('erp_sync_logs')
