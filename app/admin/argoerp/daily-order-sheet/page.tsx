@@ -3441,7 +3441,17 @@ export default function DailyOrderSheetPage() {
                                   </div>
                                 )
                               ) : row.mo_number ? (
-                                <span className="text-violet-300">{row.mo_number}</span>
+                                <div>
+                                  <span className="text-violet-300">{row.mo_number}</span>
+                                  {row.po_number && (
+                                    <div className="mt-1 text-[10px]" title="此訂單同時有採購單">
+                                      <button
+                                        onClick={() => setPoModalId(row.po_number!)}
+                                        className="text-orange-300/80 hover:text-orange-200 hover:underline underline-offset-2 transition-colors text-left"
+                                      >採購 {row.po_number}</button>
+                                    </div>
+                                  )}
+                                </div>
                               ) : (
                                 <span className="text-slate-600">—</span>
                               )}

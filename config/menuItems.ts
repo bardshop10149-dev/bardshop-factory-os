@@ -52,7 +52,8 @@ export const NAV_GROUPS: Array<{ title: string; theme: string; items: MenuEntry[
         name: '採購單生成',
         icon: 'M16 11V7a4 4 0 00-8 0v4M5 9h14l1 12H4L5 9z',
         children: [
-          { name: '出單表→常平採購', path: '/admin/argoerp/order-batch-export-c', icon: 'M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z' },
+          { name: '出單表→常平採購', path: '/admin/argoerp/order-batch-export-c',   icon: 'M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z' },
+          { name: '單獨開立→採購單',   path: '/admin/argoerp/standalone-po-create', icon: 'M12 4v16m8-8H4' },
         ],
       },
       {
