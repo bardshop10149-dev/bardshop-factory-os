@@ -2,9 +2,6 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import Link from 'next/link'
-import { supabase } from '../../../lib/supabaseClient'
-
-const SETTINGS_KEY = 'design_studio_inventory_watchlist'
 
 interface InventoryRow {
   item_code: string
@@ -90,18 +87,21 @@ export default function InventoryQueryPage() {
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   useEffect(() => {
-    supabase.from('app_settings').select('value').eq('key', SETTINGS_KEY).maybeSingle()
-      .then(({ data }) => {
-        if (Array.isArray(data?.value)) setWatchlist(data!.value as string[])
+    fetch('/api/inventory/watchlist', { cache: 'no-store' })
+      .then(r => r.json())
+      .then((json: { success: boolean; list?: string[] }) => {
+        if (json.success && Array.isArray(json.list)) setWatchlist(json.list)
       })
   }, [])
 
   const persistWatchlist = useCallback((list: string[]) => {
     if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
     saveTimerRef.current = setTimeout(() => {
-      void supabase.from('app_settings').upsert({
-        key: SETTINGS_KEY, value: list, updated_at: new Date().toISOString(),
-      })
+      fetch('/api/inventory/watchlist', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ list }),
+      }).catch(() => {})
     }, 600)
   }, [])
 
