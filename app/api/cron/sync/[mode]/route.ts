@@ -129,7 +129,16 @@ async function runSync(request: NextRequest, ctx: { params: Promise<{ mode: stri
   const mode = rawMode.startsWith('full') ? 'full' : rawMode
   const group = rawMode === 'full-orders' ? 'orders' : rawMode === 'full-master' ? 'master' : null
 
-  const baseUrl = process.env.NEXT_PUBLIC_BASE_URL ?? request.nextUrl.origin
+  // 內部呼叫 /api/argoerp 的位址。
+  // 【2026-08-09 修正】Vercel Cron 觸發時的 host 是「部署專屬網址」
+  // （如 bardshop-6ez9l4n1w-xxx.vercel.app），該網址受 Deployment Protection 保護，
+  // 用 request.nextUrl.origin 去做內部呼叫會被擋 → 每個 action 都失敗 → 整支回 500。
+  // 因此優先採用 Vercel 提供的正式網域（VERCEL_PROJECT_PRODUCTION_URL，未受保護）。
+  // 本機開發時這些變數不存在，會落回 origin（localhost），行為不變。
+  const baseUrl =
+    (process.env.VERCEL_PROJECT_PRODUCTION_URL ? `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}` : null)
+    ?? process.env.NEXT_PUBLIC_BASE_URL
+    ?? request.nextUrl.origin
   const jobs = buildJobs(mode, group)
   const started = Date.now()
 
@@ -175,6 +184,11 @@ async function runSync(request: NextRequest, ctx: { params: Promise<{ mode: stri
   )
 
   const failed = steps.filter((s) => !s.ok)
+  // 失敗細節印進 Vercel 函式日誌（View Logs 可直接看到原因，不用另外查）
+  if (failed.length > 0) {
+    console.error(`[cron/sync] mode=${rawMode} ${failed.length}/${steps.length} 步失敗：`,
+      failed.map((f) => `${f.step}: ${f.error ?? '?'}`).join(' | '))
+  }
   return NextResponse.json(
     {
       success: failed.length === 0,
