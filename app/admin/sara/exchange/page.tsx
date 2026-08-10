@@ -62,7 +62,7 @@ export default function SaraExchangePage() {
   const [csvRows, setCsvRows]   = useState<string[][]>([])
   const [csvLoading, setCsvLoading] = useState(false)
   const [csvMsg, setCsvMsg]     = useState('')
-  const csvFileRef              = useRef<HTMLInputElement>(null)
+  // 上傳檔案引用：分別用於「取代基底」和「追加新列」
 
   // 新增表單
   const [showAdd, setShowAdd]   = useState(false)
@@ -123,29 +123,37 @@ export default function SaraExchangePage() {
 
   useEffect(() => { void load() }, [load])
 
-  // ── CSV 上傳（解析後 append 至 buffer）──
-  const handleCsvUpload = useCallback(async (file: File) => {
+  // 上傳檔案引用：分別用於「取代基底」和「追加新列」
+  const csvReplaceRef = useRef<HTMLInputElement>(null)
+  const csvAppendRef  = useRef<HTMLInputElement>(null)
+
+  // ── CSV 上傳（append=false 就是取代基底）──
+  const handleCsvUpload = useCallback(async (file: File, append: boolean) => {
     setCsvMsg('')
     const text = await file.text()
     const allRows = parseCSVRows(text)
-    // 跳過前兩行 header
     const dataRows = allRows.filter(r => r[0] !== 'Order Number' && r[0] !== '訂單編號' && r.length >= 10)
     if (dataRows.length === 0) { setCsvMsg('⚠️ 未偵測到有效資料列（已跳過標題行）'); return }
+    if (!append && csvRows.length > 0) {
+      if (!confirm(`確定用此 CSV 「取代」目前的 ${csvRows.length} 列資料？`)) return
+    }
     setCsvLoading(true)
     try {
       const res = await fetch('/api/sara/exchange-csv', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ rows: dataRows, append: true }),
+        body: JSON.stringify({ rows: dataRows, append }),
       })
       const j = await res.json() as { success: boolean; count?: number; error?: string }
       if (!j.success) throw new Error(j.error)
-      setCsvMsg(`✅ 已加入 ${dataRows.length} 列，累積共 ${j.count} 列`)
+      setCsvMsg(append
+        ? `✅ 已追加 ${dataRows.length} 列，累積共 ${j.count} 列`
+        : `✅ 已取代基底，現共 ${j.count} 列`)
       await loadCsvBuffer()
     } catch (e) {
       setCsvMsg(`❌ ${e instanceof Error ? e.message : String(e)}`)
     } finally { setCsvLoading(false) }
-  }, [loadCsvBuffer])
+  }, [loadCsvBuffer, csvRows.length])
 
   // ── 下載 CSV buffer ──
   const handleCsvDownload = useCallback(() => {
@@ -314,7 +322,10 @@ export default function SaraExchangePage() {
           <div className="flex items-center justify-between flex-wrap gap-3 mb-3">
             <div>
               <h2 className="text-sm font-semibold text-emerald-300">📄 CSV 累積區（交換主體）</h2>
-              <p className="text-xs text-slate-400 mt-0.5">上傳 SARA CSV 作為基底，工序格式產生頁可直接追加；塔台透過上方 API 拉取此區資料</p>
+              <p className="text-xs text-slate-400 mt-0.5">
+                <span className="text-amber-300">📄 取代基底</span>：清空後放入新 CSV（週期性更新整份資料）　
+                <span className="text-emerald-300">＋ 追加新列</span>：在現有資料後加入（工序格式產生後追加）
+              </p>
             </div>
             <div className="flex items-center gap-2 flex-wrap">
               {csvMsg && (
@@ -325,12 +336,22 @@ export default function SaraExchangePage() {
               <span className={`px-3 py-1 rounded-full text-xs font-semibold border ${csvRows.length > 0 ? 'bg-emerald-900/40 text-emerald-300 border-emerald-700/50' : 'bg-slate-800 text-slate-500 border-slate-700'}`}>
                 {csvLoading ? '載入中…' : `累積 ${csvRows.length} 列`}
               </span>
-              <input ref={csvFileRef} type="file" accept=".csv" className="hidden"
-                onChange={e => { const f = e.target.files?.[0]; if (f) void handleCsvUpload(f); e.target.value = '' }} />
-              <button onClick={() => csvFileRef.current?.click()} disabled={csvLoading}
-                className="px-4 py-2 rounded-lg bg-emerald-700 hover:bg-emerald-600 disabled:bg-slate-700 disabled:text-slate-500 text-white text-sm font-medium transition-colors">
-                ⬆ 上傳 CSV
-              </button>
+              <input ref={csvReplaceRef} type="file" accept=".csv" className="hidden"
+                onChange={e => { const f = e.target.files?.[0]; if (f) void handleCsvUpload(f, false); e.target.value = '' }} />
+              <input ref={csvAppendRef} type="file" accept=".csv" className="hidden"
+                onChange={e => { const f = e.target.files?.[0]; if (f) void handleCsvUpload(f, true); e.target.value = '' }} />
+              <div className="flex flex-col gap-1">
+                <button onClick={() => csvReplaceRef.current?.click()} disabled={csvLoading}
+                  className="px-4 py-2 rounded-lg bg-amber-700 hover:bg-amber-600 disabled:bg-slate-700 disabled:text-slate-500 text-white text-sm font-medium transition-colors whitespace-nowrap"
+                  title="清空 buffer 後放入此 CSV（更新基底）">
+                  📄 取代基底
+                </button>
+                <button onClick={() => csvAppendRef.current?.click()} disabled={csvLoading}
+                  className="px-4 py-2 rounded-lg bg-emerald-700 hover:bg-emerald-600 disabled:bg-slate-700 disabled:text-slate-500 text-white text-sm font-medium transition-colors whitespace-nowrap"
+                  title="在現有 buffer 後方加入新列">
+                  ➕ 追加新列
+                </button>
+              </div>
               <button onClick={handleCsvDownload} disabled={csvRows.length === 0 || csvLoading}
                 className="px-4 py-2 rounded-lg bg-sky-700 hover:bg-sky-600 disabled:bg-slate-700 disabled:text-slate-500 text-white text-sm font-medium transition-colors">
                 ⬇ 下載合併 CSV
