@@ -52,6 +52,10 @@ const STATUS_BADGE: Record<string, string> = {
 }
 
 export default function SaraExchangePage() {
+  const [unlocked, setUnlocked] = useState(false)
+  const [pwInput, setPwInput]   = useState('')
+  const [pwError, setPwError]   = useState(false)
+
   const [rows, setRows]         = useState<ExchangeRow[]>([])
   const [loading, setLoading]   = useState(false)
   const [statusFilter, setStatusFilter] = useState<'pending' | 'consumed' | 'all'>('all')
@@ -234,6 +238,37 @@ export default function SaraExchangePage() {
 
   const origin = typeof window !== 'undefined' ? window.location.origin : 'https://your-domain.vercel.app'
   const apiUrl = `${origin}/api/sara/exchange`
+
+  if (!unlocked) {
+    return (
+      <div className="min-h-screen bg-slate-950 flex items-center justify-center">
+        <div className="bg-slate-900 border border-slate-700 rounded-2xl p-8 w-80 flex flex-col items-center gap-4">
+          <div className="text-2xl">🔒</div>
+          <h2 className="text-white font-semibold text-lg">SARA 資料交換區</h2>
+          <p className="text-slate-400 text-sm">請輸入密碼以繼續</p>
+          <input
+            type="password" value={pwInput}
+            onChange={e => { setPwInput(e.target.value); setPwError(false) }}
+            onKeyDown={e => {
+              if (e.key === 'Enter') {
+                if (pwInput === '666') setUnlocked(true)
+                else { setPwError(true); setPwInput('') }
+              }
+            }}
+            placeholder="密碼" autoFocus
+            className={`w-full px-4 py-2 rounded-lg bg-slate-800 border text-white text-center tracking-widest focus:outline-none ${
+              pwError ? 'border-red-500' : 'border-slate-600 focus:border-cyan-500'
+            }`}
+          />
+          {pwError && <p className="text-red-400 text-xs">密碼錯誤</p>}
+          <button
+            onClick={() => { if (pwInput === '666') setUnlocked(true); else { setPwError(true); setPwInput('') } }}
+            className="w-full py-2 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white font-medium transition-colors"
+          >進入</button>
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div className="min-h-screen bg-slate-950 text-white p-4 md:p-6">
