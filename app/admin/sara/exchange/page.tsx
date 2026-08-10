@@ -229,11 +229,11 @@ export default function SaraExchangePage() {
 
         {/* API 端口說明卡片 */}
         <div className="mb-6 rounded-xl border border-cyan-800/40 bg-cyan-950/20 p-5">
-          <h2 className="text-sm font-semibold text-cyan-300 mb-3">📡 塔台呼叫端口</h2>
+          <h2 className="text-sm font-semibold text-cyan-300 mb-3">📡 塔台呼叫端口（CSV 格式）</h2>
           <div className="space-y-3 text-xs">
             <div>
               <span className="text-slate-400">端口 URL：</span>
-              <code className="ml-2 px-2 py-0.5 rounded bg-slate-900 text-cyan-200 font-mono select-all">{apiUrl}</code>
+              <code className="ml-2 px-2 py-0.5 rounded bg-slate-900 text-cyan-200 font-mono select-all">{`${origin}/api/sara/exchange-csv`}</code>
             </div>
             <div>
               <span className="text-slate-400">方法：</span>
@@ -244,18 +244,18 @@ export default function SaraExchangePage() {
               <code className="ml-2 px-2 py-0.5 rounded bg-slate-900 text-amber-200 font-mono">Authorization: Bearer {'<'}SARA_EXCHANGE_API_KEY{'>'}</code>
             </div>
             <div className="rounded-lg bg-slate-900/60 border border-slate-700 p-3 font-mono text-slate-300 space-y-1">
-              <div className="text-slate-500"># 拉取所有 pending 資料</div>
-              <div>GET {apiUrl}</div>
-              <div className="text-slate-500 mt-2"># 篩選特定類型</div>
-              <div>GET {apiUrl}?type=mo_list</div>
-              <div className="text-slate-500 mt-2"># 拉取後自動標記 consumed</div>
-              <div>GET {apiUrl}?mark_consumed=true</div>
-              <div className="text-slate-500 mt-2"># 時間篩選</div>
-              <div>GET {apiUrl}?since=2026-08-01</div>
+              <div className="text-slate-500"># 拉取 CSV 累積區全部資料（回傳 .csv 檔）</div>
+              <div>GET {`${origin}/api/sara/exchange-csv`}</div>
+              <div className="text-slate-500 mt-2"># 拉取後自動清空 buffer</div>
+              <div>GET {`${origin}/api/sara/exchange-csv`}?mark_consumed=true</div>
             </div>
             <div>
               <span className="text-slate-400">回傳格式：</span>
-              <code className="ml-2 px-2 py-0.5 rounded bg-slate-900 text-slate-300 font-mono">{'{ "success": true, "count": N, "data": [...], "fetched_at": "..." }'}</code>
+              <code className="ml-2 px-2 py-0.5 rounded bg-slate-900 text-slate-300 font-mono">text/csv（含 BOM，UTF-8，2 行標題 + 資料）</code>
+            </div>
+            <div>
+              <span className="text-slate-400">Header 回傳：</span>
+              <code className="ml-2 px-2 py-0.5 rounded bg-slate-900 text-slate-300 font-mono">X-Row-Count: N（資料列數）</code>
             </div>
             <div className="text-amber-300/80">
               ⚠️ API Key 請至 Vercel 環境變數設定 <code className="font-mono">SARA_EXCHANGE_API_KEY</code>
@@ -267,8 +267,8 @@ export default function SaraExchangePage() {
         <div className="mb-6 rounded-xl border border-emerald-800/40 bg-emerald-950/20 p-5">
           <div className="flex items-center justify-between flex-wrap gap-3 mb-3">
             <div>
-              <h2 className="text-sm font-semibold text-emerald-300">📄 CSV 累積區</h2>
-              <p className="text-xs text-slate-400 mt-0.5">上傳 SARA CSV 作為基底，工序格式產生頁可直接追加，最後合併下載</p>
+              <h2 className="text-sm font-semibold text-emerald-300">📄 CSV 累積區（交換主體）</h2>
+              <p className="text-xs text-slate-400 mt-0.5">上傳 SARA CSV 作為基底，工序格式產生頁可直接追加；塔台透過上方 API 拉取此區資料</p>
             </div>
             <div className="flex items-center gap-2 flex-wrap">
               {csvMsg && (
