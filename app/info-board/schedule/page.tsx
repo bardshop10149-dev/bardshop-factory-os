@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { NavButton } from '../../../components/NavButton'
 import { supabase } from '../../../lib/supabaseClient'
 
@@ -41,6 +41,9 @@ export default function ScheduleInquiryPage() {
   const [copied, setCopied] = useState(false)
   const [orderNoModal, setOrderNoModal] = useState<{ id: number; current: string } | null>(null)
   const [orderNoInput, setOrderNoInput] = useState('')
+  const [notifyPhotoUploading, setNotifyPhotoUploading] = useState(false)
+  const [notifyPhotoUploaded, setNotifyPhotoUploaded] = useState(false)
+  const notifyPhotoInputRef = useRef<HTMLInputElement>(null)
 
   // 表單欄位
   const [formDate, setFormDate] = useState(() => new Date().toISOString().slice(0, 10))
@@ -176,6 +179,37 @@ export default function ScheduleInquiryPage() {
       document.body.removeChild(textarea)
       setCopied(true)
       setTimeout(() => setCopied(false), 2000)
+    }
+  }
+
+  const handleNotifyPhotoSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    const ext = (file.name.split('.').pop() || '').toLowerCase()
+    if (!['jpg', 'jpeg', 'png', 'gif', 'webp'].includes(ext)) {
+      alert('請上傳圖片格式檔案（JPG、PNG、GIF、WEBP）')
+      e.target.value = ''
+      return
+    }
+    setNotifyPhotoUploading(true)
+    setNotifyPhotoUploaded(false)
+    try {
+      const fileName = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}.${ext}`
+      const filePath = `schedule-inquiries/${fileName}`
+      const { error: uploadError } = await supabase.storage
+        .from('anomaly-attachments')
+        .upload(filePath, file)
+      if (uploadError) {
+        alert(`上傳失敗：${uploadError.message}`)
+      } else {
+        setNotifyPhotoUploaded(true)
+        setTimeout(() => setNotifyPhotoUploaded(false), 3000)
+      }
+    } catch {
+      alert('上傳發生錯誤')
+    } finally {
+      setNotifyPhotoUploading(false)
+      e.target.value = ''
     }
   }
 
@@ -507,12 +541,30 @@ export default function ScheduleInquiryPage() {
             <h2 className="text-lg font-bold text-white text-center">📨 通知訊息預覽</h2>
             <p className="text-xs text-slate-400 text-center">新增成功！可複製以下訊息貼到 LINE 群組通知相關人員</p>
             <pre className="bg-slate-950 border border-slate-700 rounded-lg p-4 text-sm text-slate-200 whitespace-pre-wrap leading-relaxed max-h-[50vh] overflow-y-auto select-all">{notifyPreview}</pre>
-            <div className="flex gap-2 justify-center">
+            <input
+              ref={notifyPhotoInputRef}
+              type="file"
+              accept="image/*"
+              className="hidden"
+              onChange={e => void handleNotifyPhotoSelect(e)}
+            />
+            <div className="flex gap-2 justify-center flex-wrap">
               <button
-                onClick={() => setNotifyPreview(null)}
+                onClick={() => { setNotifyPreview(null); setNotifyPhotoUploaded(false) }}
                 className="px-4 py-2 rounded border border-slate-700 text-slate-300 hover:bg-slate-800 text-sm"
               >
                 關閉
+              </button>
+              <button
+                onClick={() => notifyPhotoInputRef.current?.click()}
+                disabled={notifyPhotoUploading}
+                className={`px-4 py-2 rounded font-bold text-sm transition-colors ${
+                  notifyPhotoUploaded
+                    ? 'bg-emerald-600 text-white'
+                    : 'bg-violet-600 hover:bg-violet-500 text-white disabled:opacity-50 disabled:cursor-not-allowed'
+                }`}
+              >
+                {notifyPhotoUploading ? '上傳中...' : notifyPhotoUploaded ? '✅ 照片已上傳！' : '📷 上傳照片'}
               </button>
               <button
                 onClick={() => void handleCopyNotify()}
