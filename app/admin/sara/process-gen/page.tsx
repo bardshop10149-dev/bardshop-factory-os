@@ -153,6 +153,8 @@ export default function ProcessGenPage() {
   const [flaggedItems, setFlaggedItems] = useState<Set<string>>(new Set())
   const [generating, setGenerating]     = useState(false)
   const [dlDone, setDlDone]         = useState(false)
+  const [csvAppending, setCsvAppending] = useState(false)
+  const [csvAppendMsg, setCsvAppendMsg] = useState('')
   const [isDragOver, setIsDragOver] = useState(false)
 
   // No-route override state
@@ -718,6 +720,34 @@ export default function ProcessGenPage() {
     setTimeout(() => setDlDone(false), 2000)
   }, [saraRows])
 
+  // ── 加入 CSV 交換區（append）──────────────────────────────────
+
+  const handleAppendToExchangeCsv = useCallback(async () => {
+    const validRows = saraRows.filter(r => !r._noRoute)
+    if (validRows.length === 0) return
+    setCsvAppending(true); setCsvAppendMsg('')
+    try {
+      const dataRows = validRows.map(r =>
+        [r.order_number, r.mfg_order_number, r.product_name, r.product_desc,
+         r.lot_number, String(r.prod_qty), r.due, r.priority, r.earliest_start,
+         String(r.job_seq), r.workcenter, r.job_name, String(r.job_qty), r.outsourcing,
+         String(r.est_time), r.time_unit, r.bom, r.mat_req_qty,
+         r.customer ?? '', r.assigned_machine ?? '', '', '']
+      )
+      const res = await fetch('/api/sara/exchange-csv', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ rows: dataRows, append: true }),
+      })
+      const j = await res.json() as { success: boolean; count?: number; error?: string }
+      if (!j.success) throw new Error(j.error)
+      setCsvAppendMsg(`✅ 已追加 ${validRows.length} 列（累積 ${j.count} 列）`)
+      setTimeout(() => setCsvAppendMsg(''), 5000)
+    } catch (e) {
+      setCsvAppendMsg(`❌ ${e instanceof Error ? e.message : String(e)}`)
+    } finally { setCsvAppending(false) }
+  }, [saraRows])
+
   // ── 單品查詢 ──────────────────────────────────────────────────
 
   const handleSingleGenerate = useCallback(async () => {
@@ -923,6 +953,13 @@ export default function ProcessGenPage() {
                   className="px-4 py-2 rounded-lg bg-cyan-700 hover:bg-cyan-600 text-white text-sm font-semibold">
                   {dlDone ? '✅ 已下載' : '⬇ 下載 SARA CSV'}
                 </button>
+                <button onClick={() => void handleAppendToExchangeCsv()} disabled={csvAppending}
+                  className="px-4 py-2 rounded-lg bg-emerald-700 hover:bg-emerald-600 disabled:bg-slate-700 disabled:text-slate-500 text-white text-sm font-semibold transition-colors">
+                  {csvAppending ? '追加中…' : '➕ 加入交換區 CSV'}
+                </button>
+                {csvAppendMsg && (
+                  <span className={`text-xs ${csvAppendMsg.startsWith('✅') ? 'text-emerald-400' : 'text-red-400'}`}>{csvAppendMsg}</span>
+                )}
               </div>
 
               {/* 預覽表（僅有途程的列）*/}

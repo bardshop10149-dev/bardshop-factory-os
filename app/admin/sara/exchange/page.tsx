@@ -1,7 +1,38 @@
 'use client'
 
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { supabase } from '../../../../lib/supabaseClient'
+
+const CSV_H1 = 'Order Number,Manufacturing Order Number,Product Name,Product Description,Lot Number,Production Quantity,Due,Priority Level,Earliest Start Time,Job Sequence,Workcenter,Job Name,Job Quantity,Out Sourcing,Est. Time,Time Unit,BOM Components,Material Required Quantity,customer_id,assigned_machine,Rule,Parameter 1'
+const CSV_H2 = '訂單編號,(必填)工單編號,(必填)品號,規格,生產批號,(必填)生產需求數量,(必填)需求日,排程優先等級(1-99),最早可開始時間,(必填)工序,(必填)站點,(必填)製程名稱,製程數量,製程委外,(必填)預估工時,工時單位,BOM元件品號,物料需求數量,客戶名稱,分配機台,規則,參數1'
+
+function parseCSVRows(text: string): string[][] {
+  const result: string[][] = []
+  for (const line of text.split(/\r?\n/)) {
+    if (!line.trim()) continue
+    const cells: string[] = []
+    let i = 0, cell = ''
+    while (i <= line.length) {
+      const ch = line[i] ?? ''
+      if (ch === '"') {
+        i++
+        while (i < line.length) {
+          if (line[i] === '"' && line[i + 1] === '"') { cell += '"'; i += 2 }
+          else if (line[i] === '"') { i++; break }
+          else cell += line[i++]
+        }
+      } else if (ch === ',' || ch === '') { cells.push(cell.trim()); cell = ''; i++ }
+      else { cell += ch; i++ }
+    }
+    if (cells.length > 1 || cells[0]) result.push(cells)
+  }
+  return result
+}
+
+function escCsv(v: string | number): string {
+  const s = String(v ?? '')
+  return /[,"\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s
+}
 
 interface ExchangeRow {
   id: number
@@ -27,6 +58,12 @@ export default function SaraExchangePage() {
   const [typeFilter, setTypeFilter]     = useState('')
   const [total, setTotal]       = useState(0)
 
+  // CSV 累積區
+  const [csvRows, setCsvRows]   = useState<string[][]>([])
+  const [csvLoading, setCsvLoading] = useState(false)
+  const [csvMsg, setCsvMsg]     = useState('')
+  const csvFileRef              = useRef<HTMLInputElement>(null)
+
   // 新增表單
   const [showAdd, setShowAdd]   = useState(false)
   const [addType, setAddType]   = useState('')
@@ -42,6 +79,18 @@ export default function SaraExchangePage() {
   const [delMsg, setDelMsg]     = useState('')
 
   const [expandedId, setExpandedId] = useState<number | null>(null)
+
+  // 載入 CSV buffer
+  const loadCsvBuffer = useCallback(async () => {
+    setCsvLoading(true)
+    try {
+      const res = await fetch('/api/sara/exchange-csv', { cache: 'no-store' })
+      const j = await res.json() as { success: boolean; rows?: string[][] }
+      if (j.success) setCsvRows(j.rows ?? [])
+    } finally { setCsvLoading(false) }
+  }, [])
+
+  useEffect(() => { void loadCsvBuffer() }, [loadCsvBuffer])
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -63,6 +112,52 @@ export default function SaraExchangePage() {
   }, [statusFilter, typeFilter])
 
   useEffect(() => { void load() }, [load])
+
+  // ── CSV 上傳（解析後 append 至 buffer）──
+  const handleCsvUpload = useCallback(async (file: File) => {
+    setCsvMsg('')
+    const text = await file.text()
+    const allRows = parseCSVRows(text)
+    // 跳過前兩行 header
+    const dataRows = allRows.filter(r => r[0] !== 'Order Number' && r[0] !== '訂單編號' && r.length >= 10)
+    if (dataRows.length === 0) { setCsvMsg('⚠️ 未偵測到有效資料列（已跳過標題行）'); return }
+    setCsvLoading(true)
+    try {
+      const res = await fetch('/api/sara/exchange-csv', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ rows: dataRows, append: true }),
+      })
+      const j = await res.json() as { success: boolean; count?: number; error?: string }
+      if (!j.success) throw new Error(j.error)
+      setCsvMsg(`✅ 已加入 ${dataRows.length} 列，累積共 ${j.count} 列`)
+      await loadCsvBuffer()
+    } catch (e) {
+      setCsvMsg(`❌ ${e instanceof Error ? e.message : String(e)}`)
+    } finally { setCsvLoading(false) }
+  }, [loadCsvBuffer])
+
+  // ── 下載 CSV buffer ──
+  const handleCsvDownload = useCallback(() => {
+    if (csvRows.length === 0) return
+    const lines = [CSV_H1, CSV_H2, ...csvRows.map(r => r.map(escCsv).join(','))].join('\r\n')
+    const blob = new Blob(['\uFEFF' + lines], { type: 'text/csv;charset=utf-8;' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a'); a.href = url
+    a.download = `SARA_combined_${new Date().toISOString().slice(0, 10)}.csv`
+    a.click(); URL.revokeObjectURL(url)
+  }, [csvRows])
+
+  // ── 清空 CSV buffer ──
+  const handleCsvClear = useCallback(async () => {
+    if (!confirm(`確定清空 CSV 累積區（${csvRows.length} 列）？`)) return
+    setCsvLoading(true)
+    try {
+      await fetch('/api/sara/exchange-csv', { method: 'DELETE' })
+      setCsvRows([]); setCsvMsg('✅ 已清空')
+      setTimeout(() => setCsvMsg(''), 3000)
+    } finally { setCsvLoading(false) }
+  }, [csvRows.length])
 
   const handleAdd = async () => {
     if (!addType.trim()) { setAddMsg('❌ 請填寫資料類型'); return }
@@ -166,6 +261,45 @@ export default function SaraExchangePage() {
               ⚠️ API Key 請至 Vercel 環境變數設定 <code className="font-mono">SARA_EXCHANGE_API_KEY</code>
             </div>
           </div>
+        </div>
+
+        {/* ── CSV 累積區 ── */}
+        <div className="mb-6 rounded-xl border border-emerald-800/40 bg-emerald-950/20 p-5">
+          <div className="flex items-center justify-between flex-wrap gap-3 mb-3">
+            <div>
+              <h2 className="text-sm font-semibold text-emerald-300">📄 CSV 累積區</h2>
+              <p className="text-xs text-slate-400 mt-0.5">上傳 SARA CSV 作為基底，工序格式產生頁可直接追加，最後合併下載</p>
+            </div>
+            <div className="flex items-center gap-2 flex-wrap">
+              {csvMsg && (
+                <span className={`text-xs ${csvMsg.startsWith('✅') ? 'text-emerald-400' : csvMsg.startsWith('⚠') ? 'text-amber-400' : 'text-red-400'}`}>
+                  {csvMsg}
+                </span>
+              )}
+              <span className={`px-3 py-1 rounded-full text-xs font-semibold border ${csvRows.length > 0 ? 'bg-emerald-900/40 text-emerald-300 border-emerald-700/50' : 'bg-slate-800 text-slate-500 border-slate-700'}`}>
+                {csvLoading ? '載入中…' : `累積 ${csvRows.length} 列`}
+              </span>
+              <input ref={csvFileRef} type="file" accept=".csv" className="hidden"
+                onChange={e => { const f = e.target.files?.[0]; if (f) void handleCsvUpload(f); e.target.value = '' }} />
+              <button onClick={() => csvFileRef.current?.click()} disabled={csvLoading}
+                className="px-4 py-2 rounded-lg bg-emerald-700 hover:bg-emerald-600 disabled:bg-slate-700 disabled:text-slate-500 text-white text-sm font-medium transition-colors">
+                ⬆ 上傳 CSV
+              </button>
+              <button onClick={handleCsvDownload} disabled={csvRows.length === 0 || csvLoading}
+                className="px-4 py-2 rounded-lg bg-sky-700 hover:bg-sky-600 disabled:bg-slate-700 disabled:text-slate-500 text-white text-sm font-medium transition-colors">
+                ⬇ 下載合併 CSV
+              </button>
+              <button onClick={() => void handleCsvClear()} disabled={csvRows.length === 0 || csvLoading}
+                className="px-3 py-2 rounded-lg bg-slate-800 border border-slate-700 text-slate-400 text-sm hover:bg-red-900/40 hover:text-red-300 hover:border-red-700/50 disabled:opacity-40 transition-colors">
+                清空
+              </button>
+            </div>
+          </div>
+          {csvRows.length > 0 && (
+            <div className="text-xs text-slate-500 font-mono bg-slate-900/60 rounded px-3 py-2 border border-slate-800">
+              前 3 列預覽：{csvRows.slice(0, 3).map(r => `[${r[0]}, ${r[1]}, ${r[2]}...]`).join(' | ')}
+            </div>
+          )}
         </div>
 
         {/* 控制列 */}
