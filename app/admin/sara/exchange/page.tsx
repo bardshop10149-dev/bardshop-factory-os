@@ -80,6 +80,16 @@ export default function SaraExchangePage() {
 
   const [expandedId, setExpandedId] = useState<number | null>(null)
 
+  // 載入 API Key（server-side env，僅管理員可見）
+  const [apiKey, setApiKey] = useState<string | null>(null)
+  const [showKey, setShowKey] = useState(false)
+  useEffect(() => {
+    fetch('/api/sara/exchange-key', { cache: 'no-store' })
+      .then(r => r.json())
+      .then((j: { key: string | null }) => setApiKey(j.key))
+      .catch(() => {})
+  }, [])
+
   // 載入 CSV buffer
   const loadCsvBuffer = useCallback(async () => {
     setCsvLoading(true)
@@ -229,37 +239,73 @@ export default function SaraExchangePage() {
 
         {/* API 端口說明卡片 */}
         <div className="mb-6 rounded-xl border border-cyan-800/40 bg-cyan-950/20 p-5">
-          <h2 className="text-sm font-semibold text-cyan-300 mb-3">📡 塔台呼叫端口（CSV 格式）</h2>
-          <div className="space-y-3 text-xs">
-            <div>
-              <span className="text-slate-400">端口 URL：</span>
-              <code className="ml-2 px-2 py-0.5 rounded bg-slate-900 text-cyan-200 font-mono select-all">{`${origin}/api/sara/exchange-csv`}</code>
+          <h2 className="text-sm font-semibold text-cyan-300 mb-4">📡 塔台呼叫端口（CSV 格式）完整串接說明</h2>
+          <div className="space-y-4 text-xs">
+
+            {/* Step 1 */}
+            <div className="rounded-lg bg-slate-900/60 border border-slate-700 p-4">
+              <div className="text-slate-300 font-semibold mb-2">① 端口 URL</div>
+              <code className="block px-3 py-2 rounded bg-slate-950 text-cyan-200 font-mono select-all text-sm">
+                {`${origin}/api/sara/exchange-csv`}
+              </code>
             </div>
-            <div>
-              <span className="text-slate-400">方法：</span>
-              <code className="ml-2 px-2 py-0.5 rounded bg-emerald-950 text-emerald-300 font-mono">GET</code>
+
+            {/* Step 2 */}
+            <div className="rounded-lg bg-slate-900/60 border border-slate-700 p-4">
+              <div className="text-slate-300 font-semibold mb-2">② 認證 Header（必填）</div>
+              <div className="flex items-center gap-3 flex-wrap">
+                <code className="px-3 py-2 rounded bg-slate-950 text-amber-200 font-mono select-all">
+                  Authorization: Bearer {showKey && apiKey ? apiKey : (apiKey ? '••••••••••••' : '（未設定）')}
+                </code>
+                {apiKey && (
+                  <button onClick={() => setShowKey(v => !v)}
+                    className="px-2 py-1 rounded bg-slate-800 border border-slate-700 text-slate-400 hover:text-slate-200 transition-colors">
+                    {showKey ? '隱藏' : '顯示'} Key
+                  </button>
+                )}
+                {!apiKey && (
+                  <span className="text-amber-400">⚠️ Vercel 尚未設定 SARA_EXCHANGE_API_KEY</span>
+                )}
+              </div>
+              {showKey && apiKey && (
+                <div className="mt-2 p-2 rounded bg-amber-950/40 border border-amber-700/40 text-amber-300">
+                  ⚠️ 此 Key 請妥善保管，不要外傳
+                </div>
+              )}
             </div>
-            <div>
-              <span className="text-slate-400">認證 Header：</span>
-              <code className="ml-2 px-2 py-0.5 rounded bg-slate-900 text-amber-200 font-mono">Authorization: Bearer {'<'}SARA_EXCHANGE_API_KEY{'>'}</code>
+
+            {/* Step 3 */}
+            <div className="rounded-lg bg-slate-900/60 border border-slate-700 p-4">
+              <div className="text-slate-300 font-semibold mb-2">③ 呼叫範例</div>
+              <div className="space-y-1 font-mono text-slate-300">
+                <div className="text-slate-500"># 拉取全部 CSV 資料</div>
+                <div className="select-all">GET {`${origin}/api/sara/exchange-csv`}</div>
+                <div className="text-slate-500 mt-2"># 拉取後自動清空 buffer（建議塔台使用）</div>
+                <div className="select-all">GET {`${origin}/api/sara/exchange-csv`}?mark_consumed=true</div>
+              </div>
             </div>
-            <div className="rounded-lg bg-slate-900/60 border border-slate-700 p-3 font-mono text-slate-300 space-y-1">
-              <div className="text-slate-500"># 拉取 CSV 累積區全部資料（回傳 .csv 檔）</div>
-              <div>GET {`${origin}/api/sara/exchange-csv`}</div>
-              <div className="text-slate-500 mt-2"># 拉取後自動清空 buffer</div>
-              <div>GET {`${origin}/api/sara/exchange-csv`}?mark_consumed=true</div>
+
+            {/* Step 4 */}
+            <div className="rounded-lg bg-slate-900/60 border border-slate-700 p-4">
+              <div className="text-slate-300 font-semibold mb-2">④ 回傳格式</div>
+              <div className="space-y-1 text-slate-400">
+                <div>• <span className="text-slate-200">Content-Type</span>：<code className="font-mono">text/csv; charset=utf-8</code>（含 BOM）</div>
+                <div>• <span className="text-slate-200">第 1 行</span>：英文欄位名稱</div>
+                <div>• <span className="text-slate-200">第 2 行</span>：中文欄位說明</div>
+                <div>• <span className="text-slate-200">第 3 行起</span>：實際工序資料</div>
+                <div>• <span className="text-slate-200">Header X-Row-Count</span>：資料列數（不含標題）</div>
+              </div>
             </div>
-            <div>
-              <span className="text-slate-400">回傳格式：</span>
-              <code className="ml-2 px-2 py-0.5 rounded bg-slate-900 text-slate-300 font-mono">text/csv（含 BOM，UTF-8，2 行標題 + 資料）</code>
+
+            {/* Step 5 */}
+            <div className="rounded-lg bg-slate-900/60 border border-slate-700 p-4">
+              <div className="text-slate-300 font-semibold mb-2">⑤ 完整 curl 範例</div>
+              <pre className="text-slate-300 font-mono overflow-x-auto text-[11px] leading-relaxed select-all">{`curl -X GET \\
+  "${origin}/api/sara/exchange-csv?mark_consumed=true" \\
+  -H "Authorization: Bearer ${showKey && apiKey ? apiKey : (apiKey ? '••••••••••••' : '<YOUR_API_KEY>')}" \\
+  -o SARA_export.csv`}</pre>
             </div>
-            <div>
-              <span className="text-slate-400">Header 回傳：</span>
-              <code className="ml-2 px-2 py-0.5 rounded bg-slate-900 text-slate-300 font-mono">X-Row-Count: N（資料列數）</code>
-            </div>
-            <div className="text-amber-300/80">
-              ⚠️ API Key 請至 Vercel 環境變數設定 <code className="font-mono">SARA_EXCHANGE_API_KEY</code>
-            </div>
+
           </div>
         </div>
 
