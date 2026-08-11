@@ -46,16 +46,19 @@ export async function GET(request: NextRequest) {
     }
 
     if (isSaraCall) {
-      // 塔台呼叫：回傳 CSV 文字
-      const csv = [CSV_H1, CSV_H2, ...rows.map(r => r.map(escCsv).join(','))].join('\r\n')
-      return new NextResponse('\uFEFF' + csv, {
-        headers: {
-          'Content-Type': 'text/csv; charset=utf-8',
-          'Content-Disposition': `attachment; filename="SARA_exchange_${new Date().toISOString().slice(0, 10)}.csv"`,
-          'Cache-Control': 'no-store',
-          'X-Row-Count': String(rows.length),
-        },
+      // 塔台呼叫：回傳 JSON { success, count, fetched_at, data: [...] }
+      const colHeaders = CSV_H1.split(',')
+      const dataObjects = rows.map(row => {
+        const obj: Record<string, string> = {}
+        colHeaders.forEach((h, i) => { obj[h] = row[i] ?? '' })
+        return obj
       })
+      return NextResponse.json({
+        success: true,
+        count: rows.length,
+        fetched_at: new Date().toISOString(),
+        data: dataObjects,
+      }, { headers: { 'Cache-Control': 'no-store' } })
     }
 
     // 管理端：回傳 JSON

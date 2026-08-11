@@ -330,14 +330,39 @@ export default function SaraExchangePage() {
 
             {/* Step 4 */}
             <div className="rounded-lg bg-slate-900/60 border border-slate-700 p-4">
-              <div className="text-slate-300 font-semibold mb-2">④ 回傳格式</div>
-              <div className="space-y-1 text-slate-400">
-                <div>• <span className="text-slate-200">Content-Type</span>：<code className="font-mono">text/csv; charset=utf-8</code>（含 BOM）</div>
-                <div>• <span className="text-slate-200">第 1 行</span>：英文欄位名稱</div>
-                <div>• <span className="text-slate-200">第 2 行</span>：中文欄位說明</div>
-                <div>• <span className="text-slate-200">第 3 行起</span>：實際工序資料</div>
-                <div>• <span className="text-slate-200">Header X-Row-Count</span>：資料列數（不含標題）</div>
-              </div>
+              <div className="text-slate-300 font-semibold mb-2">④ 回傳格式（JSON）</div>
+              <pre className="text-slate-300 font-mono text-[11px] leading-relaxed overflow-x-auto">{`{
+  "success": true,
+  "count": N,
+  "fetched_at": "2026-08-11T...",
+  "data": [
+    {
+      "Order Number": "RO26042028",
+      "Manufacturing Order Number": "RO26042028",
+      "Product Name": "CCUSD-KZ",
+      "Product Description": "...",
+      "Lot Number": "",
+      "Production Quantity": "210",
+      "Due": "2026/7/27",
+      "Priority Level": "",
+      "Earliest Start Time": "2026/04/24",
+      "Job Sequence": "1",
+      "Workcenter": "轉運站",
+      "Job Name": "委外/11天回",
+      "Job Quantity": "210",
+      "Out Sourcing": "",
+      "Est. Time": "15840",
+      "Time Unit": "分鐘",
+      "BOM Components": "",
+      "Material Required Quantity": "",
+      "customer_id": "",
+      "assigned_machine": "",
+      "Rule": "",
+      "Parameter 1": ""
+    },
+    ...
+  ]
+}`}</pre>
             </div>
 
             {/* Step 5 */}
@@ -346,7 +371,7 @@ export default function SaraExchangePage() {
               <pre className="text-slate-300 font-mono overflow-x-auto text-[11px] leading-relaxed select-all">{`curl -X GET \\
   "${origin}/api/sara/exchange-csv?mark_consumed=true" \\
   -H "Authorization: Bearer ${showKey && apiKey ? apiKey : (apiKey ? '••••••••••••' : '<YOUR_API_KEY>')}" \\
-  -o SARA_export.csv`}</pre>
+  -H "Accept: application/json"`}</pre>
             </div>
 
           </div>
