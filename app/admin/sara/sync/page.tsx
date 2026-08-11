@@ -572,7 +572,31 @@ SARA_BASE_URL=https://sara-factory.com/api/data_export
 
                 {a.needsBody && (
                   <div className="mt-2">
-                    <label className="text-xs text-slate-400">items（JSON 陣列）</label>
+                    <div className="flex items-center justify-between mb-1">
+                      <label className="text-xs text-slate-400">items（JSON 陣列）</label>
+                      {/* 從工單列表預覽結果自動填入 */}
+                      {(() => {
+                        const orderData = (results['order']?.rawResult as { data?: { mo_nbr: string; product_name?: string; lot_nbr?: string }[] } | null)?.data
+                        if (!orderData?.length) return (
+                          <span className="text-[10px] text-slate-600">先預覽「工單列表」再自動帶入</span>
+                        )
+                        return (
+                          <button
+                            onClick={() => {
+                              const items = orderData.map(r => ({
+                                mo_nbr: r.mo_nbr,
+                                product_name: r.product_name ?? '',
+                                lot_nbr: r.lot_nbr ?? '',
+                              }))
+                              setLotItems(JSON.stringify(items, null, 2))
+                            }}
+                            className="px-2 py-0.5 rounded bg-emerald-800/60 border border-emerald-700/50 text-emerald-300 text-[11px] hover:bg-emerald-700/60 transition-colors"
+                          >
+                            ⬇ 從工單列表帶入（{orderData.length} 筆）
+                          </button>
+                        )
+                      })()}
+                    </div>
                     <textarea
                       className="w-full mt-1 bg-slate-950 border border-slate-700 rounded p-2 text-xs font-mono"
                       rows={5}
