@@ -171,28 +171,73 @@ function PreviewJlb({ data }: { data: unknown }) {
 }
 
 function PreviewLotDetail({ data }: { data: unknown }) {
-  type RouteRow = { mo_nbr?: string; lot_nbr?: string; seq?: number; job_name?: string; workcenter_name?: string; plan_start?: string; plan_end?: string; qty?: number }
+  type RouteRow = {
+    mo_nbr?: string; lot_nbr?: string; seq?: number; job_name?: string
+    workcenter_name?: string; plan_start?: string; plan_end?: string; qty?: number
+    status?: string
+    primary_resources?: unknown; assigned_resources?: unknown
+  }
+
+  function extractResourceName(r: unknown): string {
+    if (!r) return '—'
+    if (typeof r === 'string') return r
+    if (Array.isArray(r)) {
+      const names = r.map((item: unknown) => {
+        if (typeof item === 'object' && item !== null) {
+          const o = item as Record<string, unknown>
+          return String(o.resource_name ?? o.name ?? o.id ?? '?')
+        }
+        return String(item)
+      }).filter(Boolean)
+      return names.join(', ') || '—'
+    }
+    if (typeof r === 'object') {
+      const o = r as Record<string, unknown>
+      return String(o.resource_name ?? o.name ?? o.id ?? JSON.stringify(r))
+    }
+    return String(r)
+  }
+
   const arr = (data as { data?: RouteRow[] })?.data ?? []
   if (!arr.length) return <div className="text-slate-500 text-xs">（無資料）</div>
   return (
     <div className="overflow-auto max-h-[500px] rounded border border-slate-700">
       <table className="w-full text-white border-collapse">
         <thead className="sticky top-0 bg-slate-900 z-10">
-          <tr><Th>製令號</Th><Th>批號</Th><Th>Seq</Th><Th>製程</Th><Th>站點</Th><Th>預計開始</Th><Th>預計結束</Th><Th>數量</Th></tr>
+          <tr>
+            <Th>製令號</Th><Th>批號</Th><Th>Seq</Th><Th>製程</Th><Th>站點</Th>
+            <Th>分配機台/資源</Th>
+            <Th>預計開始</Th><Th>預計結束</Th><Th>數量</Th><Th>狀態</Th>
+          </tr>
         </thead>
         <tbody>
-          {arr.map((r, i) => (
-            <tr key={i} className="hover:bg-slate-800/50">
-              <Td mono><span className="text-cyan-300">{r.mo_nbr}</span></Td>
-              <Td mono>{r.lot_nbr ?? '—'}</Td>
-              <Td mono>{r.seq ?? '—'}</Td>
-              <Td><span className="text-teal-300">{r.job_name}</span></Td>
-              <Td>{r.workcenter_name}</Td>
-              <Td>{r.plan_start?.slice(0, 16) ?? '—'}</Td>
-              <Td>{r.plan_end?.slice(0, 16) ?? '—'}</Td>
-              <Td mono>{r.qty ?? '—'}</Td>
-            </tr>
-          ))}
+          {arr.map((r, i) => {
+            const resource = extractResourceName(r.assigned_resources ?? r.primary_resources)
+            return (
+              <tr key={i} className="hover:bg-slate-800/50">
+                <Td mono><span className="text-cyan-300">{r.mo_nbr}</span></Td>
+                <Td mono>{r.lot_nbr ?? '—'}</Td>
+                <Td mono>{r.seq ?? '—'}</Td>
+                <Td><span className="text-teal-300">{r.job_name}</span></Td>
+                <Td>{r.workcenter_name}</Td>
+                <Td>
+                  {resource !== '—'
+                    ? <span className="px-1.5 py-0.5 rounded bg-sky-900/50 border border-sky-700/50 text-sky-300 text-[11px] font-mono">{resource}</span>
+                    : <span className="text-slate-600 text-xs">未排程</span>
+                  }
+                </Td>
+                <Td>{r.plan_start?.slice(0, 16) ?? '—'}</Td>
+                <Td>{r.plan_end?.slice(0, 16) ?? '—'}</Td>
+                <Td mono>{r.qty ?? '—'}</Td>
+                <Td>
+                  {r.status
+                    ? <span className={`text-[10px] px-1.5 py-0.5 rounded border ${r.status === 'done' ? 'bg-emerald-900/40 text-emerald-300 border-emerald-700/40' : r.status === 'in_progress' ? 'bg-amber-900/40 text-amber-300 border-amber-700/40' : 'bg-slate-800 text-slate-400 border-slate-700'}`}>{r.status}</span>
+                    : <span className="text-slate-600 text-xs">—</span>
+                  }
+                </Td>
+              </tr>
+            )
+          })}
         </tbody>
       </table>
     </div>
