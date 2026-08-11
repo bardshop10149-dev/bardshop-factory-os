@@ -180,7 +180,7 @@ function PreviewLotDetail({ data }: { data: unknown }) {
 
   function extractResourceName(r: unknown): string {
     if (!r) return '—'
-    if (typeof r === 'string') return r
+    if (typeof r === 'string') return r || '—'
     if (Array.isArray(r)) {
       const names = r.map((item: unknown) => {
         if (typeof item === 'object' && item !== null) {
@@ -193,9 +193,15 @@ function PreviewLotDetail({ data }: { data: unknown }) {
     }
     if (typeof r === 'object') {
       const o = r as Record<string, unknown>
-      return String(o.resource_name ?? o.name ?? o.id ?? JSON.stringify(r))
+      // { resource_name, name, id } 格式
+      if (o.resource_name ?? o.name) return String(o.resource_name ?? o.name)
+      // { "資源ID": "資源名稱" } 格式（SARA primary_resources 常見格式）
+      const vals = Object.values(o).filter(v => v && typeof v === 'string')
+      if (vals.length > 0) return vals.join(', ')
+      const keys = Object.keys(o)
+      if (keys.length > 0) return keys.join(', ')
     }
-    return String(r)
+    return '—'
   }
 
   const arr = (data as { data?: RouteRow[] })?.data ?? []
