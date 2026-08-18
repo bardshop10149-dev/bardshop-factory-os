@@ -52,8 +52,8 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: `更新密碼失敗: ${updErr.message}` }, { status: 400 })
   }
 
-  // 3. 同步 members.password（與既有機制一致）
-  await admin.from('members').update({ password: newPassword }).eq('email', g.member.email)
+  // SEC 修復 V1：不再把明文密碼同步寫回 members.password。
+  // 登入完全走 Supabase Auth（signInWithPassword），該欄位只寫不讀、純屬外洩風險，故移除寫入。
 
   return NextResponse.json({ ok: true })
 }

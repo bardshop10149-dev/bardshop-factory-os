@@ -1,7 +1,6 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { supabase } from "../../../../lib/supabaseClient";
 
 export default function ProductionNoticeGroupSettings() {
   // 移動群組順序
@@ -19,7 +18,11 @@ export default function ProductionNoticeGroupSettings() {
     setGroups(newGroups);
     await Promise.all(
       newGroups.map((g, i) =>
-        supabase.from("production_notice_groups").update({ order: i }).eq("id", g.id)
+        fetch("/api/production/notice-group", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ id: g.id, fields: { order: i } }),
+        })
       )
     );
   };
@@ -27,8 +30,13 @@ export default function ProductionNoticeGroupSettings() {
   const deleteGroup = async (idx) => {
     const groupId = groups[idx]?.id;
     if (!groupId) return;
-    const { error } = await supabase.from("production_notice_groups").delete().eq("id", groupId);
-    if (!error) setGroups(gs => gs.filter((_, i) => i !== idx));
+    const res = await fetch("/api/production/notice-group", {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: groupId }),
+    });
+    const json = await res.json().catch(() => null);
+    if (res.ok && json?.success) setGroups(gs => gs.filter((_, i) => i !== idx));
   };
 
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -36,13 +44,14 @@ export default function ProductionNoticeGroupSettings() {
     if (!editGroup.name) return;
     const groupId = groups[idx]?.id;
     if (!groupId) return;
-    const { data, error } = await supabase
-      .from("production_notice_groups")
-      .update(editGroup)
-      .eq("id", groupId)
-      .select();
-    if (!error && data && data.length > 0) {
-      setGroups(gs => gs.map((g, i) => (i === idx ? data[0] : g)));
+    const res = await fetch("/api/production/notice-group", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: groupId, fields: editGroup }),
+    });
+    const json = await res.json().catch(() => null);
+    if (res.ok && json?.success && Array.isArray(json.groups) && json.groups.length > 0) {
+      setGroups(gs => gs.map((g, i) => (i === idx ? json.groups[0] : g)));
     }
     setEditIdx(null);
     setEditGroup({ name: "", sample_days: 0, mass_days: 0, summary: "", mass_qty_standard: 0 });
@@ -61,16 +70,22 @@ export default function ProductionNoticeGroupSettings() {
 
   useEffect(() => {
     const fetchGroups = async () => {
-      const { data } = await supabase.from("production_notice_groups").select("*").order("id");
-      if (data) setGroups(data);
+      const res = await fetch("/api/production/notice-group");
+      const json = await res.json().catch(() => null);
+      if (res.ok && json?.success && Array.isArray(json.groups)) setGroups(json.groups);
     };
     fetchGroups();
   }, []);
 
   const addGroup = async () => {
     if (!newGroup.name) return;
-    const { data, error } = await supabase.from("production_notice_groups").insert([newGroup]).select();
-    if (!error && data) setGroups(gs => [...gs, ...data]);
+    const res = await fetch("/api/production/notice-group", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(newGroup),
+    });
+    const json = await res.json().catch(() => null);
+    if (res.ok && json?.success && Array.isArray(json.groups)) setGroups(gs => [...gs, ...json.groups]);
     setNewGroup({ name: "", sample_days: 0, mass_days: 0, summary: "", mass_qty_standard: 0 });
   };
 

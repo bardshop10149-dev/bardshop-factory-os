@@ -326,6 +326,19 @@ function PoCard({
           }}>
             {docNo}
           </div>
+          {/* 委外請購單：若這筆同時已經比對到採購單號，一併列出（不取代請購單號，兩者並列）*/}
+          {isPr && mo.po_number && (
+            <div style={{ marginTop: '4px' }}>
+              <span style={{ fontSize: '10px', color: '#555', fontWeight: 600, letterSpacing: '1px', marginRight: '6px' }}>採購單號</span>
+              <span style={{
+                fontSize: '15px', fontWeight: 'bold', letterSpacing: '0.5px',
+                background: '#f0f0f0', padding: '2px 8px', border: '1px solid #999',
+                display: 'inline-block', borderRadius: '3px', color: '#000',
+              }}>
+                {mo.po_number}
+              </span>
+            </div>
+          )}
         </div>
 
         {/* 中：採購單／請購單 大標題 */}

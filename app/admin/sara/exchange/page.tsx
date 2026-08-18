@@ -66,6 +66,7 @@ export default function SaraExchangePage() {
   const [csvRows, setCsvRows]   = useState<string[][]>([])
   const [csvLoading, setCsvLoading] = useState(false)
   const [csvMsg, setCsvMsg]     = useState('')
+  const [lastPulledAt, setLastPulledAt] = useState<string | null>(null)
   // 上傳檔案引用：分別用於「取代基底」和「追加新列」
 
   // 新增表單
@@ -99,8 +100,11 @@ export default function SaraExchangePage() {
     setCsvLoading(true)
     try {
       const res = await fetch('/api/sara/exchange-csv', { cache: 'no-store' })
-      const j = await res.json() as { success: boolean; rows?: string[][] }
-      if (j.success) setCsvRows(j.rows ?? [])
+      const j = await res.json() as { success: boolean; rows?: string[][]; last_pulled_at?: string | null }
+      if (j.success) {
+        setCsvRows(j.rows ?? [])
+        setLastPulledAt(j.last_pulled_at ?? null)
+      }
     } finally { setCsvLoading(false) }
   }, [])
 
@@ -395,6 +399,10 @@ export default function SaraExchangePage() {
               )}
               <span className={`px-3 py-1 rounded-full text-xs font-semibold border ${csvRows.length > 0 ? 'bg-emerald-900/40 text-emerald-300 border-emerald-700/50' : 'bg-slate-800 text-slate-500 border-slate-700'}`}>
                 {csvLoading ? '載入中…' : `累積 ${csvRows.length} 列`}
+              </span>
+              <span className={`px-3 py-1 rounded-full text-xs font-medium border ${lastPulledAt ? 'bg-slate-800 text-slate-300 border-slate-700' : 'bg-slate-800 text-slate-500 border-slate-700'}`}
+                title="塔台最後一次成功呼叫本端口的時間（不論是否帶 mark_consumed）">
+                📡 塔台上次呼出：{lastPulledAt ? new Date(lastPulledAt).toLocaleString('zh-TW', { hour12: false }) : '尚無紀錄'}
               </span>
               <input ref={csvReplaceRef} type="file" accept=".csv" className="hidden"
                 onChange={e => { const f = e.target.files?.[0]; if (f) void handleCsvUpload(f, false); e.target.value = '' }} />

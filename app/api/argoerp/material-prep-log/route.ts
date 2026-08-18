@@ -76,9 +76,59 @@ export async function POST(request: NextRequest) {
 
     const supabase = getSupabaseAdminClient()
     const { error } = await supabase.from(TABLE).insert(insertRows)
-    if (error) throw error
+    if (error) {
+      // 23505 = unique_violation：argo_slip_no 已存在（見 sql/20260811_ng_prep_log_slip_unique.sql）
+      // 通常代表另一個分頁/使用者已搶先用掉這個批備料單號（保留位機制），
+      // 呼叫端（NG補印頁面）需視為「送出前的併發衝突」中止流程，不可視為一般錯誤忽略。
+      const isDup = error.code === '23505' || /duplicate key|already exists/i.test(error.message)
+      return NextResponse.json(
+        {
+          success: false,
+          error: isDup
+            ? `批備料單號重複，可能有人剛用相同單號送出：${error.message}`
+            : formatSupabaseAdminError(error.message),
+          duplicate: isDup,
+        },
+        { status: isDup ? 409 : 500 }
+      )
+    }
 
     return NextResponse.json({ success: true, inserted: insertRows.length })
+  } catch (e) {
+    const msg = e instanceof Error ? formatSupabaseAdminError(e.message) : String(e)
+    return NextResponse.json({ success: false, error: msg }, { status: 500 })
+  }
+}
+
+// DELETE: 撤銷/釋放單筆批備料紀錄（保留位回滾用）
+// body: { mo_number: string, argo_slip_no: string }
+// 用途：NG補印頁面在寫入「保留位」記錄後，若後續呼叫 ARGO 匯入失敗，
+// 需要釋放已保留的批備料單號，讓使用者可以重試（否則該單號會被永久佔用、
+// 但 ARGO 那邊其實沒有真的匯入成功的資料）。
+export async function DELETE(request: NextRequest) {
+  const guard = await guardPermission('production_admin')
+  if (!guard.ok) return guard.res
+  try {
+    const body = await request.json()
+    const moNumber: string = body?.mo_number
+    const argoSlipNo: string = body?.argo_slip_no
+
+    if (!moNumber || !argoSlipNo) {
+      return NextResponse.json({ success: false, error: 'mo_number 與 argo_slip_no 皆為必填' }, { status: 400 })
+    }
+
+    const supabase = getSupabaseAdminClient()
+    const { error, count } = await supabase
+      .from(TABLE)
+      .delete({ count: 'exact' })
+      .eq('mo_number', moNumber)
+      .eq('argo_slip_no', argoSlipNo)
+
+    if (error) {
+      return NextResponse.json({ success: false, error: formatSupabaseAdminError(error.message) }, { status: 500 })
+    }
+
+    return NextResponse.json({ success: true, deleted: count ?? 0 })
   } catch (e) {
     const msg = e instanceof Error ? formatSupabaseAdminError(e.message) : String(e)
     return NextResponse.json({ success: false, error: msg }, { status: 500 })

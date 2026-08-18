@@ -130,7 +130,14 @@ function detectFactory(docType: string): 'T' | 'C' | 'O' {
   return 'T'
 }
 
-function createRowKey(row: SourceRow): string {
+// 序號（B欄 line_no_input，或已比對出的 match_line_no）決定「同一張工單裡的哪一筆」，
+// 必須納入 row_key 組成 —— 否則同工單/同品號/同數量/同交期但不同序號的多筆列會產生相同
+// row_key，導致以 row_key 為鍵的操作（勾選 selectedKeys、逐列機台指派 rowMachines、
+// handlePrint、handleBatchChangeFactory 等）互相污染。
+// 優先採用使用者手動填入的 line_no_input；若尚無手動輸入（列本身也還沒有 line_no_input，
+// 例如尚未比對完成的舊資料）則退用已比對出的 match_line_no，確保任何時間點重新計算
+// row_key 都能維持列與列之間的唯一性。
+function createRowKey(row: SourceRow & { match_line_no?: string | null }): string {
   return [
     row.order_number,
     row.doc_type,
@@ -140,21 +147,32 @@ function createRowKey(row: SourceRow): string {
     row.note,
     row.quantity,
     row.delivery_date,
+    row.line_no_input || row.match_line_no || '',
   ].join('||')
 }
 
+// 數量欄位安全轉數字：空白／格式錯誤回傳 null（視為「無法判讀」），
+// 不可用 || 0 頂替，否則會被誤判為「數量剛好是 0」，進而誤配到真的數量為 0 的候選（序號/PO/PR 比對皆同理）。
+function parseRowQty(v: unknown): number | null {
+  const raw = String(v ?? '').replace(/,/g, '').trim()
+  if (!raw) return null
+  const n = parseFloat(raw)
+  return Number.isNaN(n) ? null : n
+}
+
 /**
- * 清除製令號欄位時，保留使用者主動設定的備料狀態（無需備料/已備料）；
- * 僅清除衍生自 ARGO ERP 的 已批備料 狀態。
+ * 清除製令號欄位時，只保留使用者純手動設定、與 MO 無關的「無需備料」；
+ * 「已備料」／「已批備料」都是衍生自 ARGO 批備料動作（一律綁著 argo_slip_no），
+ * MO 本身已判定無效時這兩者連同 argo_slip_no 一併清除，避免留下對不上目前序號的孤兒單據號碼。
  */
 function clearMoFields(r: SheetRow): SheetRow {
+  const keepPrep = r.material_prep_status === '無需備料'
   return {
     ...r,
     mo_number: undefined,
     mo_status: null,
-    material_prep_status:
-      r.material_prep_status === '無需備料' || r.material_prep_status === '已備料'
-        ? r.material_prep_status : null,
+    material_prep_status: keepPrep ? r.material_prep_status : null,
+    argo_slip_no: keepPrep ? r.argo_slip_no : null,
   }
 }
 
@@ -492,8 +510,11 @@ export default function DailyOrderSheetPage() {
   // ---- 轉換廠區 ----
   const [convertFactoryModalOpen, setConvertFactoryModalOpen] = useState(false)
 
-  // 快速查詢集合：含未確認改單的 project_id（供出單表列 badge 使用；詳細頁面請至「改單提示」頁）
+  // 快速查詢集合：含未確認改單的 project_id（供出單表列 badge 使用，僅限目前選取日期；詳細頁面請至「改單檢測」頁）
   const [soChangesUnconfirmedSet, setSoChangesUnconfirmedSet] = useState<Set<string>>(new Set())
+  // 全部出單表（不限目前選取日期）範圍內、未確認改單的訂單數 —— 供工具列上方 tab 的紅點計數，
+  // 避免只看今天這張表時，漏掉其他日期出單表裡已改單但還沒被回頭確認的訂單
+  const [soChangesTotalCount, setSoChangesTotalCount] = useState(0)
   // 自動補對旗標：解析後若有常平列，自動執行採購比對
   const [pendingAutoPoMatch, setPendingAutoPoMatch] = useState(false)
 
@@ -539,6 +560,32 @@ export default function DailyOrderSheetPage() {
         setSoChangesUnconfirmedSet(new Set((data ?? []).map((r: { project_id: string }) => r.project_id)))
       })
   }, [sheetRows])
+
+  // 頁面載入時掃一次「所有出單表（近 180 天）」涵蓋的訂單號，計算全域未確認改單數，
+  // 供工具列 tab 紅點顯示——不受目前選取日期限制，避免只看某一天時漏掉其他日期已改單的訂單
+  useEffect(() => {
+    void (async () => {
+      const { data: sheets } = await supabase
+        .from('daily_order_sheets')
+        .select('rows')
+        .order('sheet_date', { ascending: false })
+        .limit(180)
+      const allPids = new Set<string>()
+      for (const sheet of (sheets ?? []) as Array<{ rows?: unknown }>) {
+        const rows = Array.isArray(sheet.rows) ? (sheet.rows as Array<{ order_number?: string }>) : []
+        for (const row of rows) {
+          if (row.order_number) allPids.add(row.order_number)
+        }
+      }
+      if (allPids.size === 0) { setSoChangesTotalCount(0); return }
+      const { count } = await supabase
+        .from('so_change_notices')
+        .select('project_id', { count: 'exact', head: true })
+        .in('project_id', [...allPids].slice(0, 1000))
+        .is('confirmed_at', null)
+      setSoChangesTotalCount(count ?? 0)
+    })()
+  }, [])
 
   // ---- 常平 自動採購比對：解析後若有常平列自動觸發 ----
   useEffect(() => {
@@ -597,13 +644,19 @@ export default function DailyOrderSheetPage() {
       const res = await fetch(`/api/argoerp/daily-order-sheet?date=${date}`, { cache: 'no-store' })
       const json = await res.json()
       if (json.success && json.sheet) {
-        const storedRows: SheetRow[] = Array.isArray(json.sheet.rows) ? json.sheet.rows as SheetRow[] : []
+        const storedRowsRaw: SheetRow[] = Array.isArray(json.sheet.rows) ? json.sheet.rows as SheetRow[] : []
         const rawTextStored: string = json.sheet.raw_text ?? ''
 
         // 以 raw_text 重新解析確保所有廠別（T/C/O）都能正確還原，
         // 再以 row_key 對應，保留 DB 裡已有的 MO / 採購單 / 機台等富化資料
         // raw_text 無法取得時退用 storedRows，並對舊格式錯位資料做修正
-        let finalRows: SheetRow[] = storedRows.map(r => fixStoredPackingShift(r, date))
+        // ── row_key 格式遷移：createRowKey 現已把序號（line_no_input / match_line_no）納入組成。
+        //    這裡用每筆列自己的欄位重新計算 row_key，讓舊格式資料（row_key 未含序號）
+        //    在載入時自動升級成新格式並與本次重新計算的 key 對齊，不需要額外的 DB 遷移腳本。
+        const storedRows: SheetRow[] = storedRowsRaw
+          .map(r => fixStoredPackingShift(r, date))
+          .map(r => ({ ...r, row_key: createRowKey(r) }))
+        let finalRows: SheetRow[] = storedRows
         if (rawTextStored.trim()) {
           const { rows: parsedRows } = parseSourceRows(rawTextStored, date)
           if (parsedRows.length > 0) {
@@ -611,8 +664,11 @@ export default function DailyOrderSheetPage() {
             const enrichedMap = new Map<string, SheetRow>()
             // 次要索引：不含 factory 欄位，供廠區手動轉換後的列回退查找
             const enrichedMapNoFactory = new Map<string, SheetRow>()
+            // 三次索引：訂單號＋序號（B欄）是 ERP 層面真正穩定的身分，供品名/備註/數量/交期
+            // 事後被修正時仍能找回舊列狀態（同 handleParse 貼上合併邏輯）
+            const enrichedByOrderSeq = new Map<string, SheetRow[]>()
             const rowKeyNoFactory = (r: SheetRow) =>
-              [r.order_number, r.doc_type, r.item_code, r.item_name, r.note, r.quantity, r.delivery_date].join('||')
+              [r.order_number, r.doc_type, r.item_code, r.item_name, r.note, r.quantity, r.delivery_date, r.line_no_input || r.match_line_no || ''].join('||')
             for (const r of storedRows) {
               if (r.match_line_no != null && r.match_line_no !== '') {
                 enrichedMap.set(`${r.row_key}||seq:${r.match_line_no}`, r)
@@ -623,16 +679,33 @@ export default function DailyOrderSheetPage() {
                 const nfKey = rowKeyNoFactory(r)
                 if (!enrichedMapNoFactory.has(nfKey)) enrichedMapNoFactory.set(nfKey, r)
               }
+              const seq = r.line_no_input || r.match_line_no
+              if (r.order_number && seq) {
+                const osKey = `${r.order_number}|${seq}`
+                const arr = enrichedByOrderSeq.get(osKey) ?? []
+                arr.push(r)
+                enrichedByOrderSeq.set(osKey, arr)
+              }
             }
+            const osConsumedLoad = new Map<string, number>()
             finalRows = parsedRows.map(r => {
               const key = createRowKey(r)
               // 原始資料有序號時優先用複合鍵查找正確的已存列
               const seqLookupKey = r.line_no_input ? `${key}||seq:${r.line_no_input}` : null
               // factory_changed 回退：若主鍵查無，嘗試不含 factory 的次要索引
-              const parsedNfKey = [r.order_number, r.doc_type, r.item_code, r.item_name, r.note, r.quantity, r.delivery_date].join('||')
-              const stored = (seqLookupKey ? enrichedMap.get(seqLookupKey) : null)
+              const parsedNfKey = [r.order_number, r.doc_type, r.item_code, r.item_name, r.note, r.quantity, r.delivery_date, r.line_no_input || ''].join('||')
+              let stored = (seqLookupKey ? enrichedMap.get(seqLookupKey) : null)
                 ?? enrichedMap.get(key)
                 ?? enrichedMapNoFactory.get(parsedNfKey)
+              if (!stored && r.line_no_input && r.order_number) {
+                const osKey = `${r.order_number}|${r.line_no_input}`
+                const candidates = enrichedByOrderSeq.get(osKey)
+                if (candidates && candidates.length > 0) {
+                  const idx = osConsumedLoad.get(osKey) ?? 0
+                  stored = candidates[Math.min(idx, candidates.length - 1)]
+                  osConsumedLoad.set(osKey, idx + 1)
+                }
+              }
               // 原始資料已有序號時直接套用，不讓 DB 存值覆蓋
               const base: SheetRow = {
                 ...r,
@@ -856,12 +929,16 @@ export default function DailyOrderSheetPage() {
           mo_number: r.mo_number!,
           machine: moMachines[r.mo_number!] || '',
         }))
+      // 機台衝突提示（非阻擋性）：API 會回傳這次指派中，已被其他工單佔用的機台清單
+      let machineConflicts: { machine: string; mo_number: string; existing_mo_numbers: string[] }[] = []
       if (moAssignments.length > 0) {
-        await fetch('/api/argoerp/mo-machine-assign', {
+        const assignRes = await fetch('/api/argoerp/mo-machine-assign', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ assignments: moAssignments }),
         })
+        const assignJson = await assignRes.json().catch(() => null)
+        if (Array.isArray(assignJson?.conflicts)) machineConflicts = assignJson.conflicts
       }
 
       // 2. PATCH daily_order_sheets.rows 的 machine 欄位（所有列）
@@ -887,8 +964,17 @@ export default function DailyOrderSheetPage() {
           : (rowMachines[r.row_key] || r.machine || ''),
       })))
       setMachineChanged(false)
-      setSaveMsg('✅ 機台分配已儲存')
-      setTimeout(() => setSaveMsg(''), 4000)
+      if (machineConflicts.length > 0) {
+        // 非阻擋性提示：儲存已完成，僅告知使用者該機台目前也被其他工單佔用（是否允許併用屬業務規則，此處不擋存檔）
+        const detail = machineConflicts
+          .map(c => `${c.machine}（另有 ${c.existing_mo_numbers.join('、')}）`)
+          .join('；')
+        setSaveMsg(`⚠️ 機台分配已儲存，但偵測到機台衝突：${detail}`)
+        setTimeout(() => setSaveMsg(''), 8000)
+      } else {
+        setSaveMsg('✅ 機台分配已儲存')
+        setTimeout(() => setSaveMsg(''), 4000)
+      }
     } catch (e) {
       setSaveMsg(`❌ 機台儲存失敗：${e instanceof Error ? e.message : String(e)}`)
       setTimeout(() => setSaveMsg(''), 5000)
@@ -920,8 +1006,13 @@ export default function DailyOrderSheetPage() {
     const existingMap = new Map<string, SheetRow>()
     // 次要索引：不含 factory，供廠區手動轉換後的列回退查找（同 DB 載入邏輯）
     const existingMapNoFactory = new Map<string, SheetRow>()
+    // 三次索引：訂單號＋序號（B欄）是 ERP 層面真正穩定的身分——row_key 還額外納入了
+    // 品名/備註/數量/交期，這些欄位業務常會回頭修正，一改就讓主鍵找不到舊列，
+    // 導致「無需備料」等人工標記/MO/採購單狀態被誤判成全新列而消失。
+    // 同訂單同序號理論上只會有一筆，若真的有重複（如複製貼上出錯），依序消耗候選即可。
+    const existingByOrderSeq = new Map<string, SheetRow[]>()
     const rowKeyNoFactory = (r: SheetRow) =>
-      [r.order_number, r.doc_type, r.item_code, r.item_name, r.note, r.quantity, r.delivery_date].join('||')
+      [r.order_number, r.doc_type, r.item_code, r.item_name, r.note, r.quantity, r.delivery_date, r.line_no_input || r.match_line_no || ''].join('||')
     for (const r of sheetRows) {
       if (r.match_line_no != null && r.match_line_no !== '') {
         existingMap.set(`${r.row_key}||seq:${r.match_line_no}`, r)
@@ -931,13 +1022,30 @@ export default function DailyOrderSheetPage() {
         const nfKey = rowKeyNoFactory(r)
         if (!existingMapNoFactory.has(nfKey)) existingMapNoFactory.set(nfKey, r)
       }
+      const seq = r.line_no_input || r.match_line_no
+      if (r.order_number && seq) {
+        const osKey = `${r.order_number}|${seq}`
+        const arr = existingByOrderSeq.get(osKey) ?? []
+        arr.push(r)
+        existingByOrderSeq.set(osKey, arr)
+      }
     }
+    const osConsumed = new Map<string, number>()
     const merged = sheetRowsNew.map(r => {
       const seqKey = r.line_no_input ? `${r.row_key}||seq:${r.line_no_input}` : null
-      const parsedNfKey = [r.order_number, r.doc_type, r.item_code, r.item_name, r.note, r.quantity, r.delivery_date].join('||')
-      const old = (seqKey ? existingMap.get(seqKey) : null)
+      const parsedNfKey = [r.order_number, r.doc_type, r.item_code, r.item_name, r.note, r.quantity, r.delivery_date, r.line_no_input || ''].join('||')
+      let old = (seqKey ? existingMap.get(seqKey) : null)
         ?? existingMap.get(r.row_key)
         ?? existingMapNoFactory.get(parsedNfKey)
+      if (!old && r.line_no_input && r.order_number) {
+        const osKey = `${r.order_number}|${r.line_no_input}`
+        const candidates = existingByOrderSeq.get(osKey)
+        if (candidates && candidates.length > 0) {
+          const idx = osConsumed.get(osKey) ?? 0
+          old = candidates[Math.min(idx, candidates.length - 1)]
+          osConsumed.set(osKey, idx + 1)
+        }
+      }
       if (!old) return r
       // 若舊列有廠區轉換記錄，保留轉換後的廠別及所有比對狀態
       if (old.factory_changed) {
@@ -1196,7 +1304,10 @@ export default function DailyOrderSheetPage() {
         if (!src.order_number || !soProjectIds.has(src.order_number)) {
           return { ...src, match_status: 'no_order', match_line_no: null, match_pdl_seq: null, match_reason: '無對應來源單號' }
         }
-        const qty = parseFloat(String(src.quantity).replace(/,/g, '')) || 0
+        const qty = parseRowQty(src.quantity)
+        if (qty === null) {
+          return { ...src, match_status: 'no_qty_match', match_line_no: null, match_pdl_seq: null, match_reason: '數量欄位無法判讀' }
+        }
         const key = `${src.order_number}|${src.item_code}|${qty}`
         const candidates = candidateMap.get(key) ?? []
         if (candidates.length === 0) {
@@ -1542,7 +1653,7 @@ export default function DailyOrderSheetPage() {
 
   // 共用配對邏輯（C 與 O 均適用）
   type PoCandidate = { doc_no: string; sub_no: string; item_code: string | null; qty: number; status: string | null; start_date: string | null; extra: Record<string, unknown> | null; _used: boolean }
-  const matchPoRows = (rows: SheetRow[], pool: PoCandidate[], factory: 'C' | 'O', sheetDate: string): SheetRow[] => {
+  const matchPoRows = (rows: SheetRow[], pool: PoCandidate[], factory: 'C' | 'O', sheetDate: string, claimedByDoc?: Map<string, string>): SheetRow[] => {
     // fallback 日期門檻：PO 開單日距出單表日期不得超過 6 個月，防止舊 PO 誤配新單
     const sheetMs = new Date(sheetDate).getTime()
     const SIX_MONTHS_MS = 6 * 30 * 24 * 60 * 60 * 1000
@@ -1561,12 +1672,19 @@ export default function DailyOrderSheetPage() {
       if (row.po_status === 'no_po') return row       // 使用者已標記無須採購，保留
       if (row.po_confirmed && row.po_number) return row // 使用者已人工確認採購單，保留
       if (!row.item_code) return { ...row, po_number: null, po_sub_no: null, po_status: 'no_match' }
-      const qty = parseFloat(String(row.quantity).replace(/,/g, '')) || 0
+      const qty = parseRowQty(row.quantity)
+      if (qty === null) return { ...row, po_number: null, po_sub_no: null, po_status: 'no_match' }
       const matchLineNo = (row.match_line_no ?? '').trim()
+      // 跨日期鎖定：同一張真實採購單（doc_no+sub_no）已被其他 row_key 領用時不可再配給本列，
+      // 避免不同日期出單表各自獨立比對到同一張 PO（同一張單印兩次、金額/數量對不上）
+      const isDocFree = (c: PoCandidate): boolean => {
+        const claimedBy = claimedByDoc?.get(`${c.doc_no}|${c.sub_no}`)
+        return !claimedBy || claimedBy === (row.row_key ?? '')
+      }
       // 第一優先：料號 + 數量 + SO_PROJECT_ID === 銷售訂單號（委外 PO 用此欄位記錄來源單）
       // 額外驗證批號：MBP_LOT_NO 若有值，必須也等於訂單號（防止跨單誤配）
       let hitIdx = pool.findIndex(c =>
-        !c._used && (c.item_code ?? '') === row.item_code && c.qty === qty &&
+        !c._used && isDocFree(c) && (c.item_code ?? '') === row.item_code && c.qty === qty &&
         String(c.extra?.SO_PROJECT_ID ?? '') === (row.order_number ?? '') &&
         (!String(c.extra?.MBP_LOT_NO ?? '').trim() ||
           String(c.extra?.MBP_LOT_NO ?? '').trim() === (row.order_number ?? '').trim())
@@ -1574,7 +1692,7 @@ export default function DailyOrderSheetPage() {
       // 第二優先：料號 + 數量 + MBP_LOT_NO === 銷售訂單號（常平 PO 批號即 SO 單號）
       if (hitIdx === -1)
         hitIdx = pool.findIndex(c =>
-          !c._used && (c.item_code ?? '') === row.item_code && c.qty === qty &&
+          !c._used && isDocFree(c) && (c.item_code ?? '') === row.item_code && c.qty === qty &&
           String(c.extra?.MBP_LOT_NO ?? '').trim() === (row.order_number ?? '').trim()
         )
       // 第三優先：料號 + TPN_PART_NO === match_line_no + SO_PROJECT_ID / MBP_LOT_NO 指向同一工單
@@ -1583,7 +1701,7 @@ export default function DailyOrderSheetPage() {
       let p3QtyMismatch = false
       if (hitIdx === -1 && matchLineNo && factory === 'O') {
         hitIdx = pool.findIndex(c =>
-          !c._used && (c.item_code ?? '') === row.item_code &&
+          !c._used && isDocFree(c) && (c.item_code ?? '') === row.item_code &&
           String(c.extra?.TPN_PART_NO ?? '') === matchLineNo &&
           (
             String(c.extra?.SO_PROJECT_ID ?? '').trim() === (row.order_number ?? '').trim() ||
@@ -1597,7 +1715,7 @@ export default function DailyOrderSheetPage() {
       // 常平（C）與委外（O）都有明確的批號/來源訂單可比對，不走此 fallback
       if (hitIdx === -1 && factory !== 'C' && factory !== 'O')
         hitIdx = pool.findIndex(c =>
-          !c._used && (c.item_code ?? '') === row.item_code && c.qty === qty &&
+          !c._used && isDocFree(c) && (c.item_code ?? '') === row.item_code && c.qty === qty &&
           !String(c.extra?.MBP_LOT_NO ?? '').trim() &&
           (!String(c.extra?.SO_PROJECT_ID ?? '').trim() || String(c.extra?.SO_PROJECT_ID ?? '') === (row.order_number ?? '')) &&
           isPoRecent(c)
@@ -1633,15 +1751,20 @@ export default function DailyOrderSheetPage() {
     soToRoAny: Map<string, string>,     // key: SO → 任一 RO（item 對不到時 fallback）
     roToPr: Map<string, PrCandidate[]>, // RO → 請購候選
     soToPr: Map<string, PrCandidate[]>, // SO → 請購候選（直接 SO 號比對）
+    claimedByDoc?: Map<string, string>, // `${doc_no}|${sub_no}` → row_key，跨日期鎖定同一張真實請購單
   ): SheetRow[] => {
-    const pickHit = (cands: PrCandidate[] | undefined, itemCode: string | null | undefined, rowQty: number): PrCandidate | undefined => {
+    const pickHit = (cands: PrCandidate[] | undefined, itemCode: string | null | undefined, rowQty: number, rowKey: string | undefined): PrCandidate | undefined => {
       if (!cands || cands.length === 0) return undefined
       const myItem = (itemCode ?? '').trim()
+      const isDocFree = (c: PrCandidate): boolean => {
+        const claimedBy = claimedByDoc?.get(`${c.doc_no}|${c.sub_no}`)
+        return !claimedBy || claimedBy === (rowKey ?? '')
+      }
       // 優先：料號精準相符、數量相符且未用
-      const exactHit = cands.find(c => !c._used && (c.item_code ?? '').trim() === myItem && c.qty === rowQty)
+      const exactHit = cands.find(c => !c._used && isDocFree(c) && (c.item_code ?? '').trim() === myItem && c.qty === rowQty)
       if (exactHit) return exactHit
       // 次之：PR 本身沒有料號（整張請購，不限定品項）但數量相符且未用
-      const blankItemHit = cands.find(c => !c._used && !(c.item_code ?? '').trim() && c.qty === rowQty)
+      const blankItemHit = cands.find(c => !c._used && isDocFree(c) && !(c.item_code ?? '').trim() && c.qty === rowQty)
       if (blankItemHit) return blankItemHit
       // 料號不符、或數量不符 → 不配（避免誤配到不同品項/不同數量的請購）
       return undefined
@@ -1650,10 +1773,11 @@ export default function DailyOrderSheetPage() {
       if (row.factory !== 'O') return row
       const so = String(row.order_number ?? '').trim()
       if (!so) return { ...row, pr_number: null, pr_sub_no: null, pr_status: 'no_match' }
-      const rowQty = parseFloat(String(row.quantity).replace(/,/g, '')) || 0
+      const rowQty = parseRowQty(row.quantity)
+      if (rowQty === null) return { ...row, pr_number: null, pr_sub_no: null, pr_status: 'no_match' }
 
       // (a) 直接 SO 號比對（優先）
-      const directHit = pickHit(soToPr.get(so), row.item_code, rowQty)
+      const directHit = pickHit(soToPr.get(so), row.item_code, rowQty, row.row_key)
       if (directHit) {
         directHit._used = true
         return { ...row, pr_number: directHit.doc_no, pr_sub_no: directHit.sub_no, pr_status: 'matched' }
@@ -1666,7 +1790,7 @@ export default function DailyOrderSheetPage() {
           // 批號必須有值，且等於 RO 號或 SO 號（空批號不予配對）
           !!c.mbp_lot_no && (c.mbp_lot_no === ro || c.mbp_lot_no === so)
         )
-        const roHit = pickHit(roCands, row.item_code, rowQty)
+        const roHit = pickHit(roCands, row.item_code, rowQty, row.row_key)
         if (roHit) {
           roHit._used = true
           return { ...row, pr_number: roHit.doc_no, pr_sub_no: roHit.sub_no, pr_status: 'matched' }
@@ -1677,7 +1801,7 @@ export default function DailyOrderSheetPage() {
   }
 
   // 依出單表 O 列建立 SO→請購 對應並比對，回傳更新後 rows
-  const matchPrRows = async (rows: SheetRow[]): Promise<SheetRow[]> => {
+  const matchPrRows = async (rows: SheetRow[], claimedByDoc?: Map<string, string>): Promise<SheetRow[]> => {
     const oRows = rows.filter(r => r.factory === 'O')
     if (oRows.length === 0) return rows
     const soNos = [...new Set(oRows.map(r => String(r.order_number ?? '').trim()).filter(Boolean))]
@@ -1749,7 +1873,43 @@ export default function DailyOrderSheetPage() {
       return rows.map(r => r.factory === 'O' ? { ...r, pr_number: null, pr_sub_no: null, pr_status: 'no_match' } : r)
     }
 
-    return matchPrRowsByPool(rows, soToRoByItem, soToRoAny, roToPr, soToPr)
+    return matchPrRowsByPool(rows, soToRoByItem, soToRoAny, roToPr, soToPr, claimedByDoc)
+  }
+
+  // 查詢「本日以外」出單表已鎖定的採購單/請購單 (doc_no|sub_no) → row_key，
+  // 避免不同日期各自獨立比對時把同一張真實 PO/PR 配給兩列（同 SO 序號比對的跨日期鎖定）
+  const fetchClaimedDocMaps = async (excludeDate: string): Promise<{ po: Map<string, string>; pr: Map<string, string> }> => {
+    const po = new Map<string, string>()
+    const pr = new Map<string, string>()
+    try {
+      const { data: otherSheets } = await supabase
+        .from('daily_order_sheets')
+        .select('sheet_date, rows')
+        .neq('sheet_date', excludeDate)
+        .order('sheet_date', { ascending: false })
+        .limit(90)
+      for (const sheet of (otherSheets ?? [])) {
+        const rows = Array.isArray((sheet as { rows?: unknown }).rows)
+          ? ((sheet as { rows: Record<string, unknown>[] }).rows) : []
+        for (const row of rows) {
+          const rowKey = String(row.row_key ?? '').trim()
+          if (!rowKey) continue
+          const poNo = String(row.po_number ?? '').trim()
+          if (poNo) {
+            const key = `${poNo}|${String(row.po_sub_no ?? '').trim()}`
+            if (!po.has(key)) po.set(key, rowKey)
+          }
+          const prNo = String(row.pr_number ?? '').trim()
+          if (prNo) {
+            const key = `${prNo}|${String(row.pr_sub_no ?? '').trim()}`
+            if (!pr.has(key)) pr.set(key, rowKey)
+          }
+        }
+      }
+    } catch (e) {
+      console.warn('讀取跨日期採購/請購單鎖定失敗，略過鎖定：', e)
+    }
+    return { po, pr }
   }
 
   const runPoMatch = useCallback(async () => {
@@ -1775,6 +1935,9 @@ export default function DailyOrderSheetPage() {
         po_confirmed: dbConfirmedMap.get(r.row_key) ?? r.po_confirmed,
       }))
 
+      // 跨日期鎖定：避免本日比對到的 PO/PR 跟其他日期出單表已配對的是同一張真實單據
+      const { po: claimedPo, pr: claimedPr } = await fetchClaimedDocMaps(selectedDate)
+
       // ── 常平（C01510）──
       if (cRows.length > 0) {
         const itemCodes = [...new Set(cRows.map(r => r.item_code).filter(Boolean))]
@@ -1794,7 +1957,7 @@ export default function DailyOrderSheetPage() {
             start_date: (r.start_date as string | null) ?? null,
             extra: (r.extra ?? null) as Record<string, unknown> | null, _used: false,
           }))
-          next = matchPoRows(next, pool, 'C', selectedDate)
+          next = matchPoRows(next, pool, 'C', selectedDate, claimedPo)
         }
       }
 
@@ -1817,13 +1980,13 @@ export default function DailyOrderSheetPage() {
             start_date: (r.start_date as string | null) ?? null,
             extra: (r.extra ?? null) as Record<string, unknown> | null, _used: false,
           }))
-          next = matchPoRows(next, poolO, 'O', selectedDate)
+          next = matchPoRows(next, poolO, 'O', selectedDate, claimedPo)
         }
       }
 
       // ── 委外請購單比對（PR 為輔）──
       try {
-        next = await matchPrRows(next)
+        next = await matchPrRows(next, claimedPr)
       } catch (prE) {
         console.error('請購單比對失敗（不影響採購結果）：', prE)
       }
@@ -2117,7 +2280,10 @@ export default function DailyOrderSheetPage() {
         if (!src.order_number || !soProjectIds.has(src.order_number)) {
           return { ...src, match_status: 'no_order', match_line_no: null, match_pdl_seq: null, match_reason: '無對應來源單號' }
         }
-        const qty = parseFloat(String(src.quantity).replace(/,/g, '')) || 0
+        const qty = parseRowQty(src.quantity)
+        if (qty === null) {
+          return { ...src, match_status: 'no_qty_match', match_line_no: null, match_pdl_seq: null, match_reason: '數量欄位無法判讀' }
+        }
         const key = `${src.order_number}|${src.item_code}|${qty}`
         const candidates = candidateMap.get(key) ?? []
         if (candidates.length === 0) {
@@ -2292,6 +2458,10 @@ export default function DailyOrderSheetPage() {
       const hasORows = currentRows.some(r => r.factory === 'O')
       let poMatched = 0
       let oPoMatched = 0
+      // 跨日期鎖定：避免本日比對到的 PO/PR 跟其他日期出單表已配對的是同一張真實單據
+      const { po: claimedPo, pr: claimedPr } = (hasCRows || hasORows)
+        ? await fetchClaimedDocMaps(selectedDate)
+        : { po: new Map<string, string>(), pr: new Map<string, string>() }
       if (hasCRows || hasORows) {
         setSaveMsg('⏳ 全同步進行中：比對採購單…')
         type AllSyncCandidate = { doc_no: string; sub_no: string; item_code: string | null; qty: number; status: string | null; start_date: string | null; extra: Record<string, unknown> | null; _used: boolean }
@@ -2315,7 +2485,7 @@ export default function DailyOrderSheetPage() {
               start_date: (r.start_date as string | null) ?? null,
               extra: (r.extra ?? null) as Record<string, unknown> | null, _used: false,
             }))
-            currentRows = matchPoRows(currentRows, pool, 'C', selectedDate)
+            currentRows = matchPoRows(currentRows, pool, 'C', selectedDate, claimedPo)
             poMatched = currentRows.filter(r => r.factory === 'C' && r.po_status === 'matched').length
           }
         }
@@ -2339,7 +2509,7 @@ export default function DailyOrderSheetPage() {
               start_date: (r.start_date as string | null) ?? null,
               extra: (r.extra ?? null) as Record<string, unknown> | null, _used: false,
             }))
-            currentRows = matchPoRows(currentRows, poolO, 'O', selectedDate)
+            currentRows = matchPoRows(currentRows, poolO, 'O', selectedDate, claimedPo)
             oPoMatched = currentRows.filter(r => r.factory === 'O' && r.po_status === 'matched').length
           }
         }
@@ -2350,7 +2520,7 @@ export default function DailyOrderSheetPage() {
       if (hasORows) {
         setSaveMsg('⏳ 全同步進行中：比對委外請購單…')
         try {
-          currentRows = await matchPrRows(currentRows)
+          currentRows = await matchPrRows(currentRows, claimedPr)
           oPrMatched = currentRows.filter(r => r.factory === 'O' && r.pr_status === 'matched').length
         } catch (prE) {
           console.error('請購單比對失敗（不影響其他結果）：', prE)
@@ -2407,8 +2577,11 @@ export default function DailyOrderSheetPage() {
 
   const runBatchRecentSync = useCallback(async () => {
     const ok = confirm(
-      '⚡ 一鍵全同步（七日內）\n\n' +
-      '將對近七天的出單表重新執行序號比對 + MO 比對 + 採購單比對，並逐張寫回資料庫。\n\n' +
+      '⚡ 一鍵全同步（七日內＋未完成舊單）\n\n' +
+      '將對近七天的出單表、以及任何超過七天但仍有未比對完成之常平/委外/請購項目的舊出單表，\n' +
+      '重新執行序號比對 + MO 比對 + 採購單比對，並逐張寫回資料庫。\n\n' +
+      '（超過七天的舊單常常是「ARGO 那邊其實已經有對應的單，只是沒人回頭重新比對」才會一直卡著，\n' +
+      '　這次會一併撈出來重新核對，不會漏。）\n\n' +
       '建議先完成 ERP 同步頁面的全同步（MO / PO / PR），再執行本操作。\n\n' +
       '確定執行？'
     )
@@ -2419,13 +2592,37 @@ export default function DailyOrderSheetPage() {
     try {
       // 0. 先撈近七天出單表（供後續逐張處理用）
       const sevenDaysAgo = new Date(Date.now() - 7 * 86_400_000).toISOString().slice(0, 10)
-      const { data: allSheetsPreload, error: sheetsPreErr } = await supabase
+      const { data: recentSheetsPreload, error: sheetsPreErr } = await supabase
         .from('daily_order_sheets')
         .select('sheet_date, rows, raw_text')
         .gte('sheet_date', sevenDaysAgo)
         .order('sheet_date', { ascending: false })
       if (sheetsPreErr) throw sheetsPreErr
-      const allSheetsData = allSheetsPreload ?? []
+
+      // 0b. 額外納入「超過七天，但常平/委外/請購仍有未比對完成項目」的舊出單表——
+      // 否則卡在 no_match 超過七天沒人手動回頭處理的列，即使 ARGO 那邊已經有對應的單，
+      // 也永遠不會被重新比對到（本次修復的主因就是這個時間窗限制）。
+      let staleSheetsPreload: typeof recentSheetsPreload = []
+      try {
+        const listRes = await fetch('/api/argoerp/daily-order-sheet', { cache: 'no-store' })
+        const listJson = await listRes.json()
+        const staleDates: string[] = (listJson?.sheets ?? [])
+          .filter((s: { sheet_date: string; pending_c_count?: number; pending_pr_count?: number }) =>
+            s.sheet_date < sevenDaysAgo && ((s.pending_c_count ?? 0) > 0 || (s.pending_pr_count ?? 0) > 0))
+          .map((s: { sheet_date: string }) => s.sheet_date)
+        if (staleDates.length > 0) {
+          const { data: staleData, error: staleErr } = await supabase
+            .from('daily_order_sheets')
+            .select('sheet_date, rows, raw_text')
+            .in('sheet_date', staleDates)
+          if (staleErr) throw staleErr
+          staleSheetsPreload = staleData ?? []
+        }
+      } catch (staleFetchErr) {
+        console.warn('讀取超過七天的未完成舊出單表失敗，僅處理近七天：', staleFetchErr)
+      }
+
+      const allSheetsData = [...(recentSheetsPreload ?? []), ...staleSheetsPreload]
       // NOTE: erp_so_lines 查詢在各張出單表 loop 內逐張執行（同 一鍵全同步），避免 Supabase 1000 筆截斷
 
       // 2. 一次抓全部 MO 相關資料
@@ -2444,6 +2641,7 @@ export default function DailyOrderSheetPage() {
         activeMoNumbers = new Set((summaryRows ?? []).map(r => r.mo_number))
       }
       const moMap = new Map<string, { mo_number: string }>()
+      const moSeqMapAll = new Map<string, string>() // source_order|product_code|seq(padded) → mo_number
       for (const log of (allMoLogs ?? [])) {
         if (!log.mo_number?.startsWith('MO') || !activeMoNumbers.has(log.mo_number)) continue
         const qty = String(log.planned_qty ?? '').trim()
@@ -2451,6 +2649,12 @@ export default function DailyOrderSheetPage() {
         const k2 = `${log.source_order}|${log.product_code}`
         if (!moMap.has(k1)) moMap.set(k1, { mo_number: log.mo_number })
         if (!moMap.has(k2)) moMap.set(k2, { mo_number: log.mo_number })
+        // 以 MO 末兩碼作為序號 key（同 runMoSync / runAllSync）
+        const suffix = log.mo_number.slice(-2)
+        if (/^\d{2}$/.test(suffix)) {
+          const seqKey = `${log.source_order}|${log.product_code}|${suffix}`
+          if (!moSeqMapAll.has(seqKey)) moSeqMapAll.set(seqKey, log.mo_number)
+        }
       }
       const { data: allErpMo, error: erpErr } = await supabase
         .from('erp_mo_lines')
@@ -2524,6 +2728,58 @@ export default function DailyOrderSheetPage() {
       const sheets = allSheetsData
       let totalUpdated = 0
 
+      // ── 跨日期序號鎖定（同單日版本 runSerialMatch/runAllSync 的防呆）──────────────
+      // 撈取本次批次日期範圍以外、其他出單表已鎖定的 (order_number, line_no)，記錄是被哪個
+      // row_key 佔用的；批次處理過程中每配到一個序號就即時登記進同一份 Map，讓「同一份跑批」
+      // 裡先處理到的日期鎖定的序號，後處理的日期不會重複領用（避免同張訂單分兩批交期時，
+      // 兩天各自獨立配到同一序號）。
+      const batchDateSet = new Set(sheets.map(s => s.sheet_date as string))
+      const claimedLineByOrderBatch = new Map<string, Map<string, string>>() // order_number → Map<line_no, row_key>
+      // 同步撈取批次範圍以外、其他出單表已鎖定的採購單/請購單 (doc_no|sub_no) → row_key，
+      // 避免批次比對到跟其他日期同一張真實 PO/PR（同 runPoMatch/runAllSync 的跨日期鎖定）
+      const claimedPoByDocBatch = new Map<string, string>()
+      const claimedPrByDocBatch = new Map<string, string>()
+      try {
+        const { data: otherSheetsBatch } = await supabase
+          .from('daily_order_sheets')
+          .select('sheet_date, rows')
+          .order('sheet_date', { ascending: false })
+          .limit(200)
+        for (const sheet of (otherSheetsBatch ?? [])) {
+          // 本次批次涵蓋的日期改由下方迴圈處理時即時登記鎖定，這裡只需要批次範圍以外的既有鎖定
+          if (batchDateSet.has(sheet.sheet_date as string)) continue
+          const otherRows = Array.isArray((sheet as { rows?: unknown }).rows)
+            ? ((sheet as { rows: Record<string, unknown>[] }).rows) : []
+          for (const row of otherRows) {
+            const orderNo = String(row.order_number ?? '').trim()
+            const lineNo  = String(row.match_line_no ?? '').trim()
+            const rowKey  = String(row.row_key ?? '').trim()
+            if (orderNo && lineNo && rowKey) {
+              if (!claimedLineByOrderBatch.has(orderNo)) claimedLineByOrderBatch.set(orderNo, new Map())
+              const m = claimedLineByOrderBatch.get(orderNo)!
+              if (!m.has(lineNo)) m.set(lineNo, rowKey)
+            }
+            if (rowKey) {
+              const poNo = String(row.po_number ?? '').trim()
+              if (poNo) {
+                const key = `${poNo}|${String(row.po_sub_no ?? '').trim()}`
+                if (!claimedPoByDocBatch.has(key)) claimedPoByDocBatch.set(key, rowKey)
+              }
+              const prNo = String(row.pr_number ?? '').trim()
+              if (prNo) {
+                const key = `${prNo}|${String(row.pr_sub_no ?? '').trim()}`
+                if (!claimedPrByDocBatch.has(key)) claimedPrByDocBatch.set(key, rowKey)
+              }
+            }
+          }
+        }
+      } catch (claimErr) {
+        console.warn('讀取跨日期序號/採購單鎖定失敗，略過鎖定：', claimErr)
+      }
+      // usageCounter 移到迴圈外、跨所有處理中的日期共用同一份計數，理由同上
+      const usageCounter = new Map<string, number>()
+      // ─────────────────────────────────────────────────────────────────────────
+
       for (let si = 0; si < sheets.length; si++) {
         const sheet = sheets[si]
         const sheetDate = sheet.sheet_date as string
@@ -2547,18 +2803,31 @@ export default function DailyOrderSheetPage() {
           candidateMap.get(key)!.push({ line_no: String(line.line_no ?? ''), pdl_seq: line.pdl_seq != null ? Number(line.pdl_seq) : null })
         }
         for (const arr of candidateMap.values()) arr.sort((a, b) => (Number(a.line_no) || 0) - (Number(b.line_no) || 0))
-        const usageCounter = new Map<string, number>()
         rows = rows.map(src => {
+          // 原始資料已有序號（B欄直接填入）→ 跳過比對，保留現有值（同單日版本 runSerialMatch）
+          if (src.line_no_input) return src
           if (!src.order_number || !soProjectIds.has(src.order_number))
             return { ...src, match_status: 'no_order' as const, match_line_no: null, match_pdl_seq: null, match_reason: '無對應來源單號' }
-          const qty = parseFloat(String(src.quantity).replace(/,/g, '')) || 0
+          const qty = parseRowQty(src.quantity)
+          if (qty === null)
+            return { ...src, match_status: 'no_qty_match' as const, match_line_no: null, match_pdl_seq: null, match_reason: '數量欄位無法判讀' }
           const key = `${src.order_number}|${src.item_code}|${qty}`
           const candidates = candidateMap.get(key) ?? []
           if (candidates.length === 0)
             return { ...src, match_status: 'no_qty_match' as const, match_line_no: null, match_pdl_seq: null, match_reason: '有來源單號但無對應數量' }
+          // 跨日期鎖定過濾：排除被其他 row_key 佔用的序號（同 row_key 可沿用）
+          const claimedForOrder = claimedLineByOrderBatch.get(src.order_number) ?? new Map<string, string>()
+          const avail = candidates.filter(c => {
+            const claimedBy = claimedForOrder.get(c.line_no)
+            return !claimedBy || claimedBy === src.row_key
+          })
+          const pool = avail.length > 0 ? avail : candidates
           const used = usageCounter.get(key) ?? 0
-          const candidate = candidates[Math.min(used, candidates.length - 1)]
+          const candidate = pool[Math.min(used, pool.length - 1)]
           usageCounter.set(key, used + 1)
+          // 立即登記鎖定，讓批次中尚未處理到的其他日期不會重複領用同一序號
+          if (!claimedLineByOrderBatch.has(src.order_number)) claimedLineByOrderBatch.set(src.order_number, new Map())
+          claimedLineByOrderBatch.get(src.order_number)!.set(candidate.line_no, src.row_key ?? '')
           return { ...src, match_status: 'matched' as const, match_line_no: candidate.line_no, match_pdl_seq: candidate.pdl_seq, match_reason: '' }
         })
 
@@ -2571,15 +2840,34 @@ export default function DailyOrderSheetPage() {
             const erpMosForOrder = erpMoBySourceOrder.get(r.order_number)
             if (erpMosForOrder && !erpMosForOrder.has(r.mo_number))
               return clearMoFields(r)
+            if (!erpMosForOrder && !activeMoNumbers.has(r.mo_number))
+              return clearMoFields(r)
             if (!matchSeq) return r
             const erpConfirm = erpMoMap.get(`${r.order_number}|${r.item_code}|${matchSeq}`)
-            if (!erpConfirm || erpConfirm === r.mo_number) return r
+                            ?? moSeqMapAll.get(`${r.order_number}|${r.item_code}|${matchSeq}`)
+                            ?? null
+            if (!erpConfirm) {
+              // 無法由 ARGO/上傳 log 確認正確 MO，以末碼驗證序號是否符合（同 runMoSync / runAllSync）
+              const moSuffix = r.mo_number.slice(-2)
+              if (/^\d{2}$/.test(moSuffix) && moSuffix !== matchSeq)
+                return clearMoFields(r)
+              return r
+            }
+            if (erpConfirm === r.mo_number) return r
             return { ...r, mo_number: erpConfirm, mo_status: '已匯入製令' as const }
           }
           const qty = String(r.quantity).trim()
           if (matchSeq) {
             const erpHit = erpMoMap.get(`${r.order_number}|${r.item_code}|${matchSeq}`)
             if (erpHit) return { ...r, mo_number: erpHit, mo_status: '已匯入製令' as const }
+          }
+          if (matchSeq) {
+            const seqHit = moSeqMapAll.get(`${r.order_number}|${r.item_code}|${matchSeq}`)
+            if (seqHit) {
+              const erpMosForOrder = erpMoBySourceOrder.get(r.order_number)
+              const stillInArgo = !erpMosForOrder || erpMosForOrder.has(seqHit)
+              if (stillInArgo) return { ...r, mo_number: seqHit, mo_status: '已匯入製令' as const }
+            }
           }
           const logHit = moMap.get(`${r.order_number}|${r.item_code}|${qty}`) ?? moMap.get(`${r.order_number}|${r.item_code}`)
           if (logHit) {
@@ -2595,6 +2883,15 @@ export default function DailyOrderSheetPage() {
           return r
         })
 
+        // 去重：同一製令單號只允許配對一列（同 runMoSync / runAllSync，以第一列為準，後續清除）
+        const usedMoSetSheet = new Set<string>()
+        rows = rows.map(r => {
+          if (!r.mo_number) return r
+          if (usedMoSetSheet.has(r.mo_number)) return clearMoFields(r)
+          usedMoSetSheet.add(r.mo_number)
+          return r
+        })
+
         // Step B2: 批備料狀態
         for (let i = 0; i < rows.length; i++) {
           const moNo = rows[i].mo_number
@@ -2603,24 +2900,39 @@ export default function DailyOrderSheetPage() {
           else if (prepMap.has(moNo)) rows[i] = { ...rows[i], material_prep_status: prepMap.get(moNo)! }
         }
 
-        // Step C: 採購單比對（每張獨立 pool，避免跨日期搶佔）
+        // Step C: 採購單比對（pool 每張重置 _used，但 claimedPoByDocBatch 跨整批共用，
+        // 避免本批次先處理到的日期領走的 PO/PR 被後處理的日期重複領用）
         // 常平（C）
         const sheetPoPool: Candidate[] = globalPoPool.map(c => ({ ...c, _used: false }))
         if (rows.some(r => r.factory === 'C')) {
-          rows = matchPoRows(rows, sheetPoPool, 'C', sheetDate)
+          rows = matchPoRows(rows, sheetPoPool, 'C', sheetDate, claimedPoByDocBatch)
         }
         // 委外（O）
         const sheetPoPoolO: Candidate[] = globalPoPoolO.map(c => ({ ...c, _used: false }))
         if (rows.some(r => r.factory === 'O')) {
-          rows = matchPoRows(rows, sheetPoPoolO, 'O', sheetDate)
+          rows = matchPoRows(rows, sheetPoPoolO, 'O', sheetDate, claimedPoByDocBatch)
         }
 
         // Step C2: 委外請購單比對（PR 為輔，採購單優先）
         if (rows.some(r => r.factory === 'O')) {
           try {
-            rows = await matchPrRows(rows)
+            rows = await matchPrRows(rows, claimedPrByDocBatch)
           } catch (prE) {
             console.error(`請購單比對失敗（${sheetDate}，不影響其他結果）：`, prE)
+          }
+        }
+
+        // 即時登記本張已配對到的採購單/請購單，讓同一批次後續處理的日期不會重複領用同一張真實單據
+        for (const r of rows) {
+          const rk = String(r.row_key ?? '').trim()
+          if (!rk) continue
+          if (r.po_number) {
+            const key = `${String(r.po_number).trim()}|${String(r.po_sub_no ?? '').trim()}`
+            if (!claimedPoByDocBatch.has(key)) claimedPoByDocBatch.set(key, rk)
+          }
+          if (r.pr_number) {
+            const key = `${String(r.pr_number).trim()}|${String(r.pr_sub_no ?? '').trim()}`
+            if (!claimedPrByDocBatch.has(key)) claimedPrByDocBatch.set(key, rk)
           }
         }
 
@@ -2637,7 +2949,8 @@ export default function DailyOrderSheetPage() {
       }
 
       setBatchProgress('')
-      setSaveMsg(`✅ 全同步完成（七日內），共更新 ${totalUpdated} 張出單表`)
+      const staleCount = staleSheetsPreload.length
+      setSaveMsg(`✅ 全同步完成（七日內${staleCount > 0 ? `＋${staleCount}張未完成舊單` : ''}），共更新 ${totalUpdated} 張出單表`)
       setTimeout(() => setSaveMsg(''), 8000)
     } catch (e) {
       setBatchProgress('')
@@ -2825,12 +3138,12 @@ export default function DailyOrderSheetPage() {
                   onClick={() => void runBatchRecentSync()}
                   disabled={batchSyncing || exportingMissing}
                   className="px-4 py-2 rounded-lg bg-violet-900/60 border border-violet-700/50 hover:bg-violet-800 disabled:bg-slate-700 disabled:text-slate-500 disabled:border-slate-600 text-violet-200 text-sm font-medium transition-colors flex items-center gap-1.5"
-                  title="對近七天的出單表重新執行序號比對 + MO + 採購單比對，並寫回資料庫"
+                  title="對近七天的出單表、以及超過七天但仍有未比對完成之常平/委外/請購項目的舊出單表，重新執行序號比對 + MO + 採購單比對，並寫回資料庫"
                 >
                   <svg className="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
                   </svg>
-                  {batchSyncing ? (batchProgress ? `同步中 ${batchProgress}` : '同步中…') : '⚡ 一鍵全同步(七日內)'}
+                  {batchSyncing ? (batchProgress ? `同步中 ${batchProgress}` : '同步中…') : '⚡ 一鍵全同步(七日內+未完成舊單)'}
                 </button>
               </>
             )}
@@ -2910,7 +3223,7 @@ export default function DailyOrderSheetPage() {
               </>
             )}
             {saveMsg && (
-              <span className={`text-sm ${saveMsg.startsWith('❌') ? 'text-red-400' : 'text-emerald-400'}`}>{saveMsg}</span>
+              <span className={`text-sm ${saveMsg.startsWith('❌') ? 'text-red-400' : saveMsg.startsWith('⚠️') ? 'text-amber-400' : 'text-emerald-400'}`}>{saveMsg}</span>
             )}
           </div>
         </div>
@@ -2943,11 +3256,12 @@ export default function DailyOrderSheetPage() {
             </button>
             <a
               href="/admin/argoerp/so-change-notices"
+              title="ARGO 銷售訂單同步偵測到的改單（僅列出有在出單表裡的訂單，跨所有日期）"
               className="px-5 py-2.5 text-sm font-medium rounded-t-lg transition-colors border-b-2 border-transparent text-slate-400 hover:text-red-300 hover:bg-slate-900/50 flex items-center gap-1"
             >
-              ⚠️ 改單提示
-              {soChangesUnconfirmedSet.size > 0 && (
-                <span className="px-1.5 py-0.5 rounded-full bg-red-500 text-white text-[10px] font-bold leading-none">{soChangesUnconfirmedSet.size}</span>
+              ⚠️ 改單檢測
+              {soChangesTotalCount > 0 && (
+                <span className="px-1.5 py-0.5 rounded-full bg-red-500 text-white text-[10px] font-bold leading-none">{soChangesTotalCount}</span>
               )}
             </a>
           </div>
@@ -3360,7 +3674,7 @@ export default function DailyOrderSheetPage() {
                                   </button>
                                 )}
                               </div>
-                              {/* 改單提示 badge */}
+                              {/* 改單檢測 badge */}
                               {soChangesUnconfirmedSet.has(row.order_number) && (
                                 <div className="mt-0.5">
                                   <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-red-700/50 text-red-200 border border-red-600/40">改單-未確認</span>

@@ -2,7 +2,6 @@
 
 import { NavButton } from '../../../../components/NavButton'
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { supabase } from '../../../../lib/supabaseClient'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -96,22 +95,25 @@ export default function OrderAnomalyPage() {
 
   const fetchRecords = useCallback(async () => {
     setLoadingRecords(true)
-    const { data, error } = await supabase
-      .from('order_anomaly_records')
-      .select('*')
-      .order('created_at', { ascending: false })
-    if (!error) setRecords((data as AnomalyRecord[]) || [])
+    try {
+      const res = await fetch('/api/production/order-anomaly')
+      const json = await res.json()
+      if (json?.success) setRecords((json.records as AnomalyRecord[]) || [])
+    } catch {
+      // 保持原本行為：失敗時不 alert，僅維持既有清單
+    }
     setLoadingRecords(false)
   }, [])
 
   const fetchOptions = useCallback(async () => {
     setLoadingOptions(true)
-    const { data, error } = await supabase
-      .from('order_anomaly_options')
-      .select('*')
-      .order('option_type')
-      .order('option_value')
-    if (!error) setAllOptions((data as OptionItem[]) || [])
+    try {
+      const res = await fetch('/api/production/order-anomaly/options')
+      const json = await res.json()
+      if (json?.success) setAllOptions((json.options as OptionItem[]) || [])
+    } catch {
+      // 保持原本行為：失敗時不 alert，僅維持既有清單
+    }
     setLoadingOptions(false)
   }, [])
 
@@ -185,35 +187,24 @@ export default function OrderAnomalyPage() {
   const handleSave = async () => {
     setSaving(true)
     try {
-      const uploadedUrls: string[] = []
+      const fd = new FormData()
+      fd.append('anomaly_date', form.anomaly_date || '')
+      fd.append('anomaly_category', form.anomaly_category || '')
+      fd.append('responsible_department', form.responsible_department || '')
+      fd.append('responsible_person', form.responsible_person || '')
+      fd.append('anomaly_description', form.anomaly_description || '')
+      fd.append('resolution', form.resolution || '')
+      fd.append('existing_attachments', JSON.stringify(form.existingAttachments))
+      for (const file of form.attachFiles) fd.append('files', file)
+      if (editingId) fd.append('id', String(editingId))
 
-      for (const file of form.attachFiles) {
-        const ext = file.name.split('.').pop() ?? 'bin'
-        const path = `order-anomaly/${Date.now()}_${Math.random().toString(36).slice(2, 8)}.${ext}`
-        const { error: upErr } = await supabase.storage
-          .from('anomaly-attachments')
-          .upload(path, file, { upsert: false })
-        if (upErr) { alert(`上傳失敗：${upErr.message}`); setSaving(false); return }
-        const { data: urlData } = supabase.storage.from('anomaly-attachments').getPublicUrl(path)
-        uploadedUrls.push(urlData.publicUrl)
-      }
+      const res = await fetch('/api/production/order-anomaly', {
+        method: editingId ? 'PUT' : 'POST',
+        body: fd,
+      })
+      const json = await res.json()
+      if (!res.ok || !json?.success) throw new Error(json?.error || `HTTP ${res.status}`)
 
-      const payload = {
-        anomaly_date:           form.anomaly_date           || null,
-        anomaly_category:       form.anomaly_category       || null,
-        responsible_department: form.responsible_department || null,
-        responsible_person:     form.responsible_person     || null,
-        anomaly_description:    form.anomaly_description    || null,
-        resolution:             form.resolution             || null,
-        attachments:            [...form.existingAttachments, ...uploadedUrls],
-        updated_at:             new Date().toISOString(),
-      }
-
-      const { error } = editingId
-        ? await supabase.from('order_anomaly_records').update(payload).eq('id', editingId)
-        : await supabase.from('order_anomaly_records').insert(payload)
-
-      if (error) throw error
       await fetchRecords()
       closeForm()
     } catch (err: unknown) {
@@ -231,8 +222,9 @@ export default function OrderAnomalyPage() {
   const handleDelete = async (id: number) => {
     if (!confirm('確定要刪除此筆異常紀錄？此操作無法復原。')) return
     setDeletingId(id)
-    const { error } = await supabase.from('order_anomaly_records').delete().eq('id', id)
-    if (error) alert(`刪除失敗：${error.message}`)
+    const res = await fetch(`/api/production/order-anomaly?id=${id}`, { method: 'DELETE' })
+    const json = await res.json()
+    if (!res.ok || !json?.success) alert(`刪除失敗：${json?.error || `HTTP ${res.status}`}`)
     else await fetchRecords()
     setDeletingId(null)
   }
@@ -243,10 +235,13 @@ export default function OrderAnomalyPage() {
     const value = newOptionValue[type].trim()
     if (!value) return
     setAddingOption(type)
-    const { error } = await supabase
-      .from('order_anomaly_options')
-      .insert({ option_type: type, option_value: value })
-    if (error) alert(`新增失敗：${error.message}`)
+    const res = await fetch('/api/production/order-anomaly/options', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ option_type: type, option_value: value }),
+    })
+    const json = await res.json()
+    if (!res.ok || !json?.success) alert(`新增失敗：${json?.error || `HTTP ${res.status}`}`)
     else {
       setNewOptionValue(prev => ({ ...prev, [type]: '' }))
       await fetchOptions()
@@ -257,8 +252,9 @@ export default function OrderAnomalyPage() {
   const handleDeleteOption = async (id: number) => {
     if (!confirm('確定要刪除此選項？')) return
     setDeletingOptionId(id)
-    const { error } = await supabase.from('order_anomaly_options').delete().eq('id', id)
-    if (error) alert(`刪除失敗：${error.message}`)
+    const res = await fetch(`/api/production/order-anomaly/options?id=${id}`, { method: 'DELETE' })
+    const json = await res.json()
+    if (!res.ok || !json?.success) alert(`刪除失敗：${json?.error || `HTTP ${res.status}`}`)
     else await fetchOptions()
     setDeletingOptionId(null)
   }

@@ -1,7 +1,10 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { supabase } from "../../../../lib/supabaseClient";
+
+// 群組清單改用輪詢刷新（取代原本的 postgres_changes 即時訂閱），
+// 因為前端已不再直接連線 Supabase，RLS 鎖定後 realtime 訂閱也無法運作。
+const GROUPS_POLL_INTERVAL_MS = 25000;
 
 interface BomItem {
   id: number;
@@ -23,48 +26,52 @@ export default function ProductionNoticeSettings() {
   const [showUngrouped, setShowUngrouped] = useState(false); // 預設顯示全部
 
   useEffect(() => {
-    // 分批取得所有 BOM 資料
-    const fetchBom = async () => {
-      let allData: BomItem[] = [];
-      let from = 0;
-      const batchSize = 1000;
-      while (true) {
-        const to = from + batchSize - 1;
-        const { data } = await supabase.from("bom").select("id, product_code, product_name, group_name").range(from, to);
-        if (data && data.length > 0) {
-          allData = allData.concat(data);
-          if (data.length < batchSize) break;
-          from += batchSize;
-        } else {
-          break;
-        }
+    // 取得所有 BOM 資料與群組清單（改走後端 API，需先登入）
+    const fetchBomAndGroups = async () => {
+      try {
+        const res = await fetch("/api/production/notice");
+        const json = await res.json();
+        if (!res.ok || !json?.success) throw new Error(json?.error || `HTTP ${res.status}`);
+        setBomItems(Array.isArray(json.items) ? json.items : []);
+        if (Array.isArray(json.groups)) setGroups(json.groups);
+      } catch (e) {
+        console.error("[產期告示設定] 載入資料失敗：", e);
       }
-      setBomItems(allData);
     };
-    // 取得群組資料
+    // 只刷新群組清單（輪詢用，避免每次都重撈整張 bom 表）
     const fetchGroups = async () => {
-      const { data } = await supabase.from("production_notice_groups").select("*").order("id");
-      if (data) setGroups(data);
+      try {
+        const res = await fetch("/api/production/notice-group");
+        const json = await res.json();
+        if (!res.ok || !json?.success) throw new Error(json?.error || `HTTP ${res.status}`);
+        if (Array.isArray(json.groups)) setGroups(json.groups);
+      } catch (e) {
+        console.error("[產期告示設定] 刷新群組清單失敗：", e);
+      }
     };
-    fetchBom();
-    fetchGroups();
+    fetchBomAndGroups();
 
-    // Supabase 群組資料即時訂閱
-    const groupSub = supabase
-      .channel('production_notice_groups-changes')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'production_notice_groups' }, () => {
-        fetchGroups();
-      })
-      .subscribe();
+    // 群組清單改用輪詢刷新，取代原本的 postgres_changes 即時訂閱
+    const pollId = setInterval(fetchGroups, GROUPS_POLL_INTERVAL_MS);
     return () => {
-      supabase.removeChannel(groupSub);
+      clearInterval(pollId);
     };
   }, []);
   const setItemGroup = async (itemId: number, groupName: string) => {
     // 更新本地狀態
     setBomItems(items => items.map(item => item.id === itemId ? { ...item, group_name: groupName } : item));
-    // 更新 Supabase
-    await supabase.from("bom").update({ group_name: groupName }).eq("id", itemId);
+    // 更新後端
+    try {
+      const res = await fetch("/api/production/notice", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: itemId, group_name: groupName }),
+      });
+      const json = await res.json();
+      if (!res.ok || !json?.success) throw new Error(json?.error || `HTTP ${res.status}`);
+    } catch (e) {
+      console.error("[產期告示設定] 更新品項群組失敗：", e);
+    }
   };
 
   // 取得群組設定
@@ -85,8 +92,18 @@ export default function ProductionNoticeSettings() {
     if (!batchGroup) return;
     // 更新本地狀態
     setBomItems(items => items.map(item => selected.includes(item.id) ? { ...item, group_name: batchGroup } : item));
-    // 批量更新 Supabase
-    await Promise.all(selected.map(id => supabase.from("bom").update({ group_name: batchGroup }).eq("id", id)));
+    // 批量更新後端
+    try {
+      const res = await fetch("/api/production/notice", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ids: selected, group_name: batchGroup }),
+      });
+      const json = await res.json();
+      if (!res.ok || !json?.success) throw new Error(json?.error || `HTTP ${res.status}`);
+    } catch (e) {
+      console.error("[產期告示設定] 批量更新品項群組失敗：", e);
+    }
     setSelected([]);
     setBatchGroup("");
   };

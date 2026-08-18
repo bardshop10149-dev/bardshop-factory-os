@@ -137,6 +137,10 @@ export default function NgMaterialPrepPage() {
   const [ngSlipNo, setNgSlipNo] = useState<string>('')
   const [ngSlipLoading, setNgSlipLoading] = useState(false)
 
+  // ---- 本次補印（瑕疵）數量：需使用者明確輸入，不可預設整張製令數量 ----
+  const [repairQtyInput, setRepairQtyInput] = useState('')
+  const [confirmFullBatchRepair, setConfirmFullBatchRepair] = useState(false)
+
   // ---- 匯入 ----
   const [importing, setImporting] = useState(false)
   const [importMsg, setImportMsg] = useState('')
@@ -282,6 +286,51 @@ export default function NgMaterialPrepPage() {
   }, [soQuery])
 
   // ============================================================
+  // 計算下一個可用 NG 單號
+  // ── 修法（對應漏洞3）──
+  // 1. 同時掃描兩個來源並取兩者最大值＋1：
+  //    a. argoerp_material_prep_log（本地送出紀錄）
+  //    b. erp_material_prep_lines（sync_material_prep 定期從 ARGO IV_NOTICE
+  //       同步回來的鏡像表）——藉此跟 ARGO 端實際存在的單號做交叉比對，
+  //       不完全只信任本地 log（若本地 log 因故缺筆，ARGO 鏡像仍可補上）。
+  // 2. parseInt 結果一律以 Number.isFinite 過濾，格式不符或非數字尾碼一律排除，
+  //    不會讓 NaN 污染 Math.max、也不會被誤判成「目前最大值」。
+  // 3. 送出時（handleImport）一律以此函式「重新即時查詢」而非沿用選取當下算好的
+  //    ngSlipNo state，降低「選取製令後過一段時間才送出」或「送出前單號已被
+  //    其他分頁/使用者用掉」的競態窗口（詳見 handleImport 內的預飛檢查）。
+  // ============================================================
+  const computeNextNgSlipNo = useCallback(async (moNumber: string): Promise<string> => {
+    const extractMaxNg = (values: Array<string | null | undefined>): number => {
+      let max = 0
+      for (const raw of values) {
+        if (typeof raw !== 'string') continue
+        if (!raw.startsWith(`${moNumber}NG`)) continue
+        const n = parseInt(raw.slice(moNumber.length + 2), 10)
+        if (Number.isFinite(n) && n > 0 && n > max) max = n
+      }
+      return max
+    }
+
+    const [logRes, argoMirrorRes] = await Promise.all([
+      supabase
+        .from('argoerp_material_prep_log')
+        .select('argo_slip_no')
+        .eq('mo_number', moNumber)
+        .like('argo_slip_no', `${moNumber}NG%`),
+      supabase
+        .from('erp_material_prep_lines')
+        .select('slip_no')
+        .eq('mo_number', moNumber)
+        .like('slip_no', `${moNumber}NG%`),
+    ])
+
+    const logMax = extractMaxNg((logRes.data ?? []).map((r: { argo_slip_no: string | null }) => r.argo_slip_no))
+    const argoMax = extractMaxNg((argoMirrorRes.data ?? []).map((r: { slip_no: string | null }) => r.slip_no))
+    const maxNg = Math.max(logMax, argoMax)
+    return `${moNumber}NG${maxNg + 1}`
+  }, [])
+
+  // ============================================================
   // 選取製令 → 載入 BOM / 庫存
   // ============================================================
   const handleSelectMo = useCallback(async (mo: MoRecord) => {
@@ -300,25 +349,15 @@ export default function NgMaterialPrepPage() {
     setBomError('')
     setImportMsg('')
     setNgSlipNo('')
+    setRepairQtyInput('')
+    setConfirmFullBatchRepair(false)
 
     const productCode = (mo.product_code ?? '').trim()
 
     // ── 計算下一個 NG 單號 ──
     setNgSlipLoading(true)
     try {
-      const { data: ngLogs } = await supabase
-        .from('argoerp_material_prep_log')
-        .select('argo_slip_no')
-        .eq('mo_number', mo.mo_number)
-        .like('argo_slip_no', `${mo.mo_number}NG%`)
-
-      const ngNums = (ngLogs ?? [])
-        .map((r: { argo_slip_no: string | null }) => r.argo_slip_no)
-        .filter((s): s is string => typeof s === 'string' && s.startsWith(`${mo.mo_number}NG`))
-        .map(s => parseInt(s.slice(mo.mo_number.length + 2), 10))
-        .filter(n => !isNaN(n) && n > 0)
-      const maxNg = ngNums.length > 0 ? Math.max(...ngNums) : 0
-      setNgSlipNo(`${mo.mo_number}NG${maxNg + 1}`)
+      setNgSlipNo(await computeNextNgSlipNo(mo.mo_number))
     } catch {
       setNgSlipNo(`${mo.mo_number}NG1`)
     } finally {
@@ -410,7 +449,7 @@ export default function NgMaterialPrepPage() {
     } finally {
       setBomLoading(false)
     }
-  }, [])
+  }, [computeNextNgSlipNo])
 
   // ── 自訂料號更新時補查單位 ──
   useEffect(() => {
@@ -480,7 +519,26 @@ export default function NgMaterialPrepPage() {
     const productCode = (mo.product_code ?? '').trim()
     const matchedBom = bomRows.filter(row => row.product_code === productCode)
 
-    if (matchedBom.length === 0) {
+    // ── 修法（對應漏洞4）：依料號去重 ──
+    // ERP 端 BOM（mm_bom_structure）偶爾對同一 (parent_part, bom_ver) 出現同一
+    // child_part 的重複列，若不去重會讓同料號在備料表中出現兩次、核發量加倍。
+    // 保留第一筆；若重複列的用量（quantity）不同，視為分開的用料需求、加總後留一筆
+    // （而非直接丟棄差異，避免低估真實用量）。
+    const dedupedBom: BomRow[] = (() => {
+      const map = new Map<string, BomRow>()
+      for (const row of matchedBom) {
+        const existing = map.get(row.material_code)
+        if (!existing) {
+          map.set(row.material_code, row)
+        } else if (existing.quantity !== row.quantity) {
+          map.set(row.material_code, { ...existing, quantity: existing.quantity + row.quantity })
+        }
+        // 完全相同的重複列：略過，保留第一筆
+      }
+      return Array.from(map.values())
+    })()
+
+    if (dedupedBom.length === 0) {
       const rowKey = `${mo.mo_number}::${productCode}::NO_BOM`
       const makeNoBomRow = (key: string, label: string): MaterialPrepRow => {
         const customCode = materialOverrides[key]
@@ -516,7 +574,13 @@ export default function NgMaterialPrepPage() {
       return [makeNoBomRow(rowKey, '自訂原料'), ...(extraNoBomSlots[rowKey] ?? []).map(slotId => makeNoBomRow(`${rowKey}::EX_${slotId}`, '追加用料'))]
     }
 
-    return matchedBom.map((bom): MaterialPrepRow => {
+    // ── 修法（對應漏洞2）──
+    // 「本次補印/瑕疵數量」必須由使用者明確輸入，不可預設為整張製令的完整生產數量
+    // （mo.planned_qty）。未填寫時視為 0（所有列的需求量會顯示 0，逼使用者先填）。
+    const repairQtyNum = Number(repairQtyInput)
+    const repairQtyValid = repairQtyInput.trim() !== '' && Number.isFinite(repairQtyNum) && repairQtyNum > 0
+
+    return dedupedBom.map((bom): MaterialPrepRow => {
       const rowKey = `${mo.mo_number}::${productCode}::${bom.material_code}`
       const matUpper = (bom.material_code ?? '').toUpperCase()
       const isMacrt = platePrefixes.some(p => matUpper.startsWith(p.toUpperCase()))
@@ -527,7 +591,9 @@ export default function NgMaterialPrepPage() {
         return isFinite(n) && n > 0 ? n : NaN
       })()
       const usesPlateCount = isMacrt && !isNaN(plateCountNum)
-      const planQty = usesPlateCount ? plateCountNum : Number(mo.planned_qty ?? 0)
+      // 印版類原料（MACRT 等前綴）本來就以「盤數」而非製令數量計算，不受本次補印數量影響；
+      // 其餘原料一律改用使用者輸入的「本次補印數量」，未填寫時視為 0（缺料/待輸入）。
+      const planQty = usesPlateCount ? plateCountNum : (repairQtyValid ? repairQtyNum : 0)
       const productionQty = bom.production_quantity ?? 0
       const bomBaseQty = bom.quantity ?? 0
       const baseComputedQty = productionQty > 0 ? (planQty * bomBaseQty) / productionQty : planQty * bomBaseQty
@@ -554,9 +620,15 @@ export default function NgMaterialPrepPage() {
       const selectedOption = substituteOptions.find(o => o.code === selectedCode) || substituteOptions[0]
       const selectedStockQty = selectedOption?.stock_qty ?? 0
 
+      const hasManualQtyOverride = qtyOverrides[rowKey] !== undefined && qtyOverrides[rowKey] !== ''
+
       let status: MaterialPrepRow['status']
       let note: string
-      if (selectedCode === bom.material_code && stockQty >= requiredQty) {
+      if (!usesPlateCount && !repairQtyValid && !hasManualQtyOverride) {
+        // 修法（對應漏洞2）：本次補印數量未填寫時，不可誤判為「可直接備料」（需求量會是 0）
+        status = '缺料'
+        note = '請先在上方輸入「本次補印數量」，或於下方直接手動輸入本列需求量'
+      } else if (selectedCode === bom.material_code && stockQty >= requiredQty) {
         status = '可直接備料'; note = '庫存足夠，可直接匯入生產批備料'
       } else if (selectedCode !== bom.material_code && selectedStockQty >= requiredQty) {
         status = '建議替代'; note = `原料庫存不足，改用 ${selectedCode} 可支應需求量`
@@ -579,16 +651,27 @@ export default function NgMaterialPrepPage() {
         selected_material_stock_qty: selectedStockQty, status, note,
       }
     })
-  }, [selectedMo, bomRows, inventoryMap, substituteMap, materialOverrides, qtyOverrides, noBufferKeys, platePrefixes, extraNoBomSlots])
+  }, [selectedMo, bomRows, inventoryMap, substituteMap, materialOverrides, qtyOverrides, noBufferKeys, platePrefixes, extraNoBomSlots, repairQtyInput])
+
+  // ── 修法（對應漏洞2）：本次補印數量驗證（供輸入框樣式 / 阻擋送出使用）──
+  const repairQtyValidation = useMemo(() => {
+    const num = Number(repairQtyInput)
+    const filled = repairQtyInput.trim() !== ''
+    const valid = filled && Number.isFinite(num) && num > 0
+    const plannedQty = Number(selectedMo?.planned_qty ?? 0)
+    const exceedsPlanned = valid && plannedQty > 0 && num > plannedQty
+    return { num, filled, valid, plannedQty, exceedsPlanned }
+  }, [repairQtyInput, selectedMo])
 
   // ============================================================
-  // 可匯入行（已選取 + 庫存足夠 + 非無BOM + 非無需備料）
+  // 可匯入行（已選取 + 庫存足夠 + 非無BOM + 非無需備料 + 需求量 > 0）
   // ============================================================
   const selectedImportRows = useMemo(() => {
     return materialPrepRows
       .filter(row => selectedRowKeys.has(row.row_key))
       .filter(row => !noNeedRowKeys.has(row.row_key))
       .filter(row => row.status !== '無BOM')
+      .filter(row => row.required_qty > 0)
       .filter(row => row.selected_material_code && row.selected_material_stock_qty >= row.required_qty)
       .map(row => ({
         mo_number: row.mo_number,
@@ -611,63 +694,47 @@ export default function NgMaterialPrepPage() {
   // ============================================================
   const handleImport = useCallback(async () => {
     if (!selectedMo || selectedImportRows.length === 0 || !ngSlipNo) return
-    if (importInFlightRef.current) return
-    importInFlightRef.current = true
 
-    if (!window.confirm(`將送出 ${selectedImportRows.length} 筆批備料資料到 ARGO（瑕疵補印）\n\n批備料單號：${ngSlipNo}\n\n確定？`)) {
-      importInFlightRef.current = false
+    // ── 修法（對應漏洞2）：本次補印數量必填、且不可未經確認就超過製令原始數量 ──
+    if (!repairQtyValidation.valid) {
+      setImportMsg('❌ 請先在上方輸入「本次補印數量」才能送出（不可留空，也不會預設整張製令數量）')
+      return
+    }
+    if (repairQtyValidation.exceedsPlanned && !confirmFullBatchRepair) {
+      setImportMsg('❌ 本次補印數量已超過製令原始數量，請先勾選上方的確認框再送出')
       return
     }
 
+    // ── 修法（對應漏洞1）：同步 ref 在 React re-render 之前就能攔截同一次操作內的雙擊 ──
+    if (importInFlightRef.current) return
+    importInFlightRef.current = true
     setImporting(true)
     setImportMsg('')
 
-    const today = new Date()
-    const slipDate = `${today.getFullYear()}/${String(today.getMonth() + 1).padStart(2, '0')}/${String(today.getDate()).padStart(2, '0')}`
-
-    const argoData: Record<string, string | number>[] = selectedImportRows.map((row, lineIndex) => ({
-      SLIP_NO: ngSlipNo,
-      SLIP_DATE: slipDate,
-      PJT_PROJECT_ID: row.mo_number,
-      SEG_SEGMENT_NO_DEPARTMENT: 'M1100',
-      MO_MBP_PART: row.product_code,
-      MO_MBP_VER: 1,
-      MO_QTY: Number(row.planned_qty),
-      LINE_NO: lineIndex + 1,
-      MBP_PART: row.material_code,
-      MBP_VER: 1,
-      NOTICE_QTY: Number(row.required_qty),
-      UNIT_OF_MEASURE: row.unit || 'PCS',
-      QTY_PACK: '',
-      UNIT_OF_MEASURE_PACK: '',
-      STD_QTY: 1,
-      REMARK: remarkOverrides[row.row_key] !== undefined ? remarkOverrides[row.row_key] : (row.machine || ''),
-    }))
-
     try {
-      const response = await fetch('/api/argoerp', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'import', interfaceId: MATERIAL_PREP_INTERFACE_ID, data: argoData }),
-      })
-      const result = await response.json()
-      const isSuccess = response.ok && result?.success === true
-      if (!isSuccess) {
-        const errMsg = result?.error || result?.message || result?.apiResult?.ERROR || result?.rawText || '批備料匯入失敗'
-        throw new Error(errMsg)
+      // ── 修法（對應漏洞1 + 漏洞3）：送出前「即時重新查詢」下一個可用 NG 單號 ──
+      // 不信任選取製令當下算好、可能已經過時的 ngSlipNo state。若跟現在重新算出的
+      // 結果不同（代表這段時間內已有其他分頁/使用者送出過、或本地與 ARGO 鏡像有新紀錄），
+      // 一律採用新算出的號碼並要求使用者重新確認，而不是直接沿用舊號碼送出。
+      const freshSlipNo = await computeNextNgSlipNo(selectedMo.mo_number)
+      if (freshSlipNo !== ngSlipNo) {
+        setNgSlipNo(freshSlipNo)
+        setImportMsg(`⚠️ 批備料單號已更新為 ${freshSlipNo}（偵測到期間有其他紀錄異動），請確認後再次點擊送出`)
+        return
       }
 
-      // 從 ARGO 回傳擷取真實批備料單號（可能與送出的不同）
-      const argoResultRows: Record<string, unknown>[] = Array.isArray(result?.apiResult?.RESULT)
-        ? (result.apiResult.RESULT as Record<string, unknown>[])
-        : []
-      const argoSlipNos = [...new Set(
-        argoResultRows.map(r => String(r.SLIP_NO ?? '')).filter(s => s && s !== 'undefined')
-      )].join(', ')
-      const finalSlipNo = argoSlipNos || ngSlipNo
+      if (!window.confirm(`將送出 ${selectedImportRows.length} 筆批備料資料到 ARGO（瑕疵補印）\n\n批備料單號：${freshSlipNo}\n本次補印數量：${repairQtyValidation.num}\n\n確定？`)) {
+        return
+      }
 
-      // 寫入批備料紀錄
-      await fetch('/api/argoerp/material-prep-log', {
+      // ── 修法（對應漏洞1）：呼叫 ARGO 前，先用「保留位」INSERT 搶佔這個批備料單號 ──
+      // argoerp_material_prep_log.argo_slip_no 已建立唯一索引
+      // （sql/20260811_ng_prep_log_slip_unique.sql）。若這筆 INSERT 因唯一鍵衝突失敗
+      // （API 回傳 duplicate:true / 409），代表在「即時重新查詢」之後、這次 INSERT 之前
+      // 的極短時間內，仍有其他請求搶先送出並佔用了同一單號——這正是原本「兩個併發
+      // 請求都通過檢查、都送出」的競態視窗。有了保留位 + DB 唯一索引，其中一個請求的
+      // INSERT 必定失敗，我們會在呼叫 ARGO「之前」就中止，不會造成 ARGO 端重複匯入。
+      const reserveRes = await fetch('/api/argoerp/material-prep-log', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -679,23 +746,95 @@ export default function NgMaterialPrepPage() {
             status:       '已備料',
             lines_count:  selectedImportRows.length,
             interface_id: MATERIAL_PREP_INTERFACE_ID,
-            argo_slip_no: finalSlipNo,
+            argo_slip_no: freshSlipNo,
           }],
         }),
-      }).catch(err => console.warn('[NG批備料紀錄] 寫入失敗', err))
+      })
+      const reserveJson = await reserveRes.json().catch(() => ({}))
+      if (!reserveRes.ok || !reserveJson?.success) {
+        if (reserveJson?.duplicate) {
+          const nextTry = await computeNextNgSlipNo(selectedMo.mo_number)
+          setNgSlipNo(nextTry)
+          throw new Error(`批備料單號 ${freshSlipNo} 剛被其他分頁/使用者用掉，已重新算出新單號 ${nextTry}，請確認後再次送出（本次尚未呼叫 ARGO，不會造成重複匯入）`)
+        }
+        throw new Error(reserveJson?.error || '批備料紀錄保留位寫入失敗，已中止送出')
+      }
 
-      setImportMsg(`✅ 已成功送出 ${selectedImportRows.length} 筆到 ARGO｜批備料單號：${finalSlipNo}`)
+      const today = new Date()
+      const slipDate = `${today.getFullYear()}/${String(today.getMonth() + 1).padStart(2, '0')}/${String(today.getDate()).padStart(2, '0')}`
 
-      // 更新 NG 單號（下次再執行時順延）
-      const prevNum = parseInt(ngSlipNo.slice(selectedMo.mo_number.length + 2), 10) || 1
-      setNgSlipNo(`${selectedMo.mo_number}NG${prevNum + 1}`)
+      const argoData: Record<string, string | number>[] = selectedImportRows.map((row, lineIndex) => ({
+        SLIP_NO: freshSlipNo,
+        SLIP_DATE: slipDate,
+        PJT_PROJECT_ID: row.mo_number,
+        SEG_SEGMENT_NO_DEPARTMENT: 'M1100',
+        MO_MBP_PART: row.product_code,
+        MO_MBP_VER: 1,
+        MO_QTY: Number(row.planned_qty),
+        LINE_NO: lineIndex + 1,
+        MBP_PART: row.material_code,
+        MBP_VER: 1,
+        NOTICE_QTY: Number(row.required_qty),
+        UNIT_OF_MEASURE: row.unit || 'PCS',
+        QTY_PACK: '',
+        UNIT_OF_MEASURE_PACK: '',
+        STD_QTY: 1,
+        REMARK: remarkOverrides[row.row_key] !== undefined ? remarkOverrides[row.row_key] : (row.machine || ''),
+      }))
+
+      try {
+        const response = await fetch('/api/argoerp', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'import', interfaceId: MATERIAL_PREP_INTERFACE_ID, data: argoData }),
+        })
+        const result = await response.json()
+        const isSuccess = response.ok && result?.success === true
+        if (!isSuccess) {
+          const errMsg = result?.error || result?.message || result?.apiResult?.ERROR || result?.rawText || '批備料匯入失敗'
+          throw new Error(errMsg)
+        }
+
+        // ARGO 若回傳跟送出格式不同的單號，僅作為訊息顯示參考；
+        // DB 紀錄（argo_slip_no）一律以我們送出、已鎖定保留位的 freshSlipNo 為準，
+        // 確保下次 computeNextNgSlipNo 掃描一定能對上這筆紀錄，
+        // 不會因為 ARGO 端回傳格式不同而漏算、進而撞號重用（對應漏洞3）。
+        const argoResultRows: Record<string, unknown>[] = Array.isArray(result?.apiResult?.RESULT)
+          ? (result.apiResult.RESULT as Record<string, unknown>[])
+          : []
+        const argoReturnedSlipNos = [...new Set(
+          argoResultRows.map(r => String(r.SLIP_NO ?? '')).filter(s => s && s !== 'undefined')
+        )].join(', ')
+        if (argoReturnedSlipNos && argoReturnedSlipNos !== freshSlipNo) {
+          console.warn(`[NG批備料] ARGO 回傳單號（${argoReturnedSlipNos}）與送出單號（${freshSlipNo}）不同，本地紀錄仍以送出單號為準`)
+        }
+
+        setImportMsg(
+          `✅ 已成功送出 ${selectedImportRows.length} 筆到 ARGO｜批備料單號：${freshSlipNo}` +
+          (argoReturnedSlipNos && argoReturnedSlipNos !== freshSlipNo ? `（ARGO 回應單號：${argoReturnedSlipNos}）` : '')
+        )
+
+        // 送出成功：清空本次補印數量（避免使用者忘記改、下一張製令誤用上一次的數量）
+        setRepairQtyInput('')
+        setConfirmFullBatchRepair(false)
+        setNgSlipNo(await computeNextNgSlipNo(selectedMo.mo_number))
+      } catch (argoErr) {
+        // ── 修法（對應漏洞1）：ARGO 匯入失敗時釋放保留位，讓這個單號可以被重新使用 ──
+        // 否則保留位會永久佔用這個 NG 單號，但 ARGO 那邊其實沒有真的匯入成功的資料。
+        await fetch('/api/argoerp/material-prep-log', {
+          method: 'DELETE',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ mo_number: selectedMo.mo_number, argo_slip_no: freshSlipNo }),
+        }).catch(err => console.warn('[NG批備料] 釋放保留位失敗，請人工檢查該筆紀錄', err))
+        throw argoErr
+      }
     } catch (e) {
       setImportMsg(`❌ ${e instanceof Error ? e.message : '批備料匯入失敗'}`)
     } finally {
       setImporting(false)
       importInFlightRef.current = false
     }
-  }, [selectedMo, selectedImportRows, ngSlipNo, remarkOverrides])
+  }, [selectedMo, selectedImportRows, ngSlipNo, remarkOverrides, repairQtyValidation, confirmFullBatchRepair, computeNextNgSlipNo])
 
   // ============================================================
   // Render helpers
@@ -951,10 +1090,10 @@ export default function NgMaterialPrepPage() {
             </div>
 
             {/* MO 資訊列 */}
-            <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mb-4 text-xs bg-slate-800/40 rounded-lg p-3">
+            <div className="grid grid-cols-2 md:grid-cols-6 gap-3 mb-2 text-xs bg-slate-800/40 rounded-lg p-3">
               <div><span className="text-slate-500">廠別</span><p className="text-white font-mono mt-0.5">{selectedMo.factory || '-'}</p></div>
               <div><span className="text-slate-500">品號</span><p className="text-cyan-300 font-mono mt-0.5">{selectedMo.product_code || '-'}</p></div>
-              <div><span className="text-slate-500">數量</span><p className="text-white font-mono mt-0.5">{selectedMo.planned_qty || '-'}</p></div>
+              <div><span className="text-slate-500">製令原始數量</span><p className="text-white font-mono mt-0.5">{selectedMo.planned_qty || '-'}</p></div>
               <div><span className="text-slate-500">盤數</span><p className="text-white font-mono mt-0.5">{selectedMo.plate_count || '-'}</p></div>
               <div>
                 <span className="text-slate-500">機台</span>
@@ -967,7 +1106,47 @@ export default function NgMaterialPrepPage() {
                   className="block w-full mt-0.5 px-2 py-0.5 rounded bg-slate-800 border border-slate-600 text-white font-mono text-xs focus:outline-none focus:border-cyan-500"
                 />
               </div>
+              <div>
+                <span className={repairQtyValidation.filled && !repairQtyValidation.valid ? 'text-red-400 font-semibold' : 'text-rose-300 font-semibold'}>
+                  本次補印數量 *
+                </span>
+                <input
+                  type="number"
+                  min={0}
+                  value={repairQtyInput}
+                  onChange={e => setRepairQtyInput(e.target.value)}
+                  placeholder="必填，不會預設整批數量"
+                  title="本次瑕疵補印的實際數量；各料號需求量將依此計算，而非製令原始數量"
+                  className={`block w-full mt-0.5 px-2 py-0.5 rounded bg-slate-800 border text-xs font-mono focus:outline-none ${
+                    repairQtyValidation.exceedsPlanned
+                      ? 'border-amber-500 text-amber-300 focus:border-amber-400'
+                      : repairQtyValidation.filled && !repairQtyValidation.valid
+                        ? 'border-red-500 text-red-300 focus:border-red-400'
+                        : 'border-rose-600 text-white focus:border-rose-400'
+                  }`}
+                />
+              </div>
             </div>
+
+            {/* 本次補印數量提示 / 超量警告 */}
+            {!repairQtyValidation.valid && (
+              <p className="text-xs text-amber-400 mb-3 px-1">
+                ⚠️ 請先輸入本次瑕疵補印的實際數量，各料號需求量才會依此計算（不會自動帶入製令原始數量）。
+              </p>
+            )}
+            {repairQtyValidation.exceedsPlanned && (
+              <div className="mb-3 px-3 py-2 rounded-lg bg-amber-900/30 border border-amber-700/50 text-xs text-amber-300">
+                <label className="flex items-center gap-2 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={confirmFullBatchRepair}
+                    onChange={e => setConfirmFullBatchRepair(e.target.checked)}
+                    className="w-4 h-4 rounded border-amber-600 accent-amber-500"
+                  />
+                  本次補印數量（{repairQtyValidation.num}）已超過製令原始數量（{repairQtyValidation.plannedQty}），我確認要這麼做（例如整批重做）
+                </label>
+              </div>
+            )}
 
             {bomLoading ? (
               <div className="py-10 text-center text-slate-500 text-sm">載入 BOM / 庫存中…</div>
@@ -1140,13 +1319,22 @@ export default function NgMaterialPrepPage() {
                   <div className="flex items-center gap-3">
                     <button
                       onClick={() => void handleImport()}
-                      disabled={importing || selectedImportRows.length === 0 || !ngSlipNo || ngSlipLoading}
+                      disabled={
+                        importing || selectedImportRows.length === 0 || !ngSlipNo || ngSlipLoading ||
+                        !repairQtyValidation.valid || (repairQtyValidation.exceedsPlanned && !confirmFullBatchRepair)
+                      }
                       className="px-5 py-2.5 rounded-lg bg-rose-700 hover:bg-rose-600 disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-semibold transition-colors"
                     >
                       {importing ? '匯入中…' : `送出 ${selectedImportRows.length} 筆瑕疵補印批備料`}
                     </button>
                     {selectedImportRows.length === 0 && selectedRowKeys.size > 0 && (
                       <span className="text-xs text-amber-400">已選取的行中庫存不足或缺 BOM，無法送出</span>
+                    )}
+                    {!repairQtyValidation.valid && (
+                      <span className="text-xs text-amber-400">請先輸入「本次補印數量」</span>
+                    )}
+                    {repairQtyValidation.exceedsPlanned && !confirmFullBatchRepair && (
+                      <span className="text-xs text-amber-400">本次補印數量超過製令原始數量，請先勾選上方確認框</span>
                     )}
                   </div>
                   {ngSlipNo && !ngSlipLoading && (

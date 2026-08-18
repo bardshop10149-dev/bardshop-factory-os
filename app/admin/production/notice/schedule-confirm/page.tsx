@@ -2,7 +2,6 @@
 
 import { NavButton } from '../../../../../components/NavButton'
 import { useCallback, useEffect, useState } from 'react'
-import { supabase } from '../../../../../lib/supabaseClient'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -11,6 +10,7 @@ interface ProductItem { item_code: string; item_name: string; quantity: string }
 interface Inquiry {
   id: number
   inquiry_date: string | null
+  customer_name: string | null
   order_no: string | null
   salesperson: string | null
   items: ProductItem[] | null
@@ -29,6 +29,7 @@ type ReplyFilter = 'all' | 'pending' | 'approved' | 'rejected' | 'completed'
 
 interface FormState {
   inquiry_date: string
+  customer_name: string
   order_no: string
   salesperson: string
   items: ProductItem[]
@@ -42,7 +43,7 @@ interface FormState {
 const TODAY = () => new Date().toISOString().slice(0, 10)
 const DEFAULT_ITEM: ProductItem = { item_code: '', item_name: '', quantity: '' }
 const DEFAULT_FORM: FormState = {
-  inquiry_date: TODAY(), order_no: '', salesperson: '', items: [{ ...DEFAULT_ITEM }],
+  inquiry_date: TODAY(), customer_name: '', order_no: '', salesperson: '', items: [{ ...DEFAULT_ITEM }],
   planned_order_date: '', expected_date: '', remark: '',
 }
 
@@ -73,20 +74,24 @@ export default function ScheduleInquiryPage() {
 
   const fetchRecords = useCallback(async () => {
     setLoading(true)
-    const { data, error } = await supabase
-      .from('schedule_inquiries')
-      .select('id,inquiry_date,order_no,salesperson,items,planned_order_date,expected_date,remark,planner_reply,author_name,department,created_at,updated_at')
-      .order('created_at', { ascending: false })
-    if (!error) setRecords((data as Inquiry[]) || [])
+    try {
+      const res = await fetch('/api/production/schedule-confirm')
+      const json = await res.json()
+      if (json?.success) setRecords((json.records as Inquiry[]) || [])
+    } catch {
+      // 保留原本行為：讀取失敗時不特別提示，僅維持既有列表
+    }
     setLoading(false)
   }, [])
 
   const fetchSalespersons = useCallback(async () => {
-    const { data } = await supabase
-      .from('schedule_inquiry_salespersons')
-      .select('name')
-      .order('name', { ascending: true })
-    if (data) setSalespersons(data.map((r: { name: string }) => r.name))
+    try {
+      const res = await fetch('/api/production/schedule-confirm/salespersons')
+      const json = await res.json()
+      if (json?.success) setSalespersons((json.salespersons as string[]) || [])
+    } catch {
+      // 保留原本行為：讀取失敗時不特別提示
+    }
   }, [])
 
   useEffect(() => { void fetchRecords() }, [fetchRecords])
@@ -105,6 +110,7 @@ export default function ScheduleInquiryPage() {
     setEditingId(rec.id)
     setForm({
       inquiry_date:       rec.inquiry_date       || TODAY(),
+      customer_name:      rec.customer_name      || '',
       order_no:           rec.order_no           || '',
       salesperson:        rec.salesperson        || '',
       items:              rec.items && rec.items.length > 0 ? rec.items : [{ ...DEFAULT_ITEM }],
@@ -127,6 +133,7 @@ export default function ScheduleInquiryPage() {
     setSaving(true)
     const payload = {
       inquiry_date:       form.inquiry_date       || null,
+      customer_name:      form.customer_name.trim() || null,
       order_no:           form.order_no.trim()    || null,
       salesperson:        form.salesperson        || null,
       items:              cleanItems,
@@ -135,18 +142,28 @@ export default function ScheduleInquiryPage() {
       remark:             form.remark.trim()      || null,
       updated_at:         new Date().toISOString(),
     }
-    const { error } = editingId
-      ? await supabase.from('schedule_inquiries').update(payload).eq('id', editingId)
-      : await supabase.from('schedule_inquiries').insert(payload)
-    if (error) {
-      const msg = typeof error === 'object' && error !== null && 'message' in error
-        ? String((error as { message: unknown }).message)
-        : JSON.stringify(error)
-      alert(`儲存失敗：${msg}`)
-    } else {
-      resetForm()
-      await fetchRecords()
-      setTab('records')
+    try {
+      const res = editingId
+        ? await fetch('/api/production/schedule-confirm', {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id: editingId, fields: payload }),
+          })
+        : await fetch('/api/production/schedule-confirm', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+          })
+      const json = await res.json()
+      if (!json?.success) {
+        alert(`儲存失敗：${json?.error ?? '未知錯誤'}`)
+      } else {
+        resetForm()
+        await fetchRecords()
+        setTab('records')
+      }
+    } catch (e) {
+      alert(`儲存失敗：${e instanceof Error ? e.message : String(e)}`)
     }
     setSaving(false)
   }
@@ -154,12 +171,21 @@ export default function ScheduleInquiryPage() {
   // ─── Reply ────────────────────────────────────────────────────────────────
 
   const handleReply = async (id: number, reply: 'approved' | 'rejected' | 'completed' | null) => {
-    const { error } = await supabase
-      .from('schedule_inquiries')
-      .update({ planner_reply: reply, updated_at: new Date().toISOString() })
-      .eq('id', id)
-    if (error) alert(`更新失敗：${error.message}`)
-    else await fetchRecords()
+    try {
+      const res = await fetch('/api/production/schedule-confirm', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          id,
+          fields: { planner_reply: reply, updated_at: new Date().toISOString() },
+        }),
+      })
+      const json = await res.json()
+      if (!json?.success) alert(`更新失敗：${json?.error ?? '未知錯誤'}`)
+      else await fetchRecords()
+    } catch (e) {
+      alert(`更新失敗：${e instanceof Error ? e.message : String(e)}`)
+    }
   }
 
   // ─── Delete ───────────────────────────────────────────────────────────────
@@ -167,9 +193,14 @@ export default function ScheduleInquiryPage() {
   const handleDelete = async (id: number) => {
     if (!confirm('確定要刪除此筆紀錄？此操作無法復原。')) return
     setDeletingId(id)
-    const { error } = await supabase.from('schedule_inquiries').delete().eq('id', id)
-    if (error) alert(`刪除失敗：${error.message}`)
-    else await fetchRecords()
+    try {
+      const res = await fetch(`/api/production/schedule-confirm?id=${id}`, { method: 'DELETE' })
+      const json = await res.json()
+      if (!json?.success) alert(`刪除失敗：${json?.error ?? '未知錯誤'}`)
+      else await fetchRecords()
+    } catch (e) {
+      alert(`刪除失敗：${e instanceof Error ? e.message : String(e)}`)
+    }
     setDeletingId(null)
   }
 
@@ -208,13 +239,21 @@ export default function ScheduleInquiryPage() {
     const name = spNewName.trim()
     if (!name) return
     setSpAdding(true)
-    const { error } = await supabase.from('schedule_inquiry_salespersons').insert({ name })
-    if (error) {
-      const msg = typeof error === 'object' && 'message' in error ? String((error as { message: unknown }).message) : JSON.stringify(error)
-      alert(`新增失敗：${msg}`)
-    } else {
-      setSpNewName('')
-      await fetchSalespersons()
+    try {
+      const res = await fetch('/api/production/schedule-confirm/salespersons', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name }),
+      })
+      const json = await res.json()
+      if (!json?.success) {
+        alert(`新增失敗：${json?.error ?? '未知錯誤'}`)
+      } else {
+        setSpNewName('')
+        await fetchSalespersons()
+      }
+    } catch (e) {
+      alert(`新增失敗：${e instanceof Error ? e.message : String(e)}`)
     }
     setSpAdding(false)
   }
@@ -222,9 +261,16 @@ export default function ScheduleInquiryPage() {
   const handleDeleteSalesperson = async (name: string) => {
     if (!confirm(`確定刪除業務「${name}」？`)) return
     setSpDeleting(name)
-    const { error } = await supabase.from('schedule_inquiry_salespersons').delete().eq('name', name)
-    if (error) alert(`刪除失敗：${error.message}`)
-    else await fetchSalespersons()
+    try {
+      const res = await fetch(`/api/production/schedule-confirm/salespersons?name=${encodeURIComponent(name)}`, {
+        method: 'DELETE',
+      })
+      const json = await res.json()
+      if (!json?.success) alert(`刪除失敗：${json?.error ?? '未知錯誤'}`)
+      else await fetchSalespersons()
+    } catch (e) {
+      alert(`刪除失敗：${e instanceof Error ? e.message : String(e)}`)
+    }
     setSpDeleting(null)
   }
 
@@ -291,6 +337,11 @@ export default function ScheduleInquiryPage() {
                     <span className="text-sm text-slate-300">
                       詢問日：<span className="text-white">{rec.inquiry_date ?? '—'}</span>
                     </span>
+                    {rec.customer_name && (
+                      <span className="text-sm text-slate-300">
+                        客戶：<span className="text-white font-semibold">{rec.customer_name}</span>
+                      </span>
+                    )}
                     {rec.salesperson && (
                       <span className="text-sm text-slate-400">
                         業務：<span className="text-sky-400">{rec.salesperson}</span>
@@ -411,6 +462,20 @@ export default function ScheduleInquiryPage() {
           onClick={() => { resetForm(); setTab('records') }}
           className="text-slate-500 hover:text-white text-sm transition-colors"
         >← 返回列表</button>
+      </div>
+
+      {/* 客戶名稱 */}
+      <div className="grid grid-cols-1 gap-4">
+        <div>
+          <label className="block text-sm text-slate-400 mb-1">客戶名稱</label>
+          <input
+            type="text"
+            value={form.customer_name}
+            onChange={e => setForm(f => ({ ...f, customer_name: e.target.value }))}
+            placeholder="請輸入客戶名稱"
+            className="w-full bg-slate-800 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:ring-1 focus:ring-orange-500 placeholder-slate-600"
+          />
+        </div>
       </div>
 
       {/* 詢問日期 + 業務 + 訂單編號 */}

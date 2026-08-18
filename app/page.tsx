@@ -37,13 +37,6 @@ type MemberDataType = {
 };
 
 
-function normalizeLegacyPermissions(perms: string[]): string[] {
-  // 權限轉換邏輯：null/undefined 預設空陣列
-  if (!Array.isArray(perms)) return [];
-  // 範例：去除重複、過濾空字串
-  return Array.from(new Set(perms.filter(p => typeof p === 'string' && p.trim() !== '')));
-}
-
 export default function HomePage() {
   const router = useRouter();
   const [currentUser, setCurrentUser] = useState<MemberDataType | null>(null);
@@ -68,60 +61,35 @@ export default function HomePage() {
 
   useEffect(() => {
     const fetchCurrentUser = async () => {
-      const { data: authData } = await supabase.auth.getUser();
-      const authUserId = authData.user?.id || '';
-      const email = authData.user?.email || localStorage.getItem('bardshop_user_email') || '';
-      if (!email) {
-        setMemberPermissions([]);
-        setCurrentUser({
-          real_name: '-',
-          department: '-',
-          email: '',
-          permissions: [],
-          is_admin: false,
-        });
-        return;
-      }
+      // SEC 修復：改用後端 /api/auth/me（guardAuth 驗 token、以 service role 查 DB）取得
+      // 自己的權限，不再用 anon key 直讀 members（那條路一旦 members 開 RLS 就會讀到空、
+      // 把整個首頁權限鎖死，且原本等於讓匿名可讀整張員工表含明文密碼）。
+      const email = localStorage.getItem('bardshop_user_email') || '';
+      try {
+        const res = await fetch('/api/auth/me', { cache: 'no-store' });
+        if (res.ok) {
+          const me = await res.json() as {
+            email?: string; real_name?: string | null; is_admin?: boolean;
+            role?: string; permissions?: string[];
+          };
+          const normalizedPermissions = Array.isArray(me.permissions) ? me.permissions : [];
+          setMemberPermissions(normalizedPermissions);
+          setCurrentUser({
+            real_name: me.real_name || '-',
+            department: '-',
+            email: me.email || email,
+            permissions: normalizedPermissions,
+            is_admin: !!me.is_admin,
+          });
 
-      let memberData: MemberDataType | null = null;
-
-      if (authUserId) {
-        const { data } = await supabase
-          .from('members')
-          .select('real_name, department, email, permissions, is_admin')
-          .eq('auth_user_id', authUserId)
-          .maybeSingle();
-        memberData = data;
-      }
-
-      if (!memberData) {
-        const { data } = await supabase
-          .from('members')
-          .select('real_name, department, email, permissions, is_admin')
-          .eq('email', email)
-          .maybeSingle();
-        memberData = data;
-      }
-
-      if (memberData) {
-        const normalizedPermissions = Boolean(memberData.is_admin)
-          ? ['dashboard', 'notice', 'estimation', 'tasks', 'qa_report', 'qa', 'production_admin', 'system_settings']
-          : normalizeLegacyPermissions(memberData.permissions ?? []);
-        setMemberPermissions(normalizedPermissions);
-        setCurrentUser({
-          real_name: memberData.real_name || '-',
-          department: memberData.department || '-',
-          email: memberData.email || email,
-          permissions: normalizedPermissions,
-          is_admin: !!memberData.is_admin,
-        });
-
-        // 同步更新 cookie，確保 middleware 使用最新權限
-        const isAdminRole = Boolean(memberData.is_admin) || normalizedPermissions.includes('production_admin');
-        const role = isAdminRole ? 'admin' : 'ops';
-        document.cookie = `bardshop-role=${role}; path=/; max-age=86400; SameSite=Lax;`;
-        document.cookie = `bardshop-permissions=${encodeURIComponent(normalizedPermissions.join(','))}; path=/; max-age=86400; SameSite=Lax;`;
-        return;
+          // 同步更新 cookie，確保 middleware 使用最新權限
+          const role = me.role || (me.is_admin || normalizedPermissions.includes('production_admin') ? 'admin' : 'ops');
+          document.cookie = `bardshop-role=${role}; path=/; max-age=86400; SameSite=Lax;`;
+          document.cookie = `bardshop-permissions=${encodeURIComponent(normalizedPermissions.join(','))}; path=/; max-age=86400; SameSite=Lax;`;
+          return;
+        }
+      } catch {
+        // 靜默 fallback 到未登入狀態
       }
       setMemberPermissions([]);
       setCurrentUser({
@@ -964,14 +932,17 @@ export default function HomePage() {
                 <span className="px-3 py-1 rounded border border-slate-600 text-slate-500 text-xs font-mono bg-slate-800">🔧 維修中</span>
               </div>
 
-              {/* 維修中 — 產期詢問/預留 */}
-              <div className="bg-slate-800/40 border border-slate-700 rounded-xl p-5 flex items-center gap-4 opacity-50 cursor-not-allowed select-none">
-                <div className="text-3xl grayscale">📅</div>
+              {/* 產期詢問/預留 */}
+              <div
+                className="bg-amber-500/10 border border-amber-400 rounded-xl p-5 cursor-pointer hover:bg-amber-500/20 transition-all flex items-center gap-4"
+                onClick={() => { setShowInfoModal(false); router.push('/info-board/schedule'); }}
+              >
+                <div className="text-3xl">📅</div>
                 <div className="flex-1">
-                  <div className="text-slate-400 font-bold text-lg mb-1">產期詢問/預留</div>
-                  <div className="text-xs text-slate-500">產期詢問登記及預留產程</div>
+                  <div className="text-amber-300 font-bold text-lg mb-1">產期詢問/預留</div>
+                  <div className="text-xs text-slate-300">產期詢問登記及預留產程</div>
                 </div>
-                <span className="px-3 py-1 rounded border border-slate-600 text-slate-500 text-xs font-mono bg-slate-800">🔧 維修中</span>
+                <span className="px-3 py-1 rounded border border-amber-500 text-amber-300 text-xs font-mono bg-amber-900/30">前往 →</span>
               </div>
 
               {/* 維修中 — 常平訂單 */}

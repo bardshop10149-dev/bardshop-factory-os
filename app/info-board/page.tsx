@@ -332,20 +332,15 @@ function InfoBoardContent() {
     if (fileInputRef.current) fileInputRef.current.value = ''
   }
 
-  // 取得當前使用者
+  // 取得當前使用者（SEC 修復：改走 /api/auth/me，不再 anon 直讀 members）
   useEffect(() => {
     const fetchUser = async () => {
-      const { data: authData } = await supabase.auth.getUser()
-      const email = authData.user?.email || ''
-      if (!email) return
-      const { data } = await supabase
-        .from('members')
-        .select('real_name, department, email')
-        .eq('email', email)
-        .maybeSingle()
-      if (data) {
-        setCurrentUser({ real_name: data.real_name || '-', department: data.department || '-', email: data.email || email })
-      }
+      try {
+        const res = await fetch('/api/auth/me', { cache: 'no-store' })
+        if (!res.ok) return
+        const me = await res.json() as { real_name?: string | null; department?: string | null; email?: string }
+        setCurrentUser({ real_name: me.real_name || '-', department: me.department || '-', email: me.email || '' })
+      } catch { /* 靜默 */ }
     }
     fetchUser()
   }, [])

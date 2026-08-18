@@ -162,7 +162,6 @@ export default function ProcessGenPage() {
   const [noRouteCodes, setNoRouteCodes]           = useState<Record<string, string>>({})  // key = rowKey()
   const [noRouteApplying, setNoRouteApplying]     = useState<Record<string, boolean>>({})
   const [noRouteApplyWarns, setNoRouteApplyWarns] = useState<Record<string, string>>({})
-  const [noRouteModes, setNoRouteModes]           = useState<Record<string, 'item' | 'route'>>({})  // 'item'=品號, 'route'=途程名稱
   const [selectedReroute, setSelectedReroute]     = useState<Record<string, boolean>>({})   // key = order|item
 
   // Single lookup state
@@ -351,7 +350,6 @@ export default function ProcessGenPage() {
     setNoRouteCodes({})
     setNoRouteApplying({})
     setNoRouteApplyWarns({})
-    setNoRouteModes({})
     setSelectedReroute({})
     const warns: string[] = []
     const confirms: string[] = []
@@ -608,25 +606,15 @@ export default function ProcessGenPage() {
 
   // ── 套用臨時途程至単一無途程訂單 ─────────────────────────────────────
 
-  const handleApplyTempRoute = useCallback(async (row: InputRow, override?: { mode: 'item' | 'route'; code: string }) => {
+  const handleApplyTempRoute = useCallback(async (row: InputRow, override?: { code: string }) => {
     const key  = rowKey(row)
-    const raw  = override ? override.code : (noRouteCodes[key] ?? '').trim()
-    const mode = override ? override.mode : (noRouteModes[key] ?? 'item')
-    const code = mode === 'item' ? raw.toUpperCase() : raw
+    const code = override ? override.code : (noRouteCodes[key] ?? '').trim()
     if (!code) return
     setNoRouteApplying(prev => ({ ...prev, [key]: true }))
     setNoRouteApplyWarns(prev => ({ ...prev, [key]: '' }))
     const today = fmtToday()
     try {
-      let routeId: string
-      if (mode === 'route') {
-        routeId = code   // 直接指定途程名稱（route_id）
-      } else {
-        const { data: irData, error: irErr } = await supabase
-          .from('item_routes').select('route_id').eq('item_code', code).limit(1).single()
-        if (irErr || !irData) throw new Error(`找不到品號 ${code} 的途程`)
-        routeId = (irData as { route_id: string }).route_id
-      }
+      const routeId: string = code   // 直接指定途程名稱（route_id）
 
       type SOp = { sequence: number; op_name: string }
       const { data: roData } = await supabase
@@ -692,7 +680,7 @@ export default function ProcessGenPage() {
     } finally {
       setNoRouteApplying(prev => ({ ...prev, [key]: false }))
     }
-  }, [noRouteCodes, noRouteModes, noRouteRows])
+  }, [noRouteCodes, noRouteRows])
 
   // ── 下載 SARA CSV ─────────────────────────────────────────────
 
@@ -1063,29 +1051,14 @@ export default function ProcessGenPage() {
                           <td className="px-2 py-1.5 text-right font-mono text-white whitespace-nowrap">{r.quantity}</td>
                           <td className="px-2 py-1.5">
                             <div className="space-y-1">
-                              {/* 模式切換 */}
-                              <div className="flex gap-1">
-                                {(['item', 'route'] as const).map(m => (
-                                  <button key={m}
-                                    onClick={() => setNoRouteModes(prev => ({ ...prev, [key]: m }))}
-                                    className={`px-1.5 py-0.5 rounded text-[9px] font-medium transition-colors ${
-                                      (noRouteModes[key] ?? 'item') === m
-                                        ? m === 'item' ? 'bg-emerald-800 text-emerald-200' : 'bg-cyan-800 text-cyan-200'
-                                        : 'bg-slate-700 text-slate-500 hover:text-slate-300'
-                                    }`}
-                                  >
-                                    {m === 'item' ? '品號' : '途程名稱'}
-                                  </button>
-                                ))}
-                              </div>
-                              {/* 輸入框 + 按鈕 */}
+                              {/* 輸入框 + 按鈕（只保留輸入途程名稱） */}
                               <div className="flex items-center gap-1.5 flex-wrap">
                                 <input
                                   type="text"
                                   value={code}
                                   onChange={e => setNoRouteCodes(prev => ({ ...prev, [key]: e.target.value }))}
                                   onKeyDown={e => e.key === 'Enter' && void handleApplyTempRoute(r)}
-                                  placeholder={(noRouteModes[key] ?? 'item') === 'item' ? '已有途程的料號…' : '途程名稱，如：常平一般壓克力製程'}
+                                  placeholder="途程名稱，如：常平一般壓克力製程"
                                   className="w-52 px-2 py-1 rounded bg-slate-800 border border-slate-700 text-slate-100 text-xs focus:outline-none focus:border-emerald-500 font-mono"
                                 />
                                 <button
@@ -1097,12 +1070,21 @@ export default function ProcessGenPage() {
                                 </button>
                                 {/* 常平一般壓克力製程 快捷鈕 */}
                                 <button
-                                  onClick={() => void handleApplyTempRoute(r, { mode: 'route', code: '常平一般壓克力製程' })}
+                                  onClick={() => void handleApplyTempRoute(r, { code: '常平一般壓克力製程' })}
                                   disabled={applying}
                                   title="套用「常平一般壓克力製程」途程"
                                   className="px-2 py-1 rounded bg-orange-700 hover:bg-orange-600 disabled:opacity-40 text-white text-[10px] font-semibold transition-colors whitespace-nowrap"
                                 >
                                   常平
+                                </button>
+                                {/* 仿柯(四川) 快捷鈕 */}
+                                <button
+                                  onClick={() => void handleApplyTempRoute(r, { code: '2mm+1mm壓克力貼合/V90單面印刷' })}
+                                  disabled={applying}
+                                  title="套用「2mm+1mm壓克力貼合/V90單面印刷」途程"
+                                  className="px-2 py-1 rounded bg-purple-700 hover:bg-purple-600 disabled:opacity-40 text-white text-[10px] font-semibold transition-colors whitespace-nowrap"
+                                >
+                                  仿柯(四川)
                                 </button>
                                 {warn && <span className="text-red-400 text-[10px]">{warn}</span>}
                               </div>

@@ -41,7 +41,7 @@ interface SourceRow {
 interface SoMatchResult {
   line_no: string | null
   pdl_seq: number | null
-  status: 'matched' | 'no_order' | 'no_qty_match'
+  status: 'matched' | 'no_order' | 'no_qty_match' | 'insufficient_candidates'
   reason: string
 }
 
@@ -522,7 +522,13 @@ export default function FactoryOrderExportPage({
           return { line_no: null, pdl_seq: null, status: 'no_qty_match' as const, reason: '有比對到對應的來源單號但無對應數量' }
         }
         const used = usageCounter.get(key) ?? 0
-        const candidate = candidates[Math.min(used, candidates.length - 1)]
+        if (used >= candidates.length) {
+          // 來源列數超過 ARGO 實際候選行數，不可再重複沿用最後一個候選（會產生重複單號）
+          // 明確標記為需人工確認，而非靜默夾住
+          usageCounter.set(key, used + 1)
+          return { line_no: null, pdl_seq: null, status: 'insufficient_candidates' as const, reason: '候選序號不足，需要人工確認（來源需求列數多於 ARGO 對應行數）' }
+        }
+        const candidate = candidates[used]
         usageCounter.set(key, used + 1)
         return { line_no: candidate.line_no, pdl_seq: candidate.pdl_seq, status: 'matched' as const, reason: '' }
       })
@@ -1121,7 +1127,9 @@ export default function FactoryOrderExportPage({
                               className={`inline-block text-xs px-1.5 py-0.5 rounded border font-medium cursor-help ${soMatchResults[idx].status === 'no_order' ? 'bg-red-900/40 text-red-300 border-red-700/40' : 'bg-amber-900/40 text-amber-300 border-amber-700/40'}`}
                               title={soMatchResults[idx].reason}
                             >
-                              {soMatchResults[idx].status === 'no_order' ? '✗ 無單號' : '⚠ 無數量'}
+                              {soMatchResults[idx].status === 'no_order' ? '✗ 無單號'
+                                : soMatchResults[idx].status === 'insufficient_candidates' ? '⚠ 序號不足'
+                                : '⚠ 無數量'}
                             </span>
                           )
                         ) : <span className="text-slate-700 text-xs">—</span>}

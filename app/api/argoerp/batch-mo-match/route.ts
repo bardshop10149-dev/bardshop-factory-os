@@ -1,11 +1,27 @@
-import { NextResponse } from 'next/server'
+import { NextRequest, NextResponse } from 'next/server'
 import { getSupabaseAdminClient } from '@/lib/supabaseAdmin'
+import { guardPermission } from '@/lib/requireAuth'
 
 export const dynamic = 'force-dynamic'
 export const maxDuration = 60
 
 // Server-side batch MO matching for the last N days of daily_order_sheets.
-// Called internally by /api/webhook/sync (action: run_mo_match).
+//
+// 授權（SEC 修復 V4）：這支端點第一行就用 service-role client 讀寫 daily_order_sheets，
+// 原本完全沒有守衛，任何外部人都能 POST 觸發（未授權昂貴多表運算 = DoS/成本；
+// 且可能把「這次沒同步到的列」誤判成「ARGO 已刪」而把活的 mo_number/批備料狀態洗成 null）。
+// 現在要求二擇一：
+//   (a) 內部 webhook 呼叫：帶正確的 X-Internal-Secret（= WEBHOOK_SECRET，同 /api/argoerp 慣例）；或
+//   (b) 管理端直接呼叫：具 production_admin 權限的已登入使用者。
+async function authorize(request: NextRequest): Promise<{ ok: true } | { ok: false; res: NextResponse }> {
+  const internalSecret = request.headers.get('X-Internal-Secret') ?? ''
+  const webhookSecret = process.env.WEBHOOK_SECRET ?? ''
+  if (webhookSecret && internalSecret === webhookSecret) return { ok: true }
+
+  const guard = await guardPermission('production_admin')
+  if (!guard.ok) return { ok: false, res: guard.res }
+  return { ok: true }
+}
 
 interface SheetRow {
   order_number: string
@@ -27,7 +43,10 @@ interface DailySheet {
   rows: SheetRow[]
 }
 
-export async function POST() {
+export async function POST(request: NextRequest) {
+  const auth = await authorize(request)
+  if (!auth.ok) return auth.res
+
   const supabase = getSupabaseAdminClient()
 
   // 取得最近 14 天有資料的出單表
@@ -60,15 +79,17 @@ export async function POST() {
   return NextResponse.json({ success: true, results })
 }
 
-// 清除製令號欄位時，保留使用者主動設定的備料狀態（無需備料/已備料）；僅清除衍生自 ARGO ERP 的 已批備料 狀態
+// 清除製令號欄位時，只保留使用者純手動設定、與 MO 無關的「無需備料」；
+// 「已備料」／「已批備料」都是衍生自 ARGO 批備料動作（一律綁著 argo_slip_no），
+// MO 本身已判定無效時這兩者連同 argo_slip_no 一併清除，避免留下對不上目前序號的孤兒單據號碼。
 function clearMoFields(r: SheetRow): SheetRow {
+  const keepPrep = r.material_prep_status === '無需備料'
   return {
     ...r,
     mo_number: undefined,
     mo_status: null,
-    material_prep_status:
-      r.material_prep_status === '無需備料' || r.material_prep_status === '已備料'
-        ? r.material_prep_status : null,
+    material_prep_status: keepPrep ? r.material_prep_status : null,
+    argo_slip_no: keepPrep ? r.argo_slip_no : null,
   }
 }
 

@@ -195,6 +195,16 @@ function buildPoSection(
                 spacing: { before: 40, after: 40 },
                 indent: { left: 80, right: 80 },
               }),
+              // 委外請購單：若這筆同時已經比對到採購單號，一併列出（不取代請購單號，兩者並列）
+              ...(isPr && mo.po_number ? [
+                new Paragraph({
+                  children: [
+                    t('採購單號  ', { size: 16, color: '555555' }),
+                    t(mo.po_number, { bold: true, size: 22 }),
+                  ],
+                  spacing: { before: 0, after: 40 },
+                }),
+              ] : []),
               new Paragraph({
                 children: [
                   t('□ 急件單   ', { size: 20, bold: true }),

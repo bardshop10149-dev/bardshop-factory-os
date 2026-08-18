@@ -830,7 +830,28 @@ export default function MaterialPrepPage() {
         return [baseRow, ...extraRows]
       }
 
-      return matchedBom.map((bom): MaterialPrepRow => {
+      // 依 material_code 去重：ERP 端 mm_bom_structure 同一 (parent_part, child_part)
+      // 在同一最低 bom_ver 下常見重複列。row_key 是以 mo_number::productCode::material_code
+      // 組成，若不去重，重複列會產生兩筆 row_key 完全相同的備料列，使用者只勾一次、
+      // 下方 selectedImportRows 卻會用 Set.has(row_key) 把兩筆都選中送出，
+      // 造成該料號核發量加倍。
+      // 判斷依據：若重複列的用量（quantity）相同，視為 ERP 端純重複紀錄，只保留第一筆；
+      // 若用量不同，視為個別用量列（語意上應加總才是正確需求量），加總後合併為一筆。
+      const bomByMaterial = new Map<string, BomRow[]>()
+      matchedBom.forEach(bom => {
+        const list = bomByMaterial.get(bom.material_code)
+        if (list) list.push(bom)
+        else bomByMaterial.set(bom.material_code, [bom])
+      })
+      const dedupedBom: BomRow[] = Array.from(bomByMaterial.values()).map(list => {
+        if (list.length === 1) return list[0]
+        const allSameQty = list.every(b => b.quantity === list[0].quantity)
+        return allSameQty
+          ? list[0]
+          : { ...list[0], quantity: list.reduce((sum, b) => sum + (b.quantity ?? 0), 0) }
+      })
+
+      return dedupedBom.map((bom): MaterialPrepRow => {
         const rowKey = `${mo.mo_number}::${productCode}::${bom.material_code}`
         // 盤數優先前綴（可在設定中調整），其他原料優先使用數量
         const matUpper = (bom.material_code ?? '').toUpperCase()
@@ -1216,11 +1237,56 @@ export default function MaterialPrepPage() {
     setMaterialPrepImporting(true)
     setMaterialPrepMessage('')
 
+    // ── 原子鎖定（CAS）：在真正送出 ARGO 之前，先嘗試把 prep_status 從
+    // 「未備料」條件式更新為「已備料」。這一步本身就是鎖——只有第一個
+    // 成功搶到鎖的請求才會把對應 MO 送去 ARGO；其餘因為條件式更新影響不到
+    // 任何列而落入 skipped_mo_numbers，直接整批跳過、不送 ARGO。
+    // 這樣「檢查狀態→標記已備料→送出 ARGO」之間不再有競態窗口（而不是只把
+    // 上面的預飛檢查往後挪一點）。若之後送 ARGO 失敗，會在下方 catch 內把
+    // 成功鎖定但實際未送出成功的 MO 復原回「未備料」。
+    let lockedMos: string[] = importMos
+    try {
+      const lockRes = await fetch('/api/argoerp/mo-summary', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mo_numbers: importMos, prep_status: '已備料', expected_prep_status: '未備料' }),
+      })
+      const lockJson = await lockRes.json()
+      if (!lockRes.ok || !lockJson?.success) {
+        throw new Error(lockJson?.error || `HTTP ${lockRes.status}`)
+      }
+      lockedMos = Array.isArray(lockJson.updated_mo_numbers) ? lockJson.updated_mo_numbers : importMos
+      const skippedMos: string[] = Array.isArray(lockJson.skipped_mo_numbers) ? lockJson.skipped_mo_numbers : []
+
+      if (skippedMos.length > 0) {
+        window.alert(
+          `⚠️ 以下 ${skippedMos.length} 筆製令已被其他人搶先標記為「已備料」，本次不會重複送出 ARGO：\n\n${skippedMos.join('\n')}`
+        )
+      }
+      if (lockedMos.length === 0) {
+        setMaterialPrepMessage('❌ 選取的製令皆已被其他人搶先標記為已備料，本次未送出任何資料')
+        setMaterialPrepMsgExpanded(false)
+        setMaterialPrepImporting(false)
+        importInFlightRef.current = false
+        return
+      }
+    } catch (lockError) {
+      const msg = lockError instanceof Error ? lockError.message : String(lockError)
+      setMaterialPrepMessage(`❌ 鎖定製令狀態失敗，為避免 ARGO 重複備料已中止送出：${msg}`)
+      setMaterialPrepMsgExpanded(false)
+      setMaterialPrepImporting(false)
+      importInFlightRef.current = false
+      return
+    }
+
+    // 只用實際鎖定成功的 MO 對應的料號行送 ARGO（被搶先的 MO 已在上面排除）
+    const lockedImportRows = selectedImportRows.filter(row => lockedMos.includes(row.mo_number))
+
     // 組 ARGO IV_NOTICE_PREPARE_INTERFACE 格式
     const today = new Date()
     const slipDate = `${today.getFullYear()}/${String(today.getMonth() + 1).padStart(2, '0')}/${String(today.getDate()).padStart(2, '0')}`
-    const moGroups = new Map<string, typeof selectedImportRows>()
-    for (const row of selectedImportRows) {
+    const moGroups = new Map<string, typeof lockedImportRows>()
+    for (const row of lockedImportRows) {
       if (!moGroups.has(row.mo_number)) moGroups.set(row.mo_number, [])
       moGroups.get(row.mo_number)!.push(row)
     }
@@ -1269,16 +1335,8 @@ export default function MaterialPrepPage() {
       const isSuccess = response.ok && result?.success === true
       if (!isSuccess) throw new Error(errorMessage || '生產批備料匯入失敗')
 
-      // 更新狀態為「已備料」
-      const patchRes = await fetch('/api/argoerp/mo-summary', {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ mo_numbers: importMos, prep_status: '已備料' }),
-      })
-      const patchJson = await patchRes.json()
-      if (!patchRes.ok || !patchJson?.success) {
-        throw new Error(`ARGO 已匯入成功但更新狀態失敗：${patchJson?.error || `HTTP ${patchRes.status}`}\n請手動將以下製令標為已備料：${importMos.join(', ')}`)
-      }
+      // 注意：prep_status 已在送出 ARGO 之前透過上方的 CAS 鎖定改為「已備料」，
+      // 這裡不需要再 PATCH 一次。若送 ARGO 失敗，復原邏輯在下方 catch 內處理。
 
       const argoRaw = result?.rawText ? `\nARGO 回應：${result.rawText}` : ''
 
@@ -1295,7 +1353,7 @@ export default function MaterialPrepPage() {
         if (!slipNo) continue
         // 找出哪個 MO 對應這個 SLIP_NO
         // 我們送出時 SLIP_NO = moNumber，但 ARGO 可能回傳不同值
-        const matchedMo = importMos.find(mo => mo === slipNo) ?? slipNo
+        const matchedMo = lockedMos.find(mo => mo === slipNo) ?? slipNo
         if (!moToArgoSlipNo[matchedMo]) {
           moToArgoSlipNo[matchedMo] = slipNo
         } else if (!moToArgoSlipNo[matchedMo].includes(slipNo)) {
@@ -1304,13 +1362,13 @@ export default function MaterialPrepPage() {
         void lineNo // 保留供未來 debug 用
       }
 
-      setMaterialPrepMessage(`✅ 已送出 ${selectedImportRows.length} 筆到 ARGO，並將 ${importMos.length} 筆製令標記為「已備料」${argoRaw}`)
+      setMaterialPrepMessage(`✅ 已送出 ${lockedImportRows.length} 筆到 ARGO，並將 ${lockedMos.length} 筆製令標記為「已備料」${argoRaw}`)
       setMaterialPrepMsgExpanded(false)
 
       // 清除已完成製令的 noNeedRowKeys（避免殘留影響下次）
       setNoNeedRowKeys(prev => {
         const next = new Set(prev)
-        materialPrepRows.filter(r => importMos.includes(r.mo_number)).forEach(r => next.delete(r.row_key))
+        materialPrepRows.filter(r => lockedMos.includes(r.mo_number)).forEach(r => next.delete(r.row_key))
         return next
       })
 
@@ -1319,13 +1377,13 @@ export default function MaterialPrepPage() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          rows: importMos.map(mo => ({
+          rows: lockedMos.map(mo => ({
             mo_number:    mo,
             factory:      moRecords.find(r => r.mo_number === mo)?.factory      ?? '',
             product_code: moRecords.find(r => r.mo_number === mo)?.product_code ?? '',
             planned_qty:  moRecords.find(r => r.mo_number === mo)?.planned_qty  ?? '',
             status:       '已備料',
-            lines_count:  selectedImportRows.filter(r => r.mo_number === mo).length,
+            lines_count:  lockedImportRows.filter(r => r.mo_number === mo).length,
             interface_id: materialPrepInterfaceId.trim(),
             argo_slip_no: moToArgoSlipNo[mo] ?? null,
           })),
@@ -1335,7 +1393,7 @@ export default function MaterialPrepPage() {
       // 即時更新概覽的批備料單號 map（不等待 loadSheet 重整）
       setMoSlipNoMap(prev => {
         const next = { ...prev }
-        for (const mo of importMos) {
+        for (const mo of lockedMos) {
           if (moToArgoSlipNo[mo]) next[mo] = moToArgoSlipNo[mo]
         }
         return next
@@ -1343,7 +1401,7 @@ export default function MaterialPrepPage() {
 
       // 更新出單表的批備料狀態 + ARGO 批備料單號
       const sheetUpdates = sheetRows
-        .filter(r => importMos.includes(r.mo_number ?? ''))
+        .filter(r => lockedMos.includes(r.mo_number ?? ''))
         .map(r => ({
           row_key: r.row_key,
           material_prep_status: '已備料' as const,
@@ -1362,6 +1420,23 @@ export default function MaterialPrepPage() {
       const message = error instanceof Error ? error.message : '生產批備料匯入失敗'
       setMaterialPrepMessage(`❌ ${message}`)
       setMaterialPrepMsgExpanded(false)
+
+      // 送 ARGO 失敗：把先前已 CAS 鎖定為「已備料」但實際未成功送出 ARGO 的 MO
+      // 復原回「未備料」，避免卡在「已標記已備料、但 ARGO 從未真正收到」的不一致狀態。
+      if (lockedMos.length > 0) {
+        fetch('/api/argoerp/mo-summary', {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ mo_numbers: lockedMos, prep_status: '未備料' }),
+        })
+          .then(async res => {
+            const json = await res.json().catch(() => null)
+            if (!res.ok || !json?.success) {
+              console.warn('[批備料] 復原鎖定狀態失敗，需人工檢查並手動改回未備料：', lockedMos, json)
+            }
+          })
+          .catch(err => console.warn('[批備料] 復原鎖定狀態失敗，需人工檢查並手動改回未備料：', lockedMos, err))
+      }
     } finally {
       setMaterialPrepImporting(false)
       importInFlightRef.current = false

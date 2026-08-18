@@ -74,12 +74,13 @@ export async function POST(request: Request) {
       authUserId = createdUserData.user?.id ?? null
     }
 
+    // SEC 修復 V1：密碼只寫進 Supabase Auth（上面 createUser 已帶入），
+    // members 表不再存明文 password 欄位。
     const payloadBase = {
       real_name: body.real_name,
       nickname: body.nickname ?? '',
       department: body.department,
       email,
-      password,
       permissions: Array.isArray(body.permissions) ? body.permissions : [],
       status: body.status ?? 'Active',
       is_admin: Boolean(body.is_admin),
@@ -119,6 +120,105 @@ export async function POST(request: Request) {
     }
 
     return NextResponse.json({ ok: true, auth_user_id: authUserId })
+  } catch (error) {
+    const message = error instanceof Error ? error.message : '未知錯誤'
+    return NextResponse.json({ error: formatSupabaseAdminError(message) }, { status: 500 })
+  }
+}
+
+// ============================================================
+// GET：列出所有 members（供組織成員管理頁使用）
+// SEC 修復：取代前端 anon key 直讀 members；一律不回傳 password 欄位。
+// ============================================================
+export async function GET() {
+  const guard = await guardAdmin()
+  if (!guard.ok) return guard.res
+  try {
+    const supabaseAdmin = getSupabaseAdminClient()
+    const { data, error } = await supabaseAdmin
+      .from('members')
+      .select('id, auth_user_id, real_name, nickname, department, email, permissions, status, is_admin, is_pending_approval, last_login')
+      .order('is_admin', { ascending: false })
+      .order('id', { ascending: true })
+    if (error) {
+      return NextResponse.json({ error: formatSupabaseAdminError(error.message) }, { status: 500 })
+    }
+    return NextResponse.json({ ok: true, members: data ?? [] }, { headers: { 'Cache-Control': 'no-store' } })
+  } catch (error) {
+    const message = error instanceof Error ? error.message : '未知錯誤'
+    return NextResponse.json({ error: formatSupabaseAdminError(message) }, { status: 500 })
+  }
+}
+
+// ============================================================
+// PATCH：更新一筆 member（權限 / 角色 / 部門 / 狀態…）
+// SEC 修復 V2：取代前端 anon update members（提權漏洞根源——anon 原本可把自己 is_admin 改成 true）。
+// 欄位白名單，且刻意不接受 password（改密碼一律走 /api/admin/members/set-password）。
+// ============================================================
+export async function PATCH(request: Request) {
+  const guard = await guardAdmin()
+  if (!guard.ok) return guard.res
+  try {
+    const body = (await request.json()) as { id?: number; fields?: Record<string, unknown> }
+    const id = Number(body?.id)
+    const fields = body?.fields ?? {}
+    if (!id || Number.isNaN(id)) {
+      return NextResponse.json({ error: '缺少 member id' }, { status: 400 })
+    }
+
+    const ALLOWED = ['real_name', 'nickname', 'department', 'email', 'permissions', 'status', 'is_admin', 'is_pending_approval'] as const
+    const cleaned: Record<string, unknown> = {}
+    for (const k of ALLOWED) {
+      if (fields[k] !== undefined) cleaned[k] = fields[k]
+    }
+    if (Object.keys(cleaned).length === 0) {
+      return NextResponse.json({ error: '沒有可更新的欄位' }, { status: 400 })
+    }
+
+    const supabaseAdmin = getSupabaseAdminClient()
+    // 先嘗試含 is_pending_approval 的更新；若該欄位不存在則退回不含它
+    let { error } = await supabaseAdmin.from('members').update(cleaned).eq('id', id)
+    if (isMissingPendingColumnError(error)) {
+      const withoutPending = { ...cleaned }
+      delete withoutPending.is_pending_approval
+      ;({ error } = await supabaseAdmin.from('members').update(withoutPending).eq('id', id))
+    }
+    if (error) {
+      return NextResponse.json({ error: formatSupabaseAdminError(error.message) }, { status: 400 })
+    }
+    return NextResponse.json({ ok: true })
+  } catch (error) {
+    const message = error instanceof Error ? error.message : '未知錯誤'
+    return NextResponse.json({ error: formatSupabaseAdminError(message) }, { status: 500 })
+  }
+}
+
+// ============================================================
+// DELETE：刪除一筆 member（?id= 或 body { id }）
+// SEC 修復：取代前端 anon delete members。
+// ============================================================
+export async function DELETE(request: Request) {
+  const guard = await guardAdmin()
+  if (!guard.ok) return guard.res
+  try {
+    const url = new URL(request.url)
+    let idRaw = url.searchParams.get('id')
+    if (!idRaw) {
+      try {
+        const body = await request.json()
+        idRaw = body?.id != null ? String(body.id) : null
+      } catch { idRaw = null }
+    }
+    const id = idRaw ? Number(idRaw) : NaN
+    if (!id || Number.isNaN(id)) {
+      return NextResponse.json({ error: '缺少 member id' }, { status: 400 })
+    }
+    const supabaseAdmin = getSupabaseAdminClient()
+    const { error } = await supabaseAdmin.from('members').delete().eq('id', id)
+    if (error) {
+      return NextResponse.json({ error: formatSupabaseAdminError(error.message) }, { status: 400 })
+    }
+    return NextResponse.json({ ok: true })
   } catch (error) {
     const message = error instanceof Error ? error.message : '未知錯誤'
     return NextResponse.json({ error: formatSupabaseAdminError(message) }, { status: 500 })

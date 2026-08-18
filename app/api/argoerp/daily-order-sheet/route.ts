@@ -127,6 +127,23 @@ export async function POST(request: NextRequest) {
       .maybeSingle()
     const existingRows = Array.isArray(existing?.rows) ? (existing!.rows as Record<string, unknown>[]) : []
     const existingMap = new Map(existingRows.map(r => [r.row_key as string, r]))
+    // 次要索引：訂單號＋序號（B欄 line_no_input）是 ERP 層面真正穩定的身分——row_key 還
+    // 額外納入了品名/備註/數量/交期，這些欄位事後被修正時 row_key 會變，導致主鍵查無舊列，
+    // 使無需備料／MO／採購單等既有狀態被誤判成全新列而消失。同訂單同序號理論上只有一筆，
+    // 若真的重複則依序消耗候選。
+    const existingByOrderSeq = new Map<string, Record<string, unknown>[]>()
+    for (const r of existingRows) {
+      const orderNo = typeof r.order_number === 'string' ? r.order_number : ''
+      const seq = typeof r.line_no_input === 'string' && r.line_no_input
+        ? r.line_no_input
+        : (typeof r.match_line_no === 'string' ? r.match_line_no : '')
+      if (!orderNo || !seq) continue
+      const key = `${orderNo}|${seq}`
+      const arr = existingByOrderSeq.get(key) ?? []
+      arr.push(r)
+      existingByOrderSeq.set(key, arr)
+    }
+    const osConsumed = new Map<string, number>()
 
     // 若 incoming row 某個欄位為空但 DB 已有值，保留 DB 值
     // （避免當 daily-order-sheet 頁面是在外部 PATCH 發生前載入時，POST 覆蓋掉 PATCH 的結果）
@@ -137,9 +154,21 @@ export async function POST(request: NextRequest) {
       'po_number', 'po_sub_no', 'po_status', 'po_qty_erp', 'po_confirmed',
       'pr_number', 'pr_sub_no', 'pr_status',
       'match_status', 'match_line_no', 'match_pdl_seq', 'match_reason',
+      'machine',
     ] as const
     const mergedRows = (rows as Record<string, unknown>[]).map(row => {
-      const ex = existingMap.get(row.row_key as string)
+      let ex = existingMap.get(row.row_key as string)
+      const lineNoInput = typeof row.line_no_input === 'string' ? row.line_no_input : ''
+      const orderNo = typeof row.order_number === 'string' ? row.order_number : ''
+      if (!ex && lineNoInput && orderNo) {
+        const key = `${orderNo}|${lineNoInput}`
+        const candidates = existingByOrderSeq.get(key)
+        if (candidates && candidates.length > 0) {
+          const idx = osConsumed.get(key) ?? 0
+          ex = candidates[Math.min(idx, candidates.length - 1)]
+          osConsumed.set(key, idx + 1)
+        }
+      }
       if (!ex) return row
       const out = { ...row }
       for (const field of PRESERVE_IF_EMPTY) {
@@ -199,6 +228,8 @@ export async function PATCH(request: NextRequest) {
         argo_slip_no?: string | null
         po_number?: string | null
         po_status?: string | null
+        po_sub_no?: string | null
+        po_confirmed?: boolean
       }>
     }
     const { sheet_date, updates } = body
@@ -237,6 +268,8 @@ export async function PATCH(request: NextRequest) {
       if (upd.argo_slip_no !== undefined) merged.argo_slip_no = upd.argo_slip_no
       if (upd.po_number !== undefined) merged.po_number = upd.po_number
       if (upd.po_status !== undefined) merged.po_status = upd.po_status
+      if (upd.po_sub_no !== undefined) merged.po_sub_no = upd.po_sub_no
+      if (upd.po_confirmed !== undefined) merged.po_confirmed = upd.po_confirmed
       if ((upd as Record<string, unknown>).machine !== undefined) merged.machine = (upd as Record<string, unknown>).machine
       return merged
     })

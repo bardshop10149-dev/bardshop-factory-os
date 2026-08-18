@@ -141,21 +141,26 @@ export default function TaskBoardPage() {
       }
       setCurrentUser(myProfile)
 
-      const [deptRes, memberRes] = await Promise.all([
+      // SEC 修復：員工名冊改走後端 /api/members/roster（guardAuth，不含 password），
+      // 不再用 anon key 直讀 members。departments 仍走 anon（不在本次止血範圍）。
+      const [deptRes, memberJson] = await Promise.all([
         supabase.from('departments').select('*').order('id', { ascending: true }),
-        supabase.from('members').select('id, real_name, department, email, status, is_admin').eq('status', 'Active')
+        fetch('/api/members/roster', { cache: 'no-store' })
+          .then(r => r.json())
+          .catch(() => ({ members: [] })) as Promise<{ members?: Member[] }>,
       ])
+      const memberData = Array.isArray(memberJson.members) ? memberJson.members : null
 
       if (deptRes.data) {
         setDbDepartments(deptRes.data)
         if (deptRes.data.length > 0) setActiveUserSelectTab(deptRes.data[0].name)
       }
 
-      if (memberRes.data) {
-        setDbMembers(memberRes.data as Member[])
+      if (memberData) {
+        setDbMembers(memberData as Member[])
         
         const myEmailClean = storedEmail.trim().toLowerCase()
-        const matchedMember = memberRes.data.find(m => 
+        const matchedMember = memberData.find(m =>
           m.email?.trim().toLowerCase() === myEmailClean
         )
 

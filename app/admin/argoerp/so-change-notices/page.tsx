@@ -138,7 +138,7 @@ export default function SoChangeNoticesPage() {
     return (
       <div className="flex flex-col items-center justify-center min-h-[60vh] gap-4">
         <div className="text-6xl">🔒</div>
-        <h1 className="text-lg font-bold text-slate-300">改單提示</h1>
+        <h1 className="text-lg font-bold text-slate-300">改單檢測</h1>
         <p className="text-slate-500 text-sm">此頁面已鎖定，請輸入密碼解鎖</p>
         <div className="flex gap-2 mt-2">
           <input
@@ -173,7 +173,7 @@ export default function SoChangeNoticesPage() {
 
       {/* ── Header ── */}
       <div className="flex items-center gap-3 flex-wrap">
-        <h1 className="text-xl font-bold text-red-300">⚠️ 改單提示</h1>
+        <h1 className="text-xl font-bold text-red-300">⚠️ 改單檢測</h1>
         <span className="text-slate-500 text-sm">ERP 同步時偵測到的銷售訂單欄位變動，請逐筆確認</span>
         {unconfirmedCount > 0 && (
           <span className="px-2 py-0.5 rounded-full bg-red-500 text-white text-xs font-bold">

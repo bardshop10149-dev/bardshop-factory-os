@@ -3,15 +3,11 @@
 import Link from 'next/link'
 import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { supabase } from '../../lib/supabaseClient'
 
 interface Department {
   id: number
   name: string
 }
-
-const isMissingPendingColumnError = (error: { message?: string } | null | undefined) =>
-  Boolean(error?.message?.includes("is_pending_approval"))
 
 export default function ApplyAccountPage() {
   const router = useRouter()
@@ -28,13 +24,17 @@ export default function ApplyAccountPage() {
   })
 
   useEffect(() => {
+    // SEC 修復：部門清單改由後端公開端點提供，申請頁不再用 anon key 直讀 DB
     const fetchDepartments = async () => {
-      const { data } = await supabase.from('departments').select('id,name').order('id', { ascending: true })
-      const deptList = (data as Department[]) || []
-      setDepartments(deptList)
-      if (deptList.length > 0) {
-        setFormData(prev => ({ ...prev, department: deptList[0].name }))
-      }
+      try {
+        const res = await fetch('/api/apply-account', { cache: 'no-store' })
+        const j = await res.json() as { departments?: Department[] }
+        const deptList = j.departments ?? []
+        setDepartments(deptList)
+        if (deptList.length > 0) {
+          setFormData(prev => ({ ...prev, department: deptList[0].name }))
+        }
+      } catch { /* 靜默：下拉會顯示提示 */ }
     }
 
     void fetchDepartments()
@@ -45,44 +45,23 @@ export default function ApplyAccountPage() {
     setIsSubmitting(true)
     setMessage('')
 
-    const email = formData.email.trim().toLowerCase()
-    const realName = formData.real_name.trim()
-
     try {
-      const { data: existingMember } = await supabase
-        .from('members')
-        .select('id')
-        .eq('email', email)
-        .maybeSingle()
-
-      if (existingMember) {
-        throw new Error('此 Email 已被使用，請改用其他信箱。')
-      }
-
-      const payloadBase = {
-        real_name: realName,
-        nickname: formData.nickname.trim(),
-        department: formData.department,
-        email,
-        password: formData.password,
-        permissions: [],
-        status: 'PendingApproval',
-        is_admin: false,
-      }
-
-      const payloadWithPending = {
-        ...payloadBase,
-        is_pending_approval: true,
-      }
-
-      const { error } = await supabase.from('members').insert([payloadWithPending])
-      if (error) {
-        if (isMissingPendingColumnError(error)) {
-          const { error: retryError } = await supabase.from('members').insert([payloadBase])
-          if (retryError) throw retryError
-        } else {
-          throw error
-        }
+      // SEC 修復 V1：申請一律走後端 API，由伺服器建立 Supabase Auth 帳號（密碼只進 Auth，不存明文），
+      // 前端不再用 anon key 直接 insert members。
+      const res = await fetch('/api/apply-account', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          real_name: formData.real_name.trim(),
+          nickname: formData.nickname.trim(),
+          department: formData.department,
+          email: formData.email.trim().toLowerCase(),
+          password: formData.password,
+        }),
+      })
+      const j = await res.json().catch(() => ({})) as { ok?: boolean; error?: string }
+      if (!res.ok || !j.ok) {
+        throw new Error(j.error || '申請失敗，請稍後再試')
       }
 
       setMessage('申請已送出，請等待管理員指派權限後啟用。')

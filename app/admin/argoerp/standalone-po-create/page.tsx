@@ -298,6 +298,39 @@ export default function StandalonePoCreatePage() {
         const m = `✅ 採購單 ${pid} 已匯入 ERP（${payload.length} 筆明細）`
         setMsg(m); alert(m)
         setLineItems([])
+      } else if (res.ok && (result?.partialSuccess || result?.anySuccess)) {
+        // 部分成功：ARGO RESULT 陣列中每列的 CHECK_FLAG 對應送出時的 LINE_NO（= lineItems 索引+1）。
+        // 只把 CHECK_FLAG='N'（或 ARGO 未回報）的品項留在表單供修正重送；已成功(Y)的品項已在 ARGO
+        // 建立於採購單 pid，不可再被送出，否則會在 ARGO 產生重複明細。
+        const resultRows: Record<string, unknown>[] = Array.isArray(result?.apiResult?.RESULT)
+          ? result.apiResult.RESULT as Record<string, unknown>[]
+          : []
+        const lineStatus = new Map<string, { flag: string; error: string }>()
+        for (const r of resultRows) {
+          const parsed = parseInt(String(r.LINE_NO ?? ''), 10)
+          if (Number.isNaN(parsed)) continue
+          lineStatus.set(String(parsed), {
+            flag: String(r.CHECK_FLAG ?? '').toUpperCase(),
+            error: String(r.ERROR_CODE ?? r.ERROR ?? '').trim() || '未知錯誤',
+          })
+        }
+        const succeededLabels: string[] = []
+        const failedItems: LineItem[] = []
+        const failedDetails: string[] = []
+        lineItems.forEach((item, i) => {
+          const st = lineStatus.get(String(i + 1))
+          const label = `第${i + 1}列 ${item.item_code || '(無料號)'}`
+          if (st?.flag === 'Y') {
+            succeededLabels.push(label)
+          } else {
+            failedItems.push(item)
+            failedDetails.push(`${label}：${st?.error ?? 'ARGO 未回報此筆狀態'}`)
+          }
+        })
+        setLineItems(failedItems)
+        const m = `⚠️ 採購單 ${pid} 部分成功：✅ 已成功 ${succeededLabels.length} 筆（已在 ARGO 建立，請勿重複送出）／❌ 失敗 ${failedItems.length} 筆（已保留於表單，請修正後重送）`
+        setMsg(m)
+        alert(`${m}\n\n已成功品項（不可重送）：\n${succeededLabels.slice(0, 20).join('\n')}${succeededLabels.length > 20 ? `\n…（共 ${succeededLabels.length} 筆）` : ''}\n\n失敗品項（已保留於表單）：\n${failedDetails.slice(0, 20).join('\n')}${failedDetails.length > 20 ? `\n…（共 ${failedDetails.length} 筆）` : ''}`)
       } else {
         const raw = typeof result?.rawText === 'string'
           ? result.rawText.slice(0, 500)
@@ -310,7 +343,7 @@ export default function StandalonePoCreatePage() {
     } finally {
       setImporting(false); setTimeout(() => setMsg(''), 10000)
     }
-  }, [payload, header.tpn_partner_id])
+  }, [payload, header.tpn_partner_id, lineItems])
 
   // ─────────────────────────────────────────────────────────────────────────────
   // Render — 密碼鎖

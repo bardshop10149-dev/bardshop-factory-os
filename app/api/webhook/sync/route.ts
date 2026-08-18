@@ -34,11 +34,15 @@ export async function POST(request: NextRequest) {
 
   const baseUrl = process.env.NEXT_PUBLIC_BASE_URL ?? 'http://localhost:3000'
 
-  // run_mo_match 直接呼叫內部 batch API，不需要 bardshop-token
+  // run_mo_match 直接呼叫內部 batch API：帶 X-Internal-Secret 通過其授權檢查
+  // （batch-mo-match 已改為要求內部 secret 或 production_admin，不再對外全開）
   if (action === 'run_mo_match') {
     const res = await fetch(`${baseUrl}/api/argoerp/batch-mo-match`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Internal-Secret': expectedSecret,
+      },
     })
     const json = await res.json()
     return NextResponse.json(json, { status: res.status })

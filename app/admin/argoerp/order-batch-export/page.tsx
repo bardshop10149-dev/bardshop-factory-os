@@ -38,7 +38,7 @@ interface SourceRow {
   // 移除其他同品號列時不會互相影響）
   match_line_no?: string | null
   match_pdl_seq?: number | null
-  match_status?: 'matched' | 'no_order' | 'no_qty_match'
+  match_status?: 'matched' | 'no_order' | 'no_qty_match' | 'insufficient_candidates'
   match_reason?: string
 }
 
@@ -190,7 +190,7 @@ type ExportRow = Record<string, string>
 interface SoMatchResult {
   line_no: string | null
   pdl_seq: number | null
-  status: 'matched' | 'no_order' | 'no_qty_match'
+  status: 'matched' | 'no_order' | 'no_qty_match' | 'insufficient_candidates'
   reason: string
 }
 
@@ -700,14 +700,24 @@ export default function OrderBatchExportPage() {
         if (!src.order_number || !soProjectIds.has(src.order_number)) {
           return { line_no: null, pdl_seq: null, status: 'no_order' as const, reason: '無比對到對應的來源單號' }
         }
-        const qty = parseFloat(String(src.quantity).replace(/,/g, '')) || 0
+        const rawQty = String(src.quantity).replace(/,/g, '').trim()
+        if (!rawQty || Number.isNaN(parseFloat(rawQty))) {
+          return { line_no: null, pdl_seq: null, status: 'no_qty_match' as const, reason: '數量欄位無法判讀' }
+        }
+        const qty = parseFloat(rawQty)
         const key = `${src.order_number}|${src.item_code}|${qty}`
         const candidates = candidateMap.get(key) ?? []
         if (candidates.length === 0) {
           return { line_no: null, pdl_seq: null, status: 'no_qty_match' as const, reason: '有比對到對應的來源單號但無對應數量' }
         }
         const used = usageCounter.get(key) ?? 0
-        const candidate = candidates[Math.min(used, candidates.length - 1)]
+        if (used >= candidates.length) {
+          // 來源列數超過 ARGO 實際候選行數，不可再重複沿用最後一個候選（會產生重複單號）
+          // 明確標記為需人工確認，而非靜默夾住
+          usageCounter.set(key, used + 1)
+          return { line_no: null, pdl_seq: null, status: 'insufficient_candidates' as const, reason: '候選序號不足，需要人工確認（來源需求列數多於 ARGO 對應行數）' }
+        }
+        const candidate = candidates[used]
         usageCounter.set(key, used + 1)
         return { line_no: candidate.line_no, pdl_seq: candidate.pdl_seq, status: 'matched' as const, reason: '' }
       })
@@ -963,17 +973,29 @@ export default function OrderBatchExportPage() {
       for (const arr of candidateMap.values()) arr.sort((a, b) => (Number(a.line_no) || 0) - (Number(b.line_no) || 0))
       const usageCounter = new Map<string, number>()
       rows = rows.map(src => {
+        // 原始資料已有序號（B欄直接填入）→ 序號已固定，跳過重新比對，避免覆蓋成錯誤序號
+        // （同每日出單表 runSerialMatch/runAllSync/runBatchRecentSync 的規則）
+        if (src.line_no_input) return src
         const orderNo = src.order_number as string
         const itemCode = src.item_code as string
         if (!orderNo || !soProjectIds.has(orderNo))
           return { ...src, match_status: 'no_order', match_line_no: null, match_pdl_seq: null, match_reason: '無對應來源單號' }
-        const qty = parseFloat(String(src.quantity ?? '').replace(/,/g, '')) || 0
+        const rawQty = String(src.quantity ?? '').replace(/,/g, '').trim()
+        if (!rawQty || Number.isNaN(parseFloat(rawQty)))
+          return { ...src, match_status: 'no_qty_match', match_line_no: null, match_pdl_seq: null, match_reason: '數量欄位無法判讀' }
+        const qty = parseFloat(rawQty)
         const key = `${orderNo}|${itemCode}|${qty}`
         const candidates = candidateMap.get(key) ?? []
         if (candidates.length === 0)
           return { ...src, match_status: 'no_qty_match', match_line_no: null, match_pdl_seq: null, match_reason: '有來源單號但無對應數量' }
         const used = usageCounter.get(key) ?? 0
-        const candidate = candidates[Math.min(used, candidates.length - 1)]
+        if (used >= candidates.length) {
+          // 來源列數超過 ARGO 實際候選行數，不可再重複沿用最後一個候選（會產生重複單號）
+          // 明確標記為需人工確認，而非靜默夾住
+          usageCounter.set(key, used + 1)
+          return { ...src, match_status: 'insufficient_candidates', match_line_no: null, match_pdl_seq: null, match_reason: '候選序號不足，需要人工確認（來源需求列數多於 ARGO 對應行數）' }
+        }
+        const candidate = candidates[used]
         usageCounter.set(key, used + 1)
         return { ...src, match_status: 'matched', match_line_no: candidate.line_no, match_pdl_seq: candidate.pdl_seq, match_reason: '' }
       })
@@ -1092,7 +1114,9 @@ export default function OrderBatchExportPage() {
             if (row.po_status === 'no_po') return row
             if (row.po_confirmed && row.po_number) return row  // 使用者已人工確認採購單，保留
             const itemCode = row.item_code as string
-            const qty = parseFloat(String(row.quantity ?? '').replace(/,/g, '')) || 0
+            const rawQty = String(row.quantity ?? '').replace(/,/g, '').trim()
+            if (!rawQty || Number.isNaN(parseFloat(rawQty))) return { ...row, po_status: 'no_match' }
+            const qty = parseFloat(rawQty)
             const matchLineNo = String(row.match_line_no ?? '').trim()
             const orderNo = String(row.order_number ?? '').trim()
             // P1: 料號 + 數量 + SO_PROJECT_ID
@@ -1412,8 +1436,11 @@ export default function OrderBatchExportPage() {
       setSaveMsg(successMsg)
 
       // ── 匯入成功後自動同步 ──
-      const today = new Date().toISOString().slice(0, 10)
-      void runPostImportSync(factory, today)
+      // 同步對象優先用「這批來源實際載入的出單表日期」（loadedFromSheetDate），
+      // 而不是永遠固定用今天——否則補匯入舊出單表的積壓資料時，自動同步會白跑今天的表，
+      // 真正來源那一天反而永遠沒被自動同步到，使用者回去看還是空的。
+      const todayFallback = new Date().toISOString().slice(0, 10)
+      void runPostImportSync(factory, loadedFromSheetDate ?? todayFallback)
 
       setTimeout(() => setSaveMsg(''), 6000)
     } catch (error) {
@@ -1426,7 +1453,7 @@ export default function OrderBatchExportPage() {
     } finally {
       setImportingFactory(null)
     }
-  }, [sourceRows, soMatchResults, runPostImportSync])
+  }, [sourceRows, soMatchResults, runPostImportSync, loadedFromSheetDate])
 
   // ---- 匯入前預覽：先跑 prefetch 取得最新 seq，再呈現將產生的製令單號讓使用者確認 ----
   const handleShowPreview = useCallback(async (factory: 'T' | 'C' | 'O') => {
@@ -1857,7 +1884,9 @@ export default function OrderBatchExportPage() {
                                 className={`inline-block text-xs px-1.5 py-0.5 rounded border font-medium cursor-help ${soMatchResults[idx].status === 'no_order' ? 'bg-red-900/40 text-red-300 border-red-700/40' : 'bg-amber-900/40 text-amber-300 border-amber-700/40'}`}
                                 title={soMatchResults[idx].reason}
                               >
-                                {soMatchResults[idx].status === 'no_order' ? '✗ 無單號' : '⚠ 無數量'}
+                                {soMatchResults[idx].status === 'no_order' ? '✗ 無單號'
+                                  : soMatchResults[idx].status === 'insufficient_candidates' ? '⚠ 序號不足'
+                                  : '⚠ 無數量'}
                               </span>
                             )
                           ) : (

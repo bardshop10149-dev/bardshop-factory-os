@@ -55,7 +55,7 @@ interface LineEdit {
 }
 
 interface MatchResult {
-  status: 'matched' | 'no_order' | 'no_qty_match' | null
+  status: 'matched' | 'no_order' | 'no_qty_match' | 'exhausted' | null
   line_no: string | null
   reason:  string
 }
@@ -86,17 +86,36 @@ function extractOrderNums(orderNo: string): string {
   return orderNo.replace(/\D/g, '')
 }
 
+/** 從「已有採購單號」的列（含尚未回寫本次 session 但已存在於出單表的既有紀錄）
+ *  萃取每個銷售訂單數字部分（nums）已用過的最大序號，供 genRowPoNos 的 fallback
+ *  計數器接續編號，避免重新載入/重試時計數器從 1 起算而與既有 PO 撞號。 */
+function seedUsedSeq(rowsWithPoNo: Array<{ order_number: string; po_number?: string | null }>): Map<string, number> {
+  const seed = new Map<string, number>()
+  for (const r of rowsWithPoNo) {
+    const poNo = (r.po_number ?? '').trim()
+    if (!poNo) continue
+    const nums = extractOrderNums(r.order_number)
+    const prefix = `POO${nums}`
+    if (!poNo.startsWith(prefix)) continue
+    const seq = parseInt(poNo.slice(prefix.length), 10)
+    if (Number.isNaN(seq)) continue
+    if (seq > (seed.get(nums) ?? 0)) seed.set(nums, seq)
+  }
+  return seed
+}
+
 /** 為每筆來源列自動產生一物一單的採購單號
- *  最後兩碼 = match_line_no（SO 序號）；無序號時用逐游計數器補上 */
-function genRowPoNos(rows: SourceRow[]): string[] {
-  const counters = new Map<string, number>()
+ *  最後兩碼 = match_line_no（SO 序號）；無序號時用逐游計數器補上。
+ *  `seed` 帶入已使用過的最大序號（見 seedUsedSeq），確保計數器接續編號、不重新從 1 起算。 */
+function genRowPoNos(rows: SourceRow[], seed: Map<string, number> = new Map()): string[] {
+  const counters = new Map<string, number>(seed)
   return rows.map(row => {
     const nums = extractOrderNums(row.order_number)
     const lineNo = row.match_line_no != null ? parseInt(row.match_line_no, 10) : NaN
     if (!isNaN(lineNo) && lineNo > 0) {
       return `POO${nums}${String(lineNo).padStart(2, '0')}`
     }
-    // fallback: sequential counter
+    // fallback: sequential counter，接續在 seed（已使用過的最大序號）之後
     const count = (counters.get(nums) ?? 0) + 1
     counters.set(nums, count)
     return `POO${nums}${String(count).padStart(2, '0')}`
@@ -140,6 +159,10 @@ export default function PoBatchExportOPage() {
   const [poSearchId, setPoSearchId]       = useState('')
   const [poSearching, setPoSearching]     = useState(false)
   const [poSyncRows, setPoSyncRows]       = useState<Array<Record<string, unknown>> | null>(null)
+
+  // ---- 匯入後自動同步進度 Modal ----
+  type PostSyncStep = { label: string; status: 'pending' | 'running' | 'done' | 'error' }
+  const [postSyncModal, setPostSyncModal] = useState<{ show: boolean; steps: PostSyncStep[]; error: string | null } | null>(null)
 
   // ── Init from localStorage（僅還原表頭設定）──
   useEffect(() => {
@@ -201,7 +224,8 @@ export default function PoBatchExportOPage() {
         lot_no: row.order_number,
         so_line_no: row.match_line_no ? String(parseInt(row.match_line_no, 10)) : '',
       })))
-      setRowPoNos(genRowPoNos(rows))
+      // 種子帶入 allORows（含已有採購單號的列，不論是否本次載入）以避免計數器重新歸零撞號
+      setRowPoNos(genRowPoNos(rows, seedUsedSeq(allORows)))
       setMatchResults([])
       setLoadedDate(date)
     } catch (e) { alert(`載入失敗：${e}`) }
@@ -267,17 +291,164 @@ export default function PoBatchExportOPage() {
     }
   }, [payload, loadedDate])
 
+  // ---- 匯入成功後自動執行：ERP 採購單同步 → 整張出單表委外(O)列重新比對 → 存回 ----
+  // 涵蓋這批匯入沒觸及到的、出單表裡其他還在等待比對的委外列，讓使用者匯入完直接回出單表
+  // 就看得到結果，不用再手動去「ERP同步區」按同步、再回出單表按「一鍵同步」。
+  const runPostImportSync = useCallback(async (sheetDate: string) => {
+    const steps: PostSyncStep[] = [
+      { label: 'ERP 同步：同步採購單', status: 'running' },
+      { label: `重新比對採購單（${sheetDate}）`, status: 'pending' },
+      { label: '儲存出單表', status: 'pending' },
+    ]
+    const setStep = (idx: number, status: PostSyncStep['status']) =>
+      setPostSyncModal(prev => prev ? {
+        ...prev,
+        steps: prev.steps.map((s, i) => i === idx ? { ...s, status } : s),
+      } : null)
+
+    setPostSyncModal({ show: true, steps, error: null })
+    try {
+      // ── Step 0: ERP 同步採購單（IFAF044 採購單介面）───────────────
+      const syncRes = await fetch('/api/argoerp', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'sync_po' }),
+      })
+      const syncJson = await syncRes.json()
+      if (!syncRes.ok || syncJson.status !== 'ok') {
+        throw new Error(`ERP 同步失敗：${String(syncJson.error ?? `HTTP ${syncRes.status}`)}`)
+      }
+      setStep(0, 'done')
+
+      // ── 重新載入指定日期出單表 ───────────────────────────────────
+      const sheetRes = await fetch(`/api/argoerp/daily-order-sheet?date=${sheetDate}`, { cache: 'no-store' })
+      const sheetJson = await sheetRes.json()
+      if (!sheetJson.success || !sheetJson.sheet) {
+        setStep(1, 'done'); setStep(2, 'done')
+        return
+      }
+      type DR = Record<string, unknown>
+      let rows: DR[] = Array.isArray(sheetJson.sheet.rows) ? (sheetJson.sheet.rows as DR[]) : []
+      const rawText: string = (sheetJson.sheet.raw_text as string) ?? ''
+      if (rows.length === 0) {
+        setStep(1, 'done'); setStep(2, 'done')
+        return
+      }
+
+      // ── Step 1: 委外(O廠)採購單比對 ──────────────────────────────
+      // 對整張出單表裡 factory === 'O' 的列重新比對，涵蓋這批匯入沒觸及到的其他委外列。
+      setStep(1, 'running')
+      const hasORows = rows.some(r => r.factory === 'O')
+      if (hasORows) {
+        type PoC = { doc_no: string; sub_no: string; item_code: string | null; qty: number; status: string | null; start_date: string | null; extra: Record<string, unknown> | null; _used: boolean }
+        const matchPoRows = (rRows: DR[], pool: PoC[], sDate: string): DR[] => {
+          return rRows.map(row => {
+            if (row.factory !== 'O') return row
+            if (row.po_status === 'no_po') return row
+            if (row.po_confirmed && row.po_number) return row  // 使用者已人工確認採購單，保留
+            const itemCode = row.item_code as string
+            const qty = parseFloat(String(row.quantity ?? '').replace(/,/g, '')) || 0
+            const matchLineNo = String(row.match_line_no ?? '').trim()
+            const orderNo = String(row.order_number ?? '').trim()
+            // P1: 料號 + 數量 + SO_PROJECT_ID
+            let hitIdx = pool.findIndex(c =>
+              !c._used && c.item_code === itemCode && c.qty === qty &&
+              String(c.extra?.SO_PROJECT_ID ?? '').trim() === orderNo
+            )
+            // P2: 料號 + 數量 + MBP_LOT_NO
+            if (hitIdx === -1)
+              hitIdx = pool.findIndex(c =>
+                !c._used && c.item_code === itemCode && c.qty === qty &&
+                String(c.extra?.MBP_LOT_NO ?? '').trim() === orderNo
+              )
+            // P3（O 廠特有）: 料號 + TPN_PART_NO + SO/LOT 指向同一工單（不要求 qty 完全相符）
+            if (hitIdx === -1 && matchLineNo)
+              hitIdx = pool.findIndex(c =>
+                !c._used && c.item_code === itemCode &&
+                String(c.extra?.TPN_PART_NO ?? '') === matchLineNo &&
+                (
+                  String(c.extra?.SO_PROJECT_ID ?? '').trim() === orderNo ||
+                  String(c.extra?.MBP_LOT_NO ?? '').trim() === orderNo
+                )
+              )
+            // fallback: 料號 + 數量
+            if (hitIdx === -1)
+              hitIdx = pool.findIndex(c => !c._used && c.item_code === itemCode && c.qty === qty)
+            if (hitIdx === -1) return { ...row, po_status: 'no_match' }
+            const delivDateStr = String(row.delivery_date ?? sDate).replace(/\//g, '-')
+            pool[hitIdx]._used = true
+            const p3Mismatch = !!matchLineNo &&
+              String(pool[hitIdx].extra?.TPN_PART_NO ?? '') === matchLineNo &&
+              pool[hitIdx].qty !== qty
+            return {
+              ...row,
+              po_number: pool[hitIdx].doc_no,
+              po_sub_no: pool[hitIdx].sub_no,
+              po_status: p3Mismatch ? 'qty_mismatch' : 'matched',
+              po_qty_erp: p3Mismatch ? pool[hitIdx].qty : null,
+              po_start_date: pool[hitIdx].start_date,
+              po_extra: pool[hitIdx].extra,
+              delivery_date: delivDateStr || sDate,
+            }
+          })
+        }
+        const itemCodesO = [...new Set(rows.filter(r => r.factory === 'O').map(r => r.item_code as string).filter(Boolean))]
+        if (itemCodesO.length > 0) {
+          const { data: poRowsO, error: poErr } = await supabase.from('erp_pj_sync')
+            .select('doc_no, sub_no, item_code, qty, status, start_date, extra')
+            .eq('doc_type', '採購單號').in('status', ['OPEN', 'UNSIGNED']).neq('customer_vendor', 'C01510').in('item_code', itemCodesO).order('doc_no', { ascending: false })
+          if (poErr) throw poErr
+          const poolO: PoC[] = (poRowsO ?? []).map((r: Record<string, unknown>) => ({ doc_no: r.doc_no as string, sub_no: r.sub_no as string, item_code: r.item_code as string | null, qty: Number(r.qty ?? 0), status: r.status as string | null, start_date: (r.start_date as string | null) ?? null, extra: (r.extra ?? null) as Record<string, unknown> | null, _used: false }))
+          rows = matchPoRows(rows, poolO, sheetDate)
+        }
+      }
+      setStep(1, 'done')
+
+      // ── Step 2: 儲存出單表 ────────────────────────────────────────
+      setStep(2, 'running')
+      const saveRes = await fetch('/api/argoerp/daily-order-sheet', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sheet_date: sheetDate, raw_text: rawText, rows }),
+      })
+      const saveJson = await saveRes.json()
+      if (!saveRes.ok || !saveJson.success) throw new Error(saveJson.error || `HTTP ${saveRes.status}`)
+      setStep(2, 'done')
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      setPostSyncModal(prev => prev ? {
+        ...prev,
+        steps: prev.steps.map(s => s.status === 'running' ? { ...s, status: 'error' } : s),
+        error: msg,
+      } : null)
+    }
+  }, [supabase])
+
   // ── Import to ERP — 逐張採購單送出 ──
   const handleImport = useCallback(async () => {
     if (!header.tpn_partner_id.trim()) { alert('請填寫廠商編號'); return }
     if (payload.length === 0) { alert('尚無明細資料'); return }
     const emptyPoNos = rowPoNos.slice(0, payload.length).filter(p => !p.trim())
     if (emptyPoNos.length > 0) { alert(`有 ${emptyPoNos.length} 筆採購單號為空，請確認`); return }
+    // 重複單號防呆：同批次內若有重複採購單號，代表產號邏輯異常或手動修改衝突，
+    // 一旦送出會有覆蓋 ARGO 既有採購單的風險，直接擋下不允許匯入
+    const dupCounts = new Map<string, number>()
+    rowPoNos.slice(0, payload.length).forEach(p => {
+      const key = p.trim()
+      dupCounts.set(key, (dupCounts.get(key) ?? 0) + 1)
+    })
+    const dupPoNos = [...dupCounts.entries()].filter(([, c]) => c > 1).map(([k]) => k)
+    if (dupPoNos.length > 0) {
+      alert(`⚠️ 偵測到重複採購單號，可能導致覆蓋既有 ARGO 採購單，請先修正再匯入：\n${dupPoNos.join(', ')}`)
+      return
+    }
     if (!confirm(`確認逐張匯入 ${payload.length} 張委外採購單至 ArgoERP？`)) return
 
     setImporting(true); setMsg('')
     setImportProgress({ done: 0, total: payload.length, errors: [] })
     const errors: string[] = []
+    const warnings: string[] = []
+    const succeededIdx: number[] = []
 
     for (let i = 0; i < payload.length; i++) {
       try {
@@ -287,7 +458,17 @@ export default function PoBatchExportOPage() {
           body: JSON.stringify({ action: 'import', interfaceId: 'IFAF024', data: [payload[i]] }),
         })
         const result = await res.json()
-        if (!res.ok || !result?.success) {
+        // 讀取 partialSuccess/anySuccess：ARGO 有時 success=false 但實際已建立資料（帶警示字串），
+        // 若只看 success 布林值會把「已成功建立」的列誤判為失敗，導致使用者重試時重複送出、
+        // 甚至可能覆蓋 ARGO 中已建立的採購單。anySuccess=true 即視為該列已在 ARGO 建立成功。
+        const rowOk = res.ok && (result?.success === true || result?.anySuccess === true)
+        if (rowOk) {
+          succeededIdx.push(i)
+          if (result?.success !== true) {
+            const tag = result?.partialSuccess ? '部分成功（ARGO 已建立但明細/其他欄位有警示）' : 'ARGO 已建立但回應含警示'
+            warnings.push(`${rowPoNos[i]}: ⚠️ ${tag}${result?.error ? ` — ${result.error}` : ''}`)
+          }
+        } else {
           const raw = typeof result?.rawText === 'string'
             ? result.rawText.slice(0, 200)
             : JSON.stringify(result?.apiResult ?? '').slice(0, 200)
@@ -299,19 +480,65 @@ export default function PoBatchExportOPage() {
       setImportProgress({ done: i + 1, total: payload.length, errors: [...errors] })
     }
 
-    const successCount = payload.length - errors.length
-    if (errors.length === 0) {
-      const m = `✅ 全部 ${payload.length} 張委外採購單已匯入 ERP`
-      setMsg(m); alert(m)
-      setSourceRows([]); setLineEdits([]); setRowPoNos([]); setLoadedDate(null)
+    // 匯入成功（含部分成功）的列立即回寫採購單號到出單表。
+    // 這是避免撞號的關鍵根因修正：若不回寫，下次載入/重試時系統不知道哪些單號已經用過，
+    // fallback 計數器會重新從 1 編號，可能與剛剛已成功建立的 PO 撞號甚至覆蓋。
+    let writeBackError = ''
+    if (succeededIdx.length > 0 && loadedDate) {
+      try {
+        const updates = succeededIdx
+          .filter(i => sourceRows[i]?.row_key)
+          .map(i => ({ row_key: sourceRows[i].row_key!, po_number: rowPoNos[i], po_status: 'matched' }))
+        if (updates.length > 0) {
+          const wbRes = await fetch('/api/argoerp/daily-order-sheet', {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ sheet_date: loadedDate, updates }),
+          })
+          const wbJson = await wbRes.json()
+          if (!wbJson.success) throw new Error(wbJson.error ?? '回寫失敗')
+        }
+      } catch (e) {
+        writeBackError = e instanceof Error ? e.message : String(e)
+      }
+    }
+
+    // ── 匯入成功後自動同步 ──
+    // 額外再做一次完整的 ERP 採購單同步 + 全表重新比對，涵蓋這批匯入沒觸及到的、
+    // 出單表裡其他還在等待比對的委外列，讓使用者匯入完直接回出單表就看得到結果，
+    // 不用再手動去「ERP同步區」按同步、再回出單表按「一鍵同步」。
+    // loadedDate 為本次實際載入的出單表日期（closure 捕捉的當下值，不受下方 setLoadedDate 影響）。
+    if (succeededIdx.length > 0 && loadedDate) {
+      void runPostImportSync(loadedDate)
+    }
+
+    const succeededSet = new Set(succeededIdx)
+    const successCount = succeededIdx.length
+    const detailParts: string[] = []
+    if (errors.length) detailParts.push(`失敗明細：\n${errors.slice(0, 10).join('\n')}${errors.length > 10 ? `\n…（共 ${errors.length} 筆）` : ''}`)
+    if (warnings.length) detailParts.push(`警示明細（已視為成功，不會重複送出）：\n${warnings.slice(0, 10).join('\n')}`)
+    if (writeBackError) detailParts.push(`⚠️ 採購單號回寫出單表失敗，成功匯入的項目下次載入時可能無法被排除（請盡快手動執行「回寫採購單號」）：${writeBackError}`)
+
+    if (successCount === payload.length) {
+      const m = warnings.length > 0
+        ? `✅ 全部 ${payload.length} 張委外採購單已匯入 ERP（${warnings.length} 筆含警示，請確認）`
+        : `✅ 全部 ${payload.length} 張委外採購單已匯入 ERP`
+      setMsg(m); alert(detailParts.length ? `${m}\n\n${detailParts.join('\n\n')}` : m)
+      setSourceRows([]); setLineEdits([]); setRowPoNos([]); setMatchResults([]); setLoadedDate(null)
     } else {
-      const m = `⚠️ 匯入完成：${successCount} 成功，${errors.length} 失敗`
+      // 只保留尚未成功的列，避免使用者在同一 session 內立即重試時重複送出已成功的品項
+      const keepIndices = sourceRows.map((_, i) => i).filter(i => !succeededSet.has(i))
+      setSourceRows(prev => keepIndices.map(i => prev[i]))
+      setLineEdits(prev => keepIndices.map(i => prev[i] ?? DEF_EDIT))
+      setRowPoNos(prev => keepIndices.map(i => prev[i] ?? ''))
+      setMatchResults(prev => keepIndices.map(i => prev[i] ?? { status: null, line_no: null, reason: '' }))
+      const m = `⚠️ 匯入完成：${successCount} 成功，${errors.length} 失敗（已成功項目已回寫並自清單移除，避免重複送出）`
       setMsg(m)
-      alert(`${m}\n\n失敗明細：\n${errors.slice(0, 10).join('\n')}${errors.length > 10 ? `\n…（共 ${errors.length} 筆）` : ''}`)
+      alert(`${m}${detailParts.length ? `\n\n${detailParts.join('\n\n')}` : ''}`)
     }
     setImporting(false)
     setTimeout(() => { setImportProgress(null); if (!msg.startsWith('⚠️')) setMsg('') }, 15000)
-  }, [payload, rowPoNos, header.tpn_partner_id, msg])
+  }, [payload, rowPoNos, sourceRows, loadedDate, header.tpn_partner_id, msg, runPostImportSync])
 
   const setH = useCallback(<K extends keyof PoHeader>(k: K, v: PoHeader[K]) => {
     setHeader(p => ({ ...p, [k]: v }))
@@ -459,8 +686,13 @@ export default function PoBatchExportOPage() {
         if (candidates.length === 0)
           return { status: 'no_qty_match', line_no: null, reason: '有來源單號但無對應數量' }
         const used = usageCounter.get(key) ?? 0
-        const lineNo = candidates[Math.min(used, candidates.length - 1)]
         usageCounter.set(key, used + 1)
+        // 候選數量用盡時不可強制夾住重複使用最後一筆候選，否則兩筆不同來源列會產生
+        // 相同的 SO 序號/採購單號，其中一筆需求其實從未在 ARGO 真正建立卻被誤判為比對成功。
+        // 用盡時改標記為需人工處理，不指派 line_no。
+        if (used >= candidates.length)
+          return { status: 'exhausted', line_no: null, reason: `候選序號已用盡（僅 ${candidates.length} 筆符合，本列為第 ${used + 1} 筆重複需求），需人工確認序號` }
+        const lineNo = candidates[used]
         return { status: 'matched', line_no: lineNo, reason: '' }
       })
       setMatchResults(results)
@@ -477,7 +709,8 @@ export default function PoBatchExportOPage() {
         }
       }))
       const matched = results.filter(r => r.status === 'matched').length
-      setMsg(`✅ 序號比對完成：成功 ${matched} / ${results.length}`)
+      const exhausted = results.filter(r => r.status === 'exhausted').length
+      setMsg(`✅ 序號比對完成：成功 ${matched} / ${results.length}${exhausted > 0 ? `（${exhausted} 筆候選用盡，需人工確認）` : ''}`)
       setTimeout(() => setMsg(''), 5000)
     } catch (e) {
       setMsg(`❌ 比對失敗：${e instanceof Error ? e.message : String(e)}`)
@@ -823,6 +1056,8 @@ export default function PoBatchExportOPage() {
                           <span className="px-1.5 py-0.5 rounded border text-xs bg-red-900/30 text-red-300 border-red-800/50" title={matchResults[i].reason}>無單號</span>
                         ) : matchResults[i]?.status === 'no_qty_match' ? (
                           <span className="px-1.5 py-0.5 rounded border text-xs bg-amber-900/30 text-amber-300 border-amber-700/50" title={matchResults[i].reason}>數量不符</span>
+                        ) : matchResults[i]?.status === 'exhausted' ? (
+                          <span className="px-1.5 py-0.5 rounded border text-xs bg-fuchsia-900/30 text-fuchsia-300 border-fuchsia-700/50" title={matchResults[i].reason}>候選用盡⚠</span>
                         ) : (
                           <span className="text-slate-700 text-xs">—</span>
                         )}
@@ -1021,6 +1256,74 @@ export default function PoBatchExportOPage() {
           )}
         </div>
       </div>
+
+      {/* ── 匯入後自動同步進度 Modal（阻擋操作）── */}
+      {postSyncModal?.show && (
+        <div className="fixed inset-0 bg-black/80 z-[100] flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-slate-700 rounded-2xl shadow-2xl w-full max-w-md p-6">
+            <div className="flex items-center gap-3 mb-5">
+              <div className="p-2 rounded-full bg-orange-900/50 text-orange-400">
+                <svg className="w-5 h-5 animate-spin" fill="none" viewBox="0 0 24 24">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
+                </svg>
+              </div>
+              <div>
+                <h3 className="text-white font-bold text-base">匯入後自動同步中</h3>
+                <p className="text-slate-400 text-xs">全部步驟完成前請勿關閉此視窗</p>
+              </div>
+            </div>
+
+            <div className="space-y-3">
+              {postSyncModal.steps.map((step, i) => (
+                <div key={i} className="flex items-center gap-3">
+                  <div className="w-6 h-6 flex items-center justify-center shrink-0">
+                    {step.status === 'done' && (
+                      <svg className="w-5 h-5 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" /></svg>
+                    )}
+                    {step.status === 'running' && (
+                      <svg className="w-5 h-5 text-cyan-400 animate-spin" fill="none" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
+                      </svg>
+                    )}
+                    {step.status === 'error' && (
+                      <svg className="w-5 h-5 text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+                    )}
+                    {step.status === 'pending' && (
+                      <div className="w-3 h-3 rounded-full border-2 border-slate-600 mx-auto" />
+                    )}
+                  </div>
+                  <span className={`text-sm ${
+                    step.status === 'done' ? 'text-emerald-400' :
+                    step.status === 'running' ? 'text-cyan-300 font-medium' :
+                    step.status === 'error' ? 'text-red-400' :
+                    'text-slate-500'
+                  }`}>{step.label}</span>
+                </div>
+              ))}
+            </div>
+
+            {postSyncModal.error && (
+              <div className="mt-4 p-3 bg-red-950/40 border border-red-700/50 rounded-lg text-red-300 text-xs">
+                <p className="font-semibold mb-1">錯誤</p>
+                <p>{postSyncModal.error}</p>
+              </div>
+            )}
+
+            {(postSyncModal.steps.every(s => s.status === 'done') || !!postSyncModal.error) && (
+              <div className="mt-5 flex justify-end">
+                <button
+                  onClick={() => setPostSyncModal(null)}
+                  className="px-5 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 text-white text-sm font-medium transition-colors"
+                >
+                  關閉
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   )
 }

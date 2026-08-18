@@ -2,7 +2,6 @@
 
 import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { supabase } from '../../lib/supabaseClient'
 import { ErpSyncPage } from '../admin/argoerp/erp-sync/ErpSyncPage'
 
 export default function ArgoDBPage() {
@@ -12,28 +11,20 @@ export default function ArgoDBPage() {
   useEffect(() => {
     const check = async () => {
       try {
-        const { data: authData } = await supabase.auth.getUser()
-        const authUserId = authData.user?.id || ''
-        const email = authData.user?.email || localStorage.getItem('bardshop_user_email') || ''
-
-        if (!email && !authUserId) {
+        // SEC 修復：改用後端 /api/auth/me（guardAuth 驗 token）判斷權限，
+        // 不再用 anon key 直讀 members（那條路等於讓匿名可讀整張員工表含明文密碼）。
+        const res = await fetch('/api/auth/me', { cache: 'no-store' })
+        if (res.status === 401) {
           router.replace('/login')
           return
         }
-
-        let memberData: { is_admin: boolean | null; permissions: string[] | null } | null = null
-
-        if (authUserId) {
-          const { data } = await supabase.from('members').select('is_admin, permissions').eq('auth_user_id', authUserId).maybeSingle()
-          memberData = data
+        if (!res.ok) {
+          setStatus('denied')
+          return
         }
-        if (!memberData && email) {
-          const { data } = await supabase.from('members').select('is_admin, permissions').eq('email', email).maybeSingle()
-          memberData = data
-        }
-
-        const isAdmin = Boolean(memberData?.is_admin)
-        const permissions: string[] = Array.isArray(memberData?.permissions) ? memberData!.permissions! : []
+        const me = await res.json() as { is_admin?: boolean; permissions?: string[] }
+        const isAdmin = Boolean(me.is_admin)
+        const permissions: string[] = Array.isArray(me.permissions) ? me.permissions : []
         setStatus(isAdmin || permissions.includes('argo_db') ? 'allowed' : 'denied')
       } catch {
         setStatus('denied')

@@ -191,7 +191,21 @@ export async function DELETE(request: NextRequest) {
 
 // ============================================================
 // PATCH：批次更新製令的 prep_status
-// body: { mo_numbers: string[], prep_status: '未備料' | '已備料' | '無需備料' }
+// body: {
+//   mo_numbers: string[],
+//   prep_status: '未備料' | '已備料' | '無需備料',
+//   expected_prep_status?: '未備料' | '已備料' | '無需備料',  // 選填：CAS 條件
+// }
+//
+// expected_prep_status（樂觀鎖 / compare-and-swap）：
+//   若提供，僅對「目前 prep_status 等於 expected_prep_status」的列生效，
+//   其餘列會被跳過（不更新）。用於避免多人/多分頁同時處理同一批製令時，
+//   兩邊的「檢查狀態→送出 ARGO→標記已備料」都各自通過，
+//   導致同一張製令被重複送去 ARGO 匯入、實際發料數量加倍（TOCTOU race）。
+//   呼叫端應在送出 ARGO 之前就先用這個 CAS 嘗試鎖定（例如把 未備料 CAS 成 已備料），
+//   鎖定成功才送 ARGO，鎖定失敗（已被別人搶先）就整批跳過該 mo_number。
+//   注意：prep_status 尚未設定過的製令在資料庫中是 NULL，語意上等同「未備料」，
+//   所以 expected_prep_status = '未備料' 時，條件會同時涵蓋 NULL。
 // ============================================================
 const VALID_PREP_STATUS = new Set(['未備料', '已備料', '無需備料'])
 
@@ -202,6 +216,7 @@ export async function PATCH(request: NextRequest) {
     const body = await request.json()
     const moNumbers: string[] = Array.isArray(body?.mo_numbers) ? body.mo_numbers : []
     const prepStatus: string = body?.prep_status
+    const expectedPrepStatus: string | undefined = body?.expected_prep_status
 
     if (moNumbers.length === 0) {
       return NextResponse.json({ success: false, error: 'mo_numbers 不可為空' }, { status: 400 })
@@ -212,12 +227,31 @@ export async function PATCH(request: NextRequest) {
         { status: 400 }
       )
     }
+    if (expectedPrepStatus !== undefined && !VALID_PREP_STATUS.has(expectedPrepStatus)) {
+      return NextResponse.json(
+        { success: false, error: `expected_prep_status 必須是 未備料 / 已備料 / 無需備料 之一，實際收到：${expectedPrepStatus}` },
+        { status: 400 }
+      )
+    }
 
     const supabase = getSupabaseAdminClient()
-    const { error, count } = await supabase
+
+    let query = supabase
       .from(TABLE)
-      .update({ prep_status: prepStatus }, { count: 'exact' })
+      .update({ prep_status: prepStatus })
       .in('mo_number', moNumbers)
+
+    if (expectedPrepStatus !== undefined) {
+      // CAS 條件：只更新目前狀態符合 expected_prep_status 的列。
+      // '未備料' 需同時涵蓋 NULL（尚未設定過 prep_status 的製令）。
+      query = expectedPrepStatus === '未備料'
+        ? query.or('prep_status.eq.未備料,prep_status.is.null')
+        : query.eq('prep_status', expectedPrepStatus)
+    }
+
+    // 用 select 取回實際被更新的 mo_number，藉此知道「哪些鎖定成功、哪些被跳過」，
+    // 而不只是一個籠統的受影響列數。
+    const { data, error } = await query.select('mo_number')
 
     if (error) {
       return NextResponse.json(
@@ -226,7 +260,20 @@ export async function PATCH(request: NextRequest) {
       )
     }
 
-    return NextResponse.json({ success: true, updated: count ?? 0 })
+    const updatedMoNumbers = (data ?? []).map(r => r.mo_number as string)
+    const updatedSet = new Set(updatedMoNumbers)
+    // 只有在使用 CAS（expected_prep_status）時才有意義去算「被跳過」的清單；
+    // 一般無條件更新如果請求的 mo_number 在表裡不存在也不算「被搶先」，維持舊行為不回報。
+    const skippedMoNumbers = expectedPrepStatus !== undefined
+      ? moNumbers.filter(mo => !updatedSet.has(mo))
+      : []
+
+    return NextResponse.json({
+      success: true,
+      updated: updatedMoNumbers.length,
+      updated_mo_numbers: updatedMoNumbers,
+      skipped_mo_numbers: skippedMoNumbers,
+    })
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)
     return NextResponse.json({ success: false, error: formatSupabaseAdminError(msg) }, { status: 500 })

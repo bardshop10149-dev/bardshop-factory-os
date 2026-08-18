@@ -40,9 +40,6 @@ const normalizeLegacyPermissions = (rawPermissions: string[] = []) => {
   return Array.from(normalized)
 }
 
-const isMissingPendingColumnError = (error: { message?: string } | null | undefined) =>
-  Boolean(error?.message?.includes("is_pending_approval"))
-
 export default function TeamPage() {
   const [members, setMembers] = useState<Member[]>([])
   const [departments, setDepartments] = useState<Department[]>([])
@@ -115,17 +112,14 @@ export default function TeamPage() {
   const fetchData = useCallback(async () => {
     setLoading(true)
     const [membersRes, deptsRes] = await Promise.all([
-      supabase
-        .from('members')
-        .select('id, auth_user_id, real_name, nickname, department, email, password, permissions, status, is_admin, is_pending_approval, last_login')
-        .order('is_admin', { ascending: false })
-        .order('id', { ascending: true }),
+      fetch('/api/admin/members'),
       supabase.from('departments').select('*').order('id', { ascending: true })
     ])
 
-    if (membersRes.error) console.error(membersRes.error)
+    const membersJson = await membersRes.json().catch(() => ({})) as { ok?: boolean; members?: Member[]; error?: string }
+    if (!membersRes.ok || !membersJson.ok) console.error(membersJson.error || `HTTP ${membersRes.status}`)
     else {
-      const normalizedMembers = ((membersRes.data as Member[]) || []).map(member => ({
+      const normalizedMembers = (membersJson.members || []).map(member => ({
         ...member,
         permissions: normalizeLegacyPermissions(Array.isArray(member.permissions) ? member.permissions : []),
         is_pending_approval:
@@ -192,12 +186,24 @@ export default function TeamPage() {
 
     let error
     if (formData.id) {
-      const { error: updateError } = await supabase.from('members').update(payloadWithPending).eq('id', formData.id)
-      if (isMissingPendingColumnError(updateError)) {
-        const { error: retryError } = await supabase.from('members').update(payloadBase).eq('id', formData.id)
-        error = retryError
-      } else {
-        error = updateError
+      const fields = {
+        real_name: payloadWithPending.real_name,
+        nickname: payloadWithPending.nickname,
+        department: payloadWithPending.department,
+        email: payloadWithPending.email,
+        permissions: payloadWithPending.permissions,
+        status: payloadWithPending.status,
+        is_admin: payloadWithPending.is_admin,
+        is_pending_approval: payloadWithPending.is_pending_approval,
+      }
+      const response = await fetch('/api/admin/members', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: formData.id, fields }),
+      })
+      const j = await response.json().catch(() => ({})) as { ok?: boolean; error?: string }
+      if (!response.ok || !j.ok) {
+        error = { message: j.error || `HTTP ${response.status}` }
       }
     } else {
       if (!formData.password) return alert('新增成員請設定密碼 (供備註與登入使用)')
@@ -254,8 +260,9 @@ export default function TeamPage() {
     if (member.email === currentUserEmail) return alert('無法刪除自己！')
     if (!confirm(`確定要刪除「${member.real_name}」嗎？\n注意：該成員的歷史任務紀錄將保留，但無法再登入。`)) return
     
-    const { error } = await supabase.from('members').delete().eq('id', member.id)
-    if (error) alert(error.message)
+    const response = await fetch(`/api/admin/members?id=${member.id}`, { method: 'DELETE' })
+    const j = await response.json().catch(() => ({})) as { ok?: boolean; error?: string }
+    if (!response.ok || !j.ok) alert(j.error || `刪除失敗 (HTTP ${response.status})`)
     else {
       await logSystemAction({
         actionType: '刪除成員',
