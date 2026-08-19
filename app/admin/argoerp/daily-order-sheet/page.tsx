@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback } from 'react'
 import { supabase } from '../../../../lib/supabaseClient'
 import SoOrderModal from '../../../../components/SoOrderModal'
 import PoOrderModal from '../../../../components/PoOrderModal'
+import MoRouteModal from '../../../../components/MoRouteModal'
 
 // ===== 舊系統入庫紀錄比對 =====
 interface LegacyReceiptRow {
@@ -489,6 +490,7 @@ export default function DailyOrderSheetPage() {
   ]
   const [soModalId, setSoModalId] = useState<string | null>(null)
   const [poModalId, setPoModalId] = useState<string | null>(null)
+  const [moModalId, setMoModalId] = useState<string | null>(null)  // 製令→塔台製程/報工
   const [searchQuery, setSearchQuery] = useState('')
   const [activeFactory, setActiveFactory] = useState<'ALL' | 'T' | 'C' | 'O' | 'G'>('ALL')
   const [globalSearch, setGlobalSearch] = useState('')
@@ -3763,7 +3765,11 @@ export default function DailyOrderSheetPage() {
                                   </div>
                                 ) : row.mo_number ? (
                                   <div>
-                                    <span className={row.factory === 'O' ? outsourcedStyles.text : 'text-violet-300'}>{row.mo_number}</span>
+                                    <button
+                                      onClick={() => setMoModalId(row.mo_number!)}
+                                      title="查看塔台製程與各站報工量"
+                                      className={`hover:underline underline-offset-2 text-left ${row.factory === 'O' ? outsourcedStyles.text : 'text-violet-300 hover:text-violet-100'}`}
+                                    >{row.mo_number}</button>
                                     {row.factory === 'O' && outsourcedPrefix && (
                                       <span className={`ml-1 px-1.5 py-0.5 rounded border text-[10px] ${outsourcedStyles.badge}`}>{outsourcedPrefix}</span>
                                     )}
@@ -3791,7 +3797,11 @@ export default function DailyOrderSheetPage() {
                                 )
                               ) : row.mo_number ? (
                                 <div>
-                                  <span className="text-violet-300">{row.mo_number}</span>
+                                  <button
+                                  onClick={() => setMoModalId(row.mo_number!)}
+                                  title="查看塔台製程與各站報工量"
+                                  className="text-violet-300 hover:text-violet-100 hover:underline underline-offset-2 text-left"
+                                >{row.mo_number}</button>
                                   {row.po_number && (
                                     <div className="mt-1 text-[10px]" title="此訂單同時有採購單">
                                       <button
@@ -4062,6 +4072,7 @@ export default function DailyOrderSheetPage() {
       </div>
       <SoOrderModal projectId={soModalId} onClose={() => setSoModalId(null)} />
       <PoOrderModal docNo={poModalId} onClose={() => setPoModalId(null)} />
+      <MoRouteModal moNumber={moModalId} onClose={() => setMoModalId(null)} />
 
       {/* 轉換廠區 Modal */}
       {convertFactoryModalOpen && (
