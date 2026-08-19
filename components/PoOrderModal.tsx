@@ -69,6 +69,13 @@ export default function PoOrderModal({ docNo, onClose }: Props) {
     return 'bg-slate-800 text-slate-400 border-slate-700'
   }
 
+  // 入庫進度配色：已到齊=綠、部分到貨=琥珀、未到貨=灰
+  const receivedStyle = (received: number, ordered: number) => {
+    if (ordered > 0 && received >= ordered) return 'bg-emerald-900/40 text-emerald-300 border-emerald-700/50'
+    if (received > 0) return 'bg-amber-900/40 text-amber-300 border-amber-700/50'
+    return 'bg-slate-800 text-slate-500 border-slate-700'
+  }
+
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4"
@@ -132,6 +139,9 @@ export default function PoOrderModal({ docNo, onClose }: Props) {
                 const mbpLotNo = line.extra?.['MBP_LOT_NO'] as string | undefined
                 const unitPrice = line.extra?.['UNIT_PRICE_ORU'] as number | undefined
                 const packing = line.extra?.['PACKING'] as string | undefined
+                // 已入庫量：ARGO 進貨單入庫後回寫至採購單身 ACTUAL_QTY_ORU，同步時存進 extra.RECEIVED_QTY
+                const receivedQty = Number(line.extra?.['RECEIVED_QTY'] ?? 0) || 0
+                const orderedQty = Number(line.qty ?? 0) || 0
                 return (
                   <div
                     key={i}
@@ -210,6 +220,20 @@ export default function PoOrderModal({ docNo, onClose }: Props) {
                           <span className="font-mono text-slate-300 text-xs">{tpnPartNo}</span>
                         </div>
                       )}
+
+                      {/* 入庫 / 應到（每個品項最右下角）*/}
+                      <div className="ml-auto flex items-center gap-1.5" title="已入庫數量 / 應到數量（採購訂購量）">
+                        <span className="text-slate-500 text-xs">入庫/應到</span>
+                        <span className={`px-2 py-0.5 rounded border font-mono text-sm font-semibold ${receivedStyle(receivedQty, orderedQty)}`}>
+                          {receivedQty.toLocaleString()} / {orderedQty.toLocaleString()}
+                        </span>
+                        {orderedQty > 0 && receivedQty >= orderedQty && (
+                          <span className="text-emerald-400 text-xs">已到齊</span>
+                        )}
+                        {orderedQty > 0 && receivedQty > 0 && receivedQty < orderedQty && (
+                          <span className="text-amber-400 text-xs">差 {(orderedQty - receivedQty).toLocaleString()}</span>
+                        )}
+                      </div>
                     </div>
                   </div>
                 )
