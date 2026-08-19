@@ -2,6 +2,7 @@
 
 import { useState, useCallback, useRef } from 'react'
 import { supabase } from '../../../../lib/supabaseClient'
+import { buildSaraRow, type SaraRow } from '../../../../lib/sara/buildSaraRow'
 
 // ── 型別 ─────────────────────────────────────────────────────────
 
@@ -17,31 +18,6 @@ interface InputRow {
   customer?: string             // 客戶名稱
   factory?: 'T' | 'C' | 'O'   // 廠區：T=台北 C=常平 O=委外（僅預覽，不匯出）
   assigned_machine?: string    // 分配機台（台北廠印刷站2F/6F 才填入）
-}
-
-interface SaraRow {
-  order_number: string
-  mfg_order_number: string
-  product_name: string
-  product_desc: string
-  lot_number: string
-  prod_qty: number
-  due: string
-  priority: string
-  earliest_start: string
-  job_seq: number | string
-  workcenter: string
-  job_name: string
-  job_qty: number
-  outsourcing: string
-  est_time: number
-  time_unit: string
-  bom: string
-  mat_req_qty: string
-  customer?: string
-  assigned_machine?: string   // 分配機台（僅台北廠印刷站2F/6F）
-  factory?: 'T' | 'C' | 'O'   // 廠區（僅預覽，不匯出）
-  _noRoute?: boolean
 }
 
 interface SingleRow {
@@ -689,13 +665,7 @@ export default function ProcessGenPage() {
     if (!rows.length) return
     const h1 = 'Order Number,Manufacturing Order Number,Product Name,Product Description,Lot Number,Production Quantity,Due,Priority Level,Earliest Start Time,Job Sequence,Workcenter,Job Name,Job Quantity,Out Sourcing,Est. Time,Time Unit,BOM Components,Material Required Quantity,customer_id,assigned_machine,Rule,Parameter 1'
     const h2 = '訂單編號,(必填)工單編號,(必填)品號,規格,生產批號,(必填)生產需求數量,(必填)需求日,排程優先等級(1-99),最早可開始時間,(必填)工序,(必填)站點,(必填)製程名稱,製程數量,製程委外,(必填)預估工時,工時單位,BOM元件品號,物料需求數量,客戶名稱,分配機台,規則,參數1'
-    const data = rows.map(r =>
-      [r.order_number, r.mfg_order_number, r.product_name, r.product_desc,
-       r.lot_number, r.prod_qty, r.due, r.priority, r.earliest_start,
-       r.job_seq, r.workcenter, r.job_name, r.job_qty, r.outsourcing,
-       r.est_time, r.time_unit, r.bom, r.mat_req_qty,
-       r.customer ?? '', r.assigned_machine ?? '', '', ''].map(escCsv).join(',')
-    )
+    const data = rows.map(r => buildSaraRow(r).map(escCsv).join(','))
     const csv = [h1, h2, ...data].join('\r\n')
     const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' })
     const url = URL.createObjectURL(blob)
@@ -715,13 +685,7 @@ export default function ProcessGenPage() {
     if (validRows.length === 0) return
     setCsvAppending(true); setCsvAppendMsg('')
     try {
-      const dataRows = validRows.map(r =>
-        [r.order_number, r.mfg_order_number, r.product_name, r.product_desc,
-         r.lot_number, String(r.prod_qty), r.due, r.priority, r.earliest_start,
-         String(r.job_seq), r.workcenter, r.job_name, String(r.job_qty), r.outsourcing,
-         String(r.est_time), r.time_unit, r.bom, r.mat_req_qty,
-         r.customer ?? '', r.assigned_machine ?? '', '', '']
-      )
+      const dataRows = validRows.map(buildSaraRow)
       const res = await fetch('/api/sara/exchange-csv', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

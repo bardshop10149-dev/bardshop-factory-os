@@ -4,6 +4,15 @@ import { useState, useEffect, useCallback } from 'react'
 import { supabase } from '../../../../lib/supabaseClient'
 import SoOrderModal from '../../../../components/SoOrderModal'
 import PoOrderModal from '../../../../components/PoOrderModal'
+import ChangeOrderPanel from './ChangeOrderPanel'
+import {
+  createRowKey,
+  detectFactory,
+  clearStaleDocsOnFactoryChange,
+  type SourceRow,
+  type MatchStatus,
+  type SheetRow,
+} from '../../../../lib/argoerp/dailyOrderSheetShared'
 
 // ===== 舊系統入庫紀錄比對 =====
 interface LegacyReceiptRow {
@@ -32,65 +41,6 @@ interface SaraWipRow {
   real_end_time: string | null
   report_resources: string | null
   username: string | null
-}
-
-// ===== 型別定義（與 order-batch-export 一致）=====
-interface SourceRow {
-  order_number: string
-  line_no_input: string   // B欄：貼入時直接填寫的序號（空字串 = 無填入，需比對）
-  doc_type: string
-  factory: 'T' | 'C' | 'O'
-  receiver: string
-  is_sample: string
-  has_material: string
-  designer: string
-  customer: string
-  line_nickname: string
-  handler: string
-  issuer: string
-  item_code: string
-  item_name: string
-  note: string
-  packing: string
-  quantity: string
-  delivery_date: string
-  plate_count: string
-  upload_ro: string
-  order_status: string
-  pm_note: string
-  assigned_machine: string
-}
-
-export type MatchStatus = 'matched' | 'no_order' | 'no_qty_match'
-
-export interface SheetRow extends SourceRow {
-  row_key: string
-  mo_status: '已匯入製令' | null
-  mo_number?: string
-  // 常平採購單比對結果（對應 erp_pj_sync）
-  po_number?: string | null
-  po_sub_no?: string | null
-  po_status?: 'matched' | 'no_match' | 'no_po' | 'qty_mismatch' | null
-  po_qty_erp?: number | null  // ERP 採購單數量（僅 qty_mismatch 時有值，供人工判斷用）
-  po_confirmed?: boolean      // 使用者已人工確認採購單，同步時不覆蓋
-  // 委外請購單比對結果（對應 erp_pj_sync doc_type=請購單號；為輔，採購單優先顯示）
-  // 比對鏈：出單表 order_number(SO) → erp_so_lines.tpn_part_no(RO) → 請購單 extra.SO_PROJECT_ID(RO)
-  pr_number?: string | null
-  pr_sub_no?: string | null
-  pr_status?: 'matched' | 'no_match' | null
-  // 序號比對結果（對應 erp_so_lines）
-  match_status?: MatchStatus | null
-  match_line_no?: string | null
-  match_pdl_seq?: number | null
-  match_reason?: string | null
-  // 批備料狀態（對應 argoerp_material_prep_log 最近一筆 或 erp_material_prep_lines ARGO 批備料單）
-  material_prep_status?: '已備料' | '無需備料' | '已批備料' | null
-  // ARGO 批備料建立的單據號碼（對應 argoerp_material_prep_log.argo_slip_no）
-  argo_slip_no?: string | null
-  // 機台分配（對應 argoerp_mo_machine_assign）
-  machine?: string
-  // 已手動轉換廠區（用不同底色標示）
-  factory_changed?: boolean
 }
 
 interface SheetMeta {
@@ -122,33 +72,6 @@ interface PjRecord {
 function todayStr(): string {
   const d = new Date()
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
-}
-
-function detectFactory(docType: string): 'T' | 'C' | 'O' {
-  if (docType.includes('常平')) return 'C'
-  if (docType.includes('委外')) return 'O'
-  return 'T'
-}
-
-// 序號（B欄 line_no_input，或已比對出的 match_line_no）決定「同一張工單裡的哪一筆」，
-// 必須納入 row_key 組成 —— 否則同工單/同品號/同數量/同交期但不同序號的多筆列會產生相同
-// row_key，導致以 row_key 為鍵的操作（勾選 selectedKeys、逐列機台指派 rowMachines、
-// handlePrint、handleBatchChangeFactory 等）互相污染。
-// 優先採用使用者手動填入的 line_no_input；若尚無手動輸入（列本身也還沒有 line_no_input，
-// 例如尚未比對完成的舊資料）則退用已比對出的 match_line_no，確保任何時間點重新計算
-// row_key 都能維持列與列之間的唯一性。
-function createRowKey(row: SourceRow & { match_line_no?: string | null }): string {
-  return [
-    row.order_number,
-    row.doc_type,
-    row.factory,
-    row.item_code,
-    row.item_name,
-    row.note,
-    row.quantity,
-    row.delivery_date,
-    row.line_no_input || row.match_line_no || '',
-  ].join('||')
 }
 
 // 數量欄位安全轉數字：空白／格式錯誤回傳 null（視為「無法判讀」），
@@ -210,6 +133,9 @@ function parseTSV(text: string): string[][] {
 
 // 2026-06-18 起出單表新增 PACKING 欄（cells[14]），舊日期無此欄，後面欄位需往前移一格
 const PACKING_COL_SINCE = '2026-06-18'
+
+// 禁用料號：貼上資料解析到這些品項編碼時整段拒絕（C1-1 為誤用料號，不可進到出單表）
+const FORBIDDEN_ITEM_CODES = new Set(['C1-1'])
 
 // 若舊日期的 row 是在 packing 欄加入後才儲存（無 raw_text 可重新解析時），
 // quantity 欄會存到交付日字串 → 偵測並往回移一格還原
@@ -305,6 +231,19 @@ function parseSourceRows(text: string, sheetDate?: string): { rows: SourceRow[];
     return {
       rows: [],
       error: `❌ ${missingSeq.length} 筆資料缺少序號（B欄）：${examples}${missingSeq.length > 4 ? '…' : ''}，請先在出單表中填入 SO 序號再貼入。`,
+      duplicateWarnings: [],
+    }
+  }
+
+  // 禁用料號檢查：貼上的資料裡只要有一列用到禁用料號，整段貼上一律拒絕，
+  // 避免誤用的料號進到出單表裡（同缺少序號的整批拒絕邏輯）
+  const forbidden = parsed.filter(r => FORBIDDEN_ITEM_CODES.has(r.item_code))
+  if (forbidden.length > 0) {
+    const codes = [...new Set(forbidden.map(r => r.item_code))].join('、')
+    const examples = [...new Set(forbidden.map(r => r.order_number))].slice(0, 4).join('、')
+    return {
+      rows: [],
+      error: `❌ 不可使用該料號：${codes}（${forbidden.length} 筆資料，訂單如 ${examples}${forbidden.length > 4 ? '…' : ''}），請確認來源資料後再貼入。`,
       duplicateWarnings: [],
     }
   }
@@ -464,7 +403,7 @@ export default function DailyOrderSheetPage() {
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set())
 
   // ---- 分頁 ----
-  const [activeMainTab, setActiveMainTab] = useState<'daily' | 'c-orders'>('daily')
+  const [activeMainTab, setActiveMainTab] = useState<'daily' | 'c-orders' | 'change-order'>('daily')
 
   // ---- 常平廠訂單 ----
   const [cOrders, setCOrders] = useState<PjRecord[]>([])
@@ -3016,7 +2955,8 @@ export default function DailyOrderSheetPage() {
   const handleChangeFactory = useCallback((idx: number, factory: 'T' | 'C' | 'O') => {
     setSheetRows(prev => prev.map((r, i) => {
       if (i !== idx) return r
-      return { ...r, factory, row_key: createRowKey({ ...r, factory }) }
+      if (r.factory === factory) return r
+      return { ...clearStaleDocsOnFactoryChange(r), factory, row_key: createRowKey({ ...r, factory }) }
     }))
     setEditFactoryIdx(null)
   }, [])
@@ -3026,7 +2966,8 @@ export default function DailyOrderSheetPage() {
     const next: SheetRow[] = sheetRows.map((r, i) => {
       const sk = r.row_key || String(i)
       if (!selectedKeys.has(sk)) return r
-      return { ...r, factory: targetFactory, factory_changed: true, row_key: createRowKey({ ...r, factory: targetFactory }) }
+      if (r.factory === targetFactory) return r
+      return { ...clearStaleDocsOnFactoryChange(r), factory: targetFactory, factory_changed: true, row_key: createRowKey({ ...r, factory: targetFactory }) }
     })
     setSheetRows(next)
     setConvertFactoryModalOpen(false)
@@ -3253,6 +3194,16 @@ export default function DailyOrderSheetPage() {
               {pinnedCOrderKeys.size > 0 && (
                 <span className="ml-1.5 px-1.5 py-0.5 rounded-full bg-orange-500 text-white text-[10px] font-bold leading-none">{pinnedCOrderKeys.size}</span>
               )}
+            </button>
+            <button
+              onClick={() => setActiveMainTab('change-order')}
+              className={`px-5 py-2.5 text-sm font-medium rounded-t-lg transition-colors border-b-2 ${
+                activeMainTab === 'change-order'
+                  ? 'border-amber-500 text-amber-300 bg-slate-900'
+                  : 'border-transparent text-slate-400 hover:text-slate-200 hover:bg-slate-900/50'
+              }`}
+            >
+              🛠 改單專區
             </button>
             <a
               href="/admin/argoerp/so-change-notices"
@@ -4057,6 +4008,9 @@ export default function DailyOrderSheetPage() {
               )}
             </div>
           )}
+
+          {/* ===== 改單專區分頁 ===== */}
+          {activeMainTab === 'change-order' && <ChangeOrderPanel />}
 
         </div>
       </div>

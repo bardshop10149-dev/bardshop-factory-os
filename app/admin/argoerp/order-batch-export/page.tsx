@@ -4,6 +4,15 @@ import { useState, useCallback, useEffect, useMemo, useRef } from 'react'
 import * as XLSX from 'xlsx'
 import { supabase } from '../../../../lib/supabaseClient'
 import SoOrderModal from '../../../../components/SoOrderModal'
+import {
+  EXPORT_COLUMNS,
+  getImportConfig,
+  toErpPayload,
+  parseSoDateDigits,
+  mapMoExportRowsT as mapAllToExport,
+  type ExportRow,
+  type SoMatchResult,
+} from '../../../../lib/argoerp/moExportShared'
 
 // ==================== 來源欄位（貼上的格式） ====================
 const INPUT_COLUMNS = [
@@ -63,120 +72,6 @@ function sheetRowIdentityKey(r: Record<string, unknown>): string {
   ].map(v => String(v)).join('||')
 }
 
-// ==================== ArgoERP 匯出欄位定義 ====================
-interface ExportColumn {
-  key: string
-  label: string
-  typeLabel: string
-}
-
-const EXPORT_COLUMNS: ExportColumn[] = [
-  { key: 'mo_number', label: '製令單號', typeLabel: '文字(32)' },
-  { key: 'planned_start_date', label: '預定投產日', typeLabel: '日期' },
-  { key: 'planned_end_date', label: '預定結案日', typeLabel: '日期' },
-  { key: 'mo_status', label: '製令狀態', typeLabel: '文字(10)' },
-  { key: 'status_date', label: '狀態設定日', typeLabel: '日期' },
-  { key: 'department', label: '部門', typeLabel: '文字(13)' },
-  { key: 'cost_department', label: '成本部門', typeLabel: '文字(32)' },
-  { key: 'seq_number', label: '編號', typeLabel: '數字' },
-  { key: 'product_code', label: '生產貨號', typeLabel: '文字(64)' },
-  { key: 'version', label: '版本', typeLabel: '數字' },
-  { key: 'lot_number', label: '批號', typeLabel: '文字(32)' },
-  { key: 'datecode', label: 'DATECODE', typeLabel: '文字(32)' },
-  { key: 'attr_a', label: '料件屬性A', typeLabel: '文字(32)' },
-  { key: 'attr_b', label: '料件屬性B', typeLabel: '文字(32)' },
-  { key: 'attr_c', label: '料件屬性C', typeLabel: '文字(32)' },
-  { key: 'attr_d', label: '料件屬性D', typeLabel: '文字(32)' },
-  { key: 'planned_qty', label: '預訂產出量', typeLabel: '數字' },
-  { key: 'delivered_qty', label: '已繳庫數量', typeLabel: '數字' },
-  { key: 'bom_level', label: 'BOM製造批料階數', typeLabel: '數字' },
-  { key: 'product_cost_ratio', label: '成品工費分攤約當比例', typeLabel: '數字' },
-  { key: 'material_cost_ratio', label: '直接原料分攤約當比例', typeLabel: '數字' },
-  { key: 'source_order', label: '來源訂單', typeLabel: '文字(32)' },
-  { key: 'source_order_line', label: '來源訂單項號', typeLabel: '數字' },
-  { key: 'mo_note', label: '製令說明', typeLabel: '文字(2000)' },
-  { key: 'create_date', label: '開立日期', typeLabel: '日期' },
-  { key: 'auto_material', label: '自動批備料', typeLabel: '文字(200)' },
-  { key: 'batch_number', label: '批次號', typeLabel: '文字(64)' },
-  { key: 'project_code', label: '專案代號', typeLabel: '文字(32)' },
-  { key: 'custom_1', label: '自定義欄位1', typeLabel: '文字(200)' },
-  { key: 'custom_2', label: '自定義欄位2', typeLabel: '文字(200)' },
-  { key: 'custom_3', label: '自定義欄位3', typeLabel: '文字(200)' },
-  { key: 'custom_4', label: '自定義欄位4', typeLabel: '文字(200)' },
-  { key: 'custom_5', label: '自定義欄位5', typeLabel: '文字(200)' },
-  { key: 'custom_6', label: '自定義欄位6', typeLabel: '文字(200)' },
-  { key: 'mo_type', label: '製令型態', typeLabel: '文字(32)' },
-  { key: 'box_label_report', label: '站間盒裝標籤報表代碼', typeLabel: '文字(32)' },
-  { key: 'carton_label_report', label: '外箱標籤報表代碼', typeLabel: '文字(32)' },
-  { key: 'pallet_label_report', label: '棧板標籤報表代碼', typeLabel: '文字(32)' },
-  { key: 'routing_code', label: '途程代碼', typeLabel: '文字(32)' },
-  { key: 'packing_qty', label: '包裝數量', typeLabel: '數字' },
-]
-
-// ==================== ArgoERP IFAF028 介面欄位代碼對應 ====================
-// 將內部英文 key 轉為 ArgoERP 介面實際接受的「轉檔欄位」代碼
-// 來源：IFAF028 製令介面轉檔（PJ_PROJECT / PJ_PROJECTDETAIL → PJ_PROJECTDETAIL_MO_INTERFACE）
-const ERP_FIELD_CODE_MAP: Record<string, string> = {
-  mo_number: 'PROJECT_ID',
-  planned_start_date: 'BEGIN_DATE',
-  planned_end_date: 'END_DATE',
-  mo_status: 'HOLD_STATUS',
-  status_date: 'STATUS_DATE',
-  // 部門/成本部門：必填欄位 (V)。注意 ERP 規格代碼是 SEG_ 不是 SBG_（之前 typo 導致 invalid column）
-  department: 'SEG_SEGMENT_NO_DEPARTMENT',
-  cost_department: 'PJT_SEG_SEGMENT_NO',
-  seq_number: 'LINE_NO',
-  product_code: 'MBP_PART',
-  version: 'MBP_VER',
-  lot_number: 'MBP_LOT_NO',
-  datecode: 'MBP_DATECODE',
-  attr_a: 'MBP_REFERENCEA',
-  attr_b: 'MBP_REFERENCEB',
-  attr_c: 'MBP_REFERENCEC',
-  attr_d: 'MBP_REFERENCED',
-  planned_qty: 'ORDER_QTY',
-  delivered_qty: 'ACTUAL_QTY',
-  bom_level: 'BOM_LEVELS',
-  product_cost_ratio: 'EQUIVALENT_RATIO',
-  material_cost_ratio: 'EQUIVALENT_RATIO_M',
-  source_order: 'PJT_PROJECT_ID_MO_SO',
-  source_order_line: 'LINE_NO_MO_SO',
-  mo_note: 'REMARK_LINE',
-  create_date: 'MO_BEGIN_DATE',
-  auto_material: 'AUTO_PREPARE',
-  batch_number: 'BATCH_NO',
-  project_code: 'PJT_TASK_ID',
-  custom_1: 'PDL01C',
-  custom_2: 'PDL02C',
-  custom_3: 'PDL03C',
-  custom_4: 'PDL04C',
-  custom_5: 'PDL05C',
-  custom_6: 'PDL06C',
-  mo_type: 'MO_TYPE',
-  box_label_report: 'INNER_BOX_LABEL_ID',
-  carton_label_report: 'BOX_LABEL_ID',
-  pallet_label_report: 'PAL_LABEL_ID',
-  routing_code: 'ROUTING_ID',
-  packing_qty: 'QTY_PACK',
-}
-
-// 將內部 ExportRow（英文 key）轉換為 ArgoERP 介面 payload（ERP 欄位代碼為 key）
-// 只送有值的欄位，避免 ORA-00957（duplicate column）— 某些欄位 ERP 程序內部會自填，
-// 若我們再送空字串會造成重複欄位錯誤。
-function toErpPayload(rows: ExportRow[]): Array<Record<string, string>> {
-  return rows.map(row => {
-    const erp: Record<string, string> = {}
-    for (const [internalKey, value] of Object.entries(row)) {
-      const erpCode = ERP_FIELD_CODE_MAP[internalKey]
-      if (!erpCode) continue
-      const v = (value ?? '').trim()
-      if (!v) continue   // 空值不送，避免覆蓋/重複到 ERP 程序自填的欄位
-      erp[erpCode] = v
-    }
-    return erp
-  })
-}
-
 // 有對應來源資料的欄位 key（用於高亮顯示）
 const MAPPED_KEYS = new Set([
   'mo_number', 'planned_start_date', 'planned_end_date', 'mo_status',
@@ -184,50 +79,6 @@ const MAPPED_KEYS = new Set([
   'lot_number', 'planned_qty', 'bom_level', 'product_cost_ratio',
   'material_cost_ratio', 'source_order', 'source_order_line', 'mo_note', 'create_date', 'auto_material',
 ])
-
-type ExportRow = Record<string, string>
-
-interface SoMatchResult {
-  line_no: string | null
-  pdl_seq: number | null
-  status: 'matched' | 'no_order' | 'no_qty_match' | 'insufficient_candidates'
-  reason: string
-}
-
-// ==================== 工具函式 ====================
-function formatDate(d: Date): string {
-  return `${d.getFullYear()}/${String(d.getMonth() + 1).padStart(2, '0')}/${String(d.getDate()).padStart(2, '0')}`
-}
-
-// 以 byte 長度截斷字串（UTF-8）——中文一字 3 bytes、英數 1 byte
-function truncateByByteLength(text: string, maxBytes: number): string {
-  if (!text) return ''
-  const encoder = new TextEncoder()
-  const decoder = new TextDecoder('utf-8')
-  const bytes = encoder.encode(text)
-  if (bytes.length <= maxBytes) return text
-  // 從 maxBytes 位置往前品找不會切斷多字节字符的位置
-  let cut = maxBytes
-  while (cut > 0 && (bytes[cut] & 0xc0) === 0x80) cut--
-  return decoder.decode(bytes.slice(0, cut))
-}
-
-// 取得下一個工作日（跳過六日）
-function getNextBusinessDay(from: Date): Date {
-  const d = new Date(from)
-  d.setDate(d.getDate() + 1)
-  while (d.getDay() === 0 || d.getDay() === 6) {
-    d.setDate(d.getDate() + 1)
-  }
-  return d
-}
-
-function getImportConfig(factory: 'T' | 'C' | 'O') {
-  if (factory === 'T') {
-    return { interfaceId: 'IFAF028', targetLabel: '製令', shortLabel: 'MOT' }
-  }
-  return { interfaceId: 'IFAF044', targetLabel: '採購單', shortLabel: factory === 'C' ? 'MOC' : 'MOO' }
-}
 
 // ==================== 批次映射（需要一次處理全部來計算流水號）====================
 // 流水號來源：以 Supabase 製令總表為準（DB 唯一鍵 mo_number 是最後防線），
@@ -301,63 +152,6 @@ function getMaxUsedSeq(prefix: string, dateDigits: string): number {
   const dbMax = seqCacheFromDb.get(`${prefix}${dateDigits}`) ?? 0
   const localMax = getMaxUsedSeqFromLocal(prefix, dateDigits)
   return Math.max(dbMax, localMax)
-}
-
-// 從銷售訂單號解析日期（8碼 YYYYMMDD）
-// 格式：英文前綴 + YY(2) + MM(2) + DD(2) + 後綴，例 RO26050101 → 20260501
-// 從銷售訂單號取出英文前綴後的完整數字串
-// 例：RO26042801 → "26042801"、RO26050101 → "26050101"
-function parseSoDateDigits(orderNumber: string): string | null {
-  // 擷取英文前綴後的完整後綴（含連字號），以支援外部系統產生的 SOA 格式
-  // 例：SOA260622-111728-486 → "260622-111728-486"、RO26050101 → "26050101"
-  const m = orderNumber.match(/^[A-Za-z]+(.+)/)
-  if (!m) return null
-  return m[1]
-}
-
-function mapAllToExport(srcRows: SourceRow[], matchResults?: SoMatchResult[]): ExportRow[] {
-  const today = new Date()
-  const todayStr = formatDate(today)
-  const nextBizDay = formatDate(getNextBusinessDay(today))
-  // 今日日期作為 fallback（當 SO 號無法解析時使用）
-  const todayDateDigits = `${today.getFullYear()}${String(today.getMonth() + 1).padStart(2, '0')}${String(today.getDate()).padStart(2, '0')}`
-
-  return srcRows.map((src, rowIndex) => {
-    const row: ExportRow = {}
-    EXPORT_COLUMNS.forEach(col => { row[col.key] = '' })
-
-    // 製令單號：MO + 廠別(T/C/O) + 來源單號日期(YYYYMMDD) + 兩碼序號
-    // 末兩碼直接取 source_order_line（來源訂單項號 LINE_NO），例 LINE_NO=5 → 05
-    // 日期取自來源銷售訂單號（例 RO26050101 → 20260501），無法解析時 fallback 今日
-    const prefix = src.factory === 'O' ? 'MOO' : `MO${src.factory}`
-    const soDateDigits = parseSoDateDigits(src.order_number) ?? todayDateDigits
-    const lineNo = matchResults?.[rowIndex]?.line_no
-    const seqStr = lineNo ? String(Number(lineNo)).padStart(2, '0') : '00'
-    row.mo_number = `${prefix}${soDateDigits}${seqStr}`
-
-    row.planned_start_date = nextBizDay                // 預定投產日：下一個工作日
-    row.planned_end_date = src.delivery_date            // 預定結案日：交付日期
-    row.mo_status = src.factory === 'T' ? 'OPEN' : 'UNSIGNED'  // 製令=OPEN；採購單(C/O)=UNSIGNED
-    row.department = 'M1100'                           // 部門
-    row.cost_department = 'M1000'                      // 成本部門
-    row.seq_number = lineNo ? String(Number(lineNo)) : '1'  // 編號：來源訂單項號（LINE_NO）
-    row.product_code = src.item_code                   // 生產貨號：品項編碼
-    row.version = '1'                                  // 版本
-    // 批號(MBP_LOT_NO)：來源訂單號截斷 30 bytes（ERP 欄位限制 32 bytes，留餘裕）
-    row.lot_number = truncateByByteLength(src.order_number, 30)
-    row.custom_1 = ''                                  // 自定義欄位1：暫不送出
-    row.planned_qty = src.quantity.replace(/,/g, '')                     // 預訂產出量：數量
-    row.bom_level = '99'                               // BOM製造批料階數
-    row.product_cost_ratio = '1'                       // 成品工費分攤約當比例
-    row.material_cost_ratio = '1'                      // 直接原料分攤約當比例
-    row.source_order = src.order_number                // 來源訂單：工單編號
-    row.source_order_line = matchResults?.[rowIndex]?.line_no ?? ''  // 來源訂單項號：SO 行號（ERP 比對）
-    row.mo_note = [src.item_name, src.note].filter(Boolean).join(' ')  // 製令說明：品名/規格+備註
-    row.create_date = todayStr                         // 開立日期：今天
-    row.auto_material = 'N'                            // 自動批備料
-
-    return row
-  })
 }
 
 // ==================== TSV 解析器（處理含 Tab/換行的引號欄位）====================
