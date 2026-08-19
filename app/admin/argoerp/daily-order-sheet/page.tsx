@@ -870,8 +870,6 @@ export default function DailyOrderSheetPage() {
           mo_number: r.mo_number!,
           machine: moMachines[r.mo_number!] || '',
         }))
-      // 機台衝突提示（非阻擋性）：API 會回傳這次指派中，已被其他工單佔用的機台清單
-      let machineConflicts: { machine: string; mo_number: string; existing_mo_numbers: string[] }[] = []
       if (moAssignments.length > 0) {
         const assignRes = await fetch('/api/argoerp/mo-machine-assign', {
           method: 'POST',
@@ -879,7 +877,7 @@ export default function DailyOrderSheetPage() {
           body: JSON.stringify({ assignments: moAssignments }),
         })
         const assignJson = await assignRes.json().catch(() => null)
-        if (Array.isArray(assignJson?.conflicts)) machineConflicts = assignJson.conflicts
+        if (!assignRes.ok || !assignJson?.success) throw new Error(assignJson?.error || '機台分配儲存失敗')
       }
 
       // 2. PATCH daily_order_sheets.rows 的 machine 欄位（所有列）
@@ -905,17 +903,8 @@ export default function DailyOrderSheetPage() {
           : (rowMachines[r.row_key] || r.machine || ''),
       })))
       setMachineChanged(false)
-      if (machineConflicts.length > 0) {
-        // 非阻擋性提示：儲存已完成，僅告知使用者該機台目前也被其他工單佔用（是否允許併用屬業務規則，此處不擋存檔）
-        const detail = machineConflicts
-          .map(c => `${c.machine}（另有 ${c.existing_mo_numbers.join('、')}）`)
-          .join('；')
-        setSaveMsg(`⚠️ 機台分配已儲存，但偵測到機台衝突：${detail}`)
-        setTimeout(() => setSaveMsg(''), 8000)
-      } else {
-        setSaveMsg('✅ 機台分配已儲存')
-        setTimeout(() => setSaveMsg(''), 4000)
-      }
+      setSaveMsg('✅ 機台分配已儲存')
+      setTimeout(() => setSaveMsg(''), 4000)
     } catch (e) {
       setSaveMsg(`❌ 機台儲存失敗：${e instanceof Error ? e.message : String(e)}`)
       setTimeout(() => setSaveMsg(''), 5000)

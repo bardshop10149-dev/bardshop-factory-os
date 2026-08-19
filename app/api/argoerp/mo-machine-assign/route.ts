@@ -57,31 +57,12 @@ export async function POST(request: NextRequest) {
 
     const supabase = getSupabaseAdminClient()
 
-    // 衝突提示只在「這次同一批送出的指派」裡比對——機台是實體資源，每天都會重複使用，
-    // 跟 argoerp_mo_machine_assign 全表歷史比對（不分日期）會把幾個月前早就做完的舊工單
-    // 全部誤判成衝突。只有同一批（同一天的出單表）裡兩個不同工單被指到同一台機台，
-    // 才是真正當天排程撞機。
-    const byMachine = new Map<string, string[]>()
-    for (const r of rows) {
-      if (!r.machine) continue
-      const list = byMachine.get(r.machine) ?? []
-      if (!list.includes(r.mo_number)) list.push(r.mo_number)
-      byMachine.set(r.machine, list)
-    }
-    const conflicts: { machine: string; mo_number: string; existing_mo_numbers: string[] }[] = []
-    for (const [machine, moNumbers] of byMachine) {
-      if (moNumbers.length <= 1) continue
-      for (const mo of moNumbers) {
-        conflicts.push({ machine, mo_number: mo, existing_mo_numbers: moNumbers.filter(m => m !== mo) })
-      }
-    }
-
     const { error } = await supabase
       .from(TABLE)
       .upsert(rows, { onConflict: 'mo_number' })
 
     if (error) throw error
-    return NextResponse.json({ success: true, upserted: rows.length, conflicts })
+    return NextResponse.json({ success: true, upserted: rows.length })
   } catch (e) {
     const msg = e instanceof Error ? formatSupabaseAdminError(e.message) : String(e)
     return NextResponse.json({ success: false, error: msg }, { status: 500 })
