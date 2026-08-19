@@ -54,6 +54,14 @@ interface Payload {
     sourceOrder: string | null
     routeId?: string | null
   }
+  receipt?: {
+    state: 'completed' | 'partial' | 'none' | 'unknown'
+    orderQty: number
+    actualQty: number
+    rejectQty: number
+    lastUpdate: string | null
+    error: string | null
+  }
   lots: Lot[]
   totals: { lotCount: number; stepCount: number; reportedStepCount: number }
 }
@@ -73,8 +81,13 @@ const fmtTime = (s: string | null) => {
   return d.toLocaleString('zh-TW', { timeZone: 'Asia/Taipei', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false })
 }
 
-// 依報工/剩餘判斷該站狀態
-const stepState = (s: Step) => {
+// 依報工/剩餘判斷該站狀態。
+// noLiveRecord：製令已繳庫完工、塔台也已結案移除現場紀錄 —— 這時 0 報工代表
+// 「紀錄已不存在」，不是「還沒做」，標成未開工會誤導現場。
+const stepState = (s: Step, noLiveRecord = false) => {
+  if (noLiveRecord && s.reportedQty <= 0) {
+    return { label: '無現場紀錄', cls: 'bg-slate-800 text-slate-500 border-slate-700' }
+  }
   const req = s.requiredQty
   if (req != null && req > 0) {
     if (s.reportedQty >= req) return { label: '已完成', cls: 'bg-emerald-900/40 text-emerald-300 border-emerald-700/50' }
@@ -125,6 +138,10 @@ export default function MoRouteModal({ moNumber, onClose }: Props) {
 
   if (!moNumber) return null
   const lots = data?.lots ?? []
+  const receipt = data?.receipt
+  const done = receipt?.state === 'completed'
+  // 已完工繳庫、但畫面資料是備援快照 → 塔台已結案移除現場紀錄
+  const noLiveRecord = done && data?.source === 'db_fallback'
 
   return (
     <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/70 p-6 overflow-y-auto" onClick={onClose}>
@@ -152,6 +169,14 @@ export default function MoRouteModal({ moNumber, onClose }: Props) {
                 ⚠ 快照資料
               </span>
             )}
+            {done && (
+              <span
+                className="px-2 py-0.5 rounded bg-emerald-900/50 border border-emerald-600/60 text-emerald-300 text-[11px] font-medium"
+                title={`ARGO 繳庫 ${receipt?.actualQty} / ${receipt?.orderQty}`}
+              >
+                ✅ 已完工
+              </span>
+            )}
             {data?.matchedBy === 'source_order' && (
               <span className="px-2 py-0.5 rounded bg-amber-950/40 border border-amber-700/50 text-amber-300 text-[11px]" title="塔台這批掛在訂單層級，非製令號">
                 以訂單號對應
@@ -167,14 +192,53 @@ export default function MoRouteModal({ moNumber, onClose }: Props) {
 
         {/* Body */}
         <div className="p-5 overflow-y-auto flex-1">
+          {!loading && !error && receipt && receipt.state !== 'unknown' && (
+            <div
+              className={`mb-4 rounded-lg border px-4 py-3 ${
+                done
+                  ? 'bg-emerald-950/30 border-emerald-800/60'
+                  : receipt.state === 'partial'
+                    ? 'bg-sky-950/30 border-sky-800/60'
+                    : 'bg-slate-800/40 border-slate-700'
+              }`}
+            >
+              <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+                <span className={`text-sm font-semibold ${done ? 'text-emerald-300' : receipt.state === 'partial' ? 'text-sky-300' : 'text-slate-300'}`}>
+                  {done ? '✅ 此製令已完工繳庫' : receipt.state === 'partial' ? '繳庫進行中' : '尚未繳庫'}
+                </span>
+                <span className="font-mono text-base text-slate-100">
+                  {nf(receipt.actualQty)} <span className="text-slate-500">/</span> {nf(receipt.orderQty)}
+                </span>
+                {receipt.rejectQty > 0 && (
+                  <span className="text-xs text-amber-400">不良 {nf(receipt.rejectQty)}</span>
+                )}
+                {receipt.lastUpdate && (
+                  <span className="text-xs text-slate-500">
+                    {/* ARGO 有時只回日期不含時分，硬套時間格式會顯示成 00:00 而誤導 */}
+                    ARGO 更新於 {receipt.lastUpdate.includes(':') ? (fmtTime(receipt.lastUpdate) ?? receipt.lastUpdate) : receipt.lastUpdate}
+                  </span>
+                )}
+              </div>
+              {noLiveRecord && (
+                <div className="mt-1.5 text-xs text-slate-400">
+                  塔台已結案並移除此單的現場紀錄，下方為<b className="text-slate-300">標準途程</b>，不代表各站的實際報工狀況。
+                </div>
+              )}
+            </div>
+          )}
+
           {loading && <div className="flex items-center justify-center h-40 text-slate-400 text-sm">讀取塔台製程中…</div>}
           {error && <div className="flex items-center justify-center h-40 text-red-400 text-sm">⚠ {error}</div>}
 
           {!loading && !error && data && lots.length === 0 && (
             <div className="flex flex-col items-center justify-center h-40 text-slate-400 text-sm gap-2">
-              <div>塔台查無此製令的製程</div>
+              <div>{done ? '塔台已無此製令的現場紀錄（已結案移除）' : '塔台查無此製令的製程'}</div>
               <div className="text-xs text-slate-500">
-                {data.erpInfo?.itemCode ? `品號 ${data.erpInfo.itemCode}｜可能尚未匯入塔台或已結案移除` : '找不到此製令'}
+                {data.erpInfo?.itemCode
+                  ? done
+                    ? `品號 ${data.erpInfo.itemCode}｜此單已完工繳庫，屬正常情形`
+                    : `品號 ${data.erpInfo.itemCode}｜可能尚未匯入塔台或已結案移除`
+                  : '找不到此製令'}
               </div>
               {data.saraError && <div className="text-xs text-amber-500/80 max-w-lg text-center">塔台連線問題：{data.saraError}</div>}
             </div>
@@ -225,7 +289,7 @@ export default function MoRouteModal({ moNumber, onClose }: Props) {
                   </thead>
                   <tbody>
                     {lot.steps.map((s, i) => {
-                      const st = stepState(s)
+                      const st = stepState(s, noLiveRecord)
                       const done = s.requiredQty != null && s.requiredQty > 0 && s.reportedQty >= s.requiredQty
                       const timeInfo = fmtTime(s.lastEnd)
                       return (
