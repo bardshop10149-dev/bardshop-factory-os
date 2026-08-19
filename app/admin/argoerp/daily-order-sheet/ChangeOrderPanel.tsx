@@ -302,7 +302,8 @@ export default function ChangeOrderPanel() {
     }
   }, [selectedLineNo, lastUpdatedRows, queriedOrderNumber, lastLogId, handleQuery])
 
-  // ── 同步至 SARA：移除交換區裡這張訂單的舊列，加入更正後的新列（途程留空，需至 process-gen 補）──
+  // ── 同步至 SARA：移除交換區裡「這張訂單＋這個序號」的舊列，加入更正後的新列
+  //    （途程留空，需至 process-gen 補；其他序號、其他訂單的既有列不受影響）──
   const handleSaraSync = useCallback(async () => {
     if (!selectedLineNo) return
     const src = (lastUpdatedRows[0] ?? latestRow) as SheetRowRec | undefined
@@ -314,8 +315,9 @@ export default function ChangeOrderPanel() {
       const getJson = await getRes.json() as { success: boolean; rows?: string[][]; error?: string }
       if (!getJson.success) throw new Error(getJson.error || '讀取交換區失敗')
       const existing = getJson.rows ?? []
-      // 交換區第一欄（Order Number）等於這張單號的舊列一律移除，換上更正後的新列
-      const kept = existing.filter(r => r[0] !== queriedOrderNumber)
+      // 只移除「這張銷售單號 + 這個序號」的舊列（第 0 欄 Order Number + 第 4 欄 Lot Number），
+      // 不能只比對單號——同一張單可能有好幾個序號，只改了其中一個，其他序號已同步的列不該被清掉。
+      const kept = existing.filter(r => !(r[0] === queriedOrderNumber && r[4] === selectedLineNo))
 
       const saraRow: SaraRow = {
         order_number: queriedOrderNumber,

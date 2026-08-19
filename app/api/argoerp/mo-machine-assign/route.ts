@@ -57,27 +57,22 @@ export async function POST(request: NextRequest) {
 
     const supabase = getSupabaseAdminClient()
 
-    // 寫入前先查目前佔用同機台的其他工單，回傳給前端做非阻擋性提示
-    // （機台是否允許多工單排隊使用屬業務規則，此處不阻擋寫入，僅提供資訊）
-    const machinesInUse = [...new Set(rows.map(r => r.machine).filter(Boolean))]
+    // 衝突提示只在「這次同一批送出的指派」裡比對——機台是實體資源，每天都會重複使用，
+    // 跟 argoerp_mo_machine_assign 全表歷史比對（不分日期）會把幾個月前早就做完的舊工單
+    // 全部誤判成衝突。只有同一批（同一天的出單表）裡兩個不同工單被指到同一台機台，
+    // 才是真正當天排程撞機。
+    const byMachine = new Map<string, string[]>()
+    for (const r of rows) {
+      if (!r.machine) continue
+      const list = byMachine.get(r.machine) ?? []
+      if (!list.includes(r.mo_number)) list.push(r.mo_number)
+      byMachine.set(r.machine, list)
+    }
     const conflicts: { machine: string; mo_number: string; existing_mo_numbers: string[] }[] = []
-    if (machinesInUse.length > 0) {
-      const { data: existingOnMachines } = await supabase
-        .from(TABLE)
-        .select('mo_number, machine')
-        .in('machine', machinesInUse)
-      const byMachine = new Map<string, string[]>()
-      for (const row of existingOnMachines ?? []) {
-        const list = byMachine.get(row.machine) ?? []
-        list.push(row.mo_number)
-        byMachine.set(row.machine, list)
-      }
-      for (const r of rows) {
-        if (!r.machine) continue
-        const others = (byMachine.get(r.machine) ?? []).filter(mo => mo !== r.mo_number)
-        if (others.length > 0) {
-          conflicts.push({ machine: r.machine, mo_number: r.mo_number, existing_mo_numbers: others })
-        }
+    for (const [machine, moNumbers] of byMachine) {
+      if (moNumbers.length <= 1) continue
+      for (const mo of moNumbers) {
+        conflicts.push({ machine, mo_number: mo, existing_mo_numbers: moNumbers.filter(m => m !== mo) })
       }
     }
 
