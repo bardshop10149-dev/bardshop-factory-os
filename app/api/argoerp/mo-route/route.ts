@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { getSupabaseAdminClient } from '@/lib/supabaseAdmin'
 import { guardAuth } from '@/lib/requireAuth'
 import { saraFindProjects, saraJobsOfLot, saraWebConfigured, type SaraProject } from '@/lib/saraWebClient'
+import { fetchMoReceipt, type MoReceipt } from '@/lib/argoQuery'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 製令(MOT) → 塔台所有製程與各站報工量
@@ -99,6 +100,12 @@ export async function GET(request: NextRequest) {
 
   const sb = getSupabaseAdminClient()
 
+  // ── 繳庫狀況（即時問 ARGO）───────────────────────────────────
+  // 先發車、最後才 await，讓它跟塔台查詢平行跑，不額外增加等待。
+  // 這是判斷「這張製令做完了沒」的唯一可靠來源：塔台結案後該批會從清單消失，
+  // 屆時只看報工會誤判成「未開始」；常平／委外不報工的單同理。
+  const receiptPromise: Promise<MoReceipt> = fetchMoReceipt(mo)
+
   // ── 製令基本資料（ERP 側，供顯示與備援 join）─────────────────────
   const { data: moLines } = await sb
     .from('erp_mo_lines')
@@ -181,6 +188,7 @@ export async function GET(request: NextRequest) {
           mo,
           matchedBy,
           erpInfo,
+          receipt: await receiptPromise,
           lots,
           totals: {
             lotCount: lots.length,
@@ -194,13 +202,13 @@ export async function GET(request: NextRequest) {
       // 塔台連線／登入失敗 → 靜默降級為備援，並在回應帶出原因
       const reason = e instanceof Error ? e.message : String(e)
       const fb = await fallbackFromDb(sb, mo, itemCode, sourceOrder, erpInfo)
-      return NextResponse.json({ ...fb, saraError: reason })
+      return NextResponse.json({ ...fb, receipt: await receiptPromise, saraError: reason })
     }
   }
 
   // ── ② 備援：資料庫（標準途程 + 報工快照）──────────────────────
   const fb = await fallbackFromDb(sb, mo, itemCode, sourceOrder, erpInfo)
-  return NextResponse.json(fb)
+  return NextResponse.json({ ...fb, receipt: await receiptPromise })
 }
 
 type Sb = ReturnType<typeof getSupabaseAdminClient>

@@ -5,6 +5,7 @@ import Link from 'next/link'
 import { NavButton } from '../../../components/NavButton'
 import SoOrderModal from '../../../components/SoOrderModal'
 import PoProgressChips from '../../../components/PoProgressChips'
+import { useMoRoute, MoRouteBody } from '../../../components/MoRouteModal'
 import { supabase } from '../../../lib/supabaseClient'
 
 // ─── erp_pj_sync 型別 ─────────────────────────────────────
@@ -54,6 +55,8 @@ function PjSyncModal({ docNo, onClose }: { docNo: string; onClose: () => void })
   const [err, setErr] = useState<string | null>(null)
   // 採購追蹤（進度＝採購手動點的已出貨；入庫＝ARGO 回寫的實際入庫量），key = sub_no
   const [track, setTrack] = useState<Record<string, { progress: string; received_qty: number | null; po_status: string | null }>>({})
+  // 製令才查塔台製程／各站報工（非製令傳 null，hook 內部會跳過）
+  const moRoute = useMoRoute(isMo ? docNo : null)
 
   useEffect(() => {
     if (!docNo) return
@@ -166,7 +169,8 @@ function PjSyncModal({ docNo, onClose }: { docNo: string; onClose: () => void })
           ) : totalRows === 0 ? (
             <div className="text-center py-12 text-slate-500">同步區查無資料</div>
           ) : isMo ? (
-            /* ── 製令明細 (erp_mo_lines) ── */
+            /* ── 製令明細 (erp_mo_lines) ＋ 塔台製程 ── */
+            <>
             <table className="w-full text-sm">
               <thead>
                 <tr className="text-left text-xs text-slate-500 uppercase tracking-wider sticky top-0 bg-slate-950">
@@ -193,6 +197,38 @@ function PjSyncModal({ docNo, onClose }: { docNo: string; onClose: () => void })
                 ))}
               </tbody>
             </table>
+
+            {/* ── 塔台製程與各站報工 ── */}
+            <div className="mt-4 border-t border-slate-800">
+              <div className="px-4 pt-4 flex flex-wrap items-center gap-2">
+                <span className="text-sm font-semibold text-slate-200">塔台製程與報工</span>
+                {moRoute.data?.source === 'sara_live' && (
+                  <span className="px-2 py-0.5 rounded bg-emerald-950/40 border border-emerald-700/50 text-emerald-300 text-[11px]" title="直接讀取塔台即時資料">
+                    塔台即時
+                  </span>
+                )}
+                {moRoute.data?.source === 'db_fallback' && (
+                  <span
+                    className="px-2 py-0.5 rounded bg-amber-950/40 border border-amber-700/50 text-amber-300 text-[11px]"
+                    title={moRoute.data.saraError || '塔台未連線，改用資料庫的報工快照（可能非最新）'}
+                  >
+                    ⚠ 快照資料
+                  </span>
+                )}
+                {moRoute.data?.matchedBy === 'source_order' && (
+                  <span className="px-2 py-0.5 rounded bg-amber-950/40 border border-amber-700/50 text-amber-300 text-[11px]" title="塔台這批掛在訂單層級，非製令號">
+                    以訂單號對應
+                  </span>
+                )}
+              </div>
+              <MoRouteBody
+                data={moRoute.data}
+                loading={moRoute.loading}
+                error={moRoute.error}
+                className="px-4 pb-4 pt-3"
+              />
+            </div>
+            </>
           ) : (
             /* ── 採購/請購明細 (erp_pj_sync) ── */
             <table className="w-full text-sm">
