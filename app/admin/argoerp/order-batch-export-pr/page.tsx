@@ -490,7 +490,7 @@ export default function PrBatchExportOPage() {
         MBP_VER: edit.mbp_ver || '1',
         MBP_LOT_NO: row.order_number,
         UNIT_OF_MEASURE_ORU: edit.uom || 'PCS',
-        ORDER_QTY_ORU: row.quantity,
+        ORDER_QTY_ORU: String(row.quantity ?? '').replace(/,/g, ''),
         CURRENCY: header.currency,
         DUEDATE: clampDueDate(row.delivery_date, header.apply_date),
         FLOW_TYPE: header.flow_type.trim(),

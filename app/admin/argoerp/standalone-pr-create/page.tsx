@@ -277,7 +277,7 @@ export default function StandalonePrCreatePage() {
         MBP_VER: l.mbp_ver.trim() || '1',
         MBP_LOT_NO: l.so_project_id.trim(),
         UNIT_OF_MEASURE_ORU: l.uom.trim() || 'PCS',
-        ORDER_QTY_ORU: l.quantity.trim(),
+        ORDER_QTY_ORU: l.quantity.trim().replace(/,/g, ''),
         CURRENCY: header.currency,
         DUEDATE: clampDueDate(l.delivery_date, header.apply_date),
         FLOW_TYPE: header.flow_type.trim(),

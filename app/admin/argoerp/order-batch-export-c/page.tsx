@@ -264,7 +264,7 @@ export default function PoBatchExportCPage() {
       rec['LINE_NO']                     = String(i + 1)
       rec['MBP_PART']                    = row.item_code
       rec['MBP_VER']                     = e.mbp_ver || '1'
-      rec['ORDER_QTY_ORU']               = row.quantity
+      rec['ORDER_QTY_ORU']               = String(row.quantity ?? '').replace(/,/g, '')
       rec['UNIT_OF_MEASURE_ORU']         = e.uom || 'PCS'
       rec['UNIT_PRICE_ORU']              = e.unit_price || '0'
       rec['DUEDATE']                     = row.delivery_date

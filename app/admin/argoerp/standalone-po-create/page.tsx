@@ -257,7 +257,7 @@ export default function StandalonePoCreatePage() {
       rec['LINE_NO']                     = String(i + 1)
       rec['MBP_PART']                    = item.item_code
       rec['MBP_VER']                     = '1'
-      rec['ORDER_QTY_ORU']               = item.quantity
+      rec['ORDER_QTY_ORU']               = String(item.quantity ?? '').replace(/,/g, '')
       rec['UNIT_OF_MEASURE_ORU']         = item.uom || 'PCS'
       rec['UNIT_PRICE_ORU']              = item.unit_price || '0'
       rec['DUEDATE']                     = item.delivery_date
