@@ -393,6 +393,10 @@ export default function DailyOrderSheetPage() {
   const [loading, setLoading] = useState(false)
   const [saving, setSaving] = useState(false)
   const [saveMsg, setSaveMsg] = useState('')
+  // 多人協作偵測：記錄目前這份出單表載入時的 updated_at，後台定期輪詢比對，
+  // 發現被別的電腦改過就跳提示（不自動覆蓋畫面上可能還沒存檔的編輯內容）
+  const [loadedUpdatedAt, setLoadedUpdatedAt] = useState<string | null>(null)
+  const [staleNotice, setStaleNotice] = useState<{ updatedAt: string; updatedBy: string | null } | null>(null)
   const [editFactoryIdx, setEditFactoryIdx] = useState<number | null>(null)
   const [matching, setMatching] = useState(false)
   const [syncingMo, setSyncingMo] = useState(false)
@@ -581,9 +585,11 @@ export default function DailyOrderSheetPage() {
     setCurrentRawText('')
     setShowPasteArea(false)
     setParseError('')
+    setStaleNotice(null)
     try {
       const res = await fetch(`/api/argoerp/daily-order-sheet?date=${date}`, { cache: 'no-store' })
       const json = await res.json()
+      setLoadedUpdatedAt(json.sheet?.updated_at ?? null)
       if (json.success && json.sheet) {
         const storedRowsRaw: SheetRow[] = Array.isArray(json.sheet.rows) ? json.sheet.rows as SheetRow[] : []
         const rawTextStored: string = json.sheet.raw_text ?? ''
@@ -748,6 +754,26 @@ export default function DailyOrderSheetPage() {
 
   useEffect(() => { loadSheetList() }, [loadSheetList])
   useEffect(() => { loadSheet(selectedDate) }, [selectedDate, loadSheet])
+
+  // ---- 多人協作偵測：後台每 20 秒檢查一次目前這份出單表是否被其他電腦更新過 ----
+  // 只提示、不自動覆蓋畫面——避免打斷正在編輯、還沒存檔的內容
+  useEffect(() => {
+    if (!selectedDate) return
+    const timer = setInterval(async () => {
+      if (document.visibilityState !== 'visible') return
+      try {
+        const res = await fetch(`/api/argoerp/daily-order-sheet?date=${selectedDate}&meta=1`, { cache: 'no-store' })
+        const json = await res.json()
+        const remoteUpdatedAt: string | null = json?.sheet?.updated_at ?? null
+        if (remoteUpdatedAt && loadedUpdatedAt && remoteUpdatedAt !== loadedUpdatedAt) {
+          setStaleNotice({ updatedAt: remoteUpdatedAt, updatedBy: json?.sheet?.updated_by_name ?? null })
+        }
+      } catch {
+        // 輪詢失敗不影響既有畫面，靜默略過，下次再試
+      }
+    }, 20000)
+    return () => clearInterval(timer)
+  }, [selectedDate, loadedUpdatedAt])
 
   // ---- 載入交期閾值設定 ----
   useEffect(() => {
@@ -3160,6 +3186,21 @@ export default function DailyOrderSheetPage() {
             )}
           </div>
         </div>
+
+        {staleNotice && (
+          <div className="mb-4 flex flex-wrap items-center gap-3 px-4 py-2.5 bg-amber-950/40 border border-amber-700/50 rounded-lg text-sm text-amber-200">
+            <span>
+              ⚠️ 這張出單表已被{staleNotice.updatedBy ? `「${staleNotice.updatedBy}」` : '其他電腦'}更新（
+              {new Date(staleNotice.updatedAt).toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit' })}），請重新載入以取得最新資料
+            </span>
+            <button
+              onClick={() => loadSheet(selectedDate)}
+              className="px-3 py-1 rounded-lg bg-amber-700 hover:bg-amber-600 text-white text-xs font-semibold"
+            >
+              重新載入
+            </button>
+          </div>
+        )}
 
         <div>
           {/* ===== 分頁切換 ===== */}

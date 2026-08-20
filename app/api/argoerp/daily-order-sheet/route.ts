@@ -84,6 +84,18 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ success: true, sheets: list }, { headers: { 'Cache-Control': 'no-store' } })
     }
 
+    // ?date=X&meta=1 — 只回傳 updated_at，供前端輪詢偵測「其他人是否更新過」用，
+    // 不用每次輪詢都把整份 rows（可能很大）都抓回來
+    if (searchParams.get('meta') === '1') {
+      const { data: metaData, error: metaError } = await supabase
+        .from(TABLE)
+        .select('sheet_date, updated_at, updated_by_name')
+        .eq('sheet_date', date)
+        .maybeSingle()
+      if (metaError) throw metaError
+      return NextResponse.json({ success: true, sheet: metaData }, { headers: { 'Cache-Control': 'no-store' } })
+    }
+
     const { data, error } = await supabase
       .from(TABLE)
       .select('*')
