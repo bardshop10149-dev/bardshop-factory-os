@@ -20,6 +20,7 @@ const DEMO_RECORDS: MoRecord[] = [
     create_date: '2026/05/04',
     factory: 'T',
     prep_status: 'PENDING',
+    is_sample: 'RO26042901',
   },
   {
     mo_number: 'MOC202605040023',
@@ -130,6 +131,7 @@ interface MoRecord {
   po_number?: string | null   // ERP 採購單號（POC/POO 開頭）
   pr_number?: string | null   // ERP 請購單號（委外 O 列印請購單時使用）
   pr_sub_no?: string | null   // ERP 請購單項號
+  is_sample?: string          // 打樣/追加單號（每日出單表原始欄位，非布林值，儘管欄位名稱是 is_sample）
 }
 
 interface SoLine {
@@ -339,6 +341,16 @@ function PoCard({
               </span>
             </div>
           )}
+          <div style={{ marginTop: '4px' }}>
+            <span style={{ fontSize: '10px', color: '#555', fontWeight: 600, letterSpacing: '1px', marginRight: '6px' }}>打樣/追加單號</span>
+            <span style={{
+              fontSize: '13px', fontWeight: 'bold', letterSpacing: '0.5px',
+              background: '#f0f0f0', padding: '2px 8px', border: '1px solid #999',
+              display: 'inline-block', borderRadius: '3px', color: '#000', minWidth: '70px', minHeight: '16px',
+            }}>
+              {mo.is_sample || ''}
+            </span>
+          </div>
         </div>
 
         {/* 中：採購單／請購單 大標題 */}
@@ -888,6 +900,16 @@ function MoPrintContent() {
                     display: 'inline-block', borderRadius: '3px', color: '#000',
                   }}>
                     {mo.mo_number}
+                  </div>
+                  <div style={{ marginTop: '4px' }}>
+                    <span style={{ fontSize: '10px', color: '#555', fontWeight: 600, letterSpacing: '1px', marginRight: '6px' }}>打樣/追加單號</span>
+                    <span style={{
+                      fontSize: '13px', fontWeight: 'bold', letterSpacing: '0.5px',
+                      background: '#f0f0f0', padding: '2px 8px', border: '1px solid #999',
+                      display: 'inline-block', borderRadius: '3px', color: '#000', minWidth: '70px', minHeight: '16px',
+                    }}>
+                      {mo.is_sample || ''}
+                    </span>
                   </div>
                 </div>
 

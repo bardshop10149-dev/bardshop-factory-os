@@ -1125,6 +1125,7 @@ export default function DailyOrderSheetPage() {
       po_number: r.po_number ?? undefined,
       pr_number: r.pr_number ?? undefined,
       pr_sub_no: r.pr_sub_no ?? undefined,
+      is_sample: r.is_sample || undefined,
     }))
 
     sessionStorage.setItem('mo_print_selection', JSON.stringify(moRecords))
