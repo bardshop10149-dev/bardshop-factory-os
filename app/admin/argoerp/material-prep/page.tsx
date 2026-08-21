@@ -806,7 +806,8 @@ export default function MaterialPrepPage() {
       // C開頭＝委外生產、O開頭＝代工（客戶供料）：這兩種本身就不需要 BOM，不用等人工補登，
       // 直接視為可備料（不檢查任何庫存，因為根本沒有要領用的原料）
       if (bomPrefixRule === 'outsourced') {
-        const isContracted = productCode.trim().toUpperCase().startsWith('O')
+        const upperProductCode = productCode.trim().toUpperCase()
+        const isContracted = upperProductCode.startsWith('O') || upperProductCode.startsWith('S')
         return [{
           row_key: `${mo.mo_number}::${productCode}::NO_MATERIAL_NEEDED`,
           mo_number: mo.mo_number,
