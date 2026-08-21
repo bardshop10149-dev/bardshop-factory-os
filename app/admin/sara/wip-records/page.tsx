@@ -145,9 +145,37 @@ function refLabel(siteFilter: string): string {
   return '製令/採購/請購號'
 }
 
+// ===== 各機台日報 =====
+// report_resources 是「機台, 人員」黏在同一個逗號分隔字串裡（順序不固定，兩種都出現過），
+// 無法單純用位置判斷；改用 sara_resources 裡登記的機台/產線清單來比對，抓出真正的機台名稱，
+// 同機台不同人一律算同一台（不分人）。
+interface DailyMachineRow {
+  machine: string
+  totalQty: number
+  reportCount: number
+  orderNumbers: Set<string>
+  jobNames: Set<string>
+}
+
+function taipeiDateStr(d: Date): string {
+  // 用 Intl 取得 Asia/Taipei 當地日期字串（YYYY-MM-DD），避免用本機瀏覽器時區猜測
+  const parts = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Taipei', year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(d)
+  const y = parts.find(p => p.type === 'year')!.value
+  const m = parts.find(p => p.type === 'month')!.value
+  const dd = parts.find(p => p.type === 'day')!.value
+  return `${y}-${m}-${dd}`
+}
+
+function taipeiDayUtcRange(dateStr: string): { startUtc: string; endUtc: string } {
+  // Asia/Taipei 為 UTC+8，當地一天的範圍換算成 UTC 區間
+  const start = new Date(`${dateStr}T00:00:00+08:00`)
+  const end = new Date(start.getTime() + 24 * 60 * 60 * 1000)
+  return { startUtc: start.toISOString(), endUtc: end.toISOString() }
+}
+
 // ===== 主元件 =====
 export default function SaraWipRecordsPage() {
-  const [tab, setTab] = useState<'upload' | 'view'>('view')
+  const [tab, setTab] = useState<'upload' | 'view' | 'daily'>('view')
 
   // --- 上傳狀態 ---
   const [file, setFile] = useState<File | null>(null)
@@ -165,6 +193,17 @@ export default function SaraWipRecordsPage() {
   const [search, setSearch] = useState('')
   const [page, setPage] = useState(0)
   const PAGE_SIZE = 50
+
+  // --- 各機台日報狀態 ---
+  const [dailyDate, setDailyDate] = useState(() => {
+    const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000)
+    return taipeiDateStr(yesterday)
+  })
+  const [dailySiteFilter, setDailySiteFilter] = useState<string>('all')
+  const [dailyLoading, setDailyLoading] = useState(false)
+  const [dailyRows, setDailyRows] = useState<DailyMachineRow[]>([])
+  const [dailyUnmatched, setDailyUnmatched] = useState<DailyMachineRow[]>([])
+  const [dailyLatestDate, setDailyLatestDate] = useState<string | null>(null)  // 資料庫實際最新一筆報工的日期，供新鮮度提示
 
   // --- 解析 CSV ---
   const handleFileChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
@@ -269,6 +308,67 @@ export default function SaraWipRecordsPage() {
   const pageRecords = records.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE)
   const totalPages = Math.ceil(records.length / PAGE_SIZE)
 
+  // --- 各機台日報：讀取指定（台北時區）日期內已完成的報工，依機台彙總 ---
+  const fetchDailySummary = useCallback(async (dateStr: string) => {
+    setDailyLoading(true)
+    try {
+      // 已登記的機台／產線清單（同機台不同人不分人，靠這份清單從 report_resources 抓出機台）
+      const { data: resourceRows, error: resErr } = await supabase
+        .from('sara_resources')
+        .select('resource_name, resource_type')
+        .in('resource_type', ['Machine', 'Line'])
+      if (resErr) throw resErr
+      const machineNames = new Set((resourceRows ?? []).map(r => r.resource_name))
+
+      const { startUtc, endUtc } = taipeiDayUtcRange(dateStr)
+      let query = supabase
+        .from('sara_wip_records')
+        .select('mo_nbr,job_name,wip_qty,report_resources,status,real_end_time,site_label')
+        .eq('status', 'finished')
+        .gte('real_end_time', startUtc)
+        .lt('real_end_time', endUtc)
+        .limit(5000)
+      if (dailySiteFilter !== 'all') query = query.eq('site_label', dailySiteFilter)
+      const { data, error } = await query
+      if (error) throw error
+
+      const matched = new Map<string, DailyMachineRow>()
+      const unmatched = new Map<string, DailyMachineRow>()
+      for (const r of (data ?? []) as Array<{ mo_nbr: string | null; job_name: string | null; wip_qty: number | null; report_resources: string | null; status: string | null; real_end_time: string | null; site_label: string | null }>) {
+        const pieces = String(r.report_resources ?? '').split(/[,、]/).map(s => s.trim()).filter(Boolean)
+        const machinesInRow = pieces.filter(p => machineNames.has(p))
+        const targets = machinesInRow.length > 0 ? machinesInRow : [pieces.join('、') || '（無資源資訊）']
+        const bucket = machinesInRow.length > 0 ? matched : unmatched
+        for (const m of targets) {
+          const row = bucket.get(m) ?? { machine: m, totalQty: 0, reportCount: 0, orderNumbers: new Set(), jobNames: new Set() }
+          row.totalQty += r.wip_qty ?? 0
+          row.reportCount += 1
+          if (r.mo_nbr) row.orderNumbers.add(r.mo_nbr)
+          if (r.job_name) row.jobNames.add(r.job_name)
+          bucket.set(m, row)
+        }
+      }
+
+      setDailyRows([...matched.values()].sort((a, b) => b.totalQty - a.totalQty))
+      setDailyUnmatched([...unmatched.values()].sort((a, b) => b.totalQty - a.totalQty))
+
+      // 順便查一下資料庫實際最新一筆報工的日期，判斷選定日期是否落在有資料的範圍內
+      const { data: latest } = await supabase
+        .from('sara_wip_records')
+        .select('real_end_time')
+        .not('real_end_time', 'is', null)
+        .order('real_end_time', { ascending: false })
+        .limit(1)
+      setDailyLatestDate(latest?.[0]?.real_end_time ? taipeiDateStr(new Date(latest[0].real_end_time)) : null)
+    } catch (e) {
+      console.error('fetchDailySummary error', e)
+      setDailyRows([])
+      setDailyUnmatched([])
+    } finally {
+      setDailyLoading(false)
+    }
+  }, [dailySiteFilter])
+
   return (
     <div className="min-h-screen bg-slate-950 text-slate-200 p-4">
       <div className="max-w-7xl mx-auto space-y-4">
@@ -282,10 +382,14 @@ export default function SaraWipRecordsPage() {
 
         {/* 分頁標籤 */}
         <div className="flex gap-1 border-b border-slate-800">
-          {([['view', '📋 瀏覽紀錄'], ['upload', '📤 匯入 CSV']] as const).map(([key, label]) => (
+          {([['view', '📋 瀏覽紀錄'], ['daily', '📊 各機台日報'], ['upload', '📤 匯入 CSV']] as const).map(([key, label]) => (
             <button
               key={key}
-              onClick={() => { setTab(key); if (key === 'view') void fetchRecords() }}
+              onClick={() => {
+                setTab(key)
+                if (key === 'view') void fetchRecords()
+                if (key === 'daily') void fetchDailySummary(dailyDate)
+              }}
               className={`px-4 py-2 text-sm rounded-t transition-colors ${tab === key ? 'bg-slate-800 text-white border-t border-x border-slate-700' : 'text-slate-400 hover:text-slate-200'}`}
             >
               {label}
@@ -523,6 +627,132 @@ export default function SaraWipRecordsPage() {
                   </tbody>
                 </table>
               </div>
+            )}
+          </div>
+        )}
+
+        {/* ===== 各機台日報 ===== */}
+        {tab === 'daily' && (
+          <div className="space-y-4">
+            <div className="flex flex-wrap items-center gap-2">
+              <label className="text-slate-400 text-sm whitespace-nowrap">日期</label>
+              <button
+                onClick={() => {
+                  const d = new Date(`${dailyDate}T00:00:00+08:00`)
+                  const prev = taipeiDateStr(new Date(d.getTime() - 24 * 60 * 60 * 1000))
+                  setDailyDate(prev)
+                  void fetchDailySummary(prev)
+                }}
+                className="px-2 py-1.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300"
+              >‹</button>
+              <input
+                type="date"
+                value={dailyDate}
+                onChange={e => { setDailyDate(e.target.value); void fetchDailySummary(e.target.value) }}
+                className="px-2 py-1.5 rounded bg-slate-800 border border-slate-700 text-slate-200 text-sm focus:outline-none"
+              />
+              <button
+                onClick={() => {
+                  const d = new Date(`${dailyDate}T00:00:00+08:00`)
+                  const next = taipeiDateStr(new Date(d.getTime() + 24 * 60 * 60 * 1000))
+                  setDailyDate(next)
+                  void fetchDailySummary(next)
+                }}
+                className="px-2 py-1.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300"
+              >›</button>
+              <div className="flex items-center gap-2 ml-2">
+                <label className="text-slate-400 text-sm whitespace-nowrap">廠區</label>
+                <select
+                  value={dailySiteFilter}
+                  onChange={e => { setDailySiteFilter(e.target.value); void fetchDailySummary(dailyDate) }}
+                  className="px-2 py-1.5 rounded bg-slate-800 border border-slate-700 text-slate-200 text-sm focus:outline-none"
+                >
+                  <option value="all">全部</option>
+                  {SITE_OPTIONS.map(s => <option key={s} value={s}>{s}</option>)}
+                </select>
+              </div>
+              <button
+                onClick={() => void fetchDailySummary(dailyDate)}
+                disabled={dailyLoading}
+                className="px-4 py-1.5 rounded-lg bg-cyan-700 hover:bg-cyan-600 disabled:opacity-40 text-white text-sm transition-colors"
+              >
+                {dailyLoading ? '查詢中…' : '重新查詢'}
+              </button>
+            </div>
+
+            <p className="text-slate-500 text-xs">
+              只計算狀態為「完成」的報工，同一台機台不論由誰報工都算在一起。資料來源是「匯入 CSV」上傳的報工快照，不是即時資料。
+            </p>
+
+            {dailyLatestDate && dailyLatestDate < dailyDate && (
+              <div className="px-3 py-2 rounded-lg bg-amber-900/30 border border-amber-700/40 text-amber-300 text-xs">
+                ⚠ 資料庫目前最新的報工紀錄只到 {dailyLatestDate}，比你選的日期舊——請先到「匯入 CSV」上傳更新的報工資料，這份日報才會準確。
+              </div>
+            )}
+
+            {dailyLoading ? (
+              <div className="py-16 text-center text-slate-400 text-sm">載入中…</div>
+            ) : dailyRows.length === 0 && dailyUnmatched.length === 0 ? (
+              <div className="py-16 text-center space-y-2">
+                <p className="text-slate-400 text-sm">{dailyDate} 沒有已完成的報工紀錄</p>
+              </div>
+            ) : (
+              <>
+                <div className="overflow-x-auto rounded-xl border border-slate-700">
+                  <table className="w-full text-xs">
+                    <thead className="bg-slate-800/90">
+                      <tr className="border-b border-slate-700">
+                        <th className="px-3 py-2.5 text-left text-slate-300 whitespace-nowrap">機台</th>
+                        <th className="px-3 py-2.5 text-right text-slate-300 whitespace-nowrap">產出總數</th>
+                        <th className="px-3 py-2.5 text-right text-slate-300 whitespace-nowrap">報工筆數</th>
+                        <th className="px-3 py-2.5 text-right text-slate-300 whitespace-nowrap">涉及工單數</th>
+                        <th className="px-3 py-2.5 text-left text-slate-300">主要製程</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {dailyRows.map((row, i) => (
+                        <tr key={row.machine} className={`border-b border-slate-800/50 ${i % 2 === 0 ? '' : 'bg-slate-800/20'}`}>
+                          <td className="px-3 py-2 font-medium text-slate-100 whitespace-nowrap">{row.machine}</td>
+                          <td className="px-3 py-2 text-right font-mono text-emerald-300 whitespace-nowrap">{row.totalQty.toLocaleString()}</td>
+                          <td className="px-3 py-2 text-right text-slate-300 whitespace-nowrap">{row.reportCount}</td>
+                          <td className="px-3 py-2 text-right text-slate-300 whitespace-nowrap">{row.orderNumbers.size}</td>
+                          <td className="px-3 py-2 text-slate-400 max-w-[320px] truncate" title={[...row.jobNames].join('、')}>
+                            {[...row.jobNames].slice(0, 4).join('、')}{row.jobNames.size > 4 ? ` 等 ${row.jobNames.size} 項` : ''}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+
+                {dailyUnmatched.length > 0 && (
+                  <div className="space-y-2">
+                    <p className="text-slate-500 text-xs">
+                      以下報工的資源欄位比對不到已登記的機台/產線清單（可能是只記了人員、或機台名稱跟 SARA 資源設定不一致），列出來供核對：
+                    </p>
+                    <div className="overflow-x-auto rounded-xl border border-slate-800">
+                      <table className="w-full text-xs">
+                        <thead className="bg-slate-900 text-slate-500">
+                          <tr>
+                            <th className="px-3 py-2 text-left whitespace-nowrap">原始資源欄位</th>
+                            <th className="px-3 py-2 text-right whitespace-nowrap">產出總數</th>
+                            <th className="px-3 py-2 text-right whitespace-nowrap">報工筆數</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {dailyUnmatched.map(row => (
+                            <tr key={row.machine} className="border-b border-slate-800/40 text-slate-400">
+                              <td className="px-3 py-2 whitespace-nowrap">{row.machine}</td>
+                              <td className="px-3 py-2 text-right font-mono">{row.totalQty.toLocaleString()}</td>
+                              <td className="px-3 py-2 text-right">{row.reportCount}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
+              </>
             )}
           </div>
         )}
