@@ -55,19 +55,24 @@ export async function GET() {
     }
 
     // 分批查（IN 條件筆數過多時 PostgREST 可能有 URL 長度限制），500 筆一批
+    // BOM 兩個來源都算：mm_bom_structure（ARGO 同步）+ bom_manual_supplement（人工補登，
+    // 獨立表、不會被同步覆蓋）——任一邊有資料就不算缺 BOM。
     const CHUNK = 500
     const hasRoute = new Set<string>()
     const hasBom = new Set<string>()
     for (let i = 0; i < allItemCodes.length; i += CHUNK) {
       const chunk = allItemCodes.slice(i, i + CHUNK)
-      const [{ data: routes, error: routesErr }, { data: boms, error: bomsErr }] = await Promise.all([
+      const [{ data: routes, error: routesErr }, { data: boms, error: bomsErr }, { data: manualBoms, error: manualBomsErr }] = await Promise.all([
         sb.from('item_routes').select('item_code').in('item_code', chunk),
         sb.from('mm_bom_structure').select('parent_part').in('parent_part', chunk),
+        sb.from('bom_manual_supplement').select('parent_part').in('parent_part', chunk),
       ])
       if (routesErr) throw routesErr
       if (bomsErr) throw bomsErr
+      if (manualBomsErr) throw manualBomsErr
       for (const r of routes ?? []) hasRoute.add(r.item_code)
       for (const b of boms ?? []) hasBom.add(b.parent_part)
+      for (const b of manualBoms ?? []) hasBom.add(b.parent_part)
     }
 
     const items: GapItem[] = []

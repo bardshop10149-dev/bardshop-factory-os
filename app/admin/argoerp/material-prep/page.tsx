@@ -659,8 +659,25 @@ export default function MaterialPrepPage() {
       })
       const filteredErpBom = allErpBom.filter(r => r.bom_ver === minVerMap[r.parent_part])
 
+      // 人工補登 BOM（bom_manual_supplement，跟 ARGO 同步的 mm_bom_structure 分開存放、
+      // 不會被同步覆蓋）：只補 ARGO 完全沒有資料的品項，ARGO 有資料的以 ARGO 為準
+      const argoParents = new Set(filteredErpBom.map(r => r.parent_part))
+      const codesNeedingSupplement = productCodes.filter(code => !argoParents.has(code))
+      type ManualBomRow = { parent_part: string; child_part: string; child_qty: number }
+      let manualBom: ManualBomRow[] = []
+      if (codesNeedingSupplement.length > 0) {
+        const { data: manualBomData } = await supabase
+          .from('bom_manual_supplement')
+          .select('parent_part, child_part, child_qty')
+          .in('parent_part', codesNeedingSupplement)
+        manualBom = (manualBomData ?? []) as ManualBomRow[]
+      }
+
       // 取子件的中文名稱與單位（mm_bom_part_units）
-      const materialCodes = Array.from(new Set(filteredErpBom.map(r => r.child_part).filter(Boolean)))
+      const materialCodes = Array.from(new Set([
+        ...filteredErpBom.map(r => r.child_part),
+        ...manualBom.map(r => r.child_part),
+      ].filter(Boolean)))
       const partInfoMap: Record<string, { part_name: string | null; unit_of_measure: string | null }> = {}
       if (materialCodes.length > 0) {
         const { data: partData } = await supabase
@@ -673,17 +690,32 @@ export default function MaterialPrepPage() {
       }
 
       // 組合 BomRow（保持原有介面欄位，供 materialPrepRows 計算邏輯不變）
-      const rows: BomRow[] = filteredErpBom.map(r => ({
-        product_code: r.parent_part,
-        product_name: null,
-        production_quantity: r.lot_base ?? 1,
-        production_unit: null,
-        note: null,
-        material_code: r.child_part,
-        material_name: partInfoMap[r.child_part]?.part_name ?? null,
-        quantity: r.lot_child_qty ?? 0,
-        unit: partInfoMap[r.child_part]?.unit_of_measure ?? null,
-      }))
+      // 人工補登的部分 production_quantity 固定視為 1（lot_base=1），child_qty 就是每 1 個
+      // 成品要用的子件數量，跟補登表單填寫時的認知一致
+      const rows: BomRow[] = [
+        ...filteredErpBom.map(r => ({
+          product_code: r.parent_part,
+          product_name: null,
+          production_quantity: r.lot_base ?? 1,
+          production_unit: null,
+          note: null,
+          material_code: r.child_part,
+          material_name: partInfoMap[r.child_part]?.part_name ?? null,
+          quantity: r.lot_child_qty ?? 0,
+          unit: partInfoMap[r.child_part]?.unit_of_measure ?? null,
+        })),
+        ...manualBom.map(r => ({
+          product_code: r.parent_part,
+          product_name: null,
+          production_quantity: 1,
+          production_unit: null,
+          note: '人工補登',
+          material_code: r.child_part,
+          material_name: partInfoMap[r.child_part]?.part_name ?? null,
+          quantity: r.child_qty,
+          unit: partInfoMap[r.child_part]?.unit_of_measure ?? null,
+        })),
+      ]
 
       const { data: substituteData, error: substituteError } = await supabase
         .from('material_substitute_rules')
@@ -1202,6 +1234,12 @@ export default function MaterialPrepPage() {
     }
 
     const importMos = Array.from(new Set(selectedImportRows.map(r => r.mo_number)))
+    // 集單製令（MOS 開頭）由「集單匯出」頁自己建立、自己送 ARGO，從不會在 argoerp_mo_summary
+    // 留下任何一列——對它們做 CAS 條件更新一定是 0 筆命中，會被誤判成「已被搶先標記」而整批
+    // 排除在送出範圍外。集單通常只有單一人員在管理，重複送出風險本來就低，這裡直接放行、
+    // 不對它們做 CAS 鎖定，只對真正會被 argoerp_mo_summary 追蹤的一般製令做鎖定。
+    const casImportMos = importMos.filter(mo => !mo.startsWith('MOS'))
+    const bypassImportMos = importMos.filter(mo => mo.startsWith('MOS'))
 
     // ── 預飛檢查：確認選取的製令在 mo-summary 中確實仍是未備料狀態 ──
     try {
@@ -1244,24 +1282,27 @@ export default function MaterialPrepPage() {
     // 這樣「檢查狀態→標記已備料→送出 ARGO」之間不再有競態窗口（而不是只把
     // 上面的預飛檢查往後挪一點）。若之後送 ARGO 失敗，會在下方 catch 內把
     // 成功鎖定但實際未送出成功的 MO 復原回「未備料」。
-    let lockedMos: string[] = importMos
+    let lockedMos: string[] = [...bypassImportMos]
     try {
-      const lockRes = await fetch('/api/argoerp/mo-summary', {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ mo_numbers: importMos, prep_status: '已備料', expected_prep_status: '未備料' }),
-      })
-      const lockJson = await lockRes.json()
-      if (!lockRes.ok || !lockJson?.success) {
-        throw new Error(lockJson?.error || `HTTP ${lockRes.status}`)
-      }
-      lockedMos = Array.isArray(lockJson.updated_mo_numbers) ? lockJson.updated_mo_numbers : importMos
-      const skippedMos: string[] = Array.isArray(lockJson.skipped_mo_numbers) ? lockJson.skipped_mo_numbers : []
+      if (casImportMos.length > 0) {
+        const lockRes = await fetch('/api/argoerp/mo-summary', {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ mo_numbers: casImportMos, prep_status: '已備料', expected_prep_status: '未備料' }),
+        })
+        const lockJson = await lockRes.json()
+        if (!lockRes.ok || !lockJson?.success) {
+          throw new Error(lockJson?.error || `HTTP ${lockRes.status}`)
+        }
+        const casLockedMos: string[] = Array.isArray(lockJson.updated_mo_numbers) ? lockJson.updated_mo_numbers : casImportMos
+        const skippedMos: string[] = Array.isArray(lockJson.skipped_mo_numbers) ? lockJson.skipped_mo_numbers : []
+        lockedMos = [...lockedMos, ...casLockedMos]
 
-      if (skippedMos.length > 0) {
-        window.alert(
-          `⚠️ 以下 ${skippedMos.length} 筆製令已被其他人搶先標記為「已備料」，本次不會重複送出 ARGO：\n\n${skippedMos.join('\n')}`
-        )
+        if (skippedMos.length > 0) {
+          window.alert(
+            `⚠️ 以下 ${skippedMos.length} 筆製令已被其他人搶先標記為「已備料」，本次不會重複送出 ARGO：\n\n${skippedMos.join('\n')}`
+          )
+        }
       }
       if (lockedMos.length === 0) {
         setMaterialPrepMessage('❌ 選取的製令皆已被其他人搶先標記為已備料，本次未送出任何資料')

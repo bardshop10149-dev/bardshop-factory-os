@@ -21,6 +21,12 @@ interface RouteOption {
 
 type FilterMode = 'all' | 'route' | 'bom' | 'both'
 
+// 標記「這個品項不需要工序」用的 route_id 值——例如原物料買賣，進貨後直接出貨，
+// 本來就不會經過任何生產工序。寫進 item_routes 之後，這個品項會自然不再出現在
+// 缺工序清單裡（判斷邏輯只看 item_routes 有沒有這個品項的資料，不管 route_id 是什麼），
+// 不需要另外加欄位或新表。
+const NO_ROUTE_NEEDED = '（無需工序）'
+
 function RouteForm({ item, routeOptions, onDone }: { item: GapItem; routeOptions: RouteOption[]; onDone: () => void }) {
   const [routeId, setRouteId] = useState('')
   const [saving, setSaving] = useState(false)
@@ -92,7 +98,7 @@ function BomForm({ item, onDone }: { item: GapItem; onDone: () => void }) {
     setSaving(true)
     setMsg('')
     try {
-      const res = await fetch('/api/production/mm-bom-structure', {
+      const res = await fetch('/api/production/bom-manual-supplement', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -113,6 +119,9 @@ function BomForm({ item, onDone }: { item: GapItem; onDone: () => void }) {
   return (
     <div className="mt-2 p-3 rounded-lg bg-slate-950 border border-slate-800 space-y-2">
       <div className="text-xs text-slate-400">新增這個品項的 BOM 子件（料號＋用量）</div>
+      <div className="text-[11px] text-amber-400/80">
+        ⚠ 這是系統內部的暫時記錄，不會寫回 ARGO——批備料會一併讀取比對，但正式的 BOM 還是要在 ARGO 那邊建立
+      </div>
       {children.map((c, i) => (
         <div key={i} className="flex items-center gap-2">
           <input
@@ -160,6 +169,7 @@ export default function ItemRouteBomGapsPage() {
   const [filter, setFilter] = useState<FilterMode>('all')
   const [search, setSearch] = useState('')
   const [openForm, setOpenForm] = useState<{ code: string; kind: 'route' | 'bom' } | null>(null)
+  const [markingNoRoute, setMarkingNoRoute] = useState<string | null>(null)
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -204,6 +214,24 @@ export default function ItemRouteBomGapsPage() {
   const closeFormAndReload = useCallback(() => {
     setOpenForm(null)
     void load()
+  }, [load])
+
+  const markNoRouteNeeded = useCallback(async (item: GapItem) => {
+    setMarkingNoRoute(item.item_code)
+    try {
+      const res = await fetch('/api/production/item-routes', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ item_code: item.item_code, item_name: item.item_name, route_id: NO_ROUTE_NEEDED }),
+      })
+      const json = await res.json() as { success: boolean; error?: string }
+      if (!res.ok || !json.success) throw new Error(json.error || `HTTP ${res.status}`)
+      await load()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setMarkingNoRoute(null)
+    }
   }, [load])
 
   return (
@@ -274,12 +302,22 @@ export default function ItemRouteBomGapsPage() {
                   </div>
                   <div className="flex flex-wrap items-center gap-2 shrink-0">
                     {item.missing_route && (
-                      <button
-                        onClick={() => setOpenForm(prev => prev?.code === item.item_code && prev.kind === 'route' ? null : { code: item.item_code, kind: 'route' })}
-                        className="px-2.5 py-1 rounded-full text-[11px] font-semibold bg-amber-900/40 text-amber-300 border border-amber-700/40 hover:bg-amber-900/60 transition-colors"
-                      >
-                        ⚠ 缺工序・補登
-                      </button>
+                      <>
+                        <button
+                          onClick={() => setOpenForm(prev => prev?.code === item.item_code && prev.kind === 'route' ? null : { code: item.item_code, kind: 'route' })}
+                          className="px-2.5 py-1 rounded-full text-[11px] font-semibold bg-amber-900/40 text-amber-300 border border-amber-700/40 hover:bg-amber-900/60 transition-colors"
+                        >
+                          ⚠ 缺工序・補登
+                        </button>
+                        <button
+                          onClick={() => void markNoRouteNeeded(item)}
+                          disabled={markingNoRoute === item.item_code}
+                          title="這個品項本來就不需要工序（例如原物料買賣，可直接出貨）"
+                          className="px-2.5 py-1 rounded-full text-[11px] font-semibold bg-slate-800 text-slate-400 border border-slate-700 hover:bg-slate-700 hover:text-slate-300 disabled:opacity-40 transition-colors"
+                        >
+                          {markingNoRoute === item.item_code ? '處理中…' : '🚫 無工序'}
+                        </button>
+                      </>
                     )}
                     {item.missing_bom && (
                       <button
