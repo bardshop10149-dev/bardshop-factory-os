@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server'
 import { getSupabaseAdminClient, formatSupabaseAdminError } from '@/lib/supabaseAdmin'
 import { guardAuth } from '@/lib/requireAuth'
+import { classifyBomPrefix } from '@/lib/bomPrefixRules'
 
 // 工序/BOM 補登表——找出「發單作業區出現過，但工序總表(item_routes)或BOM
 // (mm_bom_structure)沒有對應資料」的品項編碼，供生管補齊資料。
@@ -78,7 +79,9 @@ export async function GET() {
     const items: GapItem[] = []
     for (const [itemCode, info] of itemMap) {
       const missingRoute = !hasRoute.has(itemCode)
-      const missingBom = !hasBom.has(itemCode)
+      // C/O 開頭（委外/代工）本身不需要 BOM，M/W 開頭子件料號等於自己（自我參照）
+      // 一律不算缺 BOM，不用等人工補登
+      const missingBom = classifyBomPrefix(itemCode) === null && !hasBom.has(itemCode)
       if (!missingRoute && !missingBom) continue
       items.push({
         item_code: itemCode,

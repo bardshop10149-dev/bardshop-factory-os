@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { supabase } from '../../../../lib/supabaseClient'
 import SoOrderModal from '../../../../components/SoOrderModal'
+import { classifyBomPrefix } from '../../../../lib/bomPrefixRules'
 
 // ============================================================
 // 型別
@@ -800,7 +801,57 @@ export default function MaterialPrepPage() {
     if (moRecords.length === 0) return []
     return moRecords.flatMap((mo): MaterialPrepRow[] => {
       const productCode = (mo.product_code ?? '').trim()
-      const matchedBom = bomRows.filter(row => row.product_code === productCode)
+      const bomPrefixRule = classifyBomPrefix(productCode)
+
+      // C開頭＝委外生產、O開頭＝代工（客戶供料）：這兩種本身就不需要 BOM，不用等人工補登，
+      // 直接視為可備料（不檢查任何庫存，因為根本沒有要領用的原料）
+      if (bomPrefixRule === 'outsourced') {
+        const isContracted = productCode.trim().toUpperCase().startsWith('O')
+        return [{
+          row_key: `${mo.mo_number}::${productCode}::NO_MATERIAL_NEEDED`,
+          mo_number: mo.mo_number,
+          customer: sourceOrderCustomerMap[mo.source_order ?? ''] || '-',
+          source_order: mo.source_order || '-',
+          product_code: productCode || '-',
+          source_material_code: '-',
+          source_material_name: isContracted ? '代工（客戶供料）' : '委外生產',
+          required_qty: 0,
+          is_buffered: false,
+          uses_plate_count: false,
+          unit: '-',
+          stock_qty: 0,
+          substitute_options: [],
+          selected_material_code: '',
+          selected_material_name: '',
+          selected_material_stock_qty: 0,
+          planned_qty: Number(mo.planned_qty ?? 0),
+          plate_count: mo.plate_count || '-',
+          factory: mo.factory || '-',
+          machine: mo.machine || '',
+          std_qty: 0,
+          status: '可直接備料',
+          note: isContracted ? '代工（客戶供料），本身不需要 BOM' : '委外生產，本身不需要 BOM',
+        }]
+      }
+
+      let matchedBom = bomRows.filter(row => row.product_code === productCode)
+
+      // M開頭／W開頭：子件料號就是料號本身（沒有真正拆分的 BOM），庫存直接查自己的料號。
+      // 只在真的查無 BOM 資料時才套用這個自我參照規則，若之後 BOM 表補上真實資料則優先用真實資料。
+      if (matchedBom.length === 0 && bomPrefixRule === 'self_reference') {
+        matchedBom = [{
+          product_code: productCode,
+          product_name: null,
+          production_quantity: 1,
+          production_unit: null,
+          note: '自我參照（無拆分 BOM）',
+          material_code: productCode,
+          material_name: null,
+          quantity: 1,
+          unit: null,
+        }]
+      }
+
     if (matchedBom.length === 0) {
         const rowKey = `${mo.mo_number}::${productCode}::NO_BOM`
         const moBase = {
