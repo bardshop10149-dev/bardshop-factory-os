@@ -75,6 +75,8 @@ export default function DailyMachineOutputPage() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [showSettings, setShowSettings] = useState(false)
+  const [recomputing, setRecomputing] = useState(false)
+  const [recomputeMsg, setRecomputeMsg] = useState('')
 
   const [recipients, setRecipients] = useState<string[]>([])
   const [recipientsLoading, setRecipientsLoading] = useState(false)
@@ -94,6 +96,28 @@ export default function DailyMachineOutputPage() {
       setSnapshot(null)
     } finally {
       setLoading(false)
+    }
+  }, [])
+
+  const recomputeSnapshot = useCallback(async (dateStr: string) => {
+    setRecomputing(true)
+    setRecomputeMsg('')
+    setError('')
+    try {
+      const res = await fetch('/api/production/daily-machine-output-snapshot', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ date: dateStr }),
+      })
+      const json = await res.json() as { success: boolean; error?: string; snapshot?: Snapshot }
+      if (!res.ok || !json.success) throw new Error(json.error || `HTTP ${res.status}`)
+      setSnapshot(json.snapshot ?? null)
+      setRecomputeMsg(`✅ 已更新（${new Date().toLocaleTimeString('zh-TW')}）`)
+      setTimeout(() => setRecomputeMsg(''), 5000)
+    } catch (e) {
+      setRecomputeMsg(`❌ ${e instanceof Error ? e.message : String(e)}`)
+    } finally {
+      setRecomputing(false)
     }
   }, [])
 
@@ -172,11 +196,23 @@ export default function DailyMachineOutputPage() {
             className="w-10 h-10 shrink-0 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-lg active:scale-95 transition-transform"
           >›</button>
         </div>
-        {snapshot && (
-          <div className="mt-1.5 text-[11px] text-slate-500">
-            快照計算於 {new Date(snapshot.computed_at).toLocaleString('zh-TW', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
-            {snapshot.total_mo_count > 0 && `・共 ${snapshot.total_mo_count} 張製令有繳庫`}
-            {snapshot.unassigned_mo_count > 0 && `（${snapshot.unassigned_mo_count} 張無機台分配）`}
+        <button
+          onClick={() => void recomputeSnapshot(date)}
+          disabled={recomputing}
+          className="mt-2 w-full h-10 rounded-lg bg-emerald-700 hover:bg-emerald-600 disabled:opacity-40 text-white text-sm font-medium active:scale-95 transition-transform"
+        >
+          {recomputing ? '更新中…' : '🔄 手動更新這天的資料'}
+        </button>
+        {(snapshot || recomputeMsg) && (
+          <div className="mt-1.5 text-[11px] text-slate-500 space-y-0.5">
+            {snapshot && (
+              <div>
+                快照計算於 {new Date(snapshot.computed_at).toLocaleString('zh-TW', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
+                {snapshot.total_mo_count > 0 && `・共 ${snapshot.total_mo_count} 張製令有繳庫`}
+                {snapshot.unassigned_mo_count > 0 && `（${snapshot.unassigned_mo_count} 張無機台分配）`}
+              </div>
+            )}
+            {recomputeMsg && <div className={recomputeMsg.startsWith('❌') ? 'text-red-400' : 'text-emerald-400'}>{recomputeMsg}</div>}
           </div>
         )}
       </div>
