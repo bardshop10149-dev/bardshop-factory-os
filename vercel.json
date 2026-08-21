@@ -12,6 +12,14 @@
     {
       "path": "/api/cron/sync/full",
       "schedule": "0 0,5,11,17 * * *"
+    },
+    {
+      "path": "/api/cron/daily-machine-output",
+      "schedule": "0 21 * * *"
+    },
+    {
+      "path": "/api/cron/daily-machine-output-email",
+      "schedule": "30 21 * * *"
     }
   ]
 }

@@ -173,9 +173,25 @@ function taipeiDayUtcRange(dateStr: string): { startUtc: string; endUtc: string 
   return { startUtc: start.toISOString(), endUtc: end.toISOString() }
 }
 
+interface ArgoProductQty {
+  code: string
+  qty: number
+  name: string | null
+}
+
+interface ArgoMachineOutputRow {
+  machine: string
+  actualQty: number
+  rejectQty: number
+  moCount: number
+  pendingMoCount: number
+  moNumbers: string[]
+  products: ArgoProductQty[]
+}
+
 // ===== 主元件 =====
 export default function SaraWipRecordsPage() {
-  const [tab, setTab] = useState<'upload' | 'view' | 'daily'>('view')
+  const [tab, setTab] = useState<'upload' | 'view' | 'daily' | 'argo-daily'>('view')
 
   // --- 上傳狀態 ---
   const [file, setFile] = useState<File | null>(null)
@@ -204,6 +220,15 @@ export default function SaraWipRecordsPage() {
   const [dailyRows, setDailyRows] = useState<DailyMachineRow[]>([])
   const [dailyUnmatched, setDailyUnmatched] = useState<DailyMachineRow[]>([])
   const [dailyLatestDate, setDailyLatestDate] = useState<string | null>(null)  // 資料庫實際最新一筆報工的日期，供新鮮度提示
+
+  // --- 各機台日報（ARGO 實際繳庫版）狀態 ---
+  const [argoDate, setArgoDate] = useState(() => taipeiDateStr(new Date(Date.now() - 24 * 60 * 60 * 1000)))
+  const [argoLoading, setArgoLoading] = useState(false)
+  const [argoRows, setArgoRows] = useState<ArgoMachineOutputRow[]>([])
+  const [argoPackingList, setArgoPackingList] = useState<ArgoProductQty[]>([])
+  const [argoUnassignedCount, setArgoUnassignedCount] = useState(0)
+  const [argoTotalMoCount, setArgoTotalMoCount] = useState(0)
+  const [argoError, setArgoError] = useState('')
 
   // --- 解析 CSV ---
   const handleFileChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
@@ -369,6 +394,31 @@ export default function SaraWipRecordsPage() {
     }
   }, [dailySiteFilter])
 
+  // --- 各機台日報（ARGO 實際繳庫版）：直接查 ARGO 製令繳庫 + 本系統機台分配，不依賴 SARA ---
+  const fetchArgoDailyOutput = useCallback(async (dateStr: string) => {
+    setArgoLoading(true)
+    setArgoError('')
+    try {
+      const res = await fetch(`/api/argoerp/daily-machine-output?date=${dateStr}`, { cache: 'no-store' })
+      const json = await res.json() as {
+        success: boolean; error?: string
+        rows?: ArgoMachineOutputRow[]; packingList?: ArgoProductQty[]
+        totalMoCount?: number; unassignedMoCount?: number
+      }
+      if (!res.ok || !json.success) throw new Error(json.error || `HTTP ${res.status}`)
+      setArgoRows(json.rows ?? [])
+      setArgoPackingList(json.packingList ?? [])
+      setArgoTotalMoCount(json.totalMoCount ?? 0)
+      setArgoUnassignedCount(json.unassignedMoCount ?? 0)
+    } catch (e) {
+      setArgoError(e instanceof Error ? e.message : String(e))
+      setArgoRows([])
+      setArgoPackingList([])
+    } finally {
+      setArgoLoading(false)
+    }
+  }, [])
+
   return (
     <div className="min-h-screen bg-slate-950 text-slate-200 p-4">
       <div className="max-w-7xl mx-auto space-y-4">
@@ -382,13 +432,14 @@ export default function SaraWipRecordsPage() {
 
         {/* 分頁標籤 */}
         <div className="flex gap-1 border-b border-slate-800">
-          {([['view', '📋 瀏覽紀錄'], ['daily', '📊 各機台日報'], ['upload', '📤 匯入 CSV']] as const).map(([key, label]) => (
+          {([['view', '📋 瀏覽紀錄'], ['daily', '📊 各機台日報(SARA)'], ['argo-daily', '🎯 各機台日報(ARGO繳庫)'], ['upload', '📤 匯入 CSV']] as const).map(([key, label]) => (
             <button
               key={key}
               onClick={() => {
                 setTab(key)
                 if (key === 'view') void fetchRecords()
                 if (key === 'daily') void fetchDailySummary(dailyDate)
+                if (key === 'argo-daily') void fetchArgoDailyOutput(argoDate)
               }}
               className={`px-4 py-2 text-sm rounded-t transition-colors ${tab === key ? 'bg-slate-800 text-white border-t border-x border-slate-700' : 'text-slate-400 hover:text-slate-200'}`}
             >
@@ -753,6 +804,139 @@ export default function SaraWipRecordsPage() {
                   </div>
                 )}
               </>
+            )}
+          </div>
+        )}
+
+        {/* ===== 各機台日報（ARGO 實際繳庫版）===== */}
+        {tab === 'argo-daily' && (
+          <div className="space-y-4">
+            <div className="px-3 py-2 rounded-lg bg-emerald-900/20 border border-emerald-700/40 text-emerald-300 text-xs">
+              這個版本不吃 SARA 的資料——直接查 ARGO 製令實際繳庫量（ACTUAL_QTY），交叉比對每日出單表「儲存機台分配」存的機台，
+              兩邊都是目前有在正常運作、即時的資料來源，不會有資料過期的問題。
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              <label className="text-slate-400 text-sm whitespace-nowrap">日期</label>
+              <button
+                onClick={() => {
+                  const d = new Date(`${argoDate}T00:00:00+08:00`)
+                  const prev = taipeiDateStr(new Date(d.getTime() - 24 * 60 * 60 * 1000))
+                  setArgoDate(prev)
+                  void fetchArgoDailyOutput(prev)
+                }}
+                className="px-2 py-1.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300"
+              >‹</button>
+              <input
+                type="date"
+                value={argoDate}
+                onChange={e => { setArgoDate(e.target.value); void fetchArgoDailyOutput(e.target.value) }}
+                className="px-2 py-1.5 rounded bg-slate-800 border border-slate-700 text-slate-200 text-sm focus:outline-none"
+              />
+              <button
+                onClick={() => {
+                  const d = new Date(`${argoDate}T00:00:00+08:00`)
+                  const next = taipeiDateStr(new Date(d.getTime() + 24 * 60 * 60 * 1000))
+                  setArgoDate(next)
+                  void fetchArgoDailyOutput(next)
+                }}
+                className="px-2 py-1.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300"
+              >›</button>
+              <button
+                onClick={() => void fetchArgoDailyOutput(argoDate)}
+                disabled={argoLoading}
+                className="px-4 py-1.5 rounded-lg bg-emerald-700 hover:bg-emerald-600 disabled:opacity-40 text-white text-sm transition-colors"
+              >
+                {argoLoading ? '查詢中…' : '重新查詢'}
+              </button>
+              {argoTotalMoCount > 0 && (
+                <span className="text-slate-500 text-xs">
+                  當天共 {argoTotalMoCount} 張製令有繳庫紀錄
+                  {argoUnassignedCount > 0 && `，其中 ${argoUnassignedCount} 張沒有機台分配紀錄（未計入下表）`}
+                </span>
+              )}
+            </div>
+
+            {argoError && (
+              <div className="px-3 py-2 rounded-lg bg-red-900/30 border border-red-700/40 text-red-300 text-xs">❌ {argoError}</div>
+            )}
+
+            {argoLoading ? (
+              <div className="py-16 text-center text-slate-400 text-sm">查詢 ARGO 中…</div>
+            ) : argoRows.length === 0 ? (
+              <div className="py-16 text-center space-y-2">
+                <p className="text-slate-400 text-sm">{argoDate} 沒有可歸屬到機台的繳庫紀錄</p>
+              </div>
+            ) : (
+              <div className="overflow-x-auto rounded-xl border border-slate-700">
+                <table className="w-full text-xs">
+                  <thead className="bg-slate-800/90">
+                    <tr className="border-b border-slate-700">
+                      <th className="px-3 py-2.5 text-left text-slate-300 whitespace-nowrap">機台</th>
+                      <th className="px-3 py-2.5 text-right text-slate-300 whitespace-nowrap">實際繳庫量</th>
+                      <th className="px-3 py-2.5 text-right text-slate-300 whitespace-nowrap">製令數</th>
+                      <th className="px-3 py-2.5 text-left text-slate-300">品號（品名／數量）</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {argoRows.map((row, i) => (
+                      <tr key={row.machine} className={`border-b border-slate-800/50 ${i % 2 === 0 ? '' : 'bg-slate-800/20'}`}>
+                        <td className="px-3 py-2 font-medium text-slate-100 whitespace-nowrap align-top">
+                          {row.machine}
+                          {row.pendingMoCount > 0 && (
+                            <div className="mt-0.5 text-[10px] font-normal text-amber-400/90 whitespace-normal">
+                              ⚠️ {row.pendingMoCount} 張製令有異動但尚未繳庫
+                            </div>
+                          )}
+                        </td>
+                        <td className="px-3 py-2 text-right font-mono text-emerald-300 whitespace-nowrap align-top">{row.actualQty.toLocaleString()}</td>
+                        <td className="px-3 py-2 text-right text-slate-300 whitespace-nowrap align-top">{row.moCount}</td>
+                        <td className="px-3 py-2 text-slate-400 max-w-[480px] align-top">
+                          <div className="flex flex-col gap-0.5">
+                            {row.products.map(p => (
+                              <span key={p.code} className="whitespace-nowrap">
+                                <span className="text-slate-200">{p.code}</span>
+                                {p.name && <span className="text-slate-500"> · {p.name}</span>}
+                                <span className="text-emerald-300/80"> ({p.qty.toLocaleString()})</span>
+                              </span>
+                            ))}
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            {/* 包裝部清單：當天所有有繳庫的製令，不分機台，品號+數量整批加總 */}
+            {argoPackingList.length > 0 && (
+              <div className="space-y-2 pt-2">
+                <div className="flex items-center gap-2">
+                  <h2 className="text-sm font-semibold text-slate-200">📦 包裝部清單</h2>
+                  <span className="text-slate-500 text-xs">{argoDate} 當天所有繳庫製令的品號加總，不分機台</span>
+                </div>
+                <div className="overflow-x-auto rounded-xl border border-slate-700 max-h-[400px] overflow-y-auto">
+                  <table className="w-full text-xs">
+                    <thead className="bg-slate-800/90 sticky top-0">
+                      <tr className="border-b border-slate-700">
+                        <th className="px-3 py-2.5 text-left text-slate-300 whitespace-nowrap">品號</th>
+                        <th className="px-3 py-2.5 text-left text-slate-300">品名</th>
+                        <th className="px-3 py-2.5 text-right text-slate-300 whitespace-nowrap">數量</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {argoPackingList.map((p, i) => (
+                        <tr key={p.code} className={`border-b border-slate-800/50 ${i % 2 === 0 ? '' : 'bg-slate-800/20'}`}>
+                          <td className="px-3 py-2 text-slate-100 whitespace-nowrap">{p.code}</td>
+                          <td className="px-3 py-2 text-slate-400">{p.name ?? '—'}</td>
+                          <td className="px-3 py-2 text-right font-mono text-emerald-300 whitespace-nowrap">{p.qty.toLocaleString()}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
             )}
           </div>
         )}
