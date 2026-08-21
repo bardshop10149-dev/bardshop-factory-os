@@ -95,6 +95,77 @@ function RouteForm({ item, routeOptions, onDone }: { item: GapItem; routeOptions
   )
 }
 
+interface MaterialOption {
+  item_code: string
+  item_name: string | null
+  unit_of_measure: string | null
+  book_count: number | null
+}
+
+// 子件料號輸入框——輸入關鍵字（料號或品名）即時搜尋 ERP 同步區的庫存名單
+// （material_inventory_list），跟工序補登的途程挑選一樣是「打字就看到符合項目」，
+// 但庫存名單有 7 千多筆，不適合像途程清單那樣一次全部塞進 datalist，改成打字時
+// 才去查、只顯示前 20 筆符合的。
+function MaterialPicker({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+  const [options, setOptions] = useState<MaterialOption[]>([])
+  const [open, setOpen] = useState(false)
+  const [searching, setSearching] = useState(false)
+
+  useEffect(() => {
+    const q = value.trim()
+    if (!q) return
+    let cancelled = false
+    const timer = setTimeout(() => {
+      setSearching(true)
+      fetch(`/api/production/material-inventory-search?q=${encodeURIComponent(q)}`, { cache: 'no-store' })
+        .then(res => res.json())
+        .then((json: { success: boolean; items?: MaterialOption[] }) => {
+          if (!cancelled && json.success) setOptions(json.items ?? [])
+        })
+        .catch(() => {})
+        .finally(() => { if (!cancelled) setSearching(false) })
+    }, 250)
+    return () => { cancelled = true; clearTimeout(timer) }
+  }, [value])
+
+  return (
+    <div className="relative flex-1 min-w-0">
+      <input
+        value={value}
+        onChange={e => { onChange(e.target.value); setOpen(true) }}
+        onFocus={() => setOpen(true)}
+        onBlur={() => setTimeout(() => setOpen(false), 150)}
+        placeholder="子件料號（輸入關鍵字搜尋庫存名單）"
+        className="w-full px-3 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-slate-200 text-sm focus:outline-none focus:border-cyan-500"
+      />
+      {open && value.trim() && (searching || options.length > 0) && (
+        <div className="absolute z-20 mt-1 w-full max-h-64 overflow-y-auto rounded-lg bg-slate-900 border border-slate-700 shadow-xl">
+          {searching && options.length === 0 && (
+            <div className="px-3 py-2 text-xs text-slate-500">搜尋中…</div>
+          )}
+          {options.map(opt => (
+            <button
+              key={opt.item_code}
+              onMouseDown={e => e.preventDefault()}
+              onClick={() => { onChange(opt.item_code); setOpen(false) }}
+              className="w-full text-left px-3 py-1.5 hover:bg-slate-800 transition-colors border-b border-slate-800/60 last:border-b-0"
+            >
+              <div className="text-xs font-mono text-slate-100">{opt.item_code}</div>
+              {opt.item_name && <div className="text-[11px] text-slate-400 truncate">{opt.item_name}</div>}
+              <div className="text-[10px] text-slate-500">
+                {opt.unit_of_measure ?? '—'}・庫存 {opt.book_count ?? 0}
+              </div>
+            </button>
+          ))}
+          {!searching && options.length === 0 && (
+            <div className="px-3 py-2 text-xs text-slate-500">查無符合的料號</div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function BomForm({ item, onDone }: { item: GapItem; onDone: () => void }) {
   const [children, setChildren] = useState([{ child_part: '', child_qty: '1' }])
   const [saving, setSaving] = useState(false)
@@ -136,12 +207,7 @@ function BomForm({ item, onDone }: { item: GapItem; onDone: () => void }) {
       </div>
       {children.map((c, i) => (
         <div key={i} className="flex items-center gap-2">
-          <input
-            value={c.child_part}
-            onChange={e => updateChild(i, 'child_part', e.target.value)}
-            placeholder="子件料號"
-            className="flex-1 min-w-0 px-3 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-slate-200 text-sm focus:outline-none focus:border-cyan-500"
-          />
+          <MaterialPicker value={c.child_part} onChange={v => updateChild(i, 'child_part', v)} />
           <input
             value={c.child_qty}
             onChange={e => updateChild(i, 'child_qty', e.target.value)}
