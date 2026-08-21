@@ -239,12 +239,215 @@ function BomForm({ item, onDone }: { item: GapItem; onDone: () => void }) {
   )
 }
 
+interface BomCurrentArgoRow {
+  child_part: string
+  child_qty: number
+  lot_child_qty: number | null
+  lot_base: number | null
+}
+interface BomCurrentManualRow {
+  child_part: string
+  child_qty: number
+}
+
+// BOM 更正——輸入料號查出目前生效的 BOM（ARGO 同步版本 + 目前的補登/更正版本），
+// 下方可以整版重新輸入儲存。儲存時用 replace 模式：先清掉這個品項既有的補登列，
+// 整批換成新的一版，不是像補登表單那樣單純累加子件。
+function BomCorrectionModal({ onClose, onSaved }: { onClose: () => void; onSaved: () => void }) {
+  const [itemCode, setItemCode] = useState('')
+  const [looking, setLooking] = useState(false)
+  const [lookupError, setLookupError] = useState('')
+  const [argoRows, setArgoRows] = useState<BomCurrentArgoRow[] | null>(null)
+  const [manualRows, setManualRows] = useState<BomCurrentManualRow[] | null>(null)
+  const [effectiveSource, setEffectiveSource] = useState<'manual' | 'argo' | 'none' | null>(null)
+  const [children, setChildren] = useState([{ child_part: '', child_qty: '1' }])
+  const [saving, setSaving] = useState(false)
+  const [saveMsg, setSaveMsg] = useState('')
+
+  const updateChild = (i: number, field: 'child_part' | 'child_qty', value: string) => {
+    setChildren(prev => prev.map((c, idx) => idx === i ? { ...c, [field]: value } : c))
+  }
+
+  const lookup = useCallback(async () => {
+    const code = itemCode.trim()
+    if (!code) return
+    setLooking(true)
+    setLookupError('')
+    setSaveMsg('')
+    try {
+      const res = await fetch(`/api/production/bom-current?item_code=${encodeURIComponent(code)}`, { cache: 'no-store' })
+      const json = await res.json() as {
+        success: boolean; error?: string
+        argo_rows?: BomCurrentArgoRow[]; manual_rows?: BomCurrentManualRow[]
+        effective_source?: 'manual' | 'argo' | 'none'
+      }
+      if (!res.ok || !json.success) throw new Error(json.error || `HTTP ${res.status}`)
+      setArgoRows(json.argo_rows ?? [])
+      setManualRows(json.manual_rows ?? [])
+      setEffectiveSource(json.effective_source ?? 'none')
+
+      // 預填編輯表單：優先用現有的補登/更正版本，沒有的話用 ARGO 版本當起點，都沒有就留空白一列
+      if ((json.manual_rows ?? []).length > 0) {
+        setChildren(json.manual_rows!.map(r => ({ child_part: r.child_part, child_qty: String(r.child_qty) })))
+      } else if ((json.argo_rows ?? []).length > 0) {
+        setChildren(json.argo_rows!.map(r => ({
+          child_part: r.child_part,
+          child_qty: String(r.lot_base ? (r.lot_child_qty ?? 0) / r.lot_base : (r.lot_child_qty ?? 0)),
+        })))
+      } else {
+        setChildren([{ child_part: '', child_qty: '1' }])
+      }
+    } catch (e) {
+      setLookupError(e instanceof Error ? e.message : String(e))
+      setArgoRows(null)
+      setManualRows(null)
+      setEffectiveSource(null)
+    } finally {
+      setLooking(false)
+    }
+  }, [itemCode])
+
+  const save = useCallback(async () => {
+    const code = itemCode.trim()
+    const valid = children.filter(c => c.child_part.trim())
+    if (!code || valid.length === 0) return
+    setSaving(true)
+    setSaveMsg('')
+    try {
+      const res = await fetch('/api/production/bom-manual-supplement', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          parent_part: code,
+          children: valid.map(c => ({ child_part: c.child_part.trim(), child_qty: Number(c.child_qty) || 0 })),
+          note: 'BOM更正',
+          replace: true,
+        }),
+      })
+      const json = await res.json() as { success: boolean; error?: string }
+      if (!res.ok || !json.success) throw new Error(json.error || `HTTP ${res.status}`)
+      onSaved()
+      onClose()
+    } catch (e) {
+      setSaveMsg(`❌ ${e instanceof Error ? e.message : String(e)}`)
+    } finally {
+      setSaving(false)
+    }
+  }, [itemCode, children, onSaved, onClose])
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm" onClick={onClose}>
+      <div
+        className="bg-slate-900 border border-slate-700 rounded-2xl shadow-2xl w-full max-w-lg max-h-[85vh] overflow-y-auto"
+        onClick={e => e.stopPropagation()}
+      >
+        <div className="px-5 py-4 border-b border-slate-700 flex items-center justify-between sticky top-0 bg-slate-900">
+          <h2 className="text-base font-bold text-white">🔧 BOM 更正</h2>
+          <button onClick={onClose} className="text-slate-500 hover:text-white text-xl leading-none">✕</button>
+        </div>
+
+        <div className="p-5 space-y-4">
+          <div className="flex items-center gap-2">
+            <input
+              value={itemCode}
+              onChange={e => setItemCode(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter') void lookup() }}
+              placeholder="輸入料號"
+              className="flex-1 min-w-0 px-3 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-slate-200 text-sm focus:outline-none focus:border-cyan-500"
+            />
+            <button
+              onClick={() => void lookup()}
+              disabled={looking || !itemCode.trim()}
+              className="px-4 py-1.5 rounded-lg bg-cyan-700 hover:bg-cyan-600 disabled:opacity-40 text-white text-sm font-medium transition-colors shrink-0"
+            >
+              {looking ? '查詢中…' : '查詢'}
+            </button>
+          </div>
+
+          {lookupError && <div className="text-red-400 text-xs">❌ {lookupError}</div>}
+
+          {argoRows !== null && (
+            <div className="space-y-3">
+              <div className="text-xs text-slate-500">
+                目前生效來源：{effectiveSource === 'manual' ? <span className="text-cyan-300">補登/更正版本</span> : effectiveSource === 'argo' ? <span className="text-slate-300">ARGO 同步版本</span> : <span className="text-slate-600">尚無資料</span>}
+              </div>
+
+              <div className="rounded-lg bg-slate-950 border border-slate-800 p-3">
+                <div className="text-xs font-semibold text-slate-400 mb-1.5">ARGO 目前的 BOM（唯讀）</div>
+                {argoRows.length === 0 ? (
+                  <div className="text-xs text-slate-600">ARGO 沒有這個品項的 BOM 資料</div>
+                ) : (
+                  <div className="space-y-0.5">
+                    {argoRows.map((r, i) => (
+                      <div key={i} className="text-xs text-slate-400">
+                        {r.child_part} <span className="text-slate-600">× {r.lot_base ? (r.lot_child_qty ?? 0) / r.lot_base : (r.lot_child_qty ?? 0)}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {manualRows !== null && manualRows.length > 0 && (
+                <div className="rounded-lg bg-slate-950 border border-cyan-800/40 p-3">
+                  <div className="text-xs font-semibold text-cyan-400 mb-1.5">目前已有的補登/更正版本（唯讀，下方已預填）</div>
+                  <div className="space-y-0.5">
+                    {manualRows.map((r, i) => (
+                      <div key={i} className="text-xs text-slate-400">
+                        {r.child_part} <span className="text-slate-600">× {r.child_qty}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              <div className="space-y-2">
+                <div className="text-xs font-semibold text-slate-300">新版本（儲存後會取代目前的補登/更正版本，並優先於 ARGO 生效）</div>
+                {children.map((c, i) => (
+                  <div key={i} className="flex items-center gap-2">
+                    <MaterialPicker value={c.child_part} onChange={v => updateChild(i, 'child_part', v)} />
+                    <input
+                      value={c.child_qty}
+                      onChange={e => updateChild(i, 'child_qty', e.target.value)}
+                      placeholder="用量"
+                      className="w-20 px-3 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-slate-200 text-sm focus:outline-none focus:border-cyan-500"
+                    />
+                    {children.length > 1 && (
+                      <button onClick={() => setChildren(prev => prev.filter((_, idx) => idx !== i))} className="text-slate-500 hover:text-red-400 shrink-0">✕</button>
+                    )}
+                  </div>
+                ))}
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => setChildren(prev => [...prev, { child_part: '', child_qty: '1' }])}
+                    className="px-3 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs"
+                  >
+                    + 新增子件
+                  </button>
+                  <button
+                    onClick={() => void save()}
+                    disabled={saving}
+                    className="px-4 py-1.5 rounded-lg bg-cyan-700 hover:bg-cyan-600 disabled:opacity-40 text-white text-sm font-medium transition-colors"
+                  >
+                    {saving ? '儲存中…' : '儲存這一版'}
+                  </button>
+                </div>
+                {saveMsg && <div className="text-red-400 text-xs">{saveMsg}</div>}
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function SupplementedBomList() {
   const [rows, setRows] = useState<SupplementRow[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [search, setSearch] = useState('')
   const [deletingId, setDeletingId] = useState<number | null>(null)
+  const [showCorrectionModal, setShowCorrectionModal] = useState(false)
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -313,9 +516,19 @@ function SupplementedBomList() {
         >
           {loading ? '載入中…' : '重新整理'}
         </button>
+        <button
+          onClick={() => setShowCorrectionModal(true)}
+          className="px-4 py-1.5 rounded-lg bg-amber-700 hover:bg-amber-600 text-white text-sm font-medium transition-colors shrink-0"
+        >
+          🔧 BOM更正
+        </button>
       </div>
 
       {error && <div className="px-3 py-2 rounded-lg bg-red-900/30 border border-red-700/40 text-red-300 text-xs">❌ {error}</div>}
+
+      {showCorrectionModal && (
+        <BomCorrectionModal onClose={() => setShowCorrectionModal(false)} onSaved={() => void load()} />
+      )}
 
       {loading ? (
         <div className="py-16 text-center text-slate-400 text-sm">載入中…</div>

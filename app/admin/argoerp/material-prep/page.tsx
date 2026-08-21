@@ -660,23 +660,25 @@ export default function MaterialPrepPage() {
       })
       const filteredErpBom = allErpBom.filter(r => r.bom_ver === minVerMap[r.parent_part])
 
-      // 人工補登 BOM（bom_manual_supplement，跟 ARGO 同步的 mm_bom_structure 分開存放、
-      // 不會被同步覆蓋）：只補 ARGO 完全沒有資料的品項，ARGO 有資料的以 ARGO 為準
-      const argoParents = new Set(filteredErpBom.map(r => r.parent_part))
-      const codesNeedingSupplement = productCodes.filter(code => !argoParents.has(code))
+      // 人工補登/更正 BOM（bom_manual_supplement，跟 ARGO 同步的 mm_bom_structure
+      // 分開存放、不會被同步覆蓋）：只要這個品項有人工補登資料，一律優先於 ARGO
+      // （不管 ARGO 那邊有沒有資料）——「BOM更正」功能就是要能覆蓋掉 ARGO 錯誤的資料，
+      // 不能只在 ARGO 完全沒資料時才生效
       type ManualBomRow = { parent_part: string; child_part: string; child_qty: number }
       let manualBom: ManualBomRow[] = []
-      if (codesNeedingSupplement.length > 0) {
+      if (productCodes.length > 0) {
         const { data: manualBomData } = await supabase
           .from('bom_manual_supplement')
           .select('parent_part, child_part, child_qty')
-          .in('parent_part', codesNeedingSupplement)
+          .in('parent_part', productCodes)
         manualBom = (manualBomData ?? []) as ManualBomRow[]
       }
+      const manualParents = new Set(manualBom.map(r => r.parent_part))
+      const filteredErpBomAfterManualOverride = filteredErpBom.filter(r => !manualParents.has(r.parent_part))
 
       // 取子件的中文名稱與單位（mm_bom_part_units）
       const materialCodes = Array.from(new Set([
-        ...filteredErpBom.map(r => r.child_part),
+        ...filteredErpBomAfterManualOverride.map(r => r.child_part),
         ...manualBom.map(r => r.child_part),
       ].filter(Boolean)))
       const partInfoMap: Record<string, { part_name: string | null; unit_of_measure: string | null }> = {}
@@ -694,7 +696,7 @@ export default function MaterialPrepPage() {
       // 人工補登的部分 production_quantity 固定視為 1（lot_base=1），child_qty 就是每 1 個
       // 成品要用的子件數量，跟補登表單填寫時的認知一致
       const rows: BomRow[] = [
-        ...filteredErpBom.map(r => ({
+        ...filteredErpBomAfterManualOverride.map(r => ({
           product_code: r.parent_part,
           product_name: null,
           production_quantity: r.lot_base ?? 1,
@@ -710,7 +712,7 @@ export default function MaterialPrepPage() {
           product_name: null,
           production_quantity: 1,
           production_unit: null,
-          note: '人工補登',
+          note: '人工補登／更正',
           material_code: r.child_part,
           material_name: partInfoMap[r.child_part]?.part_name ?? null,
           quantity: r.child_qty,

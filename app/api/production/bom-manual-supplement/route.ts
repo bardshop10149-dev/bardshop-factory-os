@@ -39,12 +39,14 @@ export async function GET(request: NextRequest) {
   }
 }
 
-// POST { parent_part, children: [{ child_part, child_qty }], note? }
+// POST { parent_part, children: [{ child_part, child_qty }], note?, replace? }
+// replace=true：先刪掉這個品項既有的補登列，再整批寫入新的（供「BOM更正」用——
+// 更正是整版取代，不是像補登那樣單純新增/累加）
 export async function POST(request: NextRequest) {
   const guard = await guardPermission('production_admin')
   if (!guard.ok) return guard.res
   try {
-    const body = await request.json() as { parent_part?: string; children?: ChildInput[]; note?: string }
+    const body = await request.json() as { parent_part?: string; children?: ChildInput[]; note?: string; replace?: boolean }
     const parentPart = (body.parent_part ?? '').trim()
     const children = (body.children ?? []).filter(c => c.child_part?.trim())
     if (!parentPart || children.length === 0) {
@@ -52,6 +54,12 @@ export async function POST(request: NextRequest) {
     }
 
     const sb = getSupabaseAdminClient()
+
+    if (body.replace) {
+      const { error: deleteErr } = await sb.from('bom_manual_supplement').delete().eq('parent_part', parentPart)
+      if (deleteErr) throw deleteErr
+    }
+
     const rows = children.map(c => ({
       parent_part: parentPart,
       child_part: c.child_part.trim(),
