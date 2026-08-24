@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { supabase } from '../../../../lib/supabaseClient'
+import SingleOrderConvert from './SingleOrderConvert'
 
 const CSV_H1 = 'Order Number,Manufacturing Order Number,Product Name,Product Description,Lot Number,Production Quantity,Due,Priority Level,Earliest Start Time,Job Sequence,Workcenter,Job Name,Job Quantity,Out Sourcing,Est. Time,Time Unit,BOM Components,Material Required Quantity,customer_id,assigned_machine,Rule,Parameter 1'
 const CSV_H2 = '訂單編號,(必填)工單編號,(必填)品號,規格,生產批號,(必填)生產需求數量,(必填)需求日,排程優先等級(1-99),最早可開始時間,(必填)工序,(必填)站點,(必填)製程名稱,製程數量,製程委外,(必填)預估工時,工時單位,BOM元件品號,物料需求數量,客戶名稱,分配機台,規則,參數1'
@@ -414,6 +415,9 @@ export default function SaraExchangePage() {
 
           </div>
         </div>
+
+        {/* ── 單張訂單轉換 ── */}
+        <SingleOrderConvert onAppended={() => void loadCsvBuffer()} />
 
         {/* ── CSV 累積區 ── */}
         <div className="mb-6 rounded-xl border border-emerald-800/40 bg-emerald-950/20 p-5">
