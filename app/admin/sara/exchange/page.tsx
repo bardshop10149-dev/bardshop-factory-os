@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { supabase } from '../../../../lib/supabaseClient'
 
 const CSV_H1 = 'Order Number,Manufacturing Order Number,Product Name,Product Description,Lot Number,Production Quantity,Due,Priority Level,Earliest Start Time,Job Sequence,Workcenter,Job Name,Job Quantity,Out Sourcing,Est. Time,Time Unit,BOM Components,Material Required Quantity,customer_id,assigned_machine,Rule,Parameter 1'
@@ -173,6 +173,40 @@ export default function SaraExchangePage() {
     a.download = `SARA_combined_${new Date().toISOString().slice(0, 10)}.csv`
     a.click(); URL.revokeObjectURL(url)
   }, [csvRows])
+
+  // ── 依訂單號查詢/刪除 CSV buffer 內的列 ──
+  const [orderSearch, setOrderSearch] = useState('')
+  const [orderDeleting, setOrderDeleting] = useState(false)
+  const orderQuery = orderSearch.trim().toLowerCase()
+  // 第 0 欄 = Order Number；用「包含」比對方便輸入部分單號就能找到
+  const matchedOrderRows = useMemo(() => orderQuery
+    ? csvRows.map((r, idx) => ({ row: r, idx })).filter(({ row }) => (row[0] ?? '').toLowerCase().includes(orderQuery))
+    : [], [orderQuery, csvRows])
+
+  const handleDeleteOrderRows = useCallback(async () => {
+    if (matchedOrderRows.length === 0) return
+    const orderNos = [...new Set(matchedOrderRows.map(({ row }) => row[0]))]
+    if (!confirm(`確定刪除訂單號「${orderNos.join('、')}」的 ${matchedOrderRows.length} 列資料？`)) return
+    setOrderDeleting(true)
+    setCsvMsg('')
+    try {
+      const matchedIdx = new Set(matchedOrderRows.map(({ idx }) => idx))
+      const kept = csvRows.filter((_, idx) => !matchedIdx.has(idx))
+      const res = await fetch('/api/sara/exchange-csv', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ rows: kept, append: false }),
+      })
+      const j = await res.json() as { success: boolean; count?: number; error?: string }
+      if (!j.success) throw new Error(j.error)
+      setCsvMsg(`✅ 已刪除 ${matchedOrderRows.length} 列（剩 ${j.count} 列）`)
+      setOrderSearch('')
+      await loadCsvBuffer()
+      setTimeout(() => setCsvMsg(''), 5000)
+    } catch (e) {
+      setCsvMsg(`❌ ${e instanceof Error ? e.message : String(e)}`)
+    } finally { setOrderDeleting(false) }
+  }, [matchedOrderRows, csvRows, loadCsvBuffer])
 
   // ── 清空 CSV buffer ──
   const handleCsvClear = useCallback(async () => {
@@ -433,6 +467,70 @@ export default function SaraExchangePage() {
           {csvRows.length > 0 && (
             <div className="text-xs text-slate-500 font-mono bg-slate-900/60 rounded px-3 py-2 border border-slate-800">
               前 3 列預覽：{csvRows.slice(0, 3).map(r => `[${r[0]}, ${r[1]}, ${r[2]}...]`).join(' | ')}
+            </div>
+          )}
+
+          {/* 依訂單號查詢/刪除 */}
+          {csvRows.length > 0 && (
+            <div className="mt-3 rounded-lg bg-slate-900/60 border border-slate-800 p-3 space-y-2">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-xs text-slate-400 whitespace-nowrap">🔍 依訂單號查詢</span>
+                <input
+                  value={orderSearch}
+                  onChange={e => setOrderSearch(e.target.value)}
+                  placeholder="輸入訂單號（可輸入部分）…"
+                  className="flex-1 min-w-[200px] px-3 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-sm text-slate-200 focus:outline-none focus:border-emerald-500/50"
+                />
+                {orderQuery && (
+                  <span className="text-xs text-slate-400">
+                    符合 <span className={`font-mono font-semibold ${matchedOrderRows.length > 0 ? 'text-emerald-300' : 'text-slate-500'}`}>{matchedOrderRows.length}</span> 列
+                  </span>
+                )}
+                {matchedOrderRows.length > 0 && (
+                  <button
+                    onClick={() => void handleDeleteOrderRows()}
+                    disabled={orderDeleting}
+                    className="px-3 py-1.5 rounded-lg bg-red-900/50 border border-red-700/50 text-red-300 text-xs hover:bg-red-800/60 disabled:opacity-50 transition-colors whitespace-nowrap"
+                  >
+                    {orderDeleting ? '刪除中…' : `🗑 刪除這 ${matchedOrderRows.length} 列`}
+                  </button>
+                )}
+              </div>
+              {matchedOrderRows.length > 0 && (
+                <div className="overflow-x-auto max-h-64 overflow-y-auto rounded border border-slate-800">
+                  <table className="w-full text-[11px]">
+                    <thead className="bg-slate-900 sticky top-0">
+                      <tr className="text-slate-500">
+                        <th className="px-2 py-1.5 text-left whitespace-nowrap">訂單號</th>
+                        <th className="px-2 py-1.5 text-left whitespace-nowrap">工單編號</th>
+                        <th className="px-2 py-1.5 text-left whitespace-nowrap">品號</th>
+                        <th className="px-2 py-1.5 text-left whitespace-nowrap">批號</th>
+                        <th className="px-2 py-1.5 text-right whitespace-nowrap">數量</th>
+                        <th className="px-2 py-1.5 text-left whitespace-nowrap">工序</th>
+                        <th className="px-2 py-1.5 text-left whitespace-nowrap">站點</th>
+                        <th className="px-2 py-1.5 text-left whitespace-nowrap">製程名稱</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {matchedOrderRows.map(({ row, idx }) => (
+                        <tr key={idx} className="border-t border-slate-800/60 text-slate-300">
+                          <td className="px-2 py-1 font-mono text-cyan-300 whitespace-nowrap">{row[0]}</td>
+                          <td className="px-2 py-1 font-mono whitespace-nowrap">{row[1]}</td>
+                          <td className="px-2 py-1 font-mono whitespace-nowrap">{row[2]}</td>
+                          <td className="px-2 py-1 font-mono whitespace-nowrap">{row[4]}</td>
+                          <td className="px-2 py-1 text-right font-mono whitespace-nowrap">{row[5]}</td>
+                          <td className="px-2 py-1 whitespace-nowrap">{row[9]}</td>
+                          <td className="px-2 py-1 whitespace-nowrap">{row[10]}</td>
+                          <td className="px-2 py-1 whitespace-nowrap">{row[11]}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+              {orderQuery && matchedOrderRows.length === 0 && (
+                <div className="text-xs text-slate-500">交換區裡沒有符合「{orderSearch.trim()}」的訂單號</div>
+              )}
             </div>
           )}
         </div>
