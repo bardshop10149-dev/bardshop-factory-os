@@ -113,6 +113,57 @@ export async function argoQuery(
   return findObjectRows(parsed)
 }
 
+/**
+ * 對 ARGO 發一次 S_IMPORT（寫入介面）。回傳逐列結果供呼叫端判讀 CHECK_FLAG。
+ * 與 app/api/argoerp/route.ts 的 import action 相同語意：RESULT 每列帶 LINE_NO/CHECK_FLAG，
+ * 部分成功時呼叫端必須逐列比對，不可整批當成功或整批當失敗。
+ */
+export async function argoImport(
+  interfaceId: string,
+  data: Array<Record<string, string>>,
+): Promise<{ success: boolean; partialSuccess: boolean; anySuccess: boolean; resultRows: Record<string, unknown>[]; error: string | null; rawText: string }> {
+  if (!argoConfigured()) throw new Error('未設定 ARGO 連線環境變數')
+  const keys = await getApiKeys()
+  const sparam = JSON.stringify({
+    APIKEY1: keys.APIKEY1,
+    APIKEY2: keys.APIKEY2,
+    APIKEY3: keys.APIKEY3,
+    SEGMENT,
+    IMP: 'Y',
+    INTERFACE: interfaceId,
+    DATA: data,
+  })
+  const res = await fetch(`${API_BASE}/S_IMPORT`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sparam }),
+    cache: 'no-store',
+  })
+  const rawText = await res.text()
+  let parsed: unknown = null
+  try { parsed = rawText ? JSON.parse(rawText) : null } catch { /* 保留 rawText 供診斷 */ }
+
+  const record = (parsed && typeof parsed === 'object') ? parsed as Record<string, unknown> : {}
+  const resultRows = Array.isArray(record.RESULT) ? (record.RESULT as Record<string, unknown>[]) : []
+  const hasCheckY = resultRows.some(row => String(row.CHECK_FLAG ?? '').toUpperCase() === 'Y')
+  const hasCheckN = resultRows.some(row => String(row.CHECK_FLAG ?? '').toUpperCase() === 'N')
+  // 與 app/api/argoerp/route.ts 的 isArgoSuccess 同語意：STATUS 只有明確為
+  // 0/FALSE/N/ERROR 才算失敗（不能反過來要求必須是 '1'），且 ERROR 有值也算失敗
+  const statusStr = String(record.STATUS ?? '').trim().toUpperCase()
+  const statusFailed = ['0', 'FALSE', 'N', 'ERROR'].includes(statusStr)
+  const error = String(record.ERROR ?? '').trim() || null
+  const success = res.ok && (resultRows.length > 0 ? !hasCheckN : (!statusFailed && !error))
+
+  return {
+    success,
+    partialSuccess: res.ok && hasCheckY && hasCheckN,
+    anySuccess: hasCheckY,
+    resultRows,
+    error: success ? null : (error || `HTTP ${res.status}`),
+    rawText: rawText.slice(0, 500),
+  }
+}
+
 const n = (v: unknown): number => {
   const x = Number(v)
   return Number.isFinite(x) ? x : 0
