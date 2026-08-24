@@ -13,6 +13,7 @@ interface DatabaseRow {
   op_name?: string
   station?: string
   std_time_min?: number
+  qty_mode?: string       // 途程表：工時計算基準（個數/盤數），預設個數
   created_at?: string
 }
 
@@ -60,6 +61,8 @@ export default function DatabaseViewer() {
   const [saveLoading, setSaveLoading] = useState(false)
   const [deleteTarget, setDeleteTarget] = useState<number | null>(null)
   const [crudMsg, setCrudMsg] = useState('')
+  // 單鍵切換數量模式時的 in-flight 記錄（避免連點）
+  const [togglingQtyModeId, setTogglingQtyModeId] = useState<number | null>(null)
 
   const tableName = activeTab === 'ops' ? 'operation_times' : activeTab === 'routes' ? 'route_operations' : 'item_routes'
 
@@ -198,6 +201,24 @@ export default function DatabaseViewer() {
     }
   }
 
+  // 單鍵切換工時計算基準（個數 ⇄ 盤數）——不用進編輯模式，點一下就存
+  const handleToggleQtyMode = async (row: DatabaseRow) => {
+    if (row.id == null) return
+    const next = (row.qty_mode ?? '個數') === '個數' ? '盤數' : '個數'
+    setTogglingQtyModeId(row.id)
+    setCrudMsg('')
+    try {
+      const { error } = await supabase.from('route_operations').update({ qty_mode: next }).eq('id', row.id)
+      if (error) throw error
+      setData(prev => prev.map(r => r.id === row.id ? { ...r, qty_mode: next } : r))
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err)
+      setCrudMsg(`❌ 切換失敗：${msg}`)
+    } finally {
+      setTogglingQtyModeId(null)
+    }
+  }
+
   const handleDelete = async (rowId: number) => {
     setSaveLoading(true)
     setCrudMsg('')
@@ -314,6 +335,7 @@ export default function DatabaseViewer() {
                         <th className="px-6 py-4">途程代碼 (Route ID)</th>
                         <th className="px-6 py-4 text-center">順序</th>
                         <th className="px-6 py-4">工序名稱</th>
+                        <th className="px-6 py-4 text-center" title="工時計算基準：個數×生產時間 或 盤數×生產時間，點擊即可切換">計算基準</th>
                         <th className="px-6 py-4 text-right text-slate-500">建立時間</th>
                         <th className="px-4 py-4 text-center text-slate-500">操作</th>
                       </>
@@ -346,6 +368,7 @@ export default function DatabaseViewer() {
                           <td className="px-4 py-2"><input className={inputCls} placeholder="途程代碼 *" value={EV.route_id} onChange={e => setEV('route_id', e.target.value)} /></td>
                           <td className="px-4 py-2"><input className={inputCls + ' text-center'} placeholder="順序" type="number" value={EV.sequence} onChange={e => setEV('sequence', e.target.value)} /></td>
                           <td className="px-4 py-2"><input className={inputCls} placeholder="工序名稱 *" value={EV.op_name} onChange={e => setEV('op_name', e.target.value)} /></td>
+                          <td className="px-4 py-2 text-center text-xs text-slate-500">個數（預設）</td>
                           <td className="px-4 py-2 text-xs text-slate-600">—</td>
                         </>
                       )}
@@ -367,7 +390,7 @@ export default function DatabaseViewer() {
                   )}
 
                   {data.length === 0 && !isNewRow ? (
-                    <tr><td colSpan={5} className="p-12 text-center text-slate-600">查無資料</td></tr>
+                    <tr><td colSpan={activeTab === 'routes' ? 6 : 5} className="p-12 text-center text-slate-600">查無資料</td></tr>
                   ) : (
                     data.map((row) => {
                       const isEditing = !isNewRow && editRowId === row.id
@@ -388,6 +411,7 @@ export default function DatabaseViewer() {
                                   <td className="px-4 py-2"><input className={inputCls} value={EV.route_id} onChange={e => setEV('route_id', e.target.value)} /></td>
                                   <td className="px-4 py-2"><input className={inputCls + ' text-center'} type="number" value={EV.sequence} onChange={e => setEV('sequence', e.target.value)} /></td>
                                   <td className="px-4 py-2"><input className={inputCls} value={EV.op_name} onChange={e => setEV('op_name', e.target.value)} /></td>
+                                  <td className="px-4 py-2 text-center text-xs text-slate-500">{row.qty_mode ?? '個數'}</td>
                                   <td className="px-4 py-2 text-xs text-slate-600 text-right font-mono">{formatDate(row.created_at)}</td>
                                 </>
                               )}
@@ -421,6 +445,20 @@ export default function DatabaseViewer() {
                                   <td className="px-6 py-3 font-mono text-purple-400">{row.route_id}</td>
                                   <td className="px-6 py-3 text-center font-mono text-slate-500">{row.sequence}</td>
                                   <td className="px-6 py-3 text-slate-300">{row.op_name}</td>
+                                  <td className="px-6 py-3 text-center">
+                                    <button
+                                      onClick={() => void handleToggleQtyMode(row)}
+                                      disabled={togglingQtyModeId === row.id || isNewRow}
+                                      title="點擊切換：個數 ⇄ 盤數"
+                                      className={`px-3 py-1 rounded-full text-xs font-semibold border transition-colors disabled:opacity-50 ${
+                                        (row.qty_mode ?? '個數') === '盤數'
+                                          ? 'bg-amber-900/40 text-amber-300 border-amber-700/50 hover:bg-amber-900/60'
+                                          : 'bg-slate-800 text-slate-400 border-slate-700 hover:bg-slate-700 hover:text-slate-200'
+                                      }`}
+                                    >
+                                      {togglingQtyModeId === row.id ? '…' : (row.qty_mode ?? '個數')}
+                                    </button>
+                                  </td>
                                   <td className="px-6 py-3 text-right text-xs text-slate-600 font-mono">{formatDate(row.created_at)}</td>
                                 </>
                               )}
