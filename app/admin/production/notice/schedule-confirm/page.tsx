@@ -1,7 +1,7 @@
 'use client'
 
 import { NavButton } from '../../../../../components/NavButton'
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useState, type ReactNode } from 'react'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -47,12 +47,27 @@ const DEFAULT_FORM: FormState = {
   planned_order_date: '', expected_date: '', remark: '',
 }
 
-const REPLY_CONFIG = {
-  approved:  { label: '同意',   cls: 'bg-emerald-900/40 text-emerald-300 border-emerald-700' },
-  rejected:  { label: '拒絕',   cls: 'bg-red-900/40     text-red-300     border-red-700'     },
-  completed: { label: '已完成', cls: 'bg-slate-700/60   text-slate-400   border-slate-600'   },
-  pending:   { label: '待回覆', cls: 'bg-amber-900/40   text-amber-300   border-amber-700'   },
+const REPLY_CONFIG: Record<'pending' | 'approved' | 'rejected' | 'completed', { label: string; cls: string; icon: ReactNode }> = {
+  pending: {
+    label: '待回覆', cls: 'bg-amber-500/10 text-amber-400 border-amber-500/30',
+    icon: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.4}><path strokeLinecap="round" strokeLinejoin="round" d="M12 8v4l3 3" /><circle cx="12" cy="12" r="9" /></svg>,
+  },
+  approved: {
+    label: '已同意', cls: 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30',
+    icon: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.4}><path strokeLinecap="round" strokeLinejoin="round" d="M8 12l3 3 5-6" /><circle cx="12" cy="12" r="9" /></svg>,
+  },
+  rejected: {
+    label: '已拒絕', cls: 'bg-rose-500/10 text-rose-400 border-rose-500/30',
+    icon: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.4}><path strokeLinecap="round" strokeLinejoin="round" d="M9 9l6 6m0-6l-6 6" /><circle cx="12" cy="12" r="9" /></svg>,
+  },
+  completed: {
+    label: '已完成', cls: 'bg-violet-500/10 text-violet-400 border-violet-500/30',
+    icon: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.4}><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l3 3 8-9M5 20l3 3 12-13" /></svg>,
+  },
 }
+
+const inputCls = 'w-full bg-[#08101c] border border-[#1e2a3f] rounded-[10px] px-4 py-3.5 text-[14px] leading-relaxed text-[#e7edf5] placeholder-[#445064] focus:outline-none focus:border-teal-400/70 transition-colors'
+const labelCls = 'block text-[11px] font-bold uppercase tracking-wider text-[#5f7290] mb-2.5'
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
@@ -225,9 +240,10 @@ export default function ScheduleInquiryPage() {
   })
 
   const replyBadge = (r: Inquiry) => {
-    const cfg = r.planner_reply ? REPLY_CONFIG[r.planner_reply] : REPLY_CONFIG.pending
+    const cfg = REPLY_CONFIG[r.planner_reply ?? 'pending']
     return (
-      <span className={`inline-block px-2 py-0.5 rounded-full border text-xs font-semibold ${cfg.cls}`}>
+      <span className={`inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-full text-xs font-bold border ${cfg.cls}`}>
+        <span className="w-[13px] h-[13px]">{cfg.icon}</span>
         {cfg.label}
       </span>
     )
@@ -277,169 +293,137 @@ export default function ScheduleInquiryPage() {
   // ─── Records Tab ─────────────────────────────────────────────────────────
 
   const renderRecords = () => (
-    <div className="space-y-4">
-      <div className="flex items-center justify-between flex-wrap gap-3">
-        {/* Filter tabs */}
-        <div className="flex gap-1 p-1 bg-slate-800/60 rounded-xl border border-slate-700">
-          {([['all','全部'],['pending','待回覆'],['approved','同意'],['rejected','拒絕'],['completed','已完成']] as [ReplyFilter,string][]).map(([key,label]) => (
+    <div className="space-y-5">
+      <div className="flex items-center gap-2 flex-wrap">
+        {([['all','全部'],['pending','待回覆'],['approved','同意'],['rejected','拒絕'],['completed','已完成']] as [ReplyFilter,string][]).map(([key,label]) => {
+          const count = key === 'all' ? records.length
+            : key === 'pending'   ? records.filter(r => !r.planner_reply).length
+            : key === 'approved'  ? records.filter(r => r.planner_reply === 'approved').length
+            : key === 'rejected'  ? records.filter(r => r.planner_reply === 'rejected').length
+            : records.filter(r => r.planner_reply === 'completed').length
+          const active = filter === key
+          return (
             <button
               key={key}
               onClick={() => setFilter(key)}
-              className={`px-4 py-1.5 rounded-lg text-sm font-semibold transition-all ${
-                filter === key ? 'bg-orange-600 text-white shadow' : 'text-slate-400 hover:text-white'
+              className={`inline-flex items-center gap-2 px-4 py-1.5 rounded-full border text-[13px] font-semibold transition-colors ${
+                active
+                  ? 'bg-teal-500/10 border-teal-400/40 text-teal-300'
+                  : 'bg-[#0b1220] border-[#1c2739] text-[#7f93b3] hover:text-[#b7c4da]'
               }`}
             >
               {label}
-              {key !== 'all' && (
-                <span className="ml-1.5 text-xs opacity-70">
-                  {key === 'pending'   ? records.filter(r => !r.planner_reply).length
-                  : key === 'approved'  ? records.filter(r => r.planner_reply === 'approved').length
-                  : key === 'rejected'  ? records.filter(r => r.planner_reply === 'rejected').length
-                  : records.filter(r => r.planner_reply === 'completed').length}
-                </span>
-              )}
+              <span className={active ? 'text-teal-300/75 text-[11px]' : 'text-[#4c5c78] text-[11px]'}>{count}</span>
             </button>
-          ))}
-        </div>
-        <button
-          onClick={openCreate}
-          className="flex items-center gap-2 bg-orange-600 hover:bg-orange-500 text-white text-sm font-semibold px-4 py-2 rounded-lg transition-colors"
-        >
-          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-          </svg>
-          新增詢問
-        </button>
+          )
+        })}
       </div>
 
       {loading ? (
         <div className="text-center py-16 text-slate-500 animate-pulse">載入中…</div>
       ) : filtered.length === 0 ? (
-        <div className="text-center py-16 text-slate-600 border-2 border-dashed border-slate-700 rounded-2xl">
+        <div className="text-center py-16 text-slate-600 border-2 border-dashed border-[#1c2739] rounded-2xl">
           目前沒有符合條件的紀錄
         </div>
       ) : (
-        <div className="space-y-3">
+        <div className="flex flex-col gap-3.5">
           {filtered.map(rec => {
             const items = rec.items || []
             const isCompleted = rec.planner_reply === 'completed'
             return (
-              <div key={rec.id} className={`rounded-2xl border transition-colors ${
-                isCompleted
-                  ? 'border-slate-700/40 bg-slate-900/20 opacity-50 hover:opacity-70'
-                  : 'border-slate-700 bg-slate-900/50 hover:bg-slate-800/40'
+              <div key={rec.id} className={`bg-[#0b1220] border rounded-[18px] px-6 py-5 flex flex-col gap-4 transition-opacity ${
+                isCompleted ? 'border-[#151f30] opacity-50 hover:opacity-80' : 'border-[#1c2739]'
               }`}>
-                {/* Card header */}
-                <div className="flex items-start justify-between gap-4 px-5 pt-4 pb-3 border-b border-slate-700/60 flex-wrap">
-                  <div className="flex items-center gap-3 flex-wrap">
-                    {replyBadge(rec)}
-                    <span className="text-xs text-slate-500 font-mono">#{rec.id}</span>
-                    <span className="text-sm text-slate-300">
-                      詢問日：<span className="text-white">{rec.inquiry_date ?? '—'}</span>
-                    </span>
-                    {rec.customer_name && (
-                      <span className="text-sm text-slate-300">
-                        客戶：<span className="text-white font-semibold">{rec.customer_name}</span>
-                      </span>
-                    )}
-                    {rec.salesperson && (
-                      <span className="text-sm text-slate-400">
-                        業務：<span className="text-sky-400">{rec.salesperson}</span>
-                      </span>
-                    )}
+                <div className="flex items-start justify-between gap-4">
+                  <div className="flex items-center gap-2.5 flex-wrap">
+                    <span className="text-[17px] font-bold text-[#f3f6fb]">{rec.customer_name || '—'}</span>
                     {rec.order_no && (
-                      <span className="text-sm text-slate-400">
-                        訂單：<span className="text-cyan-400 font-mono">{rec.order_no}</span>
-                      </span>
+                      <span className="font-mono text-xs text-[#7f93b3] bg-[#101a2c] border border-[#1c2739] rounded-[7px] px-2.5 py-1">{rec.order_no}</span>
                     )}
+                    <span className="text-xs text-[#4c5c78] font-mono">#{rec.id}</span>
                   </div>
+                  {replyBadge(rec)}
+                </div>
+
+                {items.length > 0 && (
+                  <div className="flex flex-wrap gap-2">
+                    {items.map((it, i) => (
+                      <span key={i} className="inline-flex items-center gap-1.5 bg-[#101a2c] border border-[#1c2739] rounded-[9px] px-3 py-1.5 text-[12.5px] text-[#b7c4da]">
+                        <b className="text-[#e7edf5] font-semibold">{it.item_name || it.item_code || '—'}</b>
+                        {it.quantity && <span className="text-[#6c7d99]">x{it.quantity}</span>}
+                      </span>
+                    ))}
+                  </div>
+                )}
+
+                <div className="flex flex-wrap gap-x-5 gap-y-1.5 text-[13px] text-[#93a4c0]">
+                  <span>詢問日 <b className="text-[#cdd8ea] font-semibold">{rec.inquiry_date ?? '—'}</b></span>
+                  {rec.salesperson && <span>承辦業務 <b className="text-[#cdd8ea] font-semibold">{rec.salesperson}</b></span>}
+                  {rec.planned_order_date && <span>預計發單 <b className="text-[#cdd8ea] font-semibold">{rec.planned_order_date}</b></span>}
+                  {rec.expected_date && <span>希望交期 <b className="text-[#cdd8ea] font-semibold">{rec.expected_date}</b></span>}
+                </div>
+
+                {rec.remark && (
+                  <p className="text-[13px] text-[#6c7d99] leading-relaxed whitespace-pre-wrap">{rec.remark}</p>
+                )}
+
+                <div className="flex items-center justify-between border-t border-[#151f30] pt-3.5 flex-wrap gap-3">
+                  <div className="flex items-center gap-2 text-xs text-[#5f7290]">
+                    <span>{rec.author_name}</span>
+                    {rec.department && <span className="bg-[#101a2c] border border-[#1c2739] rounded-md px-2 py-0.5 text-[#7f93b3]">{rec.department}</span>}
+                  </div>
+
                   <div className="flex items-center gap-2 flex-wrap">
-                    <span className="text-xs text-slate-500">
-                      {rec.author_name}{rec.department ? ` · ${rec.department}` : ''}
-                    </span>
-                    {/* Reply + Complete buttons */}
-                    {rec.planner_reply === 'completed' ? (
+                    {isCompleted ? (
                       <button
                         onClick={() => void handleReply(rec.id, null)}
-                        className="px-3 py-1 bg-slate-700 hover:bg-slate-600 text-slate-300 text-xs rounded-lg transition-colors"
+                        className="px-3.5 py-1.5 rounded-lg text-xs font-bold border border-[#1c2739] bg-transparent text-[#5f7290] hover:text-[#93a4c0] transition-colors"
                       >取消完成</button>
                     ) : (
                       <>
                         {rec.planner_reply !== 'approved' && (
                           <button
                             onClick={() => void handleReply(rec.id, 'approved')}
-                            className="px-3 py-1 bg-emerald-700 hover:bg-emerald-600 text-white text-xs font-semibold rounded-lg transition-colors"
+                            className="px-3.5 py-1.5 rounded-lg text-xs font-bold bg-emerald-500/10 border border-emerald-500/35 text-emerald-400 hover:bg-emerald-500/20 transition-colors"
                           >同意</button>
                         )}
                         {rec.planner_reply !== 'rejected' && (
                           <button
                             onClick={() => void handleReply(rec.id, 'rejected')}
-                            className="px-3 py-1 bg-red-800 hover:bg-red-700 text-white text-xs font-semibold rounded-lg transition-colors"
+                            className="px-3.5 py-1.5 rounded-lg text-xs font-bold border border-rose-500/40 text-rose-400 hover:bg-rose-500/10 transition-colors"
                           >拒絕</button>
                         )}
                         {rec.planner_reply && (
                           <button
                             onClick={() => void handleReply(rec.id, null)}
-                            className="px-3 py-1 bg-slate-700 hover:bg-slate-600 text-slate-300 text-xs rounded-lg transition-colors"
+                            className="px-3.5 py-1.5 rounded-lg text-xs font-bold border border-[#1c2739] text-[#5f7290] hover:text-[#93a4c0] transition-colors"
                           >清除回覆</button>
                         )}
                         <button
                           onClick={() => void handleReply(rec.id, 'completed')}
-                          className="px-3 py-1 bg-slate-600 hover:bg-slate-500 text-slate-200 text-xs rounded-lg transition-colors"
+                          className="px-3.5 py-1.5 rounded-lg text-xs font-bold bg-[#101a2c] border border-[#1c2739] text-[#93a4c0] hover:bg-[#182338] transition-colors"
                         >標記完成</button>
                       </>
                     )}
                     <button
                       onClick={() => openEdit(rec)}
-                      className="px-3 py-1 bg-slate-700 hover:bg-slate-600 text-slate-300 text-xs rounded-lg transition-colors"
-                    >編輯</button>
+                      className="w-[30px] h-[30px] rounded-lg flex items-center justify-center text-[#5f7290] hover:text-[#93a4c0] hover:bg-[#101a2c] transition-colors"
+                      title="編輯"
+                    >
+                      <svg className="w-[15px] h-[15px]" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.4-9.4a2 2 0 112.8 2.8L11 15l-4 1 1-4 9.4-9.4z" /></svg>
+                    </button>
                     <button
                       onClick={() => void handleDelete(rec.id)}
                       disabled={deletingId === rec.id}
-                      className="px-3 py-1 bg-red-900/50 hover:bg-red-800/60 text-red-300 text-xs rounded-lg transition-colors disabled:opacity-40"
-                    >{deletingId === rec.id ? '…' : '刪除'}</button>
-                  </div>
-                </div>
-
-                {/* Card body */}
-                <div className="px-5 py-3 space-y-2">
-                  {items.length === 0 ? (
-                    <p className="text-slate-600 text-sm">（無品項）</p>
-                  ) : (
-                    <table className="w-full text-sm">
-                      <thead>
-                        <tr className="text-slate-500 text-xs">
-                          <th className="text-left pb-1 pr-4">品項編碼</th>
-                          <th className="text-left pb-1 pr-4">名稱/規格</th>
-                          <th className="text-left pb-1">數量</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {items.map((it, i) => (
-                          <tr key={i} className="border-t border-slate-800/60">
-                            <td className="py-1 pr-4 text-slate-400 font-mono">{it.item_code || '—'}</td>
-                            <td className="py-1 pr-4 text-white">{it.item_name || '—'}</td>
-                            <td className="py-1 text-slate-300">{it.quantity || '—'}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  )}
-                  <div className="flex gap-6 flex-wrap text-sm pt-1">
-                    <div>
-                      <span className="text-slate-500 text-xs">預計發單日</span>
-                      <p className="text-slate-200">{rec.planned_order_date || '—'}</p>
-                    </div>
-                    <div>
-                      <span className="text-slate-500 text-xs">希望交期</span>
-                      <p className="text-slate-200">{rec.expected_date || '—'}</p>
-                    </div>
-                    {rec.remark && (
-                      <div>
-                        <span className="text-slate-500 text-xs">備註</span>
-                        <p className="text-slate-300">{rec.remark}</p>
-                      </div>
-                    )}
+                      className="w-[30px] h-[30px] rounded-lg flex items-center justify-center text-[#5f7290] hover:text-rose-400 hover:bg-rose-900/10 transition-colors disabled:opacity-40"
+                      title="刪除"
+                    >
+                      {deletingId === rec.id ? (
+                        <svg className="w-[14px] h-[14px] animate-spin" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582M20 20v-5h-.581M4.582 9a8 8 0 0115.357 5M19.418 15a8 8 0 01-15.357-5" /></svg>
+                      ) : (
+                        <svg className="w-[15px] h-[15px]" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
+                      )}
+                    </button>
                   </div>
                 </div>
               </div>
@@ -453,170 +437,167 @@ export default function ScheduleInquiryPage() {
   // ─── Create / Edit Tab ───────────────────────────────────────────────────
 
   const renderForm = () => (
-    <div className="max-w-2xl space-y-6">
-      <div className="flex items-center justify-between">
-        <h2 className="text-lg font-bold text-white">
+    <div className="max-w-[800px] bg-[#0b1220] border border-[#1c2739] rounded-[20px] px-9 py-9 overflow-hidden">
+      <div className="flex items-center justify-between mb-7">
+        <h2 className="text-[16px] font-bold text-[#f3f6fb]">
           {editingId ? `編輯紀錄 #${editingId}` : '新增詢問紀錄'}
         </h2>
         <button
           onClick={() => { resetForm(); setTab('records') }}
-          className="text-slate-500 hover:text-white text-sm transition-colors"
-        >← 返回列表</button>
+          className="flex items-center gap-1.5 text-[13px] text-[#5f7290] hover:text-[#93a4c0] font-semibold transition-colors"
+        >
+          <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M15 19l-7-7 7-7" /></svg>
+          返回列表
+        </button>
       </div>
 
-      {/* 客戶名稱 */}
-      <div className="grid grid-cols-1 gap-4">
+      <div className="flex flex-col gap-7">
+        {/* 客戶名稱 */}
         <div>
-          <label className="block text-sm text-slate-400 mb-1">客戶名稱</label>
+          <label className={labelCls}>客戶名稱</label>
           <input
             type="text"
             value={form.customer_name}
             onChange={e => setForm(f => ({ ...f, customer_name: e.target.value }))}
             placeholder="請輸入客戶名稱"
-            className="w-full bg-slate-800 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:ring-1 focus:ring-orange-500 placeholder-slate-600"
+            className={inputCls}
           />
         </div>
-      </div>
 
-      {/* 詢問日期 + 業務 + 訂單編號 */}
-      <div className="grid grid-cols-3 gap-4">
-        <div>
-          <label className="block text-sm text-slate-400 mb-1">詢問日期</label>
-          <input
-            type="date"
-            value={form.inquiry_date}
-            onChange={e => setForm(f => ({ ...f, inquiry_date: e.target.value }))}
-            className="w-full bg-slate-800 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:ring-1 focus:ring-orange-500"
-          />
-        </div>
-        <div>
-          <label className="block text-sm text-slate-400 mb-1">詢問業務</label>
-          <select
-            value={form.salesperson}
-            onChange={e => setForm(f => ({ ...f, salesperson: e.target.value }))}
-            className="w-full bg-slate-800 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:ring-1 focus:ring-orange-500"
-          >
-            <option value="">請選擇業務</option>
-            {salespersons.map(sp => (
-              <option key={sp} value={sp}>{sp}</option>
-            ))}
-          </select>
-        </div>
-        <div>
-          <label className="block text-sm text-slate-400 mb-1">訂單編號</label>
-          <input
-            type="text"
-            value={form.order_no}
-            onChange={e => setForm(f => ({ ...f, order_no: e.target.value }))}
-            placeholder="選填"
-            className="w-full bg-slate-800 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:ring-1 focus:ring-orange-500 placeholder-slate-600"
-          />
-        </div>
-      </div>
-
-      {/* 產品資訊 */}
-      <div>
-        <div className="flex items-center justify-between mb-2">
-          <label className="text-sm text-slate-400">產品資訊</label>
-          <button
-            onClick={addItem}
-            className="flex items-center gap-1 text-xs text-orange-400 hover:text-orange-300 transition-colors"
-          >
-            <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-            </svg>
-            新增品項
-          </button>
-        </div>
-        <div className="space-y-2">
-          <div className="grid grid-cols-[1fr_1.5fr_80px_32px] gap-2 px-1">
-            <span className="text-xs text-slate-500">品項編碼</span>
-            <span className="text-xs text-slate-500">名稱/規格</span>
-            <span className="text-xs text-slate-500">數量</span>
-            <span></span>
+        {/* 詢問日期 + 業務 + 訂單編號 */}
+        <div className="grid grid-cols-3 gap-5">
+          <div>
+            <label className={labelCls}>詢問日期</label>
+            <input
+              type="date"
+              value={form.inquiry_date}
+              onChange={e => setForm(f => ({ ...f, inquiry_date: e.target.value }))}
+              className={inputCls}
+            />
           </div>
-          {form.items.map((item, idx) => (
-            <div key={idx} className="grid grid-cols-[1fr_1.5fr_80px_32px] gap-2 items-center">
-              <input
-                type="text"
-                value={item.item_code}
-                onChange={e => updateItem(idx, 'item_code', e.target.value)}
-                placeholder="編碼"
-                className="bg-slate-800 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:ring-1 focus:ring-orange-500 placeholder-slate-600"
-              />
-              <input
-                type="text"
-                value={item.item_name}
-                onChange={e => updateItem(idx, 'item_name', e.target.value)}
-                placeholder="品名/規格"
-                className="bg-slate-800 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:ring-1 focus:ring-orange-500 placeholder-slate-600"
-              />
-              <input
-                type="text"
-                value={item.quantity}
-                onChange={e => updateItem(idx, 'quantity', e.target.value)}
-                placeholder="數量"
-                className="bg-slate-800 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:ring-1 focus:ring-orange-500 placeholder-slate-600"
-              />
-              <button
-                onClick={() => removeItem(idx)}
-                disabled={form.items.length === 1}
-                className="flex items-center justify-center w-8 h-8 rounded-lg text-slate-500 hover:text-red-400 hover:bg-red-900/20 transition-colors disabled:opacity-30"
-              >
-                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                </svg>
-              </button>
-            </div>
-          ))}
+          <div>
+            <label className={labelCls}>詢問業務</label>
+            <select
+              value={form.salesperson}
+              onChange={e => setForm(f => ({ ...f, salesperson: e.target.value }))}
+              className={`${inputCls} appearance-none`}
+            >
+              <option value="">請選擇業務</option>
+              {salespersons.map(sp => (
+                <option key={sp} value={sp}>{sp}</option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className={labelCls}>訂單編號</label>
+            <input
+              type="text"
+              value={form.order_no}
+              onChange={e => setForm(f => ({ ...f, order_no: e.target.value }))}
+              placeholder="選填"
+              className={inputCls}
+            />
+          </div>
         </div>
-      </div>
 
-      {/* 預計發單日 + 希望交期 */}
-      <div className="grid grid-cols-2 gap-4">
+        {/* 產品資訊 */}
         <div>
-          <label className="block text-sm text-slate-400 mb-1">預計發單日</label>
-          <input
-            type="date"
-            value={form.planned_order_date}
-            onChange={e => setForm(f => ({ ...f, planned_order_date: e.target.value }))}
-            className="w-full bg-slate-800 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:ring-1 focus:ring-orange-500"
+          <div className="flex items-center justify-between mb-3.5">
+            <label className={`${labelCls} mb-0`}>產品資訊</label>
+            <button
+              onClick={addItem}
+              className="flex items-center gap-1.5 text-xs font-bold text-teal-400 hover:text-teal-300 transition-colors"
+            >
+              <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.4} d="M12 4v16m8-8H4" />
+              </svg>
+              新增品項
+            </button>
+          </div>
+          <div className="flex flex-col gap-3">
+            {form.items.map((item, idx) => (
+              <div key={idx} className="grid grid-cols-[minmax(0,1fr)_minmax(0,1.6fr)_100px_32px] gap-2.5 items-center">
+                <input
+                  type="text"
+                  value={item.item_code}
+                  onChange={e => updateItem(idx, 'item_code', e.target.value)}
+                  placeholder="編碼"
+                  className={`${inputCls} min-w-0 text-sm py-3`}
+                />
+                <input
+                  type="text"
+                  value={item.item_name}
+                  onChange={e => updateItem(idx, 'item_name', e.target.value)}
+                  placeholder="品名/規格"
+                  className={`${inputCls} min-w-0 text-sm py-3`}
+                />
+                <input
+                  type="text"
+                  value={item.quantity}
+                  onChange={e => updateItem(idx, 'quantity', e.target.value)}
+                  placeholder="數量"
+                  className={`${inputCls} min-w-0 text-sm py-3`}
+                />
+                <button
+                  onClick={() => removeItem(idx)}
+                  disabled={form.items.length === 1}
+                  className="flex items-center justify-center w-8 h-8 rounded-lg text-[#445064] hover:text-rose-400 hover:bg-rose-900/20 transition-colors disabled:opacity-30"
+                >
+                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* 預計發單日 + 希望交期 */}
+        <div className="grid grid-cols-2 gap-5">
+          <div>
+            <label className={labelCls}>預計發單日</label>
+            <input
+              type="date"
+              value={form.planned_order_date}
+              onChange={e => setForm(f => ({ ...f, planned_order_date: e.target.value }))}
+              className={inputCls}
+            />
+          </div>
+          <div>
+            <label className={labelCls}>希望交期</label>
+            <input
+              type="date"
+              value={form.expected_date}
+              onChange={e => setForm(f => ({ ...f, expected_date: e.target.value }))}
+              className={inputCls}
+            />
+          </div>
+        </div>
+
+        {/* 備註 */}
+        <div>
+          <label className={labelCls}>備註</label>
+          <textarea
+            rows={3}
+            value={form.remark}
+            onChange={e => setForm(f => ({ ...f, remark: e.target.value }))}
+            placeholder="選填"
+            className={`${inputCls} resize-none`}
           />
         </div>
-        <div>
-          <label className="block text-sm text-slate-400 mb-1">希望交期</label>
-          <input
-            type="date"
-            value={form.expected_date}
-            onChange={e => setForm(f => ({ ...f, expected_date: e.target.value }))}
-            className="w-full bg-slate-800 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:ring-1 focus:ring-orange-500"
-          />
-        </div>
-      </div>
-
-      {/* 備註 */}
-      <div>
-        <label className="block text-sm text-slate-400 mb-1">備註</label>
-        <textarea
-          rows={3}
-          value={form.remark}
-          onChange={e => setForm(f => ({ ...f, remark: e.target.value }))}
-          placeholder="選填"
-          className="w-full bg-slate-800 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm resize-none focus:outline-none focus:ring-1 focus:ring-orange-500 placeholder-slate-600"
-        />
       </div>
 
       {/* Actions */}
-      <div className="flex gap-3 pt-2">
+      <div className="flex justify-end gap-2.5 pt-7 mt-1 border-t border-[#182131]">
         <button
           onClick={() => { resetForm(); setTab('records') }}
           disabled={saving}
-          className="px-4 py-2 bg-slate-700 hover:bg-slate-600 text-white rounded-lg text-sm transition-colors"
+          className="px-5 py-2.5 rounded-[10px] border border-[#26344a] text-[#93a4c0] text-[13.5px] font-semibold hover:bg-white/5 transition-colors"
         >取消</button>
         <button
           onClick={() => void handleSave()}
           disabled={saving}
-          className="flex items-center gap-2 px-6 py-2 bg-orange-600 hover:bg-orange-500 disabled:opacity-50 text-white rounded-lg text-sm font-semibold transition-colors"
+          className="flex items-center gap-2 px-6 py-2.5 rounded-[10px] bg-gradient-to-b from-teal-300 to-teal-400 disabled:opacity-50 text-[#04211d] text-[13.5px] font-bold transition-colors"
         >
           {saving && (
             <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -631,36 +612,36 @@ export default function ScheduleInquiryPage() {
   // ─── Settings Tab ─────────────────────────────────────────────────────────
 
   const renderSettings = () => (
-    <div className="max-w-md space-y-5">
-      <h2 className="text-lg font-bold text-white">業務人員管理</h2>
+    <div className="max-w-md bg-[#0b1220] border border-[#1c2739] rounded-[20px] px-9 py-9">
+      <h2 className="text-[16px] font-bold text-[#f3f6fb] mb-6">業務人員管理</h2>
       {/* Add */}
-      <div className="flex gap-2">
+      <div className="flex gap-2.5">
         <input
           type="text"
           value={spNewName}
           onChange={e => setSpNewName(e.target.value)}
           onKeyDown={e => e.key === 'Enter' && void handleAddSalesperson()}
           placeholder="輸入業務姓名…"
-          className="flex-1 bg-slate-800 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:ring-1 focus:ring-orange-500 placeholder-slate-600"
+          className={`${inputCls} flex-1`}
         />
         <button
           onClick={() => void handleAddSalesperson()}
           disabled={spAdding || !spNewName.trim()}
-          className="px-4 py-2 bg-orange-600 hover:bg-orange-500 disabled:opacity-40 text-white text-sm font-semibold rounded-lg transition-colors"
+          className="px-5 rounded-[10px] bg-gradient-to-b from-teal-300 to-teal-400 disabled:opacity-40 text-[#04211d] text-[13.5px] font-bold transition-colors"
         >{spAdding ? '新增中…' : '新增'}</button>
       </div>
       {/* List */}
       {salespersons.length === 0 ? (
-        <p className="text-slate-600 text-sm">(尚未新增任何業務)</p>
+        <p className="text-[#5f7290] text-sm mt-6">(尚未新增任何業務)</p>
       ) : (
-        <ul className="space-y-2">
+        <ul className="flex flex-col gap-2 mt-6">
           {salespersons.map(sp => (
-            <li key={sp} className="flex items-center justify-between bg-slate-800/60 border border-slate-700 rounded-lg px-4 py-2">
-              <span className="text-white text-sm">{sp}</span>
+            <li key={sp} className="flex items-center justify-between bg-[#101a2c] border border-[#1c2739] rounded-[10px] px-4 py-2.5">
+              <span className="text-[#e7edf5] text-sm">{sp}</span>
               <button
                 onClick={() => void handleDeleteSalesperson(sp)}
                 disabled={spDeleting === sp}
-                className="text-xs text-red-400 hover:text-red-300 disabled:opacity-40 transition-colors"
+                className="text-xs text-rose-400 hover:text-rose-300 disabled:opacity-40 transition-colors"
               >{spDeleting === sp ? '刪除中…' : '刪除'}</button>
             </li>
           ))}
@@ -671,20 +652,24 @@ export default function ScheduleInquiryPage() {
   // ─── Main ─────────────────────────────────────────────────────────────────
 
   return (
-    <div className="p-6 md:p-8 max-w-[1400px] mx-auto min-h-screen space-y-6">
+    <div className="p-6 md:p-8 max-w-[1280px] mx-auto min-h-screen">
       {/* Header */}
-      <div className="flex items-start justify-between gap-3">
+      <div className="flex items-start justify-between gap-3 flex-wrap">
         <div>
-          <h1 className="text-3xl font-bold text-white tracking-tight">產期詢問記錄</h1>
-          <p className="text-orange-400 mt-1 font-mono text-sm uppercase">
-            SCHEDULE INQUIRY // 產期詢問與生管回覆
-          </p>
+          <div className="flex items-center gap-3">
+            <h1 className="text-[28px] font-extrabold text-[#f3f6fb] tracking-tight">產期詢問記錄</h1>
+            <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-teal-500/10 border border-teal-400/35 text-teal-300 text-xs font-bold">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="w-3 h-3"><path strokeLinecap="round" strokeLinejoin="round" d="M9 3v2m6-2v2M4 8h16M5 5h14a1 1 0 011 1v13a1 1 0 01-1 1H5a1 1 0 01-1-1V6a1 1 0 011-1z" /></svg>
+              生產管理回覆
+            </span>
+          </div>
+          <p className="text-sm text-[#6c7d99] mt-2">查看業務登記的產期詢問，回覆同意 / 拒絕或標記完成</p>
         </div>
-        <NavButton href="/admin" direction="home" title="回到首頁" className="px-3 py-2" />
+        <NavButton href="/admin" direction="home" title="回到首頁" />
       </div>
 
       {/* Tab bar */}
-      <div className="flex gap-1 p-1 bg-slate-800/60 rounded-xl w-fit border border-slate-700">
+      <div className="flex gap-1 p-1.5 bg-[#0b1220] border border-[#1c2739] rounded-[13px] w-fit mt-8">
         {([['records','詢問列表'],['create', editingId ? `編輯 #${editingId}` : '新增詢問'],['settings','選項設定']] as [ActiveTab,string][]).map(([key,label]) => (
           <button
             key={key}
@@ -693,8 +678,8 @@ export default function ScheduleInquiryPage() {
               else if (key === 'create') openCreate()
               else setTab('settings')
             }}
-            className={`px-5 py-2 rounded-lg text-sm font-semibold transition-all ${
-              tab === key ? 'bg-orange-600 text-white shadow' : 'text-slate-400 hover:text-white'
+            className={`px-[18px] py-2.5 rounded-[9px] text-[13.5px] font-semibold transition-all ${
+              tab === key ? 'bg-gradient-to-b from-teal-300 to-teal-400 text-[#04211d]' : 'text-[#6c7d99] hover:text-[#b7c4da]'
             }`}
           >
             {label}
@@ -702,7 +687,9 @@ export default function ScheduleInquiryPage() {
         ))}
       </div>
 
-      {tab === 'records' ? renderRecords() : tab === 'settings' ? renderSettings() : renderForm()}
+      <div className="mt-6">
+        {tab === 'records' ? renderRecords() : tab === 'settings' ? renderSettings() : renderForm()}
+      </div>
     </div>
   )
 }
