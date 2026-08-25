@@ -35,12 +35,29 @@ function pickAllowed(rec: Record<string, unknown>): Record<string, unknown> {
 
 // ============================================================
 // GET：列出所有詢問紀錄（依 created_at 新到舊；篩選/排序邏輯維持在前端）
+// ?count=pending：只回傳「尚未回覆」筆數（供後台導覽列提示徽章用，輕量 head 查詢）
 // ============================================================
-export async function GET() {
+export async function GET(request: NextRequest) {
   const guard = await guardAuth()
   if (!guard.ok) return guard.res
   try {
     const supabase = getSupabaseAdminClient()
+
+    if (request.nextUrl.searchParams.get('count') === 'pending') {
+      const { count, error } = await supabase
+        .from(TABLE)
+        .select('id', { count: 'exact', head: true })
+        .is('planner_reply', null)
+
+      if (error) {
+        return NextResponse.json(
+          { success: false, error: formatSupabaseAdminError(error.message) },
+          { status: 500 }
+        )
+      }
+      return NextResponse.json({ success: true, count: count ?? 0 })
+    }
+
     const { data, error } = await supabase
       .from(TABLE)
       .select(SELECT_COLUMNS)

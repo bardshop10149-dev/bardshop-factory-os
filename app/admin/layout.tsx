@@ -2,9 +2,29 @@
 
 import { useRouter, usePathname } from 'next/navigation'
 import Link from 'next/link'
-import { ReactNode } from 'react'
+import { ReactNode, useEffect, useState } from 'react'
 import { NAV_GROUPS } from '../../config/menuItems' // 引入共用設定
 import { FavoritesProvider, useFavorites } from '../../context/FavoritesContext' // 引入 Context
+
+// 導覽列上的「產期詢問記錄」提示徽章：輪詢尚未回覆（planner_reply is null）的筆數，
+// 讓生管不用點進頁面就知道有沒有未確認的單子。放在 layout 層級，任何後台頁面都看得到。
+const SCHEDULE_CONFIRM_PATH = '/admin/production/notice/schedule-confirm'
+function usePendingScheduleCount(): number {
+  const [count, setCount] = useState(0)
+  useEffect(() => {
+    let cancelled = false
+    const fetchCount = () => {
+      fetch(`/api/production/schedule-confirm?count=pending`, { cache: 'no-store' })
+        .then(r => r.json())
+        .then(j => { if (!cancelled && j?.success) setCount(Number(j.count) || 0) })
+        .catch(() => { /* 靜默：導覽列提示非關鍵路徑 */ })
+    }
+    fetchCount()
+    const timer = setInterval(fetchCount, 60_000)
+    return () => { cancelled = true; clearInterval(timer) }
+  }, [])
+  return count
+}
 
 interface ThemeColors {
   text: string
@@ -20,6 +40,7 @@ function AdminNavbar() {
   const router = useRouter()
   const pathname = usePathname()
   const { favorites, toggleFavorite } = useFavorites()
+  const pendingScheduleCount = usePendingScheduleCount()
 
   // 輔助顏色函式 (維持不變)
   const getThemeColors = (theme: string) => {
@@ -75,11 +96,21 @@ function AdminNavbar() {
                 return pathname === p || pathname.startsWith(p + '?')
               })
 
+              const groupPendingCount = group.title === '生產管理入口' ? pendingScheduleCount : 0
+
               return (
                 <div key={group.title} className="relative group/menu">
-                  <button className={`flex items-center gap-2 px-4 py-2 rounded transition-all duration-300 font-bold text-sm tracking-wide border ${isActiveGroup ? `${colors.text} ${colors.activeBg} ${colors.border} ${colors.glow}` : `text-slate-400 border-transparent hover:text-white hover:bg-slate-800/50`}`}>
+                  <button className={`relative flex items-center gap-2 px-4 py-2 rounded transition-all duration-300 font-bold text-sm tracking-wide border ${isActiveGroup ? `${colors.text} ${colors.activeBg} ${colors.border} ${colors.glow}` : `text-slate-400 border-transparent hover:text-white hover:bg-slate-800/50`}`}>
                     <span>{group.title}</span>
                     <svg className="w-3 h-3 transition-transform duration-300 group-hover/menu:rotate-180 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" /></svg>
+                    {groupPendingCount > 0 && (
+                      <span
+                        className="absolute -top-1.5 -right-1.5 min-w-[18px] h-[18px] px-1 rounded-full bg-red-500 text-white text-[10px] font-bold flex items-center justify-center shadow-[0_0_8px_rgba(239,68,68,0.7)] animate-pulse"
+                        title={`${groupPendingCount} 筆產期詢問尚未回覆`}
+                      >
+                        {groupPendingCount > 99 ? '99+' : groupPendingCount}
+                      </span>
+                    )}
                   </button>
 
                   <div className="absolute left-0 top-full pt-3 w-64 opacity-0 translate-y-2 pointer-events-none group-hover/menu:opacity-100 group-hover/menu:translate-y-0 group-hover/menu:pointer-events-auto transition-all duration-200 z-50">
@@ -135,6 +166,7 @@ function AdminNavbar() {
                           const isItemActive = pathname === directItem.path
                           const isLocked = Boolean(directItem.locked)
                           const isFav = favorites.includes(directItem.path)
+                          const itemPendingCount = directItem.path === SCHEDULE_CONFIRM_PATH ? pendingScheduleCount : 0
                           return (
                             <div key={directItem.path} className={`group/item flex items-center px-4 py-2 transition-colors border-l-4 ${isLocked ? 'opacity-60 cursor-not-allowed' : 'hover:bg-slate-800/50'} ${isItemActive ? `border-${group.theme}-400 bg-slate-800/80` : 'border-transparent'}`}>
                               <button
@@ -148,8 +180,16 @@ function AdminNavbar() {
                               {isLocked ? (
                                 <span className="flex-1 text-sm font-medium tracking-wide text-slate-500 select-none">{directItem.name}（鎖定）</span>
                               ) : (
-                                <Link href={directItem.path} className={`flex-1 text-sm font-medium tracking-wide ${isItemActive ? colors.text : `text-slate-400 ${colors.hoverText} hover:text-white`}`}>
+                                <Link href={directItem.path} className={`flex-1 flex items-center gap-2 text-sm font-medium tracking-wide ${isItemActive ? colors.text : `text-slate-400 ${colors.hoverText} hover:text-white`}`}>
                                   {directItem.name}
+                                  {itemPendingCount > 0 && (
+                                    <span
+                                      className="min-w-[18px] h-[18px] px-1 rounded-full bg-red-500 text-white text-[10px] font-bold flex items-center justify-center shrink-0"
+                                      title={`${itemPendingCount} 筆尚未回覆`}
+                                    >
+                                      {itemPendingCount > 99 ? '99+' : itemPendingCount}
+                                    </span>
+                                  )}
                                 </Link>
                               )}
                             </div>
