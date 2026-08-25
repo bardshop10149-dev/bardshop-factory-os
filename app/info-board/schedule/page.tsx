@@ -52,9 +52,7 @@ export default function ScheduleInquiryPage() {
   const [loading, setLoading] = useState(true)
   const [errorMessage, setErrorMessage] = useState('')
   const [showForm, setShowForm] = useState(false)
-  const [editingId, setEditingId] = useState<number | null>(null)
   const [submitting, setSubmitting] = useState(false)
-  const [deletingId, setDeletingId] = useState<number | null>(null)
   const [currentUser, setCurrentUser] = useState<{ real_name: string; department: string; email: string } | null>(null)
   const [notifyPreview, setNotifyPreview] = useState<string | null>(null)
   const [copied, setCopied] = useState(false)
@@ -108,21 +106,7 @@ export default function ScheduleInquiryPage() {
     setFormExpectedDate('')
     setFormPlannedOrderDate('')
     setFormRemark('')
-    setEditingId(null)
     setShowForm(false)
-  }
-
-  const openEdit = (rec: Inquiry) => {
-    setEditingId(rec.id)
-    setFormDate(rec.inquiry_date || new Date().toISOString().slice(0, 10))
-    setFormSalesperson(rec.salesperson || currentUser?.real_name || '')
-    setFormCustomer(rec.customer_name || '')
-    setFormOrderNo(rec.order_no || '')
-    setFormItems(rec.items && rec.items.length > 0 ? rec.items : [{ ...DEFAULT_ITEM }])
-    setFormExpectedDate(rec.expected_date || '')
-    setFormPlannedOrderDate(rec.planned_order_date || '')
-    setFormRemark(rec.remark || '')
-    setShowForm(true)
   }
 
   const addItem    = () => setFormItems(items => [...items, { ...DEFAULT_ITEM }])
@@ -163,17 +147,12 @@ export default function ScheduleInquiryPage() {
     }
 
     try {
-      const res = editingId
-        ? await fetch('/api/production/schedule-confirm', {
-            method: 'PATCH',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ id: editingId, fields: payload }),
-          })
-        : await fetch('/api/production/schedule-confirm', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload),
-          })
+      // 送出後不可更改（僅訂單編號可於清單上補填），故只有新增、沒有編輯
+      const res = await fetch('/api/production/schedule-confirm', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      })
       const json = await res.json()
       if (!json?.success) {
         alert('送出失敗: ' + (json?.error ?? '未知錯誤'))
@@ -181,29 +160,26 @@ export default function ScheduleInquiryPage() {
         return
       }
 
-      // 組合通知訊息（僅新增時提示，編輯不重複打擾）
-      if (!editingId) {
-        const now = new Date().toLocaleString('zh-TW', { timeZone: 'Asia/Taipei' })
-        const itemLines = cleanItems.map(it => `　・${it.item_name || it.item_code || '—'}　x${it.quantity || '-'}`).join('\n')
-        const lines = [
-          '📋 【產期詢問/預留單】',
-          '',
-          `📅 填單日期：${formDate}`,
-          `👤 承辦業務：${formSalesperson.trim() || '-'}`,
-          `🏢 客戶名稱：${formCustomer.trim()}`,
-          `🔢 訂單編號：${formOrderNo.trim() || '-'}`,
-          `📦 品項：\n${itemLines}`,
-          `📅 預計發單日：${formPlannedOrderDate || '-'}`,
-          `📅 希望交期(寄出日期)：${formExpectedDate || '-'}`,
-          `💬 備註：${formRemark.trim() || '-'}`,
-          '',
-          `🏢 部門：${currentUser.department}`,
-          `👤 填單人：${currentUser.real_name}`,
-          `📌 狀態：🟡 待回覆`,
-          `🕐 建立時間：${now}`,
-        ]
-        setNotifyPreview(lines.join('\n'))
-      }
+      const now = new Date().toLocaleString('zh-TW', { timeZone: 'Asia/Taipei' })
+      const itemLines = cleanItems.map(it => `　・${it.item_name || it.item_code || '—'}　x${it.quantity || '-'}`).join('\n')
+      const lines = [
+        '📋 【產期詢問/預留單】',
+        '',
+        `📅 填單日期：${formDate}`,
+        `👤 承辦業務：${formSalesperson.trim() || '-'}`,
+        `🏢 客戶名稱：${formCustomer.trim()}`,
+        `🔢 訂單編號：${formOrderNo.trim() || '-'}`,
+        `📦 品項：\n${itemLines}`,
+        `📅 預計發單日：${formPlannedOrderDate || '-'}`,
+        `📅 希望交期(寄出日期)：${formExpectedDate || '-'}`,
+        `💬 備註：${formRemark.trim() || '-'}`,
+        '',
+        `🏢 部門：${currentUser.department}`,
+        `👤 填單人：${currentUser.real_name}`,
+        `📌 狀態：🟡 待回覆`,
+        `🕐 建立時間：${now}`,
+      ]
+      setNotifyPreview(lines.join('\n'))
 
       resetForm()
       fetchRecords()
@@ -231,29 +207,15 @@ export default function ScheduleInquiryPage() {
     }
   }
 
-  const handleDelete = async (id: number) => {
-    if (!confirm('確定要刪除此單據？')) return
-    setDeletingId(id)
-    try {
-      const res = await fetch(`/api/production/schedule-confirm?id=${id}`, { method: 'DELETE' })
-      const json = await res.json()
-      if (!json?.success) alert('刪除失敗: ' + (json?.error ?? '未知錯誤'))
-      else fetchRecords()
-    } catch (e) {
-      alert('刪除失敗: ' + (e instanceof Error ? e.message : String(e)))
-    }
-    setDeletingId(null)
-  }
-
   // 補訂單編號：唯一允許「送出後才補」的欄位——即使生管已回覆也可以補
-  // （訂單編號常常是送出詢問之後才拿到，跟登記內容本身無關，不受回覆鎖定限制）
-  const [fillingOrderNoId, setFillingOrderNoId] = useState<number | null>(null)
-  const handleFillOrderNo = async (record: Inquiry) => {
-    const input = window.prompt(`補上「${record.customer_name}」這張單的訂單編號：`, record.order_no ?? '')
-    if (input === null) return
-    const orderNo = input.trim()
-    if (!orderNo) { alert('訂單編號不可為空'); return }
-    setFillingOrderNoId(record.id)
+  // （訂單編號常常是送出詢問之後才拿到，跟登記內容本身無關，不受回覆鎖定限制）。
+  // 直接在清單列上輸入，不用彈跳對話框。
+  const [orderNoDrafts, setOrderNoDrafts] = useState<Record<number, string>>({})
+  const [savingOrderNoId, setSavingOrderNoId] = useState<number | null>(null)
+  const saveOrderNo = async (record: Inquiry) => {
+    const orderNo = (orderNoDrafts[record.id] ?? '').trim()
+    if (!orderNo) { alert('請先輸入訂單編號'); return }
+    setSavingOrderNoId(record.id)
     try {
       const res = await fetch('/api/production/schedule-confirm', {
         method: 'PATCH',
@@ -262,18 +224,16 @@ export default function ScheduleInquiryPage() {
       })
       const json = await res.json()
       if (!json?.success) throw new Error(json?.error ?? '未知錯誤')
+      setOrderNoDrafts(prev => { const n = { ...prev }; delete n[record.id]; return n })
       fetchRecords()
     } catch (e) {
       alert('補訂單編號失敗: ' + (e instanceof Error ? e.message : String(e)))
     } finally {
-      setFillingOrderNoId(null)
+      setSavingOrderNoId(null)
     }
   }
 
   const isAuthor = (record: Inquiry) => !!currentUser?.email && currentUser.email === record.author_email
-  // 生管已回覆（同意/拒絕/完成）後，內容代表的是「回覆當下」的登記狀態，
-  // 業務不應再靜默修改，避免回覆跟實際登記內容對不上
-  const isEditable = (record: Inquiry) => isAuthor(record) && !record.planner_reply
 
   return (
     <div className="min-h-screen bg-[#050b14] text-[#cbd5e1] bg-[radial-gradient(1200px_500px_at_15%_-10%,rgba(245,165,36,0.06),transparent_60%)]">
@@ -319,9 +279,7 @@ export default function ScheduleInquiryPage() {
                   <div className="w-9 h-9 rounded-[11px] bg-amber-500/15 border border-amber-500/35 text-amber-400 flex items-center justify-center">
                     <svg className="w-[18px] h-[18px]" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.2}><path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" /></svg>
                   </div>
-                  <h3 className="text-[17px] font-bold text-[#f3f6fb]">
-                    {editingId ? `編輯詢問 / 預留單 #${editingId}` : '新增詢問 / 預留單'}
-                  </h3>
+                  <h3 className="text-[17px] font-bold text-[#f3f6fb]">新增詢問 / 預留單</h3>
                 </div>
                 <button onClick={resetForm} className="w-8 h-8 rounded-[9px] flex items-center justify-center text-[#5f7290] hover:text-white transition-colors">
                   <svg className="w-[17px] h-[17px]" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
@@ -490,87 +448,64 @@ export default function ScheduleInquiryPage() {
             <div className="text-slate-600 text-xs mt-1">點擊上方「新增詢問/預留單」開始建立</div>
           </div>
         ) : (
-          <div className="flex flex-col gap-3.5">
+          <div className="flex flex-col gap-1.5">
             {records.map(record => {
               const replyInfo = REPLY_CONFIG[record.planner_reply ?? 'pending']
               const items = record.items || []
+              const itemsSummary = items.map(it => `${it.item_name || it.item_code || '—'}x${it.quantity || '-'}`).join('、')
               return (
                 <div
                   key={record.id}
-                  className="bg-[#0b1220] border border-[#1c2739] rounded-[18px] px-6 py-5 flex flex-col gap-4"
+                  className="bg-[#0b1220] border border-[#1c2739] rounded-[12px] px-4 py-2.5 flex items-center gap-3 min-w-0"
+                  title={record.remark ? `備註：${record.remark}` : undefined}
                 >
-                  <div className="flex items-start justify-between gap-4">
-                    <div className="flex items-center gap-2.5 flex-wrap">
-                      <span className="text-[17px] font-bold text-[#f3f6fb]">{record.customer_name || '—'}</span>
-                      {record.order_no ? (
-                        <span className="font-mono text-xs text-[#7f93b3] bg-[#101a2c] border border-[#1c2739] rounded-[7px] px-2.5 py-1">{record.order_no}</span>
-                      ) : isAuthor(record) ? (
-                        <button
-                          onClick={() => void handleFillOrderNo(record)}
-                          disabled={fillingOrderNoId === record.id}
-                          className="text-xs font-bold text-amber-400 bg-amber-500/10 border border-amber-500/35 border-dashed rounded-[7px] px-2.5 py-1 hover:bg-amber-500/20 disabled:opacity-50 transition-colors"
-                          title="訂單編號拿到後可隨時補上（不受回覆狀態限制）"
-                        >
-                          {fillingOrderNoId === record.id ? '補登中…' : '⚠ 補訂單編號'}
-                        </button>
-                      ) : (
-                        <span className="text-xs text-[#5f7290] border border-[#1c2739] border-dashed rounded-[7px] px-2.5 py-1">訂單編號待補</span>
-                      )}
-                    </div>
-                    <span className={`inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-full text-xs font-bold border shrink-0 ${replyInfo.class}`}>
-                      <span className="w-[13px] h-[13px]">{replyInfo.icon}</span>
-                      {replyInfo.label}
+                  {/* 狀態 */}
+                  <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-bold border shrink-0 ${replyInfo.class}`}>
+                    <span className="w-[11px] h-[11px]">{replyInfo.icon}</span>
+                    {replyInfo.label}
+                  </span>
+
+                  {/* 客戶 */}
+                  <span className="text-[14px] font-bold text-[#f3f6fb] shrink-0 max-w-[180px] truncate">{record.customer_name || '—'}</span>
+
+                  {/* 訂單編號 / 回填欄位 */}
+                  {record.order_no ? (
+                    <span className="font-mono text-xs text-[#7f93b3] bg-[#101a2c] border border-[#1c2739] rounded-[6px] px-2 py-0.5 shrink-0">{record.order_no}</span>
+                  ) : isAuthor(record) ? (
+                    <span className="flex items-center gap-1 shrink-0">
+                      <input
+                        value={orderNoDrafts[record.id] ?? ''}
+                        onChange={e => setOrderNoDrafts(prev => ({ ...prev, [record.id]: e.target.value }))}
+                        onKeyDown={e => { if (e.key === 'Enter') void saveOrderNo(record) }}
+                        placeholder="補訂單編號…"
+                        className="w-32 px-2 py-1 rounded-[6px] bg-[#08101c] border border-amber-500/40 border-dashed text-xs font-mono text-[#e7edf5] placeholder-[#5f7290] focus:outline-none focus:border-amber-500/80"
+                      />
+                      <button
+                        onClick={() => void saveOrderNo(record)}
+                        disabled={savingOrderNoId === record.id || !(orderNoDrafts[record.id] ?? '').trim()}
+                        className="px-2 py-1 rounded-[6px] bg-amber-500/15 border border-amber-500/40 text-amber-400 text-xs font-bold hover:bg-amber-500/25 disabled:opacity-40 transition-colors"
+                      >
+                        {savingOrderNoId === record.id ? '…' : '存'}
+                      </button>
                     </span>
-                  </div>
-
-                  {items.length > 0 && (
-                    <div className="flex flex-wrap gap-2">
-                      {items.map((it, i) => (
-                        <span key={i} className="inline-flex items-center gap-1.5 bg-[#101a2c] border border-[#1c2739] rounded-[9px] px-3 py-1.5 text-[12.5px] text-[#b7c4da]">
-                          <b className="text-[#e7edf5] font-semibold">{it.item_name || it.item_code || '—'}</b>
-                          {it.quantity && <span className="text-[#6c7d99]">x{it.quantity}</span>}
-                        </span>
-                      ))}
-                    </div>
+                  ) : (
+                    <span className="text-[11px] text-[#5f7290] border border-[#1c2739] border-dashed rounded-[6px] px-2 py-0.5 shrink-0">單號待補</span>
                   )}
 
-                  <div className="flex flex-wrap gap-x-5 gap-y-1.5 text-[13px] text-[#93a4c0]">
-                    {record.salesperson && <span>承辦業務 <b className="text-[#cdd8ea] font-semibold">{record.salesperson}</b></span>}
-                    {record.planned_order_date && <span>預計發單 <b className="text-[#cdd8ea] font-semibold">{record.planned_order_date}</b></span>}
-                    {record.expected_date && <span>希望交期 <b className="text-[#cdd8ea] font-semibold">{record.expected_date}</b></span>}
-                  </div>
+                  {/* 品項摘要（吃剩餘空間，截斷） */}
+                  <span className="text-[12.5px] text-[#b7c4da] flex-1 min-w-0 truncate" title={itemsSummary}>{itemsSummary || '—'}</span>
 
-                  {record.remark && (
-                    <p className="text-[13px] text-[#6c7d99] leading-relaxed whitespace-pre-wrap">{record.remark}</p>
-                  )}
+                  {/* 日期 */}
+                  <span className="text-[11.5px] text-[#93a4c0] shrink-0 whitespace-nowrap hidden md:inline">
+                    發單 <b className="text-[#cdd8ea]">{record.planned_order_date || '—'}</b>
+                    <span className="mx-1.5 text-[#3c4a62]">|</span>
+                    交期 <b className="text-[#cdd8ea]">{record.expected_date || '—'}</b>
+                  </span>
 
-                  <div className="flex items-center justify-between border-t border-[#151f30] pt-3.5">
-                    <div className="flex items-center gap-2 text-xs text-[#5f7290]">
-                      <span>{record.author_name}</span>
-                      {record.department && <span className="bg-[#101a2c] border border-[#1c2739] rounded-md px-2 py-0.5 text-[#7f93b3]">{record.department}</span>}
-                      <span className="text-[#4c5c78]">
-                        ・{new Date(record.created_at).toLocaleString('zh-TW', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })}
-                      </span>
-                    </div>
-                    {isEditable(record) && (
-                      <div className="flex items-center gap-1">
-                        <button
-                          onClick={() => openEdit(record)}
-                          className="px-3 py-1.5 text-xs font-bold rounded-lg bg-[#101a2c] hover:bg-[#182338] text-[#b7c4da] transition-colors"
-                        >
-                          編輯
-                        </button>
-                        <button
-                          onClick={() => handleDelete(record.id)}
-                          disabled={deletingId === record.id}
-                          className="w-[30px] h-[30px] rounded-lg flex items-center justify-center text-[#5f7290] hover:text-rose-400 hover:bg-rose-900/10 transition-colors disabled:opacity-40"
-                          title="刪除"
-                        >
-                          <svg className="w-[15px] h-[15px]" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
-                        </button>
-                      </div>
-                    )}
-                  </div>
+                  {/* 填單人・時間 */}
+                  <span className="text-[11px] text-[#5f7290] shrink-0 whitespace-nowrap hidden lg:inline">
+                    {record.author_name}・{new Date(record.created_at).toLocaleString('zh-TW', { month: '2-digit', day: '2-digit' })}
+                  </span>
                 </div>
               )
             })}
