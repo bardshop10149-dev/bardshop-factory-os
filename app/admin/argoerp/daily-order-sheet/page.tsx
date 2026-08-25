@@ -3746,10 +3746,15 @@ export default function DailyOrderSheetPage() {
                                     )}
                                   </div>
                                 ) : row.mo_number ? (
+                                  // C/O 廠這個欄位是「採購單」欄，本分支只會在委外(O)列命中：
+                                  // po_status 還沒到 matched（PR 剛送出、尚未轉成採購單），mo_number
+                                  // 此時存的是委外請購單號（MPO...），不是塔台製令——委外訂單本來就
+                                  // 不會有內部製令/塔台製程資料，點進去一律開請購單明細（PoOrderModal
+                                  // 依 MPO 前綴自動判斷顯示「請購單」），不查塔台
                                   <div>
                                     <button
-                                      onClick={() => setMoModalId(row.mo_number!)}
-                                      title="查看塔台製程與各站報工量"
+                                      onClick={() => setPoModalId(row.mo_number!)}
+                                      title="查看請購單明細"
                                       className={`hover:underline underline-offset-2 text-left ${row.factory === 'O' ? outsourcedStyles.text : 'text-violet-300 hover:text-violet-100'}`}
                                     >{row.mo_number}</button>
                                     {row.factory === 'O' && outsourcedPrefix && (
