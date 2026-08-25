@@ -311,7 +311,7 @@ export default function ScheduleInquiryPage() {
                     <input type="date" value={formDate} readOnly className={`${inputCls} text-[#5f7290] cursor-not-allowed`} />
                   </div>
                   <div>
-                    <label className={labelCls}>承辦業務 <span className="text-amber-500">*</span></label>
+                    <label className={labelCls}>承辦業務 <span className="text-amber-500">*</span><span className="text-[#5f7290] normal-case tracking-normal font-medium">（已依登入帳號帶入，可修改）</span></label>
                     <input
                       value={formSalesperson}
                       onChange={e => setFormSalesperson(e.target.value)}
