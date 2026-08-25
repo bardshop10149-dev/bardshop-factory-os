@@ -35,6 +35,7 @@ interface PrLine {
   uom: string                 // 單位（UNIT_OF_MEASURE_ORU）
   quantity: string            // 請購數量（ORDER_QTY_ORU）
   delivery_date: string       // 交期（DUEDATE）
+  remark: string              // 請購說明（REMARK），手打，空白則不送
 }
 
 const HEADER_KEY = 'argoerp_standalone_pr_header_v1'
@@ -53,6 +54,7 @@ const ERP_KEYS = [
   'DUEDATE',
   'FLOW_TYPE',
   'APPLY_USER',
+  'REMARK',
 ] as const
 
 function fmtDate(d: Date): string {
@@ -110,6 +112,7 @@ function emptyLine(): PrLine {
     uom: 'PCS',
     quantity: '',
     delivery_date: '',
+    remark: '',
   }
 }
 
@@ -248,6 +251,7 @@ export default function StandalonePrCreatePage() {
         uom: r.unit_of_measure_oru ?? 'PCS',
         quantity: r.order_qty_oru != null ? String(r.order_qty_oru) : '',
         delivery_date: r.duedate ?? '',
+        remark: '',
       }))
 
       // 若目前只有一筆空白列，直接取代；否則附加
@@ -267,22 +271,27 @@ export default function StandalonePrCreatePage() {
   const payload = useMemo<Array<Record<string, string>>>(() => {
     return lines
       .filter(l => l.item_code.trim() && l.quantity.trim())
-      .map((l, i) => ({
-        APPLY_ID: header.apply_id,
-        APPLY_DATE: header.apply_date,
-        SEG_SEGMENT_NO_DEPARTMENT: header.department,
-        HOLD_STATUS: header.hold_status,
-        LINE_NO: String(i + 1),
-        MBP_PART: l.item_code.trim(),
-        MBP_VER: l.mbp_ver.trim() || '1',
-        MBP_LOT_NO: l.so_project_id.trim(),
-        UNIT_OF_MEASURE_ORU: l.uom.trim() || 'PCS',
-        ORDER_QTY_ORU: l.quantity.trim().replace(/,/g, ''),
-        CURRENCY: header.currency,
-        DUEDATE: clampDueDate(l.delivery_date, header.apply_date),
-        FLOW_TYPE: header.flow_type.trim(),
-        APPLY_USER: header.apply_user.trim(),
-      }))
+      .map((l, i) => {
+        const rec: Record<string, string> = {
+          APPLY_ID: header.apply_id,
+          APPLY_DATE: header.apply_date,
+          SEG_SEGMENT_NO_DEPARTMENT: header.department,
+          HOLD_STATUS: header.hold_status,
+          LINE_NO: String(i + 1),
+          MBP_PART: l.item_code.trim(),
+          MBP_VER: l.mbp_ver.trim() || '1',
+          MBP_LOT_NO: l.so_project_id.trim(),
+          UNIT_OF_MEASURE_ORU: l.uom.trim() || 'PCS',
+          ORDER_QTY_ORU: l.quantity.trim().replace(/,/g, ''),
+          CURRENCY: header.currency,
+          DUEDATE: clampDueDate(l.delivery_date, header.apply_date),
+          FLOW_TYPE: header.flow_type.trim(),
+          APPLY_USER: header.apply_user.trim(),
+        }
+        // 請購說明：有填才送（空字串不送，避免覆寫 ERP 端自填欄位）
+        if ((l.remark ?? '').trim()) rec.REMARK = l.remark.trim()
+        return rec
+      })
   }, [lines, header])
 
   const handleImport = useCallback(async () => {
@@ -555,6 +564,7 @@ export default function StandalonePrCreatePage() {
                   <th className="text-left py-2 pr-2 w-20">單位</th>
                   <th className="text-right py-2 pr-2 w-24">數量 *</th>
                   <th className="text-left py-2 pr-2 w-32">交期</th>
+                  <th className="text-left py-2 pr-2 w-44">請購說明</th>
                   <th className="py-2 w-10"></th>
                 </tr>
               </thead>
@@ -616,6 +626,14 @@ export default function StandalonePrCreatePage() {
                         value={l.delivery_date}
                         onChange={e => setLine(l.uid, { delivery_date: e.target.value })}
                         placeholder="YYYY/MM/DD"
+                        className="w-full px-2 py-1 rounded bg-slate-800 border border-slate-700 text-white text-xs focus:outline-none focus:border-cyan-500"
+                      />
+                    </td>
+                    <td className="py-1.5 pr-2">
+                      <input
+                        value={l.remark}
+                        onChange={e => setLine(l.uid, { remark: e.target.value })}
+                        placeholder="選填"
                         className="w-full px-2 py-1 rounded bg-slate-800 border border-slate-700 text-white text-xs focus:outline-none focus:border-cyan-500"
                       />
                     </td>

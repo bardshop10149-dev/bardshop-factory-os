@@ -45,6 +45,7 @@ interface PrHeader {
 interface LineEdit {
   mbp_ver: string
   uom: string
+  remark: string   // 請購說明（PJ_APPLYPROJECTDETAIL.REMARK），手打，空白則不送
 }
 
 const HEADER_KEY = 'argoerp_pr_o_header_v1'
@@ -63,6 +64,7 @@ const ERP_KEYS = [
   'DUEDATE',
   'FLOW_TYPE',
   'APPLY_USER',
+  'REMARK',
 ] as const
 
 function fmtDate(d: Date): string {
@@ -462,6 +464,7 @@ export default function PrBatchExportOPage() {
       setLineEdits(rows.map(row => ({
         mbp_ver: '1',
         uom: fetchedUnitMap[row.item_code] || 'PCS',
+        remark: '',
       })))
       setLoadedDate(date)
       setActiveTab('pending')
@@ -479,8 +482,8 @@ export default function PrBatchExportOPage() {
 
   const payload = useMemo<Array<Record<string, string>>>(() => {
     return sourceRows.map((row, i) => {
-      const edit = lineEdits[i] ?? { mbp_ver: '1', uom: 'PCS' }
-      return {
+      const edit = lineEdits[i] ?? { mbp_ver: '1', uom: 'PCS', remark: '' }
+      const rec: Record<string, string> = {
         APPLY_ID: header.apply_id,
         APPLY_DATE: header.apply_date,
         SEG_SEGMENT_NO_DEPARTMENT: header.department,
@@ -496,6 +499,9 @@ export default function PrBatchExportOPage() {
         FLOW_TYPE: header.flow_type.trim(),
         APPLY_USER: header.apply_user.trim(),
       }
+      // 請購說明：有填才送（空字串不送，避免覆寫 ERP 端自填欄位）
+      if ((edit.remark ?? '').trim()) rec.REMARK = edit.remark.trim()
+      return rec
     })
   }, [sourceRows, lineEdits, header])
 
@@ -1035,6 +1041,7 @@ export default function PrBatchExportOPage() {
                   <th className="px-2 py-2 text-left">批號</th>
                   <th className="px-2 py-2 text-left">ERP 對應單位</th>
                   <th className="px-2 py-2 text-left">單位</th>
+                  <th className="px-2 py-2 text-left">請購說明</th>
                 </tr>
               </thead>
               <tbody>
@@ -1061,6 +1068,14 @@ export default function PrBatchExportOPage() {
                     <td className="px-2 py-1.5 font-mono">{unitMap[row.item_code] || '—'}</td>
                     <td className="px-2 py-1.5">
                       <input value={lineEdits[i]?.uom ?? 'PCS'} onChange={e => setLE(i, 'uom', e.target.value)} className={`w-20 px-2 py-1 rounded bg-slate-950 border ${unitMap[row.item_code] && lineEdits[i]?.uom !== unitMap[row.item_code] ? 'border-amber-500 text-amber-300' : 'border-slate-700'}`} />
+                    </td>
+                    <td className="px-2 py-1.5">
+                      <input
+                        value={lineEdits[i]?.remark ?? ''}
+                        onChange={e => setLE(i, 'remark', e.target.value)}
+                        placeholder="請購說明（選填）"
+                        className="w-48 px-2 py-1 rounded bg-slate-950 border border-slate-700"
+                      />
                     </td>
                   </tr>
                 ))}
