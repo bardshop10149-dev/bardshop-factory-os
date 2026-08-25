@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useCallback, type ReactNode } from 'react'
+import { useState, useEffect, useCallback, useMemo, type ReactNode } from 'react'
 import { NavButton } from '../../../components/NavButton'
 
 interface ProductItem { item_code: string; item_name: string; quantity: string }
@@ -235,6 +235,23 @@ export default function ScheduleInquiryPage() {
 
   const isAuthor = (record: Inquiry) => !!currentUser?.email && currentUser.email === record.author_email
 
+  // 全文搜尋：涵蓋客戶/訂單編號/承辦業務/填單人/部門/品項（編碼+品名+數量）/
+  // 日期/備註/回覆狀態，全部欄位都比對得到
+  const [searchTerm, setSearchTerm] = useState('')
+  const filteredRecords = useMemo(() => {
+    const q = searchTerm.trim().toLowerCase()
+    if (!q) return records
+    return records.filter(r => {
+      const replyLabel = REPLY_CONFIG[r.planner_reply ?? 'pending']?.label ?? ''
+      const haystack = [
+        r.customer_name, r.order_no, r.salesperson, r.author_name, r.department,
+        r.inquiry_date, r.planned_order_date, r.expected_date, r.remark, replyLabel,
+        ...(r.items ?? []).flatMap(it => [it.item_code, it.item_name, it.quantity]),
+      ].filter(Boolean).join(' ').toLowerCase()
+      return haystack.includes(q)
+    })
+  }, [records, searchTerm])
+
   return (
     <div className="min-h-screen bg-[#050b14] text-[#cbd5e1] bg-[radial-gradient(1200px_500px_at_15%_-10%,rgba(245,165,36,0.06),transparent_60%)]">
       <div className="max-w-[1180px] mx-auto px-8 py-11">
@@ -435,8 +452,27 @@ export default function ScheduleInquiryPage() {
         )}
 
         {/* 記錄列表 */}
-        <div className="flex items-center justify-between mt-9 mb-4">
-          <span className="text-[13px] font-semibold text-[#5f7290]">共 {records.length} 筆詢問</span>
+        <div className="flex items-center justify-between gap-4 mt-9 mb-4 flex-wrap">
+          <div className="relative flex-1 min-w-[240px] max-w-[480px]">
+            <svg className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-[#5f7290] pointer-events-none" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" /></svg>
+            <input
+              value={searchTerm}
+              onChange={e => setSearchTerm(e.target.value)}
+              placeholder="搜尋客戶 / 單號 / 品項 / 備註…"
+              className="w-full bg-[#08101c] border border-[#1e2a3f] rounded-[10px] pl-10 pr-9 py-2.5 text-[13.5px] text-[#e7edf5] placeholder-[#445064] focus:outline-none focus:border-amber-500/70 transition-colors"
+            />
+            {searchTerm && (
+              <button
+                onClick={() => setSearchTerm('')}
+                className="absolute right-2.5 top-1/2 -translate-y-1/2 w-5 h-5 flex items-center justify-center text-[#5f7290] hover:text-white transition-colors"
+              >
+                <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
+              </button>
+            )}
+          </div>
+          <span className="text-[13px] font-semibold text-[#5f7290] shrink-0">
+            {searchTerm.trim() ? `符合 ${filteredRecords.length} / ${records.length} 筆` : `共 ${records.length} 筆詢問`}
+          </span>
         </div>
 
         {loading ? (
@@ -447,9 +483,13 @@ export default function ScheduleInquiryPage() {
             <div className="text-slate-500 text-sm">目前沒有詢問/預留單</div>
             <div className="text-slate-600 text-xs mt-1">點擊上方「新增詢問/預留單」開始建立</div>
           </div>
+        ) : filteredRecords.length === 0 ? (
+          <div className="text-center py-16 border-2 border-dashed border-[#1c2739] rounded-2xl">
+            <div className="text-slate-500 text-sm">沒有符合「{searchTerm.trim()}」的詢問單</div>
+          </div>
         ) : (
           <div className="flex flex-col gap-1.5">
-            {records.map(record => {
+            {filteredRecords.map(record => {
               const replyInfo = REPLY_CONFIG[record.planner_reply ?? 'pending']
               const items = record.items || []
               const itemsSummary = items.map(it => `${it.item_name || it.item_code || '—'}x${it.quantity || '-'}`).join('、')
