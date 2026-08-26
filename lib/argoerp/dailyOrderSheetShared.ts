@@ -71,6 +71,9 @@ export interface SheetRow extends SourceRow {
   // 廠區警示——委外(O)廠列的品項編碼未以 C 開頭
   factory_alert?: boolean
   factory_alert_dismissed?: boolean
+  // 示意圖：對應這一列（訂單號#項號）的圖片/PDF，上傳至 Supabase Storage 後存網址於此，
+  // 一經設定即所有人、所有裝置都看得到，不用每次重新選內網資料夾（見 order-sketch API）
+  sketch_url?: string | null
 }
 
 // 廠區切換時，該列在舊廠區底下取得的製令/採購/請購單號與備料狀態一律失效，必須清除，
