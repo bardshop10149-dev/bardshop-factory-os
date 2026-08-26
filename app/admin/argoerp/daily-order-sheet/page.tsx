@@ -4262,7 +4262,16 @@ export default function DailyOrderSheetPage() {
           )}
 
           {/* ===== 改單專區分頁 ===== */}
-          {activeMainTab === 'change-order' && <ChangeOrderPanel />}
+          {activeMainTab === 'change-order' && (
+            <ChangeOrderPanel
+              onApplied={(dates) => {
+                // 若目前「每日出單表」分頁開的日期剛好在受影響範圍內，立即重新載入，
+                // 避免使用者切回去看到套用改單前的舊資料（見 loadSheet 的 factory_changed
+                // 保護機制——重新載入才會用 DB 裡剛更正的值，而不是本地已經停在舊狀態的 sheetRows）
+                if (dates.includes(selectedDate)) void loadSheet(selectedDate)
+              }}
+            />
+          )}
 
         </div>
       </div>

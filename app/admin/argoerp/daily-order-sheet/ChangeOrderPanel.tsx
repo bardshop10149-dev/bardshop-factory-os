@@ -90,7 +90,15 @@ function fmtQty(v: unknown): string {
 
 // ── 元件 ──────────────────────────────────────────────────────────────────
 
-export default function ChangeOrderPanel() {
+interface Props {
+  // 套用更正成功後通知外層（daily-order-sheet 主頁），讓「每日出單表」分頁若剛好開在
+  // 受影響的日期，能立即重新載入該日資料，不用手動切換日期或整頁重新整理才看得到最新結果
+  // （2026-08-26 使用者回報：改單專區改了廠區，切回出單表分頁卻沒有變，根源是這裡完全
+  // 沒有通知主頁刷新，主頁的 sheetRows 還停在套用前查到的舊狀態）
+  onApplied?: (affectedSheetDates: string[]) => void
+}
+
+export default function ChangeOrderPanel({ onApplied }: Props) {
   // 查詢
   const [orderNumberInput, setOrderNumberInput] = useState('')
   const [queriedOrderNumber, setQueriedOrderNumber] = useState('')
@@ -225,12 +233,13 @@ export default function ChangeOrderPanel() {
       // 重新查詢，讓下方表格反映最新狀態
       await handleQuery()
       setSelectedLineNo(selectedLineNo)
+      onApplied?.(json.affected_sheet_dates ?? [])
     } catch (e) {
       setApplyMsg(`❌ 套用失敗：${e instanceof Error ? e.message : String(e)}`)
     } finally {
       setApplying(false)
     }
-  }, [selectedLineNo, changeTypes, newDate, newQuantity, newItemCode, newFactory, queriedOrderNumber, handleQuery])
+  }, [selectedLineNo, changeTypes, newDate, newQuantity, newItemCode, newFactory, queriedOrderNumber, handleQuery, onApplied])
 
   // ── 重新轉單：依更正後最新資料，用共用匯出函式建立正確的製令/採購/請購單 ──
   const handleRedocument = useCallback(async () => {

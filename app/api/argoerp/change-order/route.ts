@@ -152,7 +152,11 @@ export async function POST(request: NextRequest) {
         if (changes.quantity !== undefined) next.quantity = changes.quantity
         if (changes.item_code !== undefined) next.item_code = changes.item_code
         if (changes.factory !== undefined && changes.factory !== row.factory) {
-          next = { ...clearStaleDocsOnFactoryChange(next as unknown as SheetRow), factory: changes.factory } as unknown as SheetRowRec
+          // factory_changed 是出單表頁面（loadSheet/handleParse）判斷「這列被人工改過廠區，
+          // 不可被原始 raw_text 重新解析覆蓋」的旗標——沒有這個標記，出單表每次載入都會
+          // 用 raw_text 重新解析出舊廠區，把這裡剛套用的更正蓋回去（2026-08-26 使用者回報：
+          // 改單專區改了廠區，出單表卻沒變，根源就是這裡漏設這個旗標）
+          next = { ...clearStaleDocsOnFactoryChange(next as unknown as SheetRow), factory: changes.factory, factory_changed: true } as unknown as SheetRowRec
           factoryChanged = true
         }
 
