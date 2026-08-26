@@ -463,8 +463,8 @@ function PoCard({
                 <col style={{ width: '32px' }} />
                 <col style={{ width: '36%' }} />
                 <col style={{ width: '80px' }} />
-                <col style={{ width: '28%' }} />
-                <col style={{ width: '60px' }} />
+                <col style={{ width: '18%' }} />
+                <col style={{ width: '18%' }} />
                 <col style={{ width: '96px' }} />
               </colgroup>
               <thead>
@@ -1048,8 +1048,8 @@ function MoPrintContent() {
                         <col style={{ width: '32px' }} />
                         <col style={{ width: '36%' }} />
                         <col style={{ width: '80px' }} />
-                        <col style={{ width: '28%' }} />
-                        <col style={{ width: '60px' }} />
+                        <col style={{ width: '18%' }} />
+                        <col style={{ width: '18%' }} />
                         <col style={{ width: '96px' }} />
                       </colgroup>
                       <thead>

@@ -405,12 +405,13 @@ function buildPoSection(
           children: [new Paragraph({ children: [t('包裝方式', { bold: true, size: 18, color: '555555' })] })],
           shading: { type: ShadingType.SOLID, color: 'F5F6F8', fill: 'F5F6F8' },
           borders: allBorderSingle,
+          width: { size: 2250, type: WidthType.DXA },
         }),
         new TableCell({
           children: [new Paragraph({ children: [t('出貨備註', { bold: true, size: 18, color: '555555' })] })],
           shading: { type: ShadingType.SOLID, color: 'F5F6F8', fill: 'F5F6F8' },
           borders: allBorderSingle,
-          width: { size: 1600, type: WidthType.DXA },
+          width: { size: 2250, type: WidthType.DXA },
         }),
       ],
     })
