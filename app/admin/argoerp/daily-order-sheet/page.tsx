@@ -356,7 +356,6 @@ function countWorkingDaysFrom(from: Date, to: Date): number {
 }
 
 const FACTORY_LABEL_ZH: Record<string, string> = { T: '台北', C: '常平', O: '委外' }
-const DUE_THRESHOLD: Record<string, number> = { T: 4, C: 5, O: 5 }
 
 interface DueDateAnomaly {
   order_number: string
@@ -367,6 +366,35 @@ interface DueDateAnomaly {
   quantity: string
   delivery_date: string
   reason: string
+}
+
+/**
+ * 交期警示（首次匯入警示功能）：以出單日（day 0）計算到交期的工作天數，
+ * 不足該廠別設定的天數即觸發警示。跟既有「交期檢查」Modal（handleDueDateCheck）
+ * 共用同一套判斷基準，差別只在這裡是匯入當下就標記在列上、可個別點擊取消。
+ */
+function computeDueDateAlert(
+  row: { factory: string; delivery_date: string },
+  sheetDateObj: Date,
+  thresholds: Record<string, number>,
+): boolean {
+  const threshold = thresholds[row.factory]
+  if (threshold === undefined) return false
+  if (!row.delivery_date) return false
+  const dueDate = parseDeliveryDate(row.delivery_date)
+  if (!dueDate) return false
+  return countWorkingDaysFrom(sheetDateObj, dueDate) < threshold
+}
+
+/**
+ * 廠區警示（首次匯入警示功能）：委外(O)廠列的品項編碼／料號規定要以 C 開頭，
+ * 不是的話代表廠區可能填錯，需要人工確認。空品號（如「改單/示意圖」列）不計。
+ */
+function computeFactoryAlert(row: { factory: string; item_code: string }): boolean {
+  if (row.factory !== 'O') return false
+  const code = (row.item_code ?? '').trim().toUpperCase()
+  if (!code) return false
+  return !code.startsWith('C')
 }
 
 type OutsourcePrefix = 'MOT' | 'POC' | 'POO' | 'MPO'
@@ -596,6 +624,9 @@ export default function DailyOrderSheetPage() {
   // ---- 讀取指定日期的出單表 ----
   const loadSheet = useCallback(async (date: string) => {
     if (!date) return
+    // 首次匯入警示：供下方重新解析時，DB 裡完全找不到對應舊列的全新列使用（見 !stored 分支）
+    const sheetDateObjForAlert = new Date(date)
+    sheetDateObjForAlert.setHours(0, 0, 0, 0)
     setLoading(true)
     setSheetRows([])
     setSelectedKeys(new Set())
@@ -705,6 +736,17 @@ export default function DailyOrderSheetPage() {
                 if (stored.material_prep_status !== undefined) base.material_prep_status = stored.material_prep_status
                 if (stored.argo_slip_no    !== undefined) base.argo_slip_no    = stored.argo_slip_no
                 if (stored.machine         !== undefined) base.machine         = stored.machine
+                // 首次匯入警示：這一列先前已存在，警示結果與是否已取消都原樣保留，不重新判斷
+                if (stored.due_date_alert           !== undefined) base.due_date_alert           = stored.due_date_alert
+                if (stored.due_date_alert_dismissed !== undefined) base.due_date_alert_dismissed = stored.due_date_alert_dismissed
+                if (stored.factory_alert            !== undefined) base.factory_alert            = stored.factory_alert
+                if (stored.factory_alert_dismissed  !== undefined) base.factory_alert_dismissed  = stored.factory_alert_dismissed
+              } else {
+                // DB 完全找不到這一列（真正的全新列）：視同第一次匯入，判斷一次警示
+                base.due_date_alert = computeDueDateAlert(base, sheetDateObjForAlert, dueDateThresholds)
+                base.due_date_alert_dismissed = false
+                base.factory_alert = computeFactoryAlert(base)
+                base.factory_alert_dismissed = false
               }
               return base
             })
@@ -767,7 +809,7 @@ export default function DailyOrderSheetPage() {
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [dueDateThresholds])
 
   useEffect(() => { loadSheetList() }, [loadSheetList])
   useEffect(() => { loadSheet(selectedDate) }, [selectedDate, loadSheet])
@@ -964,6 +1006,11 @@ export default function DailyOrderSheetPage() {
     const { rows, error, duplicateWarnings } = parseSourceRows(rawText, selectedDate)
     if (error) { setParseError(error); return }
 
+    // 首次匯入警示：以出單日（selectedDate）為第0天，只在這一列「第一次出現」時判斷一次，
+    // 之後重新解析/載入同一列時原樣保留（見下方合併邏輯），不會重複觸發或蓋掉已取消的警示
+    const sheetDateObjForAlert = new Date(selectedDate)
+    sheetDateObjForAlert.setHours(0, 0, 0, 0)
+
     const sheetRowsNew: SheetRow[] = rows.map(r => ({
       ...r,
       row_key: createRowKey(r),
@@ -972,6 +1019,10 @@ export default function DailyOrderSheetPage() {
       ...(r.line_no_input
         ? { match_line_no: r.line_no_input, match_status: 'matched' as MatchStatus, match_reason: '原始資料直接填入' }
         : {}),
+      due_date_alert: computeDueDateAlert(r, sheetDateObjForAlert, dueDateThresholds),
+      due_date_alert_dismissed: false,
+      factory_alert: computeFactoryAlert(r),
+      factory_alert_dismissed: false,
     }))
 
     // 保留已有狀態（相同 row_key 的保留舊狀態）
@@ -1044,6 +1095,10 @@ export default function DailyOrderSheetPage() {
           material_prep_status:  old.material_prep_status,
           argo_slip_no:          old.argo_slip_no,
           machine:               old.machine,
+          due_date_alert:            old.due_date_alert,
+          due_date_alert_dismissed:  old.due_date_alert_dismissed,
+          factory_alert:             old.factory_alert,
+          factory_alert_dismissed:   old.factory_alert_dismissed,
         }
       }
       // 保留所有由外部 PATCH 寫入的欄位（集單匯出、批備料、採購比對等）
@@ -1069,6 +1124,12 @@ export default function DailyOrderSheetPage() {
           match_reason:        old.match_reason,
         } : {}),
         machine:               old.machine,
+        // 首次匯入警示：這一列先前已存在（row_key 找得到），警示結果與是否已取消都原樣保留，
+        // 不因為重新貼上/重新解析而重新觸發或蓋掉使用者已取消的警示
+        due_date_alert:            old.due_date_alert,
+        due_date_alert_dismissed:  old.due_date_alert_dismissed,
+        factory_alert:             old.factory_alert,
+        factory_alert_dismissed:   old.factory_alert_dismissed,
       }
     })
     setSheetRows(merged)
@@ -1098,7 +1159,7 @@ export default function DailyOrderSheetPage() {
       .finally(() => setSaving(false))
     // 常平列自動觸發採購比對（避免手動再按一次）
     if (merged.some(r => r.factory === 'C')) setPendingAutoPoMatch(true)
-  }, [rawText, sheetRows, selectedDate])
+  }, [rawText, sheetRows, selectedDate, dueDateThresholds])
 
   // ---- 儲存至 Supabase ----
   const handleSave = useCallback(async () => {
@@ -3068,6 +3129,29 @@ export default function DailyOrderSheetPage() {
     }
   }, [sheetRows, selectedDate, currentRawText])
 
+  // 取消首次匯入警示（交期/廠區）：僅標記為已取消，警示紀錄本身保留供追溯
+  const handleDismissAlert = useCallback(async (rowKey: string, kind: 'due_date' | 'factory') => {
+    const field = kind === 'due_date' ? 'due_date_alert_dismissed' : 'factory_alert_dismissed'
+    const next: SheetRow[] = sheetRows.map(r => (r.row_key || '') === rowKey ? { ...r, [field]: true } : r)
+    setSheetRows(next)
+    setSaving(true)
+    try {
+      const res = await fetch('/api/argoerp/daily-order-sheet', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sheet_date: selectedDate, raw_text: currentRawText, rows: next }),
+      })
+      const json = await res.json()
+      if (!res.ok || !json.success) throw new Error(json.error || `HTTP ${res.status}`)
+      setSaveMsg('✅ 已取消警示')
+      setTimeout(() => setSaveMsg(''), 2000)
+    } catch (e) {
+      setSaveMsg(`❌ 儲存失敗：${e}`)
+    } finally {
+      setSaving(false)
+    }
+  }, [sheetRows, selectedDate, currentRawText])
+
   const handleChangeFactory = useCallback((idx: number, factory: 'T' | 'C' | 'O') => {
     setSheetRows(prev => prev.map((r, i) => {
       if (i !== idx) return r
@@ -3700,20 +3784,25 @@ export default function DailyOrderSheetPage() {
                           : null
                         const outsourcedPrefix = getOutsourcePrefix(outsourcedDocNo)
                         const outsourcedStyles = getOutsourcePrefixStyles(outsourcedPrefix)
+                        // 首次匯入警示（交期／廠區）：只要有一個未取消，整列標紅底，優先權最高
+                        const showDueDateAlert = !!row.due_date_alert && !row.due_date_alert_dismissed
+                        const showFactoryAlert = !!row.factory_alert && !row.factory_alert_dismissed
+                        const hasActiveAlert = showDueDateAlert || showFactoryAlert
                         return (
                           <tr
                             key={`${row.row_key || 'row'}::${idx}`}
-                            className={`border-b border-slate-800/60 transition-colors ${
-                              row.factory_changed ? 'bg-yellow-950/30' :
+                            className={`border-b transition-colors ${
+                              hasActiveAlert ? 'bg-red-950/50 border-red-800/60 hover:bg-red-950/60' :
+                              row.factory_changed ? 'bg-yellow-950/30 border-slate-800/60' :
                               isMoImported
-                                ? 'bg-emerald-950/20'
+                                ? 'bg-emerald-950/20 border-slate-800/60'
                                 : row.factory === 'C' && row.po_status === 'matched'
-                                ? 'bg-orange-950/20'
+                                ? 'bg-orange-950/20 border-slate-800/60'
                                 : row.factory === 'O' && (row.po_status === 'matched' || row.mo_number)
-                                ? outsourcedStyles.rowBg
+                                ? `${outsourcedStyles.rowBg} border-slate-800/60`
                                 : row.factory === 'O' && row.po_status === 'no_po'
-                                ? 'bg-slate-900/60'
-                                : 'hover:bg-slate-900/50'
+                                ? 'bg-slate-900/60 border-slate-800/60'
+                                : 'hover:bg-slate-900/50 border-slate-800/60'
                             }`}
                           >
                             <td className="px-2 py-2 text-center">
@@ -3760,6 +3849,25 @@ export default function DailyOrderSheetPage() {
                               {soChangesUnconfirmedSet.has(row.order_number) && (
                                 <div className="mt-0.5">
                                   <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-red-700/50 text-red-200 border border-red-600/40">改單-未確認</span>
+                                </div>
+                              )}
+                              {/* 首次匯入警示 badge：點擊取消警示（整列紅底同時解除） */}
+                              {(showDueDateAlert || showFactoryAlert) && (
+                                <div className="mt-0.5 flex gap-1 flex-wrap">
+                                  {showDueDateAlert && (
+                                    <button
+                                      onClick={() => void handleDismissAlert(sk, 'due_date')}
+                                      title="交期不足設定的工作天數，點擊取消此警示"
+                                      className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-red-600 text-white border border-red-400/60 hover:bg-red-500 transition-colors"
+                                    >⚠ 交期</button>
+                                  )}
+                                  {showFactoryAlert && (
+                                    <button
+                                      onClick={() => void handleDismissAlert(sk, 'factory')}
+                                      title="委外(O)廠列的品項編碼未以 C 開頭，點擊取消此警示"
+                                      className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-red-600 text-white border border-red-400/60 hover:bg-red-500 transition-colors"
+                                    >⚠ 廠區</button>
+                                  )}
                                 </div>
                               )}
                               <div className="text-slate-500 text-[10px] mt-0.5">{row.doc_type}</div>

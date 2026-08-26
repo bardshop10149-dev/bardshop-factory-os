@@ -64,6 +64,13 @@ export interface SheetRow extends SourceRow {
   // 已透過改單專區人工更正過（日期/數量/品項編碼/廠區任一項），供合併時比照
   // factory_changed 的方式保留舊列的單據狀態，不被原始出單表重新解析覆蓋
   corrected?: boolean
+  // 警示（第一次匯入時檢查一次，之後重新解析/載入同一列時原樣保留，不重複觸發）：
+  // 交期警示——以出單日為第0天，交期距離出單日不足該廠別設定的工作天數
+  due_date_alert?: boolean
+  due_date_alert_dismissed?: boolean
+  // 廠區警示——委外(O)廠列的品項編碼未以 C 開頭
+  factory_alert?: boolean
+  factory_alert_dismissed?: boolean
 }
 
 // 廠區切換時，該列在舊廠區底下取得的製令/採購/請購單號與備料狀態一律失效，必須清除，
