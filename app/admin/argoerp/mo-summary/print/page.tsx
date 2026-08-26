@@ -1,8 +1,9 @@
 'use client'
 
-import { useCallback, useEffect, useMemo, useState, Suspense } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, Suspense, Fragment } from 'react'
 import { useSearchParams } from 'next/navigation'
 import { supabase } from '@/lib/supabaseClient'
+import { matchSketchFiles, resolveSketchImages, makeSketchLookupKey, type MatchedSketch } from './sketchImages'
 
 // ── 假資料（?demo=1 預覽用）──────────────────────────────────
 const DEMO_RECORDS: MoRecord[] = [
@@ -265,6 +266,32 @@ function InfoGrid({ rows }: {
         ))}
       </tbody>
     </table>
+  )
+}
+
+// ── 示意圖穿插頁：緊跟在對應製令/採購/請購單後面，一張圖/一頁 PDF 各一頁 ──
+function SketchCard({ url, label }: { url: string; label: string }) {
+  return (
+    <div
+      className="mo-card sketch-card"
+      style={{
+        width: '210mm',
+        background: 'white',
+        margin: '0 auto 24px',
+        padding: '5mm 12mm',
+        boxSizing: 'border-box',
+        boxShadow: '0 4px 24px rgba(0,0,0,0.35)',
+        fontFamily: 'Arial, "Microsoft JhengHei", "PingFang TC", sans-serif',
+        color: '#111',
+        display: 'flex', flexDirection: 'column', minHeight: 'calc(297mm - 8mm)',
+      }}
+    >
+      <div style={{ fontSize: '12px', color: '#888', marginBottom: '4px' }}>示意圖 — {label}</div>
+      <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden' }}>
+        {/* eslint-disable-next-line @next/next/no-img-element -- blob/dataURL 本機圖片，非遠端資源，不適用 next/image */}
+        <img src={url} alt={label} style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }} />
+      </div>
+    </div>
   )
 }
 
@@ -550,6 +577,38 @@ function MoPrintContent() {
   const [loading, setLoading] = useState(true)
   const [error, setError]     = useState<string | null>(null)
 
+  // ── 示意圖穿插列印：使用者選一次本機/內網共用資料夾，依「SO單號#項號」自動
+  // 比對每張製令/採購/請購單對應的示意圖，列印時緊接在該單據後面插入 ────────
+  const sketchFolderInputRef = useRef<HTMLInputElement>(null)
+  const [sketchMatches, setSketchMatches] = useState<Map<string, MatchedSketch[]>>(new Map())
+  const [sketchImageMap, setSketchImageMap] = useState<Map<string, string[]>>(new Map())
+  const [sketchLoading, setSketchLoading] = useState(false)
+  const [sketchLoadedCount, setSketchLoadedCount] = useState(0)
+  const [sketchFolderPicked, setSketchFolderPicked] = useState(false)
+
+  const handlePickSketchFolder = useCallback(async (files: FileList | null) => {
+    if (!files || files.length === 0) return
+    const matches = matchSketchFiles(files)
+    setSketchMatches(matches)
+    setSketchFolderPicked(true)
+    setSketchImageMap(new Map())
+    setSketchLoadedCount(0)
+    setSketchLoading(true)
+    try {
+      const entries = [...matches.entries()]
+      const nextMap = new Map<string, string[]>()
+      for (const [key, matchedFiles] of entries) {
+        const urls = await resolveSketchImages(matchedFiles)
+        nextMap.set(key, urls)
+        setSketchLoadedCount(c => c + 1)
+        // 逐筆更新，讓使用者在還在轉檔時也能看到已完成的結果
+        setSketchImageMap(new Map(nextMap))
+      }
+    } finally {
+      setSketchLoading(false)
+    }
+  }, [])
+
   const soLineLookup = useMemo(() => {
     const map = new Map<string, SoLine>()
     for (const [projectId, lines] of soMap.entries()) {
@@ -595,12 +654,16 @@ function MoPrintContent() {
   }, [visibleCount, records.length])
 
   const handlePrintClick = useCallback(async () => {
+    if (sketchLoading) {
+      alert('示意圖還在轉檔中，請稍候轉檔完成（工具列會顯示進度）再列印，避免漏印示意圖。')
+      return
+    }
     if (visibleCount < records.length) {
       setVisibleCount(records.length)
       await new Promise<void>(resolve => window.setTimeout(resolve, 80))
     }
     window.print()
-  }, [visibleCount, records.length])
+  }, [visibleCount, records.length, sketchLoading])
 
   useEffect(() => {
     // ── Demo 模式：使用假資料，不讀 sessionStorage ──
@@ -820,6 +883,30 @@ function MoPrintContent() {
           <span style={{ fontSize: '11px', color: '#475569' }}>
             預覽載入：{Math.min(visibleCount, records.length)} / {records.length}
           </span>
+          <input
+            ref={sketchFolderInputRef}
+            type="file"
+            multiple
+            {...({ webkitdirectory: '', directory: '' } as Record<string, string>)}
+            style={{ display: 'none' }}
+            onChange={e => { void handlePickSketchFolder(e.target.files); e.target.value = '' }}
+          />
+          <span style={{ fontSize: '11px', color: sketchFolderPicked ? '#22c55e' : '#64748b' }} title="檔名需含「SO銷售單號#項號」，例如 SO260805024#1.jpg">
+            {sketchLoading
+              ? `示意圖轉檔中… ${sketchLoadedCount}/${sketchMatches.size}`
+              : sketchFolderPicked
+                ? `📁 已比對 ${sketchImageMap.size} / ${sketchMatches.size} 筆有示意圖`
+                : '尚未選示意圖資料夾'}
+          </span>
+          <button
+            onClick={() => sketchFolderInputRef.current?.click()}
+            style={{
+              padding: '8px 14px', background: '#334155', borderRadius: '6px',
+              cursor: 'pointer', color: '#e2e8f0', fontSize: '13px', border: 'none',
+            }}
+          >
+            📁 選示意圖資料夾
+          </button>
           <button
             onClick={() => void handleExportWord()}
             disabled={exportingWord}
@@ -847,12 +934,23 @@ function MoPrintContent() {
       {/* ── 頁面容器 ───────────────────────────────────────── */}
       <div className="mo-pages-wrapper" style={{ background: '#64748b', padding: '24px 16px', minHeight: '100vh' }}>
         {visibleRecords.map((mo) => {
+          // 示意圖穿插：依「來源訂單#項號」查詢是否有比對到的示意圖，緊跟在這張單據後面插入
+          const lineNo = getLineNo(mo)
+          const sketchUrls = sketchImageMap.get(makeSketchLookupKey(mo.source_order ?? '', lineNo)) ?? []
+          const sketchPages = sketchUrls.map((url, i) => (
+            <SketchCard key={`${mo.mo_number}-sketch-${i}`} url={url} label={`${mo.source_order ?? '—'} #${lineNo}`} />
+          ))
+
           // 常平 C → 採購單格式；委外 O → 請購單格式
           if (mo.factory === 'C' || mo.factory === 'O') {
-            return <PoCard key={mo.mo_number} mo={mo} soMap={soMap} soLineLookup={soLineLookup} customerCodeMap={customerCodeMap} variant={mo.factory === 'O' ? 'pr' : 'po'} />
+            return (
+              <Fragment key={mo.mo_number}>
+                <PoCard mo={mo} soMap={soMap} soLineLookup={soLineLookup} customerCodeMap={customerCodeMap} variant={mo.factory === 'O' ? 'pr' : 'po'} />
+                {sketchPages}
+              </Fragment>
+            )
           }
 
-          const lineNo = getLineNo(mo)
           const soLines = soMap.get(mo.source_order ?? '') ?? []
           const so = soLineLookup.get(createSoLookupKey(mo.source_order ?? '', lineNo)) ?? soLines[0] ?? null
 
@@ -866,8 +964,8 @@ function MoPrintContent() {
           const writeTd = { border: '1px solid #ccc', padding: '0 8px', height: '36px' }
 
           return (
+            <Fragment key={mo.mo_number}>
             <div
-              key={mo.mo_number}
               className="mo-card"
               style={{
                 width: '210mm',
@@ -1131,6 +1229,8 @@ function MoPrintContent() {
               </div>
 
             </div>
+            {sketchPages}
+            </Fragment>
           )
         })}
       </div>
