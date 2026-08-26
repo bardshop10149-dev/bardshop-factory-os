@@ -2,7 +2,7 @@
 
 import { useRouter, usePathname } from 'next/navigation'
 import Link from 'next/link'
-import { ReactNode, useEffect, useState } from 'react'
+import { ReactNode, useEffect, useRef, useState } from 'react'
 import { NAV_GROUPS } from '../../config/menuItems' // 引入共用設定
 import { FavoritesProvider, useFavorites } from '../../context/FavoritesContext' // 引入 Context
 
@@ -41,6 +41,27 @@ function AdminNavbar() {
   const pathname = usePathname()
   const { favorites, toggleFavorite } = useFavorites()
   const pendingScheduleCount = usePendingScheduleCount()
+
+  // 導覽選單原本只靠 CSS :hover 展開——觸控裝置（手機/平板）沒有滑鼠 hover 狀態，
+  // 點擊完全沒反應（2026-08-27 使用者回報：手機版點不開選單）。改成同時支援點擊：
+  // 桌機維持 hover 直接展開的便利性，手機/觸控則靠這裡的狀態點擊展開/收合。
+  const navRef = useRef<HTMLElement>(null)
+  const [openGroup, setOpenGroup] = useState<string | null>(null)
+  const [openSubGroup, setOpenSubGroup] = useState<string | null>(null)
+
+  const closeAllMenus = () => { setOpenGroup(null); setOpenSubGroup(null) }
+
+  useEffect(() => {
+    const handleOutside = (e: Event) => {
+      if (navRef.current && !navRef.current.contains(e.target as Node)) closeAllMenus()
+    }
+    document.addEventListener('mousedown', handleOutside)
+    document.addEventListener('touchstart', handleOutside)
+    return () => {
+      document.removeEventListener('mousedown', handleOutside)
+      document.removeEventListener('touchstart', handleOutside)
+    }
+  }, [])
 
   // 輔助顏色函式 (維持不變)
   const getThemeColors = (theme: string) => {
@@ -85,7 +106,7 @@ function AdminNavbar() {
           </div>
 
           {/* 右側下拉導航 */}
-          <nav className="flex items-center gap-4 overflow-visible w-full xl:w-auto">
+          <nav ref={navRef} className="flex items-center gap-4 overflow-visible w-full xl:w-auto">
             {NAV_GROUPS.map((group) => {
               const colors = getThemeColors(group.theme)
               const isActiveGroup = group.items.some(item => {
@@ -97,12 +118,15 @@ function AdminNavbar() {
               })
 
               const groupPendingCount = group.title === '生產管理入口' ? pendingScheduleCount : 0
+              const isGroupOpen = openGroup === group.title
 
               return (
                 <div key={group.title} className="relative group/menu">
-                  <button className={`relative flex items-center gap-2 px-4 py-2 rounded transition-all duration-300 font-bold text-sm tracking-wide border ${isActiveGroup ? `${colors.text} ${colors.activeBg} ${colors.border} ${colors.glow}` : `text-slate-400 border-transparent hover:text-white hover:bg-slate-800/50`}`}>
+                  <button
+                    onClick={() => { setOpenGroup(prev => prev === group.title ? null : group.title); setOpenSubGroup(null) }}
+                    className={`relative flex items-center gap-2 px-4 py-2 rounded transition-all duration-300 font-bold text-sm tracking-wide border ${isActiveGroup ? `${colors.text} ${colors.activeBg} ${colors.border} ${colors.glow}` : `text-slate-400 border-transparent hover:text-white hover:bg-slate-800/50`}`}>
                     <span>{group.title}</span>
-                    <svg className="w-3 h-3 transition-transform duration-300 group-hover/menu:rotate-180 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" /></svg>
+                    <svg className={`w-3 h-3 transition-transform duration-300 opacity-50 ${isGroupOpen ? 'rotate-180' : 'group-hover/menu:rotate-180'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" /></svg>
                     {groupPendingCount > 0 && (
                       <span
                         className="absolute -top-1.5 -right-1.5 min-w-[18px] h-[18px] px-1 rounded-full bg-red-500 text-white text-[10px] font-bold flex items-center justify-center shadow-[0_0_8px_rgba(239,68,68,0.7)] animate-pulse"
@@ -113,8 +137,12 @@ function AdminNavbar() {
                     )}
                   </button>
 
-                  <div className="absolute left-0 top-full pt-3 w-64 opacity-0 translate-y-2 pointer-events-none group-hover/menu:opacity-100 group-hover/menu:translate-y-0 group-hover/menu:pointer-events-auto transition-all duration-200 z-50">
-                    <div className={`bg-[#0b1120] border rounded-xl shadow-2xl backdrop-blur-xl flex flex-col py-2 ${colors.menuBorder}`}>
+                  <div className={`absolute left-0 top-full pt-3 w-64 transition-all duration-200 z-50 ${
+                    isGroupOpen
+                      ? 'opacity-100 translate-y-0 pointer-events-auto'
+                      : 'opacity-0 translate-y-2 pointer-events-none group-hover/menu:opacity-100 group-hover/menu:translate-y-0 group-hover/menu:pointer-events-auto'
+                  }`}>
+                    <div className={`bg-[#0b1120] border rounded-xl shadow-2xl backdrop-blur-xl flex flex-col py-2 max-h-[70vh] overflow-y-auto ${colors.menuBorder}`}>
                       <div className={`h-0.5 w-full bg-gradient-to-r from-transparent via-white/20 to-transparent opacity-50`}></div>
 
                       {group.items.map((item) => {
@@ -123,20 +151,26 @@ function AdminNavbar() {
                             type Child = { name: string; path: string }
                             const sub = item as { name: string; children: Child[] }
                             const isSubActive = sub.children.some(c => pathname === c.path || pathname.startsWith(c.path + '?'))
+                            const isSubOpen = openSubGroup === sub.name
                             return (
                               <div key={sub.name} className="relative group/sub">
-                                <div className={`flex items-center px-4 py-2 transition-colors border-l-4 hover:bg-slate-800/50 cursor-default select-none ${isSubActive ? `border-${group.theme}-400 bg-slate-800/80` : 'border-transparent'}`}>
+                                <button
+                                  onClick={() => setOpenSubGroup(prev => prev === sub.name ? null : sub.name)}
+                                  className={`w-full flex items-center px-4 py-2 transition-colors border-l-4 hover:bg-slate-800/50 select-none ${isSubActive ? `border-${group.theme}-400 bg-slate-800/80` : 'border-transparent'}`}
+                                >
                                   <span className="mr-3 w-6 h-6 shrink-0" />
-                                  <span className={`flex-1 text-sm font-medium tracking-wide ${isSubActive ? colors.text : 'text-slate-400 group-hover/sub:text-white'}`}>
+                                  <span className={`flex-1 text-left text-sm font-medium tracking-wide ${isSubActive ? colors.text : 'text-slate-400 group-hover/sub:text-white'}`}>
                                     {sub.name}
                                   </span>
-                                  <svg className="w-3 h-3 text-slate-500 ml-2 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                  <svg className={`w-3 h-3 text-slate-500 ml-2 shrink-0 transition-transform duration-200 ${isSubOpen ? 'rotate-90' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
                                   </svg>
-                                </div>
-                                {/* 往右展開的子選單 */}
-                                <div className="absolute left-full top-0 pl-1 w-56 opacity-0 -translate-x-2 pointer-events-none group-hover/sub:opacity-100 group-hover/sub:translate-x-0 group-hover/sub:pointer-events-auto transition-all duration-200 z-[60]">
-                                  <div className={`bg-[#0b1120] border rounded-xl shadow-2xl backdrop-blur-xl flex flex-col py-2 ${colors.menuBorder}`}>
+                                </button>
+                                {/* 子選單：向下展開（避免在手機窄螢幕上往右展開超出畫面外） */}
+                                <div className={`pl-2 transition-all duration-200 overflow-hidden ${
+                                  isSubOpen ? 'max-h-96 opacity-100' : 'max-h-0 opacity-0 group-hover/sub:max-h-96 group-hover/sub:opacity-100'
+                                }`}>
+                                  <div className={`my-1 mx-2 rounded-lg border flex flex-col py-1 bg-black/20 ${colors.menuBorder}`}>
                                     {sub.children.map(child => {
                                       const isChildActive = pathname === child.path
                                       const isFav = favorites.includes(child.path)
@@ -149,7 +183,7 @@ function AdminNavbar() {
                                           >
                                             <svg className="w-4 h-4" fill={isFav ? 'currentColor' : 'none'} stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11.049 2.927c.3-.921 1.603-.921 1.902 0l1.519 4.674a1 1 0 00.95.69h4.915c.969 0 1.371 1.24.588 1.81l-3.976 2.888a1 1 0 00-.363 1.118l1.518 4.674c.3.922-.755 1.688-1.538 1.118l-3.976-2.888a1 1 0 00-1.176 0l-3.976 2.888c-.783.57-1.838-.197-1.538-1.118l1.518-4.674a1 1 0 00-.363-1.118l-3.976-2.888c-.784-.57-.38-1.81.588-1.81h4.914a1 1 0 00.951-.69l1.519-4.674z" /></svg>
                                           </button>
-                                          <Link href={child.path} className={`flex-1 text-sm font-medium tracking-wide ${isChildActive ? colors.text : `text-slate-400 ${colors.hoverText} hover:text-white`}`}>
+                                          <Link href={child.path} onClick={closeAllMenus} className={`flex-1 text-sm font-medium tracking-wide ${isChildActive ? colors.text : `text-slate-400 ${colors.hoverText} hover:text-white`}`}>
                                             {child.name}
                                           </Link>
                                         </div>
@@ -180,7 +214,7 @@ function AdminNavbar() {
                               {isLocked ? (
                                 <span className="flex-1 text-sm font-medium tracking-wide text-slate-500 select-none">{directItem.name}（鎖定）</span>
                               ) : (
-                                <Link href={directItem.path} className={`flex-1 flex items-center gap-2 text-sm font-medium tracking-wide ${isItemActive ? colors.text : `text-slate-400 ${colors.hoverText} hover:text-white`}`}>
+                                <Link href={directItem.path} onClick={closeAllMenus} className={`flex-1 flex items-center gap-2 text-sm font-medium tracking-wide ${isItemActive ? colors.text : `text-slate-400 ${colors.hoverText} hover:text-white`}`}>
                                   {directItem.name}
                                   {itemPendingCount > 0 && (
                                     <span
