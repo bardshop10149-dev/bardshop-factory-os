@@ -1365,6 +1365,7 @@ export default function DailyOrderSheetPage() {
       const moMap = new Map<string, { mo_number: string }>()
       // 以末碼（末兩位數字）為 key 的精準序號查詢，解決同品號多筆 MO 時只能找到第一筆的問題
       const moSeqMap = new Map<string, string>() // source_order|product_code|seq(padded) → mo_number
+      const moBaseMap = new Map<string, Array<{ mo_number: string; qty: number }>>() // source_order|product_code → [{mo_number, qty}]
       for (const log of (moLogs ?? [])) {
         if (!log.mo_number?.startsWith('MO')) continue  // 排除非製令單號的資料
         if (!activeMoNumbers.has(log.mo_number)) continue  // 排除已刪除的製令
@@ -1372,7 +1373,9 @@ export default function DailyOrderSheetPage() {
         const k1 = `${log.source_order}|${log.product_code}|${qty}`
         const k2 = `${log.source_order}|${log.product_code}`
         if (!moMap.has(k1)) moMap.set(k1, { mo_number: log.mo_number })
-        if (!moMap.has(k2)) moMap.set(k2, { mo_number: log.mo_number })
+        const baseArr = moBaseMap.get(k2) ?? []
+        if (!baseArr.some(x => x.mo_number === log.mo_number)) baseArr.push({ mo_number: log.mo_number, qty: parseFloat(qty.replace(/,/g, '')) || 0 })
+        moBaseMap.set(k2, baseArr)
         // 以 MO 末兩碼作為序號 key（MOT...34802 → seq='02'）
         const suffix = log.mo_number.slice(-2)
         if (/^\d{2}$/.test(suffix)) {
@@ -1390,7 +1393,7 @@ export default function DailyOrderSheetPage() {
       // erp_mo_lines 是 ARGO 直接建立的製令，末碼跟你的 SO 序號無關
       // 必須用 erp_mo_lines.line_no（ARGO 的 SO 序號欄）作為比對依據
       const erpMoMap = new Map<string, string>()       // source_order|mbp_part|line_no(padded) → mo_number
-      const erpMoBaseMap = new Map<string, string[]>() // source_order|mbp_part → [mo_numbers]
+      const erpMoBaseMap = new Map<string, Array<{ mo_number: string; qty: number }>>() // source_order|mbp_part → [{mo_number, qty}]
       // source_order → Set<mo_number>：用於驗證某來源訂單的製令是否仍存在於 ARGO
       // 若 Set 存在（erp_mo_lines 已同步）但不含該 MO → 代表已從 ARGO 刪除
       const erpMoBySourceOrder = new Map<string, Set<string>>()
@@ -1405,7 +1408,8 @@ export default function DailyOrderSheetPage() {
         }
         const baseKey = `${mo.source_order}|${mo.mbp_part}`
         const arr = erpMoBaseMap.get(baseKey) ?? []
-        if (!arr.includes(mo.project_id)) erpMoBaseMap.set(baseKey, [...arr, mo.project_id])
+        if (!arr.some(x => x.mo_number === mo.project_id)) arr.push({ mo_number: mo.project_id, qty: Number(mo.order_qty ?? 0) })
+        erpMoBaseMap.set(baseKey, arr)
         // 建立 source_order → Set<mo_number>
         const moSet = erpMoBySourceOrder.get(mo.source_order) ?? new Set<string>()
         moSet.add(mo.project_id)
@@ -1494,7 +1498,7 @@ export default function DailyOrderSheetPage() {
         }
         //   ②-b qty 比對（唯一 MO 或無序號時兜底）
         const k1 = `${r.order_number}|${r.item_code}|${qty}`
-        const logHit = moMap.get(k1) ?? moMap.get(`${r.order_number}|${r.item_code}`)
+        const logHit = moMap.get(k1)
         if (logHit) {
           // erp_mo_lines 已同步此來源訂單但找不到該製令 → 已從 ARGO 刪除，跳過
           const erpMosForOrder = erpMoBySourceOrder.get(r.order_number)
@@ -1503,10 +1507,23 @@ export default function DailyOrderSheetPage() {
             return { ...r, mo_number: logHit.mo_number, mo_status: '已匯入製令' as const }
           }
         }
+        //   ②-c 無 qty 精準字串版本兜底：必須這筆紀錄本身登記的數量跟這一列數量吻合才套用，
+        //   不能只憑「同品號同訂單只查得到一筆上傳紀錄」就認定（2026-08-26 發現：SO260805024
+        //   項次4 的追加列被誤套用成項次2 那張已繳庫完工的製令，該追加列其實從未真正送進 ARGO）
+        const qtyNum = parseFloat(qty.replace(/,/g, '')) || 0
+        const logBaseHits = (moBaseMap.get(`${r.order_number}|${r.item_code}`) ?? []).filter(x => x.qty === qtyNum)
+        if (logBaseHits.length === 1) {
+          const hit = logBaseHits[0]
+          const erpMosForOrder = erpMoBySourceOrder.get(r.order_number)
+          const stillInArgo = !erpMosForOrder || erpMosForOrder.has(hit.mo_number)
+          if (stillInArgo && (!matchSeq || hit.mo_number.slice(-2) === matchSeq)) {
+            return { ...r, mo_number: hit.mo_number, mo_status: '已匯入製令' as const }
+          }
+        }
 
-        // ③ 唯一製令 fallback
-        const baseHits = erpMoBaseMap.get(`${r.order_number}|${r.item_code}`) ?? []
-        if (baseHits.length === 1) return { ...r, mo_number: baseHits[0], mo_status: '已匯入製令' as const }
+        // ③ 唯一製令 fallback：同樣要求數量吻合才套用
+        const baseHits = (erpMoBaseMap.get(`${r.order_number}|${r.item_code}`) ?? []).filter(x => x.qty === qtyNum)
+        if (baseHits.length === 1) return { ...r, mo_number: baseHits[0].mo_number, mo_status: '已匯入製令' as const }
 
         if (r.mo_number && !r.mo_number.startsWith('MO')) {
           return clearMoFields(r)
@@ -2295,13 +2312,16 @@ export default function DailyOrderSheetPage() {
       }
       const moMap = new Map<string, { mo_number: string }>()
       const moSeqMapAll = new Map<string, string>() // source_order|product_code|seq(padded) → mo_number
+      const moBaseMapAll = new Map<string, Array<{ mo_number: string; qty: number }>>() // source_order|product_code → [{mo_number, qty}]
       for (const log of (moLogs ?? [])) {
         if (!log.mo_number?.startsWith('MO') || !activeMoNumbers.has(log.mo_number)) continue
         const qty = String(log.planned_qty ?? '').trim()
         const k1 = `${log.source_order}|${log.product_code}|${qty}`
         const k2 = `${log.source_order}|${log.product_code}`
         if (!moMap.has(k1)) moMap.set(k1, { mo_number: log.mo_number })
-        if (!moMap.has(k2)) moMap.set(k2, { mo_number: log.mo_number })
+        const baseArr = moBaseMapAll.get(k2) ?? []
+        if (!baseArr.some(x => x.mo_number === log.mo_number)) baseArr.push({ mo_number: log.mo_number, qty: parseFloat(qty.replace(/,/g, '')) || 0 })
+        moBaseMapAll.set(k2, baseArr)
         const suffix = log.mo_number.slice(-2)
         if (/^\d{2}$/.test(suffix)) {
           const seqKey = `${log.source_order}|${log.product_code}|${suffix}`
@@ -2309,7 +2329,7 @@ export default function DailyOrderSheetPage() {
         }
       }
       const erpMoMap = new Map<string, string>()
-      const erpMoBaseMap = new Map<string, string[]>()
+      const erpMoBaseMap = new Map<string, Array<{ mo_number: string; qty: number }>>()
       const erpMoBySourceOrder = new Map<string, Set<string>>()
       for (const mo of (erp_mo ?? [])) {
         if (!mo.source_order || !mo.mbp_part || !mo.project_id?.startsWith('MO')) continue
@@ -2320,7 +2340,8 @@ export default function DailyOrderSheetPage() {
         }
         const baseKey = `${mo.source_order}|${mo.mbp_part}`
         const arr = erpMoBaseMap.get(baseKey) ?? []
-        if (!arr.includes(mo.project_id)) erpMoBaseMap.set(baseKey, [...arr, mo.project_id])
+        if (!arr.some(x => x.mo_number === mo.project_id)) arr.push({ mo_number: mo.project_id, qty: Number(mo.order_qty ?? 0) })
+        erpMoBaseMap.set(baseKey, arr)
         const moSet = erpMoBySourceOrder.get(mo.source_order) ?? new Set<string>()
         moSet.add(mo.project_id)
         erpMoBySourceOrder.set(mo.source_order, moSet)
@@ -2350,6 +2371,7 @@ export default function DailyOrderSheetPage() {
           return { ...r, mo_number: erpConfirm, mo_status: '已匯入製令' as const }
         }
         const qty = String(r.quantity).trim()
+        const qtyNum = parseFloat(qty.replace(/,/g, '')) || 0
         if (matchSeq) {
           const erpHit = erpMoMap.get(`${r.order_number}|${r.item_code}|${matchSeq}`)
           if (erpHit) return { ...r, mo_number: erpHit, mo_status: '已匯入製令' as const }
@@ -2362,15 +2384,26 @@ export default function DailyOrderSheetPage() {
             if (stillInArgo) return { ...r, mo_number: seqHit, mo_status: '已匯入製令' as const }
           }
         }
-        const logHit = moMap.get(`${r.order_number}|${r.item_code}|${qty}`) ?? moMap.get(`${r.order_number}|${r.item_code}`)
+        const logHit = moMap.get(`${r.order_number}|${r.item_code}|${qty}`)
         if (logHit) {
           const erpMosForOrder = erpMoBySourceOrder.get(r.order_number)
           const stillInArgo = !erpMosForOrder || erpMosForOrder.has(logHit.mo_number)
           if (stillInArgo && (!matchSeq || logHit.mo_number.slice(-2) === matchSeq))
             return { ...r, mo_number: logHit.mo_number, mo_status: '已匯入製令' as const }
         }
-        const baseHits = erpMoBaseMap.get(`${r.order_number}|${r.item_code}`) ?? []
-        if (baseHits.length === 1) return { ...r, mo_number: baseHits[0], mo_status: '已匯入製令' as const }
+        // 無 qty 精準字串版本兜底 + 唯一製令 fallback：必須這筆紀錄本身登記的數量跟這一列
+        // 數量吻合才套用，不能只憑「同品號同訂單只查得到一筆」就認定（2026-08-26 發現：
+        // SO260805024 項次4 誤套用成項次2 那張已繳庫完工的製令）
+        const logBaseHits = (moBaseMapAll.get(`${r.order_number}|${r.item_code}`) ?? []).filter(x => x.qty === qtyNum)
+        if (logBaseHits.length === 1) {
+          const hit = logBaseHits[0]
+          const erpMosForOrder = erpMoBySourceOrder.get(r.order_number)
+          const stillInArgo = !erpMosForOrder || erpMosForOrder.has(hit.mo_number)
+          if (stillInArgo && (!matchSeq || hit.mo_number.slice(-2) === matchSeq))
+            return { ...r, mo_number: hit.mo_number, mo_status: '已匯入製令' as const }
+        }
+        const baseHits = (erpMoBaseMap.get(`${r.order_number}|${r.item_code}`) ?? []).filter(x => x.qty === qtyNum)
+        if (baseHits.length === 1) return { ...r, mo_number: baseHits[0].mo_number, mo_status: '已匯入製令' as const }
         if (r.mo_number && !r.mo_number.startsWith('MO'))
           return clearMoFields(r)
         return r
@@ -2599,13 +2632,16 @@ export default function DailyOrderSheetPage() {
       }
       const moMap = new Map<string, { mo_number: string }>()
       const moSeqMapAll = new Map<string, string>() // source_order|product_code|seq(padded) → mo_number
+      const moBaseMapAll = new Map<string, Array<{ mo_number: string; qty: number }>>() // source_order|product_code → [{mo_number, qty}]
       for (const log of (allMoLogs ?? [])) {
         if (!log.mo_number?.startsWith('MO') || !activeMoNumbers.has(log.mo_number)) continue
         const qty = String(log.planned_qty ?? '').trim()
         const k1 = `${log.source_order}|${log.product_code}|${qty}`
         const k2 = `${log.source_order}|${log.product_code}`
         if (!moMap.has(k1)) moMap.set(k1, { mo_number: log.mo_number })
-        if (!moMap.has(k2)) moMap.set(k2, { mo_number: log.mo_number })
+        const baseArr = moBaseMapAll.get(k2) ?? []
+        if (!baseArr.some(x => x.mo_number === log.mo_number)) baseArr.push({ mo_number: log.mo_number, qty: parseFloat(qty.replace(/,/g, '')) || 0 })
+        moBaseMapAll.set(k2, baseArr)
         // 以 MO 末兩碼作為序號 key（同 runMoSync / runAllSync）
         const suffix = log.mo_number.slice(-2)
         if (/^\d{2}$/.test(suffix)) {
@@ -2618,7 +2654,7 @@ export default function DailyOrderSheetPage() {
         .select('project_id, source_order, mbp_part, order_qty, line_no')
       if (erpErr) throw erpErr
       const erpMoMap = new Map<string, string>()
-      const erpMoBaseMap = new Map<string, string[]>()
+      const erpMoBaseMap = new Map<string, Array<{ mo_number: string; qty: number }>>()
       const erpMoBySourceOrder = new Map<string, Set<string>>()
       for (const mo of (allErpMo ?? [])) {
         if (!mo.source_order || !mo.mbp_part || !mo.project_id?.startsWith('MO')) continue
@@ -2629,7 +2665,8 @@ export default function DailyOrderSheetPage() {
         }
         const baseKey = `${mo.source_order}|${mo.mbp_part}`
         const arr = erpMoBaseMap.get(baseKey) ?? []
-        if (!arr.includes(mo.project_id)) erpMoBaseMap.set(baseKey, [...arr, mo.project_id])
+        if (!arr.some(x => x.mo_number === mo.project_id)) arr.push({ mo_number: mo.project_id, qty: Number(mo.order_qty ?? 0) })
+        erpMoBaseMap.set(baseKey, arr)
         const moSet = erpMoBySourceOrder.get(mo.source_order) ?? new Set<string>()
         moSet.add(mo.project_id)
         erpMoBySourceOrder.set(mo.source_order, moSet)
@@ -2814,6 +2851,7 @@ export default function DailyOrderSheetPage() {
             return { ...r, mo_number: erpConfirm, mo_status: '已匯入製令' as const }
           }
           const qty = String(r.quantity).trim()
+          const qtyNum = parseFloat(qty.replace(/,/g, '')) || 0
           if (matchSeq) {
             const erpHit = erpMoMap.get(`${r.order_number}|${r.item_code}|${matchSeq}`)
             if (erpHit) return { ...r, mo_number: erpHit, mo_status: '已匯入製令' as const }
@@ -2826,15 +2864,26 @@ export default function DailyOrderSheetPage() {
               if (stillInArgo) return { ...r, mo_number: seqHit, mo_status: '已匯入製令' as const }
             }
           }
-          const logHit = moMap.get(`${r.order_number}|${r.item_code}|${qty}`) ?? moMap.get(`${r.order_number}|${r.item_code}`)
+          const logHit = moMap.get(`${r.order_number}|${r.item_code}|${qty}`)
           if (logHit) {
             const erpMosForOrder = erpMoBySourceOrder.get(r.order_number)
             const stillInArgo = !erpMosForOrder || erpMosForOrder.has(logHit.mo_number)
             if (stillInArgo && (!matchSeq || logHit.mo_number.slice(-2) === matchSeq))
               return { ...r, mo_number: logHit.mo_number, mo_status: '已匯入製令' as const }
           }
-          const baseHits = erpMoBaseMap.get(`${r.order_number}|${r.item_code}`) ?? []
-          if (baseHits.length === 1) return { ...r, mo_number: baseHits[0], mo_status: '已匯入製令' as const }
+          // 無 qty 精準字串版本兜底 + 唯一製令 fallback：必須這筆紀錄本身登記的數量跟這一列
+          // 數量吻合才套用，不能只憑「同品號同訂單只查得到一筆」就認定（2026-08-26 發現：
+          // SO260805024 項次4 誤套用成項次2 那張已繳庫完工的製令）
+          const logBaseHits = (moBaseMapAll.get(`${r.order_number}|${r.item_code}`) ?? []).filter(x => x.qty === qtyNum)
+          if (logBaseHits.length === 1) {
+            const hit = logBaseHits[0]
+            const erpMosForOrder = erpMoBySourceOrder.get(r.order_number)
+            const stillInArgo = !erpMosForOrder || erpMosForOrder.has(hit.mo_number)
+            if (stillInArgo && (!matchSeq || hit.mo_number.slice(-2) === matchSeq))
+              return { ...r, mo_number: hit.mo_number, mo_status: '已匯入製令' as const }
+          }
+          const baseHits = (erpMoBaseMap.get(`${r.order_number}|${r.item_code}`) ?? []).filter(x => x.qty === qtyNum)
+          if (baseHits.length === 1) return { ...r, mo_number: baseHits[0].mo_number, mo_status: '已匯入製令' as const }
           if (r.mo_number && !r.mo_number.startsWith('MO'))
             return clearMoFields(r)
           return r

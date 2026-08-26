@@ -686,18 +686,22 @@ export default function GroupOrderExportPage() {
           activeMoNumbers = new Set((summaryRows ?? []).map((r: { mo_number: string }) => r.mo_number))
         }
         const moMap = new Map<string, { mo_number: string }>()
+        const moBaseMap = new Map<string, Array<{ mo_number: string; qty: number }>>()
         for (const log of (moLogs ?? [])) {
           const l = log as { mo_number: string; source_order: string; product_code: string; planned_qty: string }
           if (!l.mo_number?.startsWith('MO') || !activeMoNumbers.has(l.mo_number)) continue
           const qty = String(l.planned_qty ?? '').trim()
           if (!moMap.has(`${l.source_order}|${l.product_code}|${qty}`)) moMap.set(`${l.source_order}|${l.product_code}|${qty}`, { mo_number: l.mo_number })
-          if (!moMap.has(`${l.source_order}|${l.product_code}`)) moMap.set(`${l.source_order}|${l.product_code}`, { mo_number: l.mo_number })
+          const baseKey = `${l.source_order}|${l.product_code}`
+          const baseArr = moBaseMap.get(baseKey) ?? []
+          if (!baseArr.some(x => x.mo_number === l.mo_number)) baseArr.push({ mo_number: l.mo_number, qty: parseFloat(qty.replace(/,/g, '')) || 0 })
+          moBaseMap.set(baseKey, baseArr)
         }
         const erpMoMap = new Map<string, string>()
-        const erpMoBaseMap = new Map<string, string[]>()
+        const erpMoBaseMap = new Map<string, Array<{ mo_number: string; qty: number }>>()
         const erpMoBySourceOrder = new Map<string, Set<string>>()
         for (const mo of (erp_mo ?? [])) {
-          const m = mo as { project_id: string; source_order: string; mbp_part: string; line_no: unknown }
+          const m = mo as { project_id: string; source_order: string; mbp_part: string; line_no: unknown; order_qty: unknown }
           if (!m.source_order || !m.mbp_part || !m.project_id?.startsWith('MO')) continue
           if (m.line_no != null) {
             const lineNoStr = String(parseInt(String(m.line_no), 10)).padStart(2, '0')
@@ -706,7 +710,8 @@ export default function GroupOrderExportPage() {
           }
           const baseKey = `${m.source_order}|${m.mbp_part}`
           const arr = erpMoBaseMap.get(baseKey) ?? []
-          if (!arr.includes(m.project_id)) erpMoBaseMap.set(baseKey, [...arr, m.project_id])
+          if (!arr.some(x => x.mo_number === m.project_id)) arr.push({ mo_number: m.project_id, qty: Number(m.order_qty ?? 0) })
+          erpMoBaseMap.set(baseKey, arr)
           const moSet = erpMoBySourceOrder.get(m.source_order) ?? new Set<string>()
           moSet.add(m.project_id); erpMoBySourceOrder.set(m.source_order, moSet)
         }
@@ -729,15 +734,28 @@ export default function GroupOrderExportPage() {
             if (erpHit) return { ...r, mo_number: erpHit, mo_status: '已匯入製令' }
           }
           const qty = String(r.quantity ?? '').trim()
-          const logHit = moMap.get(`${orderNo}|${itemCode}|${qty}`) ?? moMap.get(`${orderNo}|${itemCode}`)
+          const qtyNum = parseFloat(qty.replace(/,/g, '')) || 0
+          const logHit = moMap.get(`${orderNo}|${itemCode}|${qty}`)
           if (logHit) {
             const erpMosForOrder = erpMoBySourceOrder.get(orderNo)
             const stillInArgo = !erpMosForOrder || erpMosForOrder.has(logHit.mo_number)
             if (stillInArgo && (!matchSeq || logHit.mo_number.slice(-2) === matchSeq))
               return { ...r, mo_number: logHit.mo_number, mo_status: '已匯入製令' }
           }
-          const baseHits = erpMoBaseMap.get(`${orderNo}|${itemCode}`) ?? []
-          if (baseHits.length === 1) return { ...r, mo_number: baseHits[0], mo_status: '已匯入製令' }
+          // 「唯一製令」保底 fallback：必須這張製令實際登記的數量跟這一列要的數量吻合才套用，
+          // 不能只憑「這批只查得到一張製令」就認定，否則同品號同訂單若出現數量不同的追加列，
+          // 會被誤套用到別列早就完工的製令上（2026-08-26 發現：SO260805024 項次4 的 1 片
+          // 客戶備品被誤套用成項次2 那張數量8、已繳庫完工的製令）
+          const logBaseHits = (moBaseMap.get(`${orderNo}|${itemCode}`) ?? []).filter(x => x.qty === qtyNum)
+          if (logBaseHits.length === 1) {
+            const hit = logBaseHits[0]
+            const erpMosForOrder = erpMoBySourceOrder.get(orderNo)
+            const stillInArgo = !erpMosForOrder || erpMosForOrder.has(hit.mo_number)
+            if (stillInArgo && (!matchSeq || hit.mo_number.slice(-2) === matchSeq))
+              return { ...r, mo_number: hit.mo_number, mo_status: '已匯入製令' }
+          }
+          const baseHits = (erpMoBaseMap.get(`${orderNo}|${itemCode}`) ?? []).filter(x => x.qty === qtyNum)
+          if (baseHits.length === 1) return { ...r, mo_number: baseHits[0].mo_number, mo_status: '已匯入製令' }
           if (moNo && !moNo.startsWith('MO')) return { ...r, mo_number: undefined, mo_status: null, material_prep_status: null }
           return r
         })
