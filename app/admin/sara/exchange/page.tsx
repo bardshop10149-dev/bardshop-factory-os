@@ -184,6 +184,31 @@ export default function SaraExchangePage() {
     ? csvRows.map((r, idx) => ({ row: r, idx })).filter(({ row }) => (row[0] ?? '').toLowerCase().includes(orderQuery))
     : [], [orderQuery, csvRows])
 
+  // 單獨刪除指定某一行（依 csvRows 的原始索引，跟批次刪除共用同一套存回邏輯）
+  const [deletingRowIdx, setDeletingRowIdx] = useState<number | null>(null)
+  const handleDeleteSingleOrderRow = useCallback(async (idx: number) => {
+    const row = csvRows[idx]
+    if (!row) return
+    if (!confirm(`確定刪除這一列？\n訂單號：${row[0]}\n工單編號：${row[1]}\n品號：${row[2]}`)) return
+    setDeletingRowIdx(idx)
+    setCsvMsg('')
+    try {
+      const kept = csvRows.filter((_, i) => i !== idx)
+      const res = await fetch('/api/sara/exchange-csv', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ rows: kept, append: false }),
+      })
+      const j = await res.json() as { success: boolean; count?: number; error?: string }
+      if (!j.success) throw new Error(j.error)
+      setCsvMsg(`✅ 已刪除 1 列（剩 ${j.count} 列）`)
+      await loadCsvBuffer()
+      setTimeout(() => setCsvMsg(''), 5000)
+    } catch (e) {
+      setCsvMsg(`❌ ${e instanceof Error ? e.message : String(e)}`)
+    } finally { setDeletingRowIdx(null) }
+  }, [csvRows, loadCsvBuffer])
+
   const handleDeleteOrderRows = useCallback(async () => {
     if (matchedOrderRows.length === 0) return
     const orderNos = [...new Set(matchedOrderRows.map(({ row }) => row[0]))]
@@ -513,6 +538,7 @@ export default function SaraExchangePage() {
                         <th className="px-2 py-1.5 text-left whitespace-nowrap">工序</th>
                         <th className="px-2 py-1.5 text-left whitespace-nowrap">站點</th>
                         <th className="px-2 py-1.5 text-left whitespace-nowrap">製程名稱</th>
+                        <th className="px-2 py-1.5 text-center whitespace-nowrap">操作</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -526,6 +552,16 @@ export default function SaraExchangePage() {
                           <td className="px-2 py-1 whitespace-nowrap">{row[9]}</td>
                           <td className="px-2 py-1 whitespace-nowrap">{row[10]}</td>
                           <td className="px-2 py-1 whitespace-nowrap">{row[11]}</td>
+                          <td className="px-2 py-1 text-center whitespace-nowrap">
+                            <button
+                              onClick={() => void handleDeleteSingleOrderRow(idx)}
+                              disabled={deletingRowIdx === idx}
+                              title="只刪除這一列"
+                              className="px-2 py-0.5 rounded bg-red-900/40 border border-red-700/50 text-red-300 text-[10px] hover:bg-red-800/60 disabled:opacity-50 transition-colors"
+                            >
+                              {deletingRowIdx === idx ? '…' : '🗑 刪除'}
+                            </button>
+                          </td>
                         </tr>
                       ))}
                     </tbody>
