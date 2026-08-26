@@ -1009,7 +1009,7 @@ export default function HomePage() {
       {/* --- QA Modal --- */}
       {showQaModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-fade-in">
-          <div className="bg-slate-900 border border-teal-700 rounded-2xl w-full max-w-md shadow-2xl overflow-hidden relative">
+          <div className="bg-slate-900 border border-teal-700 rounded-2xl w-full max-w-2xl shadow-2xl overflow-hidden relative">
             <div className="bg-teal-800 p-4 flex justify-between items-center border-b border-teal-700">
               <h3 className="text-white font-bold flex items-center gap-2">
                 <span className="w-2 h-6 bg-teal-400 rounded-full"></span>
@@ -1021,6 +1021,14 @@ export default function HomePage() {
             </div>
             <div className="p-6 flex flex-col gap-6">
               <div className="flex gap-4">
+                <div
+                  className="flex-1 bg-teal-700/20 border border-teal-600 rounded-xl p-4 cursor-pointer hover:bg-teal-700/40 transition-all text-center"
+                  onClick={() => { setShowQaModal(false); router.push('/qa/report-sales-design'); }}
+                >
+                  <div className="mb-2 text-teal-400 font-bold text-lg">異常回報單</div>
+                  <div className="text-xs text-slate-300 mb-2">業務美編專用</div>
+                  <span className="px-3 py-1 rounded border border-teal-600 text-teal-300 text-xs font-mono bg-teal-900/30">前往建立</span>
+                </div>
                 <div
                   className="flex-1 bg-teal-700/20 border border-teal-600 rounded-xl p-4 cursor-pointer hover:bg-teal-700/40 transition-all text-center"
                   onClick={() => { setShowQaModal(false); router.push('/qa/report'); }}
