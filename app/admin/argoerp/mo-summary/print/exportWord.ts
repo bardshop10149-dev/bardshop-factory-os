@@ -407,10 +407,10 @@ function buildPoSection(
           borders: allBorderSingle,
         }),
         new TableCell({
-          children: [new Paragraph({ children: [t('等級', { bold: true, size: 18, color: '555555' })], alignment: AlignmentType.CENTER })],
+          children: [new Paragraph({ children: [t('出貨備註', { bold: true, size: 18, color: '555555' })] })],
           shading: { type: ShadingType.SOLID, color: 'F5F6F8', fill: 'F5F6F8' },
           borders: allBorderSingle,
-          width: { size: 800, type: WidthType.DXA },
+          width: { size: 1600, type: WidthType.DXA },
         }),
       ],
     })
@@ -450,7 +450,7 @@ function buildPoSection(
                 shading: { type: ShadingType.SOLID, color: shade, fill: shade },
               }),
               new TableCell({
-                children: [new Paragraph({ children: [t(line.grade || '—', { size: 18 })], alignment: AlignmentType.CENTER })],
+                children: [new Paragraph({ children: [t(line.remark2 || '—', { size: 18 })] })],
                 borders: allBorderSingle,
                 shading: { type: ShadingType.SOLID, color: shade, fill: shade },
               }),

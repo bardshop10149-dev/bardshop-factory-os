@@ -469,7 +469,7 @@ function PoCard({
               </colgroup>
               <thead>
                 <tr style={{ background: '#f5f6f8' }}>
-                  {(['序', '品項編碼 / 規格', '數量', '包裝方式', '等級', '交貨日'] as const).map((h, hi) => (
+                  {(['序', '品項編碼 / 規格', '數量', '包裝方式', '出貨備註', '交貨日'] as const).map((h, hi) => (
                     <th key={h} style={{ border: '1px solid #e2e4e8', padding: '3px 5px', fontWeight: 600, color: '#555', textAlign: hi === 0 ? 'center' as const : 'left' as const, whiteSpace: 'nowrap' as const, fontSize: '11px' }}>{h}</th>
                   ))}
                 </tr>
@@ -499,7 +499,7 @@ function PoCard({
                       </td>
                       <td style={td}>{lqty != null ? `${lqty} ${luom}`.trim() : '—'}</td>
                       <td style={td}>{line.packing || '—'}</td>
-                      <td style={{ ...td, textAlign: 'center', whiteSpace: 'nowrap', color: line.grade ? '#000' : '#6b7280', fontWeight: line.grade ? 600 : 400 }}>{line.grade || '—'}</td>
+                      <td style={{ ...td, color: line.remark2 ? '#000' : '#6b7280', fontWeight: line.remark2 ? 600 : 400 }}>{line.remark2 || '—'}</td>
                       <td style={td}>{line.duedate || '—'}</td>
                     </tr>
                   )
@@ -1054,7 +1054,7 @@ function MoPrintContent() {
                       </colgroup>
                       <thead>
                         <tr style={{ background: '#f5f6f8' }}>
-                          {(['序', '品項編碼 / 規格', '數量', '包裝方式', '等級', '交貨日'] as const).map((h, hi) => (
+                          {(['序', '品項編碼 / 規格', '數量', '包裝方式', '出貨備註', '交貨日'] as const).map((h, hi) => (
                             <th key={h} style={{ border: '1px solid #e2e4e8', padding: '3px 5px', fontWeight: 600, color: '#555', textAlign: hi === 0 ? 'center' as const : 'left' as const, whiteSpace: 'nowrap' as const, fontSize: '11px' }}>{h}</th>
                           ))}
                         </tr>
@@ -1084,7 +1084,7 @@ function MoPrintContent() {
                               </td>
                               <td style={td}>{lqty != null ? `${lqty} ${luom}`.trim() : '—'}</td>
                               <td style={td}>{line.packing || '—'}</td>
-                              <td style={{ ...td, textAlign: 'center' as const, whiteSpace: 'nowrap' as const, color: line.grade ? '#000' : '#6b7280', fontWeight: line.grade ? 600 : 400 }}>{line.grade || '—'}</td>
+                              <td style={{ ...td, color: line.remark2 ? '#000' : '#6b7280', fontWeight: line.remark2 ? 600 : 400 }}>{line.remark2 || '—'}</td>
                               <td style={td}>{line.duedate || '—'}</td>
                             </tr>
                           )
