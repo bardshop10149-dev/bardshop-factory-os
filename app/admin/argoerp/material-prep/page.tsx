@@ -464,7 +464,18 @@ export default function MaterialPrepPage() {
     try {
       const res = await fetch('/api/argoerp/daily-order-sheet')
       const json = await res.json()
-      if (json.success) setAvailableSheets(json.sheets ?? [])
+      if (json.success) {
+        const sheets: SheetMeta[] = json.sheets ?? []
+        setAvailableSheets(sheets)
+        // 剛進入頁面時自動帶入當天的資料：有今天的出單表就選今天，
+        // 沒有的話退而求其次選最新一筆（sheets 依日期新到舊排序）。
+        // 用函式式更新讀 prev，避免把 selectedDate 放進依賴陣列造成每次切換日期都重抓清單。
+        if (sheets.length > 0) {
+          const today = todayStr()
+          const defaultDate = sheets.some(s => s.sheet_date === today) ? today : sheets[0].sheet_date
+          setSelectedDate(prev => prev || defaultDate)
+        }
+      }
     } catch {}
   }, [])
 
