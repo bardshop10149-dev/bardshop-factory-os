@@ -126,6 +126,16 @@ function formatQty(value: number): string {
   return Number.isInteger(value) ? String(value) : value.toFixed(2).replace(/\.00$/, '')
 }
 
+// 出單表/ARGO 的數量欄位常是帶千分位逗號的字串（如 "2,300"），直接 Number() 會得到
+// NaN，經過後續運算與 formatQty 顯示後會被誤判成 0（2026-08-26 使用者回報：
+// SO260813023 數量 2,300 在批備料頁需求量算出來變 0，根源就是這裡漏了去逗號）。
+function parseQtyNum(v: string | number | null | undefined): number {
+  if (v == null) return 0
+  if (typeof v === 'number') return Number.isFinite(v) ? v : 0
+  const n = Number(String(v).replace(/,/g, '').trim())
+  return Number.isFinite(n) ? n : 0
+}
+
 const PREP_INTERFACE_KEY = 'argoerp_material_prep_interface_id'
 const PREP_QTY_OVERRIDES_KEY = 'argoerp_material_prep_qty_overrides'
 const PREP_MATERIAL_OVERRIDES_KEY = 'argoerp_material_prep_material_overrides'
@@ -827,7 +837,7 @@ export default function MaterialPrepPage() {
           selected_material_code: '',
           selected_material_name: '',
           selected_material_stock_qty: 0,
-          planned_qty: Number(mo.planned_qty ?? 0),
+          planned_qty: parseQtyNum(mo.planned_qty),
           plate_count: mo.plate_count || '-',
           factory: mo.factory || '-',
           machine: mo.machine || '',
@@ -862,7 +872,7 @@ export default function MaterialPrepPage() {
           customer: sourceOrderCustomerMap[mo.source_order ?? ''] || '-',
           source_order: mo.source_order || '-',
           product_code: productCode || '-',
-          planned_qty: Number(mo.planned_qty ?? 0),
+          planned_qty: parseQtyNum(mo.planned_qty),
           plate_count: mo.plate_count || '-',
           factory: mo.factory || '-',
           machine: mo.machine || '',
@@ -945,17 +955,17 @@ export default function MaterialPrepPage() {
         const plateCountNum = (() => {
           const raw = (mo.plate_count ?? '').trim()
           if (!raw || raw === '-') return NaN
-          const n = Number(raw)
+          const n = parseQtyNum(raw)
           return isFinite(n) && n > 0 ? n : NaN
         })()
         const usesPlateCount = isMacrt && !isNaN(plateCountNum)
-        const planQty = usesPlateCount ? plateCountNum : Number(mo.planned_qty ?? 0)
+        const planQty = usesPlateCount ? plateCountNum : parseQtyNum(mo.planned_qty)
         const productionQty = bom.production_quantity ?? 0
         const bomBaseQty = bom.quantity ?? 0
         const baseComputedQty = productionQty > 0 ? (planQty * bomBaseQty) / productionQty : planQty * bomBaseQty
         const shouldBuffer = !usesPlateCount && !noBufferKeys.has(rowKey)
         const computedQty = shouldBuffer ? Math.round(baseComputedQty * 1.03) : baseComputedQty
-        const requiredQty = qtyOverrides[rowKey] !== undefined && qtyOverrides[rowKey] !== '' ? Number(qtyOverrides[rowKey]) : computedQty
+        const requiredQty = qtyOverrides[rowKey] !== undefined && qtyOverrides[rowKey] !== '' ? parseQtyNum(qtyOverrides[rowKey]) : computedQty
         const stockQty = inventoryMap[bom.material_code] ?? 0
         const substitutes = substituteMap[bom.material_code] || []
         const substituteOptions: MaterialPrepRow['substitute_options'] = [
@@ -1011,7 +1021,7 @@ export default function MaterialPrepPage() {
           customer: sourceOrderCustomerMap[mo.source_order ?? ''] || '-',
           source_order: mo.source_order || '-',
           product_code: productCode,
-          planned_qty: Number(mo.planned_qty ?? 0),
+          planned_qty: parseQtyNum(mo.planned_qty),
           plate_count: mo.plate_count || '-',
           factory: mo.factory || '-',
           machine: mo.machine || '',
@@ -1395,7 +1405,7 @@ export default function MaterialPrepPage() {
           SEG_SEGMENT_NO_DEPARTMENT: 'M1100',
           MO_MBP_PART: row.product_code,
           MO_MBP_VER: 1,
-          MO_QTY: Number(row.planned_qty),
+          MO_QTY: parseQtyNum(row.planned_qty),
           LINE_NO: lineIndex + 1,
           MBP_PART: row.material_code,
           MBP_VER: 1,
