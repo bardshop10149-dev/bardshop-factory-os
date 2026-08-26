@@ -100,6 +100,23 @@ function clearMoFields(r: SheetRow): SheetRow {
   }
 }
 
+/**
+ * 把這一列的製令號「更正」成另一張確認為正確的製令（而非清空）時使用。
+ * 備料單號（argo_slip_no）跟備料狀態一律綁著特定製令，換了製令舊的備料紀錄就對不上了——
+ * 備料單號要套用跟製令單號一樣的比對邏輯，不能沿用舊製令留下的備料狀態
+ * （2026-08-26 發現：製令末兩碼比對修正後，備料狀態/備料單號未同步清除，留下孤兒資料）。
+ */
+function correctMoNumber(r: SheetRow, newMoNumber: string): SheetRow {
+  const keepPrep = r.material_prep_status === '無需備料'
+  return {
+    ...r,
+    mo_number: newMoNumber,
+    mo_status: '已匯入製令' as const,
+    material_prep_status: keepPrep ? r.material_prep_status : null,
+    argo_slip_no: keepPrep ? r.argo_slip_no : null,
+  }
+}
+
 function parseTSV(text: string): string[][] {
   const rows: string[][] = []
   let current = ''
@@ -1478,7 +1495,7 @@ export default function DailyOrderSheetPage() {
             return r  // 末碼符合，保留
           }
           if (erpConfirm === r.mo_number) return r  // 已確認正確
-          return { ...r, mo_number: erpConfirm, mo_status: '已匯入製令' as const }  // 更正
+          return correctMoNumber(r, erpConfirm)  // 更正
         }
 
         const qty = String(r.quantity).trim()
@@ -1580,6 +1597,10 @@ export default function DailyOrderSheetPage() {
             deduped[i] = { ...deduped[i], material_prep_status: '已批備料' }
           } else if (prepMap.has(moNo)) {
             deduped[i] = { ...deduped[i], material_prep_status: prepMap.get(moNo)! }
+          } else if (deduped[i].material_prep_status !== '無需備料') {
+            // 目前這張製令查無備料紀錄：清除可能殘留自「上一個（已被更正掉的）製令」的備料
+            // 狀態/備料單號，備料單號要套用跟製令單號一樣的比對邏輯，不能沿用對不上的舊狀態
+            deduped[i] = { ...deduped[i], material_prep_status: null, argo_slip_no: null }
           }
         }
       }
@@ -2378,7 +2399,7 @@ export default function DailyOrderSheetPage() {
             return r
           }
           if (erpConfirm === r.mo_number) return r
-          return { ...r, mo_number: erpConfirm, mo_status: '已匯入製令' as const }
+          return correctMoNumber(r, erpConfirm)
         }
         const qty = String(r.quantity).trim()
         const qtyNum = parseFloat(qty.replace(/,/g, '')) || 0
@@ -2452,6 +2473,10 @@ export default function DailyOrderSheetPage() {
           if (!moNo) continue
           if (erpPrepSet.has(moNo)) currentRows[i] = { ...currentRows[i], material_prep_status: '已批備料' }
           else if (prepMap.has(moNo)) currentRows[i] = { ...currentRows[i], material_prep_status: prepMap.get(moNo)! }
+          else if (currentRows[i].material_prep_status !== '無需備料') {
+            // 目前這張製令查無備料紀錄：清除可能殘留自上一個（已被更正掉的）製令的備料狀態/單號
+            currentRows[i] = { ...currentRows[i], material_prep_status: null, argo_slip_no: null }
+          }
         }
       }
       const newMo = currentRows.filter((r, i) => r.mo_number && !prevRows[i]?.mo_number).length
@@ -2864,7 +2889,7 @@ export default function DailyOrderSheetPage() {
               return r
             }
             if (erpConfirm === r.mo_number) return r
-            return { ...r, mo_number: erpConfirm, mo_status: '已匯入製令' as const }
+            return correctMoNumber(r, erpConfirm)
           }
           const qty = String(r.quantity).trim()
           const qtyNum = parseFloat(qty.replace(/,/g, '')) || 0
@@ -2924,6 +2949,10 @@ export default function DailyOrderSheetPage() {
           if (!moNo) continue
           if (erpPrepSet.has(moNo)) rows[i] = { ...rows[i], material_prep_status: '已批備料' }
           else if (prepMap.has(moNo)) rows[i] = { ...rows[i], material_prep_status: prepMap.get(moNo)! }
+          else if (rows[i].material_prep_status !== '無需備料') {
+            // 目前這張製令查無備料紀錄：清除可能殘留自上一個（已被更正掉的）製令的備料狀態/單號
+            rows[i] = { ...rows[i], material_prep_status: null, argo_slip_no: null }
+          }
         }
 
         // Step C: 採購單比對（pool 每張重置 _used，但 claimedPoByDocBatch 跨整批共用，

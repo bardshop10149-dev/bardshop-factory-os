@@ -921,7 +921,10 @@ export default function OrderBatchExportPage() {
           if (!moNo2) return r
           if (erpPrepSet.has(moNo2)) return { ...r, material_prep_status: '已批備料' }
           if (prepMap.has(moNo2)) return { ...r, material_prep_status: prepMap.get(moNo2) }
-          return r
+          // 這張製令查無備料紀錄：清除可能殘留自「上一個（已被更正掉的）製令」的備料狀態，
+          // 備料單號也要套用跟製令單號一樣的比對邏輯，不能沿用對不上目前製令的舊狀態
+          // （2026-08-26 發現：製令末兩碼比對修正後，備料狀態未同步清除，留下對不上的孤兒狀態）
+          return { ...r, material_prep_status: null }
         })
       }
       setStep(2, 'done')
