@@ -223,3 +223,81 @@ export async function saraJobsOfLot(lotId: number): Promise<SaraJob[]> {
     { lot_id: String(lotId) },
   )
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 全廠現況同步用（/api/sara/wip-sync）
+//
+// 上面的 saraFindProjects / saraJobsOfLot 是「查單一製令」用的；
+// 下面這兩支是「一次撈全廠」用的，供定期同步寫進 sara_lot_progress / sara_wip_schedule。
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** 排程時間等欄位，查單一批時用不到，但全廠同步要存下來 */
+export interface SaraProjectFull extends SaraProject {
+  due: string | null
+  plan_start_time: string | null
+  plan_end_time: string | null
+}
+
+/** 站點排程：每列＝一道「已排程」的工序，含現在是否正在跑 */
+export interface SaraWipRow {
+  jid: number
+  lid: number
+  mo_nbr: string | null
+  doc_nbr: string | null
+  product_name: string | null
+  lot_nbr: string | null
+  workcenter_name: string | null
+  job_name: string | null
+  job_sequence: number | null
+  qty: number | null
+  wip_qty: number | null
+  system_status: string | null   // running / pause / finished / null(未開始)
+  user_status: string | null
+  is_running: boolean | null
+  real_start_time: string | null
+  real_end_time: string | null
+  plan_start_time: string | null
+  plan_end_time: string | null
+  report_resource_name: string | null
+  resource_names: string | null
+  sourcing: string | null
+  factory_name: string | null
+}
+
+const TABLE_PAYLOAD = (columns: string[], size: number) => ({
+  pagination: { pageIndex: 0, pageSize: size },
+  sorting: [],
+  globalFilter: '',
+  globalFilterColumns: columns,
+  exactFilter: {},
+  exactFilterColumns: null,
+  exactFilterJsonColumns: ['assigned_resources'],
+  extra: { filter: {} },
+  include_unscheduled: true,
+  localFilter: {},
+})
+
+/** 全廠所有批(lot)，含整批進度與跳站警示 */
+export async function saraProjects(size = 5000): Promise<SaraProjectFull[]> {
+  return post<SaraProjectFull[]>(
+    '/api/project/management/table',
+    TABLE_PAYLOAD(['mo_nbr', 'doc_nbr', 'product_name', 'lot_nbr'], size),
+  )
+}
+
+/**
+ * 全廠站點排程。注意這裡只列「已排程」的工序——
+ * 做完的工序會從排程消失，所以「做到哪一站」要看批的 progress_percentage
+ * 或 saraJobsOfLot 的 reported_qty，不能只看這支。
+ */
+export async function saraWip(size = 5000): Promise<SaraWipRow[]> {
+  return post<SaraWipRow[]>(
+    '/api/wip/schedule',
+    TABLE_PAYLOAD(['work_order', 'jid', 'mo_nbr', 'doc_nbr', 'product_name', 'lot_nbr'], size),
+    { delay_on_top: 'false' },
+  )
+}
+
+// 製令號 → 來源訂單行號。解析規則見 lib/moLineMatch.ts
+// （SOA 訂單的編號格式是特例，「取第一段末兩碼」的寫法會誤判）。
+export { moToSoLine } from './moLineMatch'

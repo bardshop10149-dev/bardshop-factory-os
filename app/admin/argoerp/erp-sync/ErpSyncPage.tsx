@@ -3,9 +3,18 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { supabase } from '../../../../lib/supabaseClient'
 import SoOrderModal from '../../../../components/SoOrderModal'
+import SoEditLogCard from './SoEditLogCard'
+import SoMisalignCard from './SoMisalignCard'
 
 // ─── 型別 ─────────────────────────────────────────────
 type DocTypeKey = 'sales' | 'mo' | 'pr' | 'po' | 'subcontract' | 'inventory' | 'material_prep' | 'customer' | 'bom_structure'
+
+// 訂單修改紀錄／工單對位體檢：唯讀檢視，不是同步目標。
+// 刻意不放進 TABS（TABS 同時是「啟動全表同步」的執行清單，放進去會多出一個永遠卡在
+// pending 的步驟），只在分頁列尾端獨立呈現。
+const EDIT_LOG_TAB = 'so_edit_log' as const
+const MISALIGN_TAB = 'so_misalign' as const
+type TabKey = DocTypeKey | typeof EDIT_LOG_TAB | typeof MISALIGN_TAB
 
 interface PjSyncMapping {
   docNoField: string
@@ -2362,7 +2371,9 @@ const TABS: { key: DocTypeKey; label: string }[] = [
 ]
 
 export function ErpSyncPage() {
-  const [activeTab, setActiveTab] = useState<DocTypeKey>('sales')
+  const [activeTab, setActiveTab] = useState<TabKey>('sales')
+  /** 從「訂單修改紀錄」點某張單跳到「工單對位體檢」時，帶過去的訂單號 */
+  const [misalignFilter, setMisalignFilter] = useState('')
 
   // ---- 全表同步 ----
   type SyncStep = { key: DocTypeKey; label: string; status: 'pending' | 'running' | 'done' | 'error'; message: string }
@@ -2548,10 +2559,36 @@ export function ErpSyncPage() {
             {tab.label}
           </button>
         ))}
+        <button
+          type="button"
+          onClick={() => setActiveTab(EDIT_LOG_TAB)}
+          className={`rounded-lg px-4 py-2 text-sm font-medium transition-colors ${
+            activeTab === EDIT_LOG_TAB
+              ? 'bg-cyan-700 text-white shadow'
+              : 'text-slate-400 hover:text-white hover:bg-slate-800'
+          }`}
+        >
+          訂單修改紀錄
+        </button>
+        <button
+          type="button"
+          onClick={() => { setMisalignFilter(''); setActiveTab(MISALIGN_TAB) }}
+          className={`rounded-lg px-4 py-2 text-sm font-medium transition-colors ${
+            activeTab === MISALIGN_TAB
+              ? 'bg-cyan-700 text-white shadow'
+              : 'text-slate-400 hover:text-white hover:bg-slate-800'
+          }`}
+        >
+          工單對位體檢
+        </button>
       </div>
 
       {/* Content */}
-      {activeTab === 'bom_structure'
+      {activeTab === MISALIGN_TAB
+        ? <SoMisalignCard initialSearch={misalignFilter} />
+        : activeTab === EDIT_LOG_TAB
+        ? <SoEditLogCard onInspectOrder={(docNo) => { setMisalignFilter(docNo); setActiveTab(MISALIGN_TAB) }} />
+        : activeTab === 'bom_structure'
         ? <BomSyncCard resetKey={syncAllLastTime?.getTime() ?? 0} />
         : <SyncCard key={`${activeTab}-${syncAllLastTime?.getTime() ?? 0}`} docKey={activeTab} />}
     </div>
