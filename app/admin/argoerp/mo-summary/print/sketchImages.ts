@@ -43,6 +43,11 @@ export function matchSketchFiles(files: FileList | File[]): Map<string, MatchedS
     arr.push({ file, order, line })
     map.set(key, arr)
   }
+  // 同一個訂單#項次若對到多個檔案，依檔名排序後再印，順序才會是可預期的
+  // （瀏覽器讀取資料夾的順序不保證跟檔名排序一致，不同作業系統/瀏覽器可能不同）
+  for (const arr of map.values()) {
+    arr.sort((a, b) => a.file.name.localeCompare(b.file.name, 'zh-Hant', { numeric: true }))
+  }
   return map
 }
 
