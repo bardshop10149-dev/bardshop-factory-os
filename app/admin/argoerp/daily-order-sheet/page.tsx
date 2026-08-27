@@ -3263,89 +3263,92 @@ export default function DailyOrderSheetPage() {
 
   const handleBulkMatchSketchFolder = useCallback(async (files: FileList | null) => {
     if (!files || files.length === 0) return
-    const IMAGE_OR_PDF = /\.(jpe?g|png|gif|webp|bmp|pdf)$/i
-    const ORDER_PATTERN = /SO\d+/i
-    const ITEM_FOLDER_PATTERN = /^#0*(\d+)/ // 品項資料夾以 #項號 開頭，如「#1透明拼板壓克力立牌…」
-
-    const filesByKey = new Map<string, File[]>()
-    for (const file of Array.from(files)) {
-      const relPath = (file as unknown as { webkitRelativePath?: string }).webkitRelativePath || file.name
-      const segments = relPath.split('/')
-      const fileName = segments[segments.length - 1]
-      if (!IMAGE_OR_PDF.test(fileName)) continue
-      if (!fileName.includes('商品示意圖')) continue
-
-      // 找訂單資料夾（含 SO 單號的路徑片段）
-      const orderIdx = segments.findIndex(seg => ORDER_PATTERN.test(seg))
-      if (orderIdx === -1) continue
-      const orderMatch = segments[orderIdx].match(ORDER_PATTERN)
-      if (!orderMatch) continue
-      const orderNumber = orderMatch[0].toUpperCase()
-
-      // 找訂單資料夾之後、以 #項號 開頭的品項資料夾
-      let itemNumber: number | null = null
-      for (let i = orderIdx + 1; i < segments.length - 1; i++) {
-        const m = segments[i].match(ITEM_FOLDER_PATTERN)
-        if (m) { itemNumber = parseInt(m[1], 10); break }
-      }
-      if (itemNumber === null) continue
-
-      // 品項資料夾跟檔案之間必須經過「印刷」，且不能經過「美編」
-      const middleSegments = segments.slice(orderIdx + 1, segments.length - 1)
-      if (!middleSegments.includes('印刷')) continue
-      if (middleSegments.includes('美編')) continue
-
-      const key = `${orderNumber}#${itemNumber}`
-      const arr = filesByKey.get(key) ?? []
-      arr.push(file)
-      filesByKey.set(key, arr)
-    }
-    if (filesByKey.size === 0) {
-      setSketchMsg('❌ 這個資料夾裡沒有找到符合「訂單資料夾 / #項號資料夾 / 印刷 / 商品示意圖⋯」結構的檔案')
-      setTimeout(() => setSketchMsg(''), 4000)
-      return
-    }
-
-    const targets = sheetRows.filter(r => {
-      if (getSketchUrls(r).length > 0) return false // 已經有示意圖的列不覆蓋，避免蓋掉先前人工核對過的結果
-      const lineNo = r.match_line_no || r.line_no_input || ''
-      if (!r.order_number || !lineNo) return false
-      return filesByKey.has(`${r.order_number.toUpperCase()}#${parseInt(lineNo, 10)}`)
-    })
-    if (targets.length === 0) {
-      setSketchMsg('ℹ️ 沒有可自動比對的列（可能都已經有示意圖，或這份出單表沒有符合的訂單）')
-      setTimeout(() => setSketchMsg(''), 4000)
-      return
-    }
-
+    // 選好資料夾後立刻給回饋（瀏覽器列舉資料夾內容、尤其是網路磁碟機，可能要花好幾秒到
+    // 好幾十秒，這段時間下面的比對邏輯還沒開始跑，先讓按鈕跟訊息有反應，避免看起來像卡死）
     setSketchBulkMatching(true)
-    setSketchBulkProgress({ done: 0, total: targets.length })
-    const urlsByRowKey = new Map<string, string[]>()
-    for (const row of targets) {
-      const lineNo = row.match_line_no || row.line_no_input || ''
-      const matchedFiles = filesByKey.get(`${row.order_number.toUpperCase()}#${parseInt(lineNo, 10)}`) ?? []
-      if (matchedFiles.length === 0 || !row.row_key) continue
-      const urls: string[] = []
-      for (const file of matchedFiles) {
-        try {
-          const url = await uploadSketchFile(row.order_number, lineNo, file)
-          urls.push(url)
-        } catch (e) {
-          console.error(`示意圖上傳失敗（${row.order_number}#${lineNo}）：`, e)
-        }
-      }
-      if (urls.length > 0) urlsByRowKey.set(row.row_key, urls)
-      setSketchBulkProgress(p => ({ ...p, done: p.done + 1 }))
-    }
+    setSketchBulkProgress({ done: 0, total: 0 })
+    setSketchMsg(`📂 正在掃描資料夾內容…（共 ${files.length} 個檔案）`)
+    try {
+      const IMAGE_OR_PDF = /\.(jpe?g|png|gif|webp|bmp|pdf)$/i
+      const ORDER_PATTERN = /SO\d+/i
+      const ITEM_FOLDER_PATTERN = /^#0*(\d+)/ // 品項資料夾以 #項號 開頭，如「#1透明拼板壓克力立牌…」
 
-    if (urlsByRowKey.size > 0) {
-      const next: SheetRow[] = sheetRows.map(r =>
-        r.row_key && urlsByRowKey.has(r.row_key)
-          ? { ...r, sketch_urls: urlsByRowKey.get(r.row_key)!, sketch_url: urlsByRowKey.get(r.row_key)![0] }
-          : r
-      )
-      setSheetRows(next)
-      try {
+      const filesByKey = new Map<string, File[]>()
+      for (const file of Array.from(files)) {
+        const relPath = (file as unknown as { webkitRelativePath?: string }).webkitRelativePath || file.name
+        const segments = relPath.split('/')
+        const fileName = segments[segments.length - 1]
+        if (!IMAGE_OR_PDF.test(fileName)) continue
+        if (!fileName.includes('商品示意圖')) continue
+
+        // 找訂單資料夾（含 SO 單號的路徑片段）
+        const orderIdx = segments.findIndex(seg => ORDER_PATTERN.test(seg))
+        if (orderIdx === -1) continue
+        const orderMatch = segments[orderIdx].match(ORDER_PATTERN)
+        if (!orderMatch) continue
+        const orderNumber = orderMatch[0].toUpperCase()
+
+        // 找訂單資料夾之後、以 #項號 開頭的品項資料夾
+        let itemNumber: number | null = null
+        for (let i = orderIdx + 1; i < segments.length - 1; i++) {
+          const m = segments[i].match(ITEM_FOLDER_PATTERN)
+          if (m) { itemNumber = parseInt(m[1], 10); break }
+        }
+        if (itemNumber === null) continue
+
+        // 品項資料夾跟檔案之間必須經過「印刷」，且不能經過「美編」
+        const middleSegments = segments.slice(orderIdx + 1, segments.length - 1)
+        if (!middleSegments.includes('印刷')) continue
+        if (middleSegments.includes('美編')) continue
+
+        const key = `${orderNumber}#${itemNumber}`
+        const arr = filesByKey.get(key) ?? []
+        arr.push(file)
+        filesByKey.set(key, arr)
+      }
+      if (filesByKey.size === 0) {
+        setSketchMsg('❌ 這個資料夾裡沒有找到符合「訂單資料夾 / #項號資料夾 / 印刷 / 商品示意圖⋯」結構的檔案')
+        return
+      }
+
+      const targets = sheetRows.filter(r => {
+        if (getSketchUrls(r).length > 0) return false // 已經有示意圖的列不覆蓋，避免蓋掉先前人工核對過的結果
+        const lineNo = r.match_line_no || r.line_no_input || ''
+        if (!r.order_number || !lineNo) return false
+        return filesByKey.has(`${r.order_number.toUpperCase()}#${parseInt(lineNo, 10)}`)
+      })
+      if (targets.length === 0) {
+        setSketchMsg('ℹ️ 沒有可自動比對的列（可能都已經有示意圖，或這份出單表沒有符合的訂單）')
+        return
+      }
+
+      setSketchMsg('')
+      setSketchBulkProgress({ done: 0, total: targets.length })
+      const urlsByRowKey = new Map<string, string[]>()
+      for (const row of targets) {
+        const lineNo = row.match_line_no || row.line_no_input || ''
+        const matchedFiles = filesByKey.get(`${row.order_number.toUpperCase()}#${parseInt(lineNo, 10)}`) ?? []
+        if (matchedFiles.length === 0 || !row.row_key) continue
+        const urls: string[] = []
+        for (const file of matchedFiles) {
+          try {
+            const url = await uploadSketchFile(row.order_number, lineNo, file)
+            urls.push(url)
+          } catch (e) {
+            console.error(`示意圖上傳失敗（${row.order_number}#${lineNo}）：`, e)
+          }
+        }
+        if (urls.length > 0) urlsByRowKey.set(row.row_key, urls)
+        setSketchBulkProgress(p => ({ ...p, done: p.done + 1 }))
+      }
+
+      if (urlsByRowKey.size > 0) {
+        const next: SheetRow[] = sheetRows.map(r =>
+          r.row_key && urlsByRowKey.has(r.row_key)
+            ? { ...r, sketch_urls: urlsByRowKey.get(r.row_key)!, sketch_url: urlsByRowKey.get(r.row_key)![0] }
+            : r
+        )
+        setSheetRows(next)
         const res = await fetch('/api/argoerp/daily-order-sheet', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -3355,14 +3358,15 @@ export default function DailyOrderSheetPage() {
         if (!res.ok || !j.success) throw new Error(j.error || `HTTP ${res.status}`)
         const totalImgs = Array.from(urlsByRowKey.values()).reduce((s, a) => s + a.length, 0)
         setSketchMsg(`✅ 已自動比對 ${urlsByRowKey.size} / ${targets.length} 筆列（共 ${totalImgs} 張示意圖）`)
-      } catch (e) {
-        setSketchMsg(`❌ 存回出單表失敗：${e instanceof Error ? e.message : String(e)}`)
+      } else {
+        setSketchMsg('❌ 全部上傳失敗，請檢查網路後重試')
       }
-    } else {
-      setSketchMsg('❌ 全部上傳失敗，請檢查網路後重試')
+    } catch (e) {
+      setSketchMsg(`❌ 自動比對發生錯誤：${e instanceof Error ? e.message : String(e)}`)
+    } finally {
+      setSketchBulkMatching(false)
+      setTimeout(() => setSketchMsg(''), 6000)
     }
-    setSketchBulkMatching(false)
-    setTimeout(() => setSketchMsg(''), 6000)
   }, [sheetRows, selectedDate, currentRawText, uploadSketchFile, getSketchUrls])
 
   const handleChangeFactory = useCallback((idx: number, factory: 'T' | 'C' | 'O') => {
@@ -3545,7 +3549,9 @@ export default function DailyOrderSheetPage() {
                   className="px-4 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 disabled:opacity-50 text-slate-300 text-sm font-medium transition-colors"
                   title="選一次本機/內網共用資料夾，依「SO單號#項號」自動比對出這份出單表裡還沒有示意圖的列並存入"
                 >
-                  {sketchBulkMatching ? `📁 比對中… ${sketchBulkProgress.done}/${sketchBulkProgress.total}` : '📁 自動比對示意圖'}
+                  {sketchBulkMatching
+                    ? (sketchBulkProgress.total > 0 ? `📁 上傳中… ${sketchBulkProgress.done}/${sketchBulkProgress.total}` : '📁 掃描資料夾中…')
+                    : '📁 自動比對示意圖'}
                 </button>
                 {sketchMsg && <span className="text-xs text-slate-300">{sketchMsg}</span>}
                 <button
