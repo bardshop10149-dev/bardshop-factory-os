@@ -94,7 +94,7 @@ export default function ProductionNoticeGroupSettings() {
       <h1 className="text-3xl font-bold text-white mb-6">產期告示群組設定</h1>
       <div className="mb-8 p-4 bg-slate-900 border border-slate-700 rounded-xl">
         <h2 className="text-xl font-bold text-orange-400 mb-4">新增群組</h2>
-        <div className="flex gap-4 items-end">
+        <div className="flex flex-wrap gap-4 items-end">
           <div className="flex flex-col w-96">
             <label className="block text-slate-300 mb-1">群組名稱</label>
             <input type="text" className="bg-slate-800 border border-slate-600 rounded px-3 py-2 text-white w-full" value={newGroup.name} onChange={e => setNewGroup(g => ({ ...g, name: e.target.value }))} />
@@ -122,6 +122,7 @@ export default function ProductionNoticeGroupSettings() {
       </div>
       <div className="bg-slate-900 border border-slate-700 rounded-xl p-6">
         <h2 className="text-xl font-bold text-cyan-400 mb-6">群組列表</h2>
+        <div className="overflow-x-auto">
         <table className="w-full text-left text-sm text-slate-400">
           <thead className="bg-slate-950 text-slate-200 uppercase font-mono text-xs">
             <tr>
@@ -151,6 +152,7 @@ export default function ProductionNoticeGroupSettings() {
             ))}
           </tbody>
         </table>
+        </div>
       </div>
     </div>
   );

@@ -134,7 +134,7 @@ export default function ProductionNoticeSettings() {
     <div className="p-8 max-w-full mx-auto">
       <h1 className="text-3xl font-bold text-white mb-6">產期告示設定</h1>
       {/* ...existing code... */}
-      <div className="flex items-center mb-4 gap-4">
+      <div className="flex flex-wrap items-center mb-4 gap-4">
         <input
           type="text"
           className="bg-slate-800 border border-slate-600 rounded px-3 py-1.5 text-white w-64"
@@ -190,6 +190,7 @@ export default function ProductionNoticeSettings() {
             Debug: paged.length={paged.length}, totalPages={totalPages}, page={page}, blockStart={blockStart}, blockEnd={blockEnd}
           </div>
       </div>
+      <div className="overflow-x-auto">
       <table className="w-full text-left text-sm text-slate-400">
         <thead className="bg-slate-950 text-slate-200 uppercase font-mono text-xs">
           <tr>
@@ -232,6 +233,7 @@ export default function ProductionNoticeSettings() {
           })}
         </tbody>
       </table>
+      </div>
     </div>
   );
 }

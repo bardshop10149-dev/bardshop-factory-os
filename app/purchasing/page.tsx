@@ -571,11 +571,11 @@ export default function PurchasingPage() {
   return (
     <main className="min-h-screen bg-slate-950 text-white">
       {/* ─── Header ─── */}
-      <div className="border-b border-slate-800 bg-slate-900/60 backdrop-blur-sm px-4 py-3 flex items-center gap-4">
+      <div className="border-b border-slate-800 bg-slate-900/60 backdrop-blur-sm px-4 py-3 flex flex-wrap items-center gap-x-4 gap-y-2">
         <Link href="/" className="text-xs text-slate-500 hover:text-slate-300 transition-colors shrink-0">← 回首頁</Link>
-        <h1 className="text-sm font-bold text-white">採購專區</h1>
-        <span className="text-[10px] text-slate-600">OPEN 採購單追蹤（每小時自 ARGO 同步）</span>
-        <div className="ml-auto flex items-center gap-3">
+        <h1 className="text-sm font-bold text-white shrink-0 whitespace-nowrap">採購專區</h1>
+        <span className="text-[10px] text-slate-600 whitespace-nowrap">OPEN 採購單追蹤（每小時自 ARGO 同步）</span>
+        <div className="ml-auto flex flex-wrap items-center gap-3">
           {msg && <span className="text-xs text-rose-300">{msg}</span>}
           {/* 查詢耗時（診斷用）：client=按下到上畫面、伺服器=後端組裝；差值大代表卡在網路傳輸 */}
           {queryMs && (

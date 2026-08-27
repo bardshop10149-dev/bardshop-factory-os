@@ -205,18 +205,19 @@ export default function QaHandlePage() {
       ) : pendingReports.length === 0 ? (
         <div className="text-slate-400">目前沒有待處理的異常單</div>
       ) : (
-        <table className="w-full text-left text-sm text-slate-300 mb-6">
+        <div className="overflow-x-auto mb-6">
+        <table className="w-full min-w-[900px] text-left text-sm text-slate-300">
           <thead className="bg-slate-950 text-slate-200 uppercase text-xs font-mono">
             <tr>
-              <th className="p-3">日期</th>
-              <th className="p-3">相關單號</th>
-              <th className="p-3">品項</th>
-              <th className="p-3">異常分類</th>
-              <th className="p-3">異常回報</th>
-              <th className="p-3">異常處理</th>
-              <th className="p-3">異常原因</th>
-              <th className="p-3">附件</th>
-              <th className="p-3">操作</th>
+              <th className="p-3 whitespace-nowrap">日期</th>
+              <th className="p-3 whitespace-nowrap">相關單號</th>
+              <th className="p-3 whitespace-nowrap">品項</th>
+              <th className="p-3 whitespace-nowrap">異常分類</th>
+              <th className="p-3 whitespace-nowrap">異常回報</th>
+              <th className="p-3 whitespace-nowrap">異常處理</th>
+              <th className="p-3 whitespace-nowrap">異常原因</th>
+              <th className="p-3 whitespace-nowrap">附件</th>
+              <th className="p-3 whitespace-nowrap">操作</th>
             </tr>
           </thead>
           <tbody>
@@ -263,6 +264,7 @@ export default function QaHandlePage() {
             ))}
           </tbody>
         </table>
+        </div>
       )}
       {editId && (
         <div className="bg-slate-900 border border-slate-700 rounded-xl p-6 space-y-4">
