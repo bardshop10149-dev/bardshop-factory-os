@@ -21,6 +21,7 @@ export type AuthedMember = {
   authUserId: string
   email: string
   realName: string | null
+  department: string | null
   isAdmin: boolean
   permissions: string[]
 }
@@ -64,29 +65,25 @@ export async function guardAuth(): Promise<Guarded> {
   }
   const authUser = userData.user
 
-  // 角色 / 權限以 DB 為準:先用 auth_user_id,再退回 email(與 lib/logger.ts 一致)。
-  let member: {
+  // 角色 / 權限以 DB 為準:以 auth_user_id 或 email 任一符合(單一查詢，
+  // 取代原本「先查 auth_user_id、沒找到才退回查 email」的兩次序列查詢，
+  // 省下一次 Supabase 網路往返——這條路徑掛在每個受保護 API 的最前面，
+  // 是登入後每次進站「權限判讀」明顯延遲的主因之一)。
+  const orFilter = authUser.email
+    ? `auth_user_id.eq.${authUser.id},email.eq.${authUser.email}`
+    : `auth_user_id.eq.${authUser.id}`
+  const { data: members } = await admin
+    .from('members')
+    .select('email, real_name, department, is_admin, permissions')
+    .or(orFilter)
+    .limit(1)
+  const member = members?.[0] as {
     email: string | null
     real_name: string | null
+    department: string | null
     is_admin: boolean | null
     permissions: unknown
-  } | null = null
-
-  const byId = await admin
-    .from('members')
-    .select('email, real_name, is_admin, permissions')
-    .eq('auth_user_id', authUser.id)
-    .maybeSingle()
-  member = byId.data
-
-  if (!member && authUser.email) {
-    const byEmail = await admin
-      .from('members')
-      .select('email, real_name, is_admin, permissions')
-      .eq('email', authUser.email)
-      .maybeSingle()
-    member = byEmail.data
-  }
+  } | undefined
 
   if (!member) return deny(403, '找不到對應成員，請聯絡管理員')
 
@@ -96,6 +93,7 @@ export async function guardAuth(): Promise<Guarded> {
       authUserId: authUser.id,
       email: member.email ?? authUser.email ?? '',
       realName: member.real_name ?? null,
+      department: member.department ?? null,
       isAdmin: Boolean(member.is_admin),
       permissions: Array.isArray(member.permissions)
         ? (member.permissions as string[])

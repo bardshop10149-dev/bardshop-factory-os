@@ -1,6 +1,5 @@
 import { NextResponse } from 'next/server'
 import { guardAuth } from '@/lib/requireAuth'
-import { getSupabaseAdminClient } from '@/lib/supabaseAdmin'
 import { derivePermissions } from '@/lib/authShared'
 
 export const dynamic = 'force-dynamic'
@@ -23,22 +22,11 @@ export async function GET() {
     permissions: g.member.permissions,
   })
 
-  // 額外補 department（部分頁面顯示身分需要；guardAuth 本身不含此欄位）
-  let department: string | null = null
-  try {
-    const { data } = await getSupabaseAdminClient()
-      .from('members')
-      .select('department')
-      .eq('email', g.member.email)
-      .maybeSingle()
-    department = (data?.department as string | null) ?? null
-  } catch { /* 取不到 department 不影響權限判斷 */ }
-
   return NextResponse.json({
     ok: true,
     email: g.member.email,
     real_name: g.member.realName,
-    department,
+    department: g.member.department,
     is_admin: g.member.isAdmin,
     role,
     permissions,

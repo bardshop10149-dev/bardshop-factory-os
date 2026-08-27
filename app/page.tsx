@@ -36,6 +36,12 @@ type MemberDataType = {
   is_admin: boolean | null;
 };
 
+function readCookie(name: string): string | null {
+  if (typeof document === 'undefined') return null
+  const match = document.cookie.match(new RegExp('(?:^|; )' + name + '=([^;]*)'))
+  return match ? decodeURIComponent(match[1]) : null
+}
+
 
 export default function HomePage() {
   const router = useRouter();
@@ -57,6 +63,27 @@ export default function HomePage() {
       setTime(new Date().toLocaleTimeString());
     }, 1000);
     return () => clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    // 樂觀讀取：bardshop-role / bardshop-permissions 是登入時就設好的非 httpOnly cookie
+    // （中介層 proxy.ts 本身也是直接讀這兩顆 cookie 判斷路由權限），先讀出來讓選單立刻
+    // 顯示正確權限，不必等下面 fetchCurrentUser 那次 /api/auth/me 網路來回（實測約
+    // 200~400ms）才有畫面——這只影響「先顯示哪些選單按鈕」，不影響任何實際授權判斷，
+    // 每個真正會動作的 API 一律還是用 guardAuth/guardPermission 在伺服器端重新驗證。
+    const role = readCookie('bardshop-role')
+    const permsRaw = readCookie('bardshop-permissions')
+    if (role) {
+      const permissions = permsRaw ? permsRaw.split(',').map(s => s.trim()).filter(Boolean) : []
+      setMemberPermissions(permissions)
+      setCurrentUser({
+        real_name: null,
+        department: null,
+        email: localStorage.getItem('bardshop_user_email') || null,
+        permissions,
+        is_admin: role === 'admin',
+      })
+    }
   }, []);
 
   useEffect(() => {
