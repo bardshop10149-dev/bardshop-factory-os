@@ -4,7 +4,7 @@ import { guardAuth } from '@/lib/requireAuth'
 
 export const dynamic = 'force-dynamic'
 
-const BUCKET = 'order-sketch-images'
+export const BUCKET = 'order-sketch-images'
 const ALLOWED_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/bmp', 'application/pdf'])
 const MAX_SIZE = 20 * 1024 * 1024 // 20MB，示意圖多為掃描檔/photo，PDF 也可能較大
 
@@ -19,42 +19,56 @@ async function ensureBucket(supabase: ReturnType<typeof getSupabaseAdminClient>)
   }
 }
 
-// POST：上傳一張示意圖/PDF，回傳公開網址（不寫回出單表——由前端拿到網址後自行決定寫哪一列，
-// 沿用出單表既有「整份 rows 存回」的儲存模式，這裡只單純負責檔案上傳）
+// POST：核發一次性簽名上傳網址，讓瀏覽器直接把檔案傳去 Supabase Storage，不經過
+// 這台伺服器的 Serverless Function——Vercel 的 Function 請求本文上限約 4.5MB，示意圖
+// 掃描檔／照片常常超過，直接把檔案 POST 到這支 API 會被 Vercel 擋在最前面回傳非 JSON
+// 的錯誤頁（前端會看到「不是有效的 JSON」）。改成只傳檔名/類型等極小的 JSON 過來，
+// 換回簽名網址後由瀏覽器端直接上傳，完全繞開這個限制。
 export async function POST(request: NextRequest) {
   const guard = await guardAuth()
   if (!guard.ok) return guard.res
   try {
-    const formData = await request.formData()
-    const file = formData.get('file')
-    const orderNumber = String(formData.get('order_number') ?? '').trim()
-    const lineNo = String(formData.get('line_no') ?? '').trim()
+    const body = await request.json() as {
+      order_number?: string
+      line_no?: string
+      file_name?: string
+      content_type?: string
+      file_size?: number
+    }
+    const orderNumber = String(body.order_number ?? '').trim()
+    const lineNo = String(body.line_no ?? '').trim()
+    const fileName = String(body.file_name ?? '').trim()
+    const contentType = String(body.content_type ?? '').trim()
+    const fileSize = Number(body.file_size ?? 0)
 
-    if (!(file instanceof File) || file.size === 0) {
-      return NextResponse.json({ success: false, error: '請提供檔案' }, { status: 400 })
+    if (!fileName) {
+      return NextResponse.json({ success: false, error: '請提供檔案名稱' }, { status: 400 })
     }
-    if (!ALLOWED_TYPES.has(file.type)) {
-      return NextResponse.json({ success: false, error: `不支援的檔案類型：${file.type || '未知'}（僅接受圖片或 PDF）` }, { status: 400 })
+    if (!ALLOWED_TYPES.has(contentType)) {
+      return NextResponse.json({ success: false, error: `不支援的檔案類型：${contentType || '未知'}（僅接受圖片或 PDF）` }, { status: 400 })
     }
-    if (file.size > MAX_SIZE) {
+    if (fileSize > MAX_SIZE) {
       return NextResponse.json({ success: false, error: `檔案過大（上限 ${MAX_SIZE / 1024 / 1024}MB）` }, { status: 400 })
     }
 
     const supabase = getSupabaseAdminClient()
     await ensureBucket(supabase)
 
-    const ext = file.name.split('.').pop()?.toLowerCase().replace(/[^a-z0-9]/g, '') || 'bin'
+    const ext = fileName.split('.').pop()?.toLowerCase().replace(/[^a-z0-9]/g, '') || 'bin'
     const safePrefix = `${orderNumber}_${lineNo}`.replace(/[^\w#-]/g, '_') || 'sketch'
     const path = `${safePrefix}_${Date.now()}.${ext}`
-    const arrayBuffer = await file.arrayBuffer()
 
-    const { error: upErr } = await supabase.storage
-      .from(BUCKET)
-      .upload(path, Buffer.from(arrayBuffer), { upsert: false, contentType: file.type })
-    if (upErr) throw upErr
+    const { data, error: signErr } = await supabase.storage.from(BUCKET).createSignedUploadUrl(path)
+    if (signErr || !data) throw signErr || new Error('無法建立簽名上傳網址')
 
     const { data: urlData } = supabase.storage.from(BUCKET).getPublicUrl(path)
-    return NextResponse.json({ success: true, url: urlData.publicUrl })
+    return NextResponse.json({
+      success: true,
+      bucket: BUCKET,
+      path,
+      token: data.token,
+      publicUrl: urlData.publicUrl,
+    })
   } catch (e) {
     const msg = e instanceof Error ? formatSupabaseAdminError(e.message) : String(e)
     return NextResponse.json({ success: false, error: msg }, { status: 500 })

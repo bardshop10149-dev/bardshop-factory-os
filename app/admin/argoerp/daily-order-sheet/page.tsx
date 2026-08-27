@@ -3170,15 +3170,31 @@ export default function DailyOrderSheetPage() {
     return row.sketch_url ? [row.sketch_url] : []
   }, [])
 
+  // 先跟伺服器換一次性簽名上傳網址（這個請求本身只有極小的 JSON，不受 Vercel Serverless
+  // Function 請求本文上限（約 4.5MB）影響），拿到網址後由瀏覽器直接把檔案傳去 Supabase
+  // Storage——示意圖掃描檔/照片動輒好幾 MB，如果讓檔案本體先經過我們的伺服器再轉存，
+  // 超過 4.5MB 就會被 Vercel 擋下，回傳非 JSON 的錯誤頁（「不是有效的 JSON」）
   const uploadSketchFile = useCallback(async (orderNumber: string, lineNo: string, file: File): Promise<string> => {
-    const fd = new FormData()
-    fd.append('file', file)
-    fd.append('order_number', orderNumber)
-    fd.append('line_no', lineNo)
-    const res = await fetch('/api/production/order-sketch', { method: 'POST', body: fd })
-    const j = await res.json() as { success: boolean; url?: string; error?: string }
-    if (!res.ok || !j.success || !j.url) throw new Error(j.error || `上傳失敗（HTTP ${res.status}）`)
-    return j.url
+    const signRes = await fetch('/api/production/order-sketch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        order_number: orderNumber,
+        line_no: lineNo,
+        file_name: file.name,
+        content_type: file.type,
+        file_size: file.size,
+      }),
+    })
+    const signJson = await signRes.json() as { success: boolean; bucket?: string; path?: string; token?: string; publicUrl?: string; error?: string }
+    if (!signRes.ok || !signJson.success || !signJson.bucket || !signJson.path || !signJson.token || !signJson.publicUrl) {
+      throw new Error(signJson.error || `取得上傳網址失敗（HTTP ${signRes.status}）`)
+    }
+    const { error: upErr } = await supabase.storage
+      .from(signJson.bucket)
+      .uploadToSignedUrl(signJson.path, signJson.token, file, { contentType: file.type })
+    if (upErr) throw new Error(upErr.message || '上傳失敗')
+    return signJson.publicUrl
   }, [])
 
   // 存一列的完整示意圖清單（新增/移除/清除皆走這裡，跟其他列狀態異動一致的整份 rows 存回模式）
