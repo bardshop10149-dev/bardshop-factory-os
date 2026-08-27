@@ -3259,22 +3259,31 @@ export default function DailyOrderSheetPage() {
   // 存進 sketch_urls 陣列，預覽時可左右切換瀏覽。
   const sketchFolderInputRef = useRef<HTMLInputElement>(null)
   const [sketchBulkMatching, setSketchBulkMatching] = useState(false)
+  const [sketchBulkPhase, setSketchBulkPhase] = useState<'scanning' | 'uploading'>('scanning')
   const [sketchBulkProgress, setSketchBulkProgress] = useState({ done: 0, total: 0 })
 
   const handleBulkMatchSketchFolder = useCallback(async (files: FileList | null) => {
     if (!files || files.length === 0) return
     // 選好資料夾後立刻給回饋（瀏覽器列舉資料夾內容、尤其是網路磁碟機，可能要花好幾秒到
-    // 好幾十秒，這段時間下面的比對邏輯還沒開始跑，先讓按鈕跟訊息有反應，避免看起來像卡死）
+    // 好幾十秒，這段時間下面的比對邏輯還沒開始跑，先讓按鈕跟訊息有反應，避免看起來像卡死。
+    // 瀏覽器列舉資料夾本身沒有任何進度事件可以監聽（File API 沒有提供），所以「選完資料夾
+    // 到拿到檔案清單」這段真的無法顯示進度，只能等；拿到清單之後的掃描比對就分批處理、
+    // 每批之間讓出主執行緒讓畫面能重繪，才能顯示真實的進度數字。
     setSketchBulkMatching(true)
-    setSketchBulkProgress({ done: 0, total: 0 })
-    setSketchMsg(`📂 正在掃描資料夾內容…（共 ${files.length} 個檔案）`)
+    setSketchBulkPhase('scanning')
+    setSketchBulkProgress({ done: 0, total: files.length })
+    setSketchMsg(`📂 已取得資料夾內容，共 ${files.length} 個檔案，開始掃描…`)
     try {
       const IMAGE_OR_PDF = /\.(jpe?g|png|gif|webp|bmp|pdf)$/i
       const ORDER_PATTERN = /SO\d+/i
       const ITEM_FOLDER_PATTERN = /^#0*(\d+)/ // 品項資料夾以 #項號 開頭，如「#1透明拼板壓克力立牌…」
 
       const filesByKey = new Map<string, File[]>()
-      for (const file of Array.from(files)) {
+      const allFiles = Array.from(files)
+      const SCAN_CHUNK_SIZE = 300
+      for (let start = 0; start < allFiles.length; start += SCAN_CHUNK_SIZE) {
+        const chunk = allFiles.slice(start, start + SCAN_CHUNK_SIZE)
+        for (const file of chunk) {
         const relPath = (file as unknown as { webkitRelativePath?: string }).webkitRelativePath || file.name
         const segments = relPath.split('/')
         const fileName = segments[segments.length - 1]
@@ -3305,6 +3314,10 @@ export default function DailyOrderSheetPage() {
         const arr = filesByKey.get(key) ?? []
         arr.push(file)
         filesByKey.set(key, arr)
+        }
+        setSketchBulkProgress({ done: Math.min(start + SCAN_CHUNK_SIZE, allFiles.length), total: allFiles.length })
+        // 讓出主執行緒一個 tick，讓按鈕上的掃描進度數字有機會重繪，避免大資料夾時畫面看起來凍結
+        await new Promise(resolve => setTimeout(resolve, 0))
       }
       if (filesByKey.size === 0) {
         setSketchMsg('❌ 這個資料夾裡沒有找到符合「訂單資料夾 / #項號資料夾 / 印刷 / 商品示意圖⋯」結構的檔案')
@@ -3323,6 +3336,7 @@ export default function DailyOrderSheetPage() {
       }
 
       setSketchMsg('')
+      setSketchBulkPhase('uploading')
       setSketchBulkProgress({ done: 0, total: targets.length })
       const urlsByRowKey = new Map<string, string[]>()
       for (const row of targets) {
@@ -3550,7 +3564,9 @@ export default function DailyOrderSheetPage() {
                   title="選一次本機/內網共用資料夾，依「SO單號#項號」自動比對出這份出單表裡還沒有示意圖的列並存入"
                 >
                   {sketchBulkMatching
-                    ? (sketchBulkProgress.total > 0 ? `📁 上傳中… ${sketchBulkProgress.done}/${sketchBulkProgress.total}` : '📁 掃描資料夾中…')
+                    ? (sketchBulkPhase === 'scanning'
+                        ? `📁 掃描中… ${sketchBulkProgress.done}/${sketchBulkProgress.total}`
+                        : `📁 上傳中… ${sketchBulkProgress.done}/${sketchBulkProgress.total}`)
                     : '📁 自動比對示意圖'}
                 </button>
                 {sketchMsg && <span className="text-xs text-slate-300">{sketchMsg}</span>}
