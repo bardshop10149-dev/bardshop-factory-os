@@ -1,127 +1,51 @@
 'use client'
 
-// 異常回報單（業務美編版）。
-// 自 app/admin/production/anomaly/report/page.tsx 複製而來，之後將依業務美編
-// 的需求各自演進——兩頁刻意不共用，改這裡不會動到原本的異常回報單。
+// 異常回報單（業務美編・尚未生產）
+//
+// 給業務／美編在「訂單尚未進入生產」階段回報異常（圖檔、套版、示意圖等）。
+// 與 app/admin/production/anomaly/report/page.tsx（生產階段的異常回報單）
+// 刻意不共用程式碼：這頁是全新實作，只有視覺格式接近，後續依業務美編需求各自演進。
+//
+// 資料流與既有流程相容：
+// - 選項同樣讀 qa_anomaly_option_items（分類／部門／人員連動）
+// - 圖片同樣上傳 anomaly-attachments bucket 的 reports/ 路徑
+// - 送出同樣寫入 schedule_anomaly_reports 且 report_type='qa'
+//   （下游「異常單處理／異常紀錄表」都以 report_type='qa' 過濾，用別的值會看不到；
+//     資料庫也有 report_type 的 CHECK 約束擋未知值）
+// - 「尚未生產」目前以異常原因自動前綴【尚未生產】標記，之後要升級成正式欄位再一起改
 
 import Link from 'next/link'
-import { useCallback, useEffect, useRef, useState } from 'react'
-import { QRCodeSVG } from 'qrcode.react'
+import { useEffect, useState } from 'react'
 import { supabase } from '../../../lib/supabaseClient'
 
-interface OptionItem {
+interface PersonnelOption {
   option_value: string
   department_value: string
 }
 
-const DEFAULT_PERSONNEL_OPTIONS = ['王小明', '李小華', '陳建宏', '課長A', '主管B', '品保C', '作業員A', '作業員B', '技術員C']
-const DEFAULT_CATEGORY_OPTIONS = ['品質異常', '製程異常', '資料異常']
-const DEFAULT_DEPARTMENT_OPTIONS = ['品保部', '生產部', '工程部']
-
+const PRE_PRODUCTION_TAG = '【尚未生產】'
 const getTodayDateInput = () => new Date().toISOString().slice(0, 10)
 
-const getReadableErrorMessage = (err: unknown) => {
-  if (err instanceof Error && err.message) return err.message
-
-  if (typeof err === 'object' && err !== null) {
-    const maybeError = err as {
-      message?: unknown
-      details?: unknown
-      hint?: unknown
-      code?: unknown
-    }
-
-    const parts = [
-      typeof maybeError.message === 'string' ? maybeError.message : '',
-      typeof maybeError.details === 'string' ? maybeError.details : '',
-      typeof maybeError.hint === 'string' ? maybeError.hint : '',
-      typeof maybeError.code === 'string' ? `code: ${maybeError.code}` : '',
-    ].filter(Boolean)
-
-    if (parts.length > 0) return parts.join(' | ')
-  }
-
-  return '未知錯誤'
-}
-
-const isQaReportTypeConstraintError = (err: unknown) => {
-  if (typeof err !== 'object' || err === null) return false
-  const maybeError = err as { message?: unknown; code?: unknown }
-  const message = typeof maybeError.message === 'string' ? maybeError.message : ''
-  const code = typeof maybeError.code === 'string' ? maybeError.code : ''
-  return code === '23514' && message.includes('schedule_anomaly_reports_report_type_check')
-}
-
-export default function QaReportFormPage() {
+export default function SalesDesignAnomalyReportPage() {
+  // ── 表單欄位 ──────────────────────────────────────────────
   const [createdDate, setCreatedDate] = useState(getTodayDateInput())
   const [orderNumber, setOrderNumber] = useState('')
   const [itemCode, setItemCode] = useState('')
   const [itemName, setItemName] = useState('')
-  const [lossQty, setLossQty] = useState('')
-  const [status] = useState<'pending'>('pending')
-  const [reason, setReason] = useState('')
+  const [category, setCategory] = useState('')
   const [reporterDepartment, setReporterDepartment] = useState('')
   const [reporter, setReporter] = useState('')
   const [handlerDepartment, setHandlerDepartment] = useState('')
   const [handlerPersonnel, setHandlerPersonnel] = useState('')
-  const [personnelOptions, setPersonnelOptions] = useState<OptionItem[]>([])
-  const [categoryOptions, setCategoryOptions] = useState<string[]>(DEFAULT_CATEGORY_OPTIONS)
-  const [departmentOptions, setDepartmentOptions] = useState<string[]>(DEFAULT_DEPARTMENT_OPTIONS)
-  const [category, setCategory] = useState('')
-  const [submitting, setSubmitting] = useState(false)
+  const [reason, setReason] = useState('')
   const [attachFiles, setAttachFiles] = useState<File[]>([])
-  const [previewUrls, setPreviewUrls] = useState<string[]>([])
-  const [mobileSessionId, setMobileSessionId] = useState('')
-  const [showQrModal, setShowQrModal] = useState(false)
-  const [mobileUrls, setMobileUrls] = useState<string[]>([])
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
-  const [notifyPreview, setNotifyPreview] = useState<string | null>(null)
-  const [copied, setCopied] = useState(false)
-  // MOT 製令自動帶出：查 erp_mo_lines 導出 SO 單號與品項，再查 erp_so_lines 帶品名
-  const [moLookup, setMoLookup] = useState<{ mot: string; so: string; itemCode: string; itemName: string; orderQty: number | null } | null>(null)
-  const [moLookupState, setMoLookupState] = useState<'idle' | 'loading' | 'notfound'>('idle')
-  // QA 部門欄位：以 reporterDepartment 為主
-  // handlers 欄位補上，預設為單一人員
-  const handlers = handlerPersonnel ? [handlerPersonnel] : [];
+  const [submitting, setSubmitting] = useState(false)
+  const [doneMsg, setDoneMsg] = useState('')
 
-  const startMobileSession = useCallback(() => {
-    const sid = `${Date.now()}_${Math.random().toString(36).slice(2, 10)}`
-    setMobileSessionId(sid)
-    setShowQrModal(true)
-    setMobileUrls([])
-  }, [])
-
-  useEffect(() => {
-    if (!mobileSessionId || !showQrModal) {
-      if (pollRef.current) clearInterval(pollRef.current)
-      return
-    }
-    const poll = async () => {
-      const { data } = await supabase.storage
-        .from('anomaly-attachments')
-        .list(`mobile/${mobileSessionId}`)
-      if (data && data.length > 0) {
-        const urls = data
-          .filter((f) => f.name !== '.emptyFolderPlaceholder')
-          .map((f) => {
-            const { data: urlData } = supabase.storage
-              .from('anomaly-attachments')
-              .getPublicUrl(`mobile/${mobileSessionId}/${f.name}`)
-            return urlData.publicUrl
-          })
-        setMobileUrls(urls)
-      }
-    }
-    void poll()
-    pollRef.current = setInterval(() => void poll(), 3000)
-    return () => { if (pollRef.current) clearInterval(pollRef.current) }
-  }, [mobileSessionId, showQrModal])
-
-  const confirmMobilePhotos = () => {
-    setPreviewUrls((prev) => [...prev, ...mobileUrls])
-    setShowQrModal(false)
-    if (pollRef.current) clearInterval(pollRef.current)
-  }
+  // ── 選項（與既有異常單同一來源）───────────────────────────
+  const [categoryOptions, setCategoryOptions] = useState<string[]>([])
+  const [departmentOptions, setDepartmentOptions] = useState<string[]>([])
+  const [personnelOptions, setPersonnelOptions] = useState<PersonnelOption[]>([])
 
   useEffect(() => {
     const fetchOptions = async () => {
@@ -129,567 +53,251 @@ export default function QaReportFormPage() {
         .from('qa_anomaly_option_items')
         .select('option_type, option_value, department_value')
         .order('option_value', { ascending: true })
-
       if (error) {
         console.error(error)
         return
       }
-
-      const rows = (data as Array<{ option_type: string; option_value: string; department_value?: string }>) || []
-      const personnel = rows
-        .filter((item) => item.option_type === 'personnel')
-        .map((item) => ({
-          option_value: item.option_value,
-          department_value: item.department_value || '',
-        }))
-        .filter((item) => typeof item.option_value === 'string' && item.option_value.trim().length > 0)
-
-      const categories = rows
-        .filter((item) => item.option_type === 'category')
-        .map((item) => item.option_value)
-        .filter((value) => typeof value === 'string' && value.trim().length > 0)
-
-      const departments = rows
-        .filter((item) => item.option_type === 'department')
-        .map((item) => item.option_value)
-        .filter((value) => typeof value === 'string' && value.trim().length > 0)
-
-      setPersonnelOptions(personnel.length ? personnel : DEFAULT_PERSONNEL_OPTIONS.map(v => ({ option_value: v, department_value: '' })))
-      setCategoryOptions(categories.length ? categories : DEFAULT_CATEGORY_OPTIONS)
-      setDepartmentOptions(departments.length ? departments : DEFAULT_DEPARTMENT_OPTIONS)
+      const rows = (data as Array<{ option_type: string; option_value: string; department_value?: string }>) ?? []
+      setCategoryOptions(rows.filter((r) => r.option_type === 'category').map((r) => r.option_value).filter(Boolean))
+      setDepartmentOptions(rows.filter((r) => r.option_type === 'department').map((r) => r.option_value).filter(Boolean))
+      setPersonnelOptions(
+        rows
+          .filter((r) => r.option_type === 'personnel' && r.option_value?.trim())
+          .map((r) => ({ option_value: r.option_value, department_value: r.department_value || '' })),
+      )
     }
-
     void fetchOptions()
   }, [])
 
-  const buildLineMessage = () => {
-    const now = new Date().toLocaleString('zh-TW', { timeZone: 'Asia/Taipei' })
-    const lines = [
-      '\ud83d\udea8 \u3010\u7570\u5e38\u55ae\u901a\u77e5\u3011',
-      '',
-      `\ud83d\udccb \u5de5\u55ae\u7de8\u865f\uff1a${orderNumber.trim() || '-'}`,
-      `\ud83d\udd22 \u54c1\u9805\u7de8\u78bc\uff1a${itemCode.trim() || '-'}`,
-      `\ud83d\udce6 \u54c1\u540d/\u540d\u7a31\uff1a${itemName.trim() || '-'}`,
-      `\u26a0\ufe0f \u7570\u5e38\u539f\u56e0\uff1a${reason.trim() || '-'}`,
-      `\ud83c\udff7\ufe0f \u5206\u985e\uff1a${category || '-'}`,
-      `\ud83c\udfe2 \u56de\u5831\u90e8\u9580\uff1a${reporterDepartment.trim() || '-'}`,
-      `\ud83d\udc64 \u56de\u5831\u4eba\u54e1\uff1a${reporter.trim() || '-'}`,
-      `\ud83c\udfed \u8655\u7406\u90e8\u9580\uff1a${handlerDepartment.trim() || '-'}`,
-      `\ud83d\udd27 \u8655\u7406\u4eba\u54e1\uff1a${handlers.join('\u3001') || '-'}`,
-      `\ud83d\udccc \u72c0\u614b\uff1a\ud83d\udd34 \u5f85\u8655\u7406`,
-      `\ud83d\udd50 \u901a\u77e5\u6642\u9593\uff1a${now}`,
-    ]
-    return lines.join('\n')
-  }
+  const personnelOf = (dept: string) => personnelOptions.filter((p) => !dept || p.department_value === dept)
 
-  const handleCopyNotify = async () => {
-    if (!notifyPreview) return
-    try {
-      await navigator.clipboard.writeText(notifyPreview)
-      setCopied(true)
-      setTimeout(() => setCopied(false), 2000)
-    } catch {
-      const textarea = document.createElement('textarea')
-      textarea.value = notifyPreview
-      document.body.appendChild(textarea)
-      textarea.select()
-      document.execCommand('copy')
-      document.body.removeChild(textarea)
-      setCopied(true)
-      setTimeout(() => setCopied(false), 2000)
-    }
-  }
-
-  // 輸入 MOT 開頭單號時自動查詢製令並帶出 SO 單號／品項編碼／品名
-  useEffect(() => {
-    const raw = orderNumber.trim().toUpperCase()
-    if (!raw.startsWith('MOT')) {
-      setMoLookup(null)
-      setMoLookupState('idle')
-      return
-    }
-    let cancelled = false
-    setMoLookupState('loading')
-    const timer = setTimeout(async () => {
-      try {
-        const exact = await supabase
-          .from('erp_mo_lines')
-          .select('project_id, source_order, mbp_part, order_qty')
-          .eq('project_id', raw)
-          .limit(1)
-        let row = (exact.data || [])[0] as { project_id: string; source_order: string | null; mbp_part: string | null; order_qty: number | null } | undefined
-        if (!row) {
-          // 未含行號時以前綴查第一行（例：MOT260714007 → MOT26071400701）
-          const prefix = await supabase
-            .from('erp_mo_lines')
-            .select('project_id, source_order, mbp_part, order_qty')
-            .like('project_id', `${raw}%`)
-            .order('project_id')
-            .limit(1)
-          row = (prefix.data || [])[0]
-        }
-        if (cancelled) return
-        if (!row || !row.source_order) {
-          setMoLookup(null)
-          setMoLookupState('notfound')
-          return
-        }
-        let name = ''
-        if (row.mbp_part) {
-          const { data: soRows } = await supabase
-            .from('erp_so_lines')
-            .select('description')
-            .eq('project_id', row.source_order)
-            .eq('mbp_part', row.mbp_part)
-            .limit(1)
-          if (cancelled) return
-          name = (soRows?.[0] as { description: string | null } | undefined)?.description || ''
-        }
-        setMoLookup({ mot: raw, so: row.source_order, itemCode: row.mbp_part || '', itemName: name, orderQty: row.order_qty ?? null })
-        setMoLookupState('idle')
-        if (row.mbp_part) setItemCode(row.mbp_part)
-        if (name) setItemName(name)
-      } catch {
-        if (!cancelled) {
-          setMoLookup(null)
-          setMoLookupState('notfound')
-        }
-      }
-    }, 600)
-    return () => {
-      cancelled = true
-      clearTimeout(timer)
-    }
-  }, [orderNumber])
-
+  // ── 送出 ─────────────────────────────────────────────────
   const handleSubmit = async () => {
     if (!orderNumber.trim()) {
       alert('請填寫相關單號')
       return
     }
-
-    if (!reporterDepartment.trim()) {
-      alert('請選擇部門（必填）')
-      return
-    }
-
     if (!reason.trim()) {
       alert('請填寫異常原因')
       return
     }
-
     setSubmitting(true)
+    setDoneMsg('')
     try {
-      // 上傳圖片到 Supabase Storage
-      // Include mobile-uploaded URLs (non-blob URLs already in previewUrls)
-      const uploadedUrls: string[] = previewUrls.filter((u) => !u.startsWith('blob:'))
+      const uploadedUrls: string[] = []
       for (const file of attachFiles) {
         const ext = file.name.split('.').pop()
-        const fileName = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}.${ext}`
-        const filePath = `reports/${fileName}`
-        const { error: uploadError } = await supabase.storage
-          .from('anomaly-attachments')
-          .upload(filePath, file)
+        const filePath = `reports/${Date.now()}_${Math.random().toString(36).slice(2, 8)}.${ext}`
+        const { error: uploadError } = await supabase.storage.from('anomaly-attachments').upload(filePath, file)
         if (uploadError) {
           alert(`圖片上傳失敗：${uploadError.message}`)
-          setSubmitting(false)
           return
         }
-        const { data: urlData } = supabase.storage
-          .from('anomaly-attachments')
-          .getPublicUrl(filePath)
-        uploadedUrls.push(urlData.publicUrl)
+        uploadedUrls.push(supabase.storage.from('anomaly-attachments').getPublicUrl(filePath).data.publicUrl)
       }
 
-      const payload = {
+      const { error } = await supabase.from('schedule_anomaly_reports').insert({
         report_type: 'qa',
-        reason: reason.trim(),
-        status,
-        // 填 MOT 且查得到時存導出的 SO 單號（訂單詳情／缺失單列印均以 SO 對接）
-        order_number: (moLookup?.so || orderNumber).trim(),
+        reason: `${PRE_PRODUCTION_TAG}${reason.trim()}`,
+        status: '待處理',
+        order_number: orderNumber.trim(),
         created_at: createdDate ? `${createdDate}T00:00:00.000Z` : new Date().toISOString(),
         qa_department: reporterDepartment.trim() || null,
         qa_reporter: reporter.trim() || null,
-        qa_handlers: handlers,
+        qa_handlers: handlerPersonnel.trim() ? [handlerPersonnel.trim()] : [],
         qa_category: category || null,
         qa_responsible: [],
         handler_department: handlerDepartment.trim() || null,
         item_code: itemCode.trim() || null,
         item_name: itemName.trim() || null,
-        loss_qty: lossQty === '' ? null : Number(lossQty),
+        loss_qty: null,
         attachments: uploadedUrls,
-      }
-
-      const { error } = await supabase.from('schedule_anomaly_reports').insert(payload)
+      })
       if (error) throw error
 
-      const msg = buildLineMessage()
+      setDoneMsg(`已送出：${orderNumber.trim()}（${PRE_PRODUCTION_TAG.replace(/[【】]/g, '')}異常）`)
       setOrderNumber('')
       setItemCode('')
       setItemName('')
-      setLossQty('')
-      setReason('')
+      setCategory('')
       setReporterDepartment('')
       setReporter('')
       setHandlerDepartment('')
       setHandlerPersonnel('')
-      setCategory('')
+      setReason('')
       setAttachFiles([])
-      setPreviewUrls([])
-      setMobileSessionId('')
-      setMobileUrls([])
       setCreatedDate(getTodayDateInput())
-      setNotifyPreview(msg)
-      setCopied(false)
-    } catch (err: unknown) {
-      if (isQaReportTypeConstraintError(err)) {
-        alert('送出失敗：資料庫尚未允許 report_type=qa。請先執行 sql/20260224_allow_qa_report_type.sql migration。')
-        return
-      }
-      const message = getReadableErrorMessage(err)
-      alert(`送出失敗：${message}`)
+    } catch (err) {
+      alert(`送出失敗：${err instanceof Error ? err.message : String(err)}`)
     } finally {
       setSubmitting(false)
     }
   }
 
+  // ── 樣式（與既有異常單同一套視覺語言）──────────────────────
+  const labelCls = 'block text-sm text-slate-400 mb-1'
+  const inputCls =
+    'w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-white placeholder-slate-600 focus:outline-none focus:border-teal-500'
+
   return (
-    <div className="p-6 md:p-8 max-w-[1000px] mx-auto min-h-screen space-y-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-3xl font-bold text-white tracking-tight">異常回報單（業務美編）</h1>
-          <p className="text-teal-400 mt-1 font-mono text-sm uppercase">QA REPORT FORM</p>
+    <main className="min-h-screen bg-slate-950 text-white px-4 py-8">
+      <div className="max-w-3xl mx-auto">
+        {/* Header */}
+        <div className="flex items-end justify-between mb-6">
+          <div>
+            <h1 className="text-3xl font-bold text-white tracking-tight flex items-center gap-3">
+              異常回報單（業務美編）
+              <span className="px-2 py-0.5 rounded border border-amber-600/60 bg-amber-950/40 text-amber-300 text-sm font-medium">
+                尚未生產
+              </span>
+            </h1>
+            <p className="text-teal-500 text-xs font-mono mt-1 tracking-widest">QA REPORT FORM · PRE-PRODUCTION</p>
+          </div>
+          <Link href="/" className="px-3 py-2 rounded border border-slate-700 text-slate-300 hover:bg-slate-800 text-sm">
+            返回首頁
+          </Link>
         </div>
-        <Link href="/" className="px-3 py-2 rounded border border-slate-700 text-slate-300 hover:bg-slate-800 text-sm">
-          返回首頁
-        </Link>
-      </div>
 
-      <div className="bg-slate-900/60 border border-slate-700 rounded-2xl p-6 space-y-2">
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-          <div>
-            <label className="text-xs text-slate-400">日期</label>
-            <input
-              type="date"
-              value={createdDate}
-              onChange={(e) => setCreatedDate(e.target.value)}
-              className="mt-1 w-full bg-slate-950 border border-slate-700 rounded px-3 py-2 text-white"
-            />
+        {doneMsg && (
+          <div className="mb-4 rounded-lg border border-emerald-800/60 bg-emerald-950/30 px-4 py-3 text-emerald-300 text-sm">
+            ✅ {doneMsg}
           </div>
+        )}
 
-          <div>
-            <label className="text-xs text-slate-400">相關單號（建議填 MOT 製令單號，自動帶出訂單資訊）</label>
-            <input
-              value={orderNumber}
-              onChange={(e) => setOrderNumber(e.target.value)}
-              placeholder="例：MOT26071400701，也可填其他單號"
-              className="mt-1 w-full bg-slate-950 border border-slate-700 rounded px-3 py-2 text-white"
-            />
-            {moLookupState === 'loading' && (
-              <p className="mt-1 text-xs text-slate-400">查詢製令中…</p>
-            )}
-            {moLookup && (
-              <p className="mt-1 text-xs text-emerald-400">
-                已帶出 SO 單號：{moLookup.so}
-                {moLookup.itemCode ? `｜品項：${moLookup.itemCode}` : ''}
-                {moLookup.itemName ? `｜${moLookup.itemName}` : ''}
-                （存檔將使用此 SO 單號）
-              </p>
-            )}
-            {moLookupState === 'notfound' && (
-              <p className="mt-1 text-xs text-amber-400">查無此製令單號，將以輸入值存檔</p>
-            )}
-          </div>
-
-          <div>
-            <label className="text-xs text-slate-400">品項編碼（選填）</label>
-            <input
-              value={itemCode}
-              onChange={(e) => setItemCode(e.target.value)}
-              placeholder="例：A-001"
-              className="mt-1 w-full bg-slate-950 border border-slate-700 rounded px-3 py-2 text-white"
-            />
-          </div>
-
-          <div>
-            <label className="text-xs text-slate-400">品名/名稱（選填）</label>
-            <input
-              value={itemName}
-              onChange={(e) => setItemName(e.target.value)}
-              placeholder="例：產品名稱"
-              className="mt-1 w-full bg-slate-950 border border-slate-700 rounded px-3 py-2 text-white"
-            />
-          </div>
-
-          <div>
-            <label className="text-xs text-slate-400">異常數量（選填）</label>
-            <input
-              type="number"
-              min="0"
-              step="any"
-              value={lossQty}
-              onChange={(e) => setLossQty(e.target.value)}
-              placeholder="缺失導致損失數量"
-              className="mt-1 w-full bg-slate-950 border border-slate-700 rounded px-3 py-2 text-white placeholder:text-slate-500"
-            />
-          </div>
-
-          <div>
-            <label className="text-xs text-slate-400">本單數量（自動帶出）</label>
-            <div className="mt-1 w-full bg-slate-950/60 border border-slate-700 rounded px-3 py-2 text-white" style={{ height: '42px', display: 'flex', alignItems: 'center' }}>
-              {moLookup?.orderQty != null
-                ? <span className="font-bold text-cyan-300">{moLookup.orderQty}</span>
-                : <span className="text-slate-500 text-sm">填入 MOT 製令單號後自動顯示</span>}
+        <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 flex flex-col gap-5">
+          {/* 日期＋單號 */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div>
+              <label className={labelCls}>日期</label>
+              <input type="date" value={createdDate} onChange={(e) => setCreatedDate(e.target.value)} className={inputCls} />
+            </div>
+            <div>
+              <label className={labelCls}>相關單號（SO 訂單號或 MOT 製令號）</label>
+              <input
+                value={orderNumber}
+                onChange={(e) => setOrderNumber(e.target.value)}
+                placeholder="例：SO260804025"
+                className={inputCls}
+              />
             </div>
           </div>
 
-          <div className="md:col-span-2 flex gap-4">
-            <div style={{ width: '50%' }}>
-              <label className="text-xs text-slate-400">異常分類</label>
-              <select
-                value={category}
-                onChange={(e) => setCategory(e.target.value)}
-                className="mt-1 w-full bg-slate-950 border border-slate-700 rounded px-3 py-2 text-white"
-              >
-                <option value="">請選擇</option>
-                {categoryOptions.map((option) => (
-                  <option key={option} value={option}>{option}</option>
-                ))}
-              </select>
+          {/* 品項 */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div>
+              <label className={labelCls}>品項編碼（選填）</label>
+              <input value={itemCode} onChange={(e) => setItemCode(e.target.value)} className={inputCls} />
             </div>
-            <div style={{ width: '50%' }} className="flex flex-col justify-end">
-              <label className="text-xs text-slate-400">狀態</label>
-              <div className="mt-1 w-full">
-                <span className="bg-yellow-400 text-black px-3 py-2 rounded text-xs font-bold w-full block text-center" style={{height:'40px',display:'flex',alignItems:'center',justifyContent:'center'}}>待處理</span>
-              </div>
+            <div>
+              <label className={labelCls}>品名/名稱（選填）</label>
+              <input value={itemName} onChange={(e) => setItemName(e.target.value)} className={inputCls} />
             </div>
           </div>
 
-          <div className="col-span-1">
-            <label className="text-xs text-slate-400">異常回報-部門</label>
-            <select
-              value={reporterDepartment}
-              onChange={(e) => {
-                setReporterDepartment(e.target.value);
-                setReporter('');
-              }}
-              className="mt-1 w-full bg-slate-950 border border-slate-700 rounded px-3 py-2 text-white"
-            >
+          {/* 分類 */}
+          <div>
+            <label className={labelCls}>異常分類</label>
+            <select value={category} onChange={(e) => setCategory(e.target.value)} className={inputCls}>
               <option value="">請選擇</option>
-              {departmentOptions.map((dept) => (
-                <option key={dept} value={dept}>{dept}</option>
+              {categoryOptions.map((c) => (
+                <option key={c} value={c}>{c}</option>
               ))}
             </select>
           </div>
-          <div className="col-span-1">
-            <label className="text-xs text-slate-400">異常回報-人員</label>
-            {reporterDepartment ? (
+
+          {/* 回報者 */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div>
+              <label className={labelCls}>異常回報-部門</label>
               <select
-                value={reporter}
-                onChange={(e) => setReporter(e.target.value)}
-                className="mt-1 w-full bg-slate-950 border border-slate-700 rounded px-3 py-2 text-white"
+                value={reporterDepartment}
+                onChange={(e) => { setReporterDepartment(e.target.value); setReporter('') }}
+                className={inputCls}
               >
                 <option value="">請選擇</option>
-                {personnelOptions.filter(p => p.department_value === reporterDepartment).map((option, idx) => (
-                  <option key={idx} value={option.option_value}>{option.option_value}</option>
+                {departmentOptions.map((d) => (
+                  <option key={d} value={d}>{d}</option>
                 ))}
               </select>
-            ) : (
-              <div className="mt-1 text-slate-500 text-xs">請先選部門</div>
-            )}
+            </div>
+            <div>
+              <label className={labelCls}>異常回報-人員</label>
+              <select value={reporter} onChange={(e) => setReporter(e.target.value)} className={inputCls} disabled={!reporterDepartment}>
+                <option value="">{reporterDepartment ? '請選擇' : '請先選部門'}</option>
+                {personnelOf(reporterDepartment).map((p) => (
+                  <option key={p.option_value} value={p.option_value}>{p.option_value}</option>
+                ))}
+              </select>
+            </div>
           </div>
-          <div className="col-span-1">
-            <label className="text-xs text-slate-400">異常處理-部門</label>
-            <select
-              value={handlerDepartment}
-              onChange={e => {
-                setHandlerDepartment(e.target.value);
-                setHandlerPersonnel('');
-              }}
-              className="mt-1 w-full bg-slate-950 border border-slate-700 rounded px-3 py-2 text-white"
-            >
-              <option value="">請選擇</option>
-              {departmentOptions.map((dept) => (
-                <option key={dept} value={dept}>{dept}</option>
-              ))}
-            </select>
-          </div>
-          <div className="col-span-1">
-            <label className="text-xs text-slate-400">異常處理-人員</label>
-            {handlerDepartment ? (
+
+          {/* 處理者 */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div>
+              <label className={labelCls}>異常處理-部門</label>
+              <select
+                value={handlerDepartment}
+                onChange={(e) => { setHandlerDepartment(e.target.value); setHandlerPersonnel('') }}
+                className={inputCls}
+              >
+                <option value="">請選擇</option>
+                {departmentOptions.map((d) => (
+                  <option key={d} value={d}>{d}</option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className={labelCls}>異常處理-人員</label>
               <select
                 value={handlerPersonnel}
-                onChange={e => setHandlerPersonnel(e.target.value)}
-                className="mt-1 w-full bg-slate-950 border border-slate-700 rounded px-3 py-2 text-white"
+                onChange={(e) => setHandlerPersonnel(e.target.value)}
+                className={inputCls}
+                disabled={!handlerDepartment}
               >
-                <option value="">請選擇</option>
-                {personnelOptions.filter(p => p.department_value === handlerDepartment).map((option, i) => (
-                  <option key={i} value={option.option_value}>{option.option_value}</option>
+                <option value="">{handlerDepartment ? '請選擇' : '請先選部門'}</option>
+                {personnelOf(handlerDepartment).map((p) => (
+                  <option key={p.option_value} value={p.option_value}>{p.option_value}</option>
                 ))}
               </select>
-            ) : (
-              <div className="mt-1 text-slate-500 text-xs">請先選部門</div>
-            )}
+            </div>
           </div>
-          {/* 已移除多餘的先選部門再選人員空格 */}
-        </div>
 
-        <div>
-          {/* 已移除多餘的異常處理部門與人員欄位 */}
+          {/* 原因 */}
+          <div>
+            <label className={labelCls}>異常原因（送出時自動加上 {PRE_PRODUCTION_TAG} 標記）</label>
+            <textarea
+              value={reason}
+              onChange={(e) => setReason(e.target.value)}
+              rows={4}
+              placeholder="請填寫異常描述..."
+              className={inputCls}
+            />
+          </div>
 
-          {/* 異常分類欄位已移至狀態欄位，避免重複 */}
-        </div>
-
-        <div>
-          <label className="text-xs text-slate-400">異常原因（手填）</label>
-          <textarea
-            value={reason}
-            onChange={(e) => setReason(e.target.value)}
-            rows={4}
-            placeholder="請填寫異常描述..."
-            className="mt-1 w-full bg-slate-950 border border-slate-700 rounded px-3 py-2 text-white"
-          />
-        </div>
-
-        <div>
-          <label className="text-xs text-slate-400">上傳圖片（選填，可多張）</label>
-          <div className="mt-1 flex gap-2">
+          {/* 圖片 */}
+          <div>
+            <label className={labelCls}>上傳圖片（選填，可多張）</label>
             <input
               type="file"
               accept="image/*"
               multiple
-              onChange={(e) => {
-                const files = Array.from(e.target.files || [])
-                setAttachFiles((prev) => [...prev, ...files])
-                const urls = files.map((f) => URL.createObjectURL(f))
-                setPreviewUrls((prev) => [...prev, ...urls])
-              }}
-              className="flex-1 bg-slate-950 border border-slate-700 rounded px-3 py-2 text-white text-sm file:mr-3 file:py-1 file:px-3 file:rounded file:border-0 file:bg-cyan-700 file:text-white file:text-xs file:cursor-pointer"
+              onChange={(e) => setAttachFiles(Array.from(e.target.files ?? []))}
+              className="block w-full text-sm text-slate-400 file:mr-3 file:px-3 file:py-1.5 file:rounded file:border file:border-slate-700 file:bg-slate-800 file:text-slate-300 file:cursor-pointer"
             />
-            <button
-              type="button"
-              onClick={startMobileSession}
-              className="px-4 py-2 rounded border border-violet-600 text-violet-300 hover:bg-violet-900/30 text-sm whitespace-nowrap"
-            >
-              📱 手機拍照
-            </button>
+            {attachFiles.length > 0 && (
+              <div className="text-xs text-slate-500 mt-1">已選 {attachFiles.length} 張</div>
+            )}
           </div>
-          {previewUrls.length > 0 && (
-            <div className="mt-2 flex flex-wrap gap-2">
-              {previewUrls.map((url, idx) => (
-                <div key={idx} className="relative group">
-                  <img src={url} alt={`preview-${idx}`} className="w-20 h-20 object-cover rounded border border-slate-700" />
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setAttachFiles((prev) => prev.filter((_, i) => i !== idx))
-                      setPreviewUrls((prev) => prev.filter((_, i) => i !== idx))
-                    }}
-                    className="absolute -top-1 -right-1 w-5 h-5 bg-red-600 text-white rounded-full text-xs flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
-                  >
-                    ✕
-                  </button>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
 
-        <div className="rounded-lg border border-slate-700 bg-slate-950/40 px-3 py-2 text-xs text-slate-400">
-          缺失人員請於「異常紀錄表」編輯時填寫。
-        </div>
-
-        <datalist id="qa-personnel-options">
-          {personnelOptions.map((option, idx) => (
-            <option
-              key={typeof option === 'string' ? option : (option.option_value + (option.department_value || '') + idx)}
-              value={typeof option === 'string' ? option : option.option_value}
-            />
-          ))}
-        </datalist>
-
-
-        <div className="flex justify-end">
           <button
             onClick={handleSubmit}
             disabled={submitting}
-            className="px-5 py-2 rounded-lg bg-teal-600 hover:bg-teal-500 text-white font-bold disabled:bg-slate-700 disabled:text-slate-400"
+            className="w-full py-3 rounded-lg bg-teal-700 hover:bg-teal-600 disabled:opacity-50 text-white font-bold transition-colors"
           >
-            {submitting ? '送出中...' : '送出回報單'}
+            {submitting ? '送出中…' : '送出回報單'}
           </button>
         </div>
       </div>
-
-      {showQrModal && (
-        <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4">
-          <div className="bg-slate-900 border border-slate-700 rounded-2xl p-6 max-w-sm w-full space-y-4">
-            <h2 className="text-lg font-bold text-white text-center">📱 手機掃碼上傳圖片</h2>
-            <p className="text-xs text-slate-400 text-center">用手機掃描下方 QR Code 拍照上傳，照片會自動同步到此表單</p>
-            <p className="text-sm text-amber-400 font-bold text-center bg-amber-900/30 border border-amber-700 rounded-lg px-3 py-2">⚠️ 照片全部上傳完成前請勿關閉此視窗</p>
-            <div className="flex justify-center bg-white rounded-xl p-4">
-              <QRCodeSVG
-                value={`${window.location.origin}/upload-photo?sid=${mobileSessionId}`}
-                size={200}
-                level="M"
-              />
-            </div>
-            {mobileUrls.length > 0 && (
-              <div className="space-y-2">
-                <p className="text-sm text-emerald-400 text-center">已收到 {mobileUrls.length} 張圖片</p>
-                <div className="flex gap-2 flex-wrap justify-center">
-                  {mobileUrls.map((url, i) => (
-                    <img key={i} src={url} alt={`mobile-${i}`} className="w-14 h-14 object-cover rounded border border-slate-600" />
-                  ))}
-                </div>
-              </div>
-            )}
-            <div className="flex gap-2 justify-center">
-              <button
-                onClick={() => { setShowQrModal(false); if (pollRef.current) clearInterval(pollRef.current) }}
-                className="px-4 py-2 rounded border border-slate-700 text-slate-300 hover:bg-slate-800 text-sm"
-              >
-                取消
-              </button>
-              {mobileUrls.length > 0 && (
-                <button
-                  onClick={confirmMobilePhotos}
-                  className="px-4 py-2 rounded bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-sm"
-                >
-                  確認使用 ({mobileUrls.length} 張)
-                </button>
-              )}
-            </div>
-          </div>
-        </div>
-      )}
-
-      {notifyPreview && (
-        <div className="fixed inset-0 z-[60] bg-black/70 flex items-center justify-center p-4">
-          <div className="bg-slate-900 border border-slate-700 rounded-2xl p-6 max-w-lg w-full space-y-4">
-            <h2 className="text-lg font-bold text-white text-center">📨 通知訊息預覽</h2>
-            <p className="text-xs text-slate-400 text-center">此訊息與 LINE Bot 推播內容相同，可複製後手動貼到 LINE 群組</p>
-            <pre className="bg-slate-950 border border-slate-700 rounded-lg p-4 text-sm text-slate-200 whitespace-pre-wrap leading-relaxed max-h-[50vh] overflow-y-auto select-all">{notifyPreview}</pre>
-            <div className="flex gap-2 justify-center">
-              <button
-                onClick={() => { if (confirm('確定關閉？關閉後訊息將無法再次查看。')) setNotifyPreview(null) }}
-                className="px-4 py-2 rounded border border-slate-700 text-slate-300 hover:bg-slate-800 text-sm"
-              >
-                關閉
-              </button>
-              <button
-                onClick={() => void handleCopyNotify()}
-                className={`px-4 py-2 rounded font-bold text-sm transition-colors ${
-                  copied
-                    ? 'bg-emerald-600 text-white'
-                    : 'bg-cyan-600 hover:bg-cyan-500 text-white'
-                }`}
-              >
-                {copied ? '✅ 已複製！' : '📋 複製訊息'}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-    </div>
+    </main>
   )
 }
