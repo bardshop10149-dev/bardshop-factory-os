@@ -741,6 +741,8 @@ export default function DailyOrderSheetPage() {
                 if (stored.due_date_alert_dismissed !== undefined) base.due_date_alert_dismissed = stored.due_date_alert_dismissed
                 if (stored.factory_alert            !== undefined) base.factory_alert            = stored.factory_alert
                 if (stored.factory_alert_dismissed  !== undefined) base.factory_alert_dismissed  = stored.factory_alert_dismissed
+                if (stored.sketch_url               !== undefined) base.sketch_url               = stored.sketch_url
+                if (stored.sketch_urls              !== undefined) base.sketch_urls              = stored.sketch_urls
               } else {
                 // DB 完全找不到這一列（真正的全新列）：視同第一次匯入，判斷一次警示
                 base.due_date_alert = computeDueDateAlert(base, sheetDateObjForAlert, dueDateThresholds)
@@ -1099,6 +1101,8 @@ export default function DailyOrderSheetPage() {
           due_date_alert_dismissed:  old.due_date_alert_dismissed,
           factory_alert:             old.factory_alert,
           factory_alert_dismissed:   old.factory_alert_dismissed,
+          sketch_url:                old.sketch_url,
+          sketch_urls:               old.sketch_urls,
         }
       }
       // 保留所有由外部 PATCH 寫入的欄位（集單匯出、批備料、採購比對等）
@@ -1130,6 +1134,8 @@ export default function DailyOrderSheetPage() {
         due_date_alert_dismissed:  old.due_date_alert_dismissed,
         factory_alert:             old.factory_alert,
         factory_alert_dismissed:   old.factory_alert_dismissed,
+        sketch_url:                old.sketch_url,
+        sketch_urls:               old.sketch_urls,
       }
     })
     setSheetRows(merged)
@@ -3152,10 +3158,17 @@ export default function DailyOrderSheetPage() {
     }
   }, [sheetRows, selectedDate, currentRawText])
 
-  // ── 示意圖：每列一個按鈕，可預設自動比對填入，也可手動選檔覆蓋 ──────────────
+  // ── 示意圖：每列一個按鈕，可預設自動比對填入，也可手動選檔（每列可存多張，可切換瀏覽） ──
   const [sketchModalRowKey, setSketchModalRowKey] = useState<string | null>(null)
+  const [sketchModalIndex, setSketchModalIndex] = useState(0)
   const [sketchUploading, setSketchUploading] = useState(false)
   const [sketchMsg, setSketchMsg] = useState('')
+
+  // 統一讀取入口：優先讀新版陣列欄位，沒有的話回退舊版單張欄位（相容既有資料）
+  const getSketchUrls = useCallback((row: SheetRow): string[] => {
+    if (row.sketch_urls && row.sketch_urls.length > 0) return row.sketch_urls
+    return row.sketch_url ? [row.sketch_url] : []
+  }, [])
 
   const uploadSketchFile = useCallback(async (orderNumber: string, lineNo: string, file: File): Promise<string> => {
     const fd = new FormData()
@@ -3168,9 +3181,12 @@ export default function DailyOrderSheetPage() {
     return j.url
   }, [])
 
-  // 存單一列的 sketch_url（新增/更換/清除皆走這裡，跟其他列狀態異動一致的整份 rows 存回模式）
-  const saveRowSketchUrl = useCallback(async (rowKey: string, url: string | null) => {
-    const next: SheetRow[] = sheetRows.map(r => (r.row_key || '') === rowKey ? { ...r, sketch_url: url } : r)
+  // 存一列的完整示意圖清單（新增/移除/清除皆走這裡，跟其他列狀態異動一致的整份 rows 存回模式）
+  // sketch_url 同步存第一張，供舊版邏輯/資料相容
+  const saveRowSketchUrls = useCallback(async (rowKey: string, urls: string[]) => {
+    const next: SheetRow[] = sheetRows.map(r => (r.row_key || '') === rowKey
+      ? { ...r, sketch_urls: urls, sketch_url: urls[0] ?? null }
+      : r)
     setSheetRows(next)
     const res = await fetch('/api/argoerp/daily-order-sheet', {
       method: 'POST',
@@ -3188,61 +3204,113 @@ export default function DailyOrderSheetPage() {
     setSketchMsg('')
     try {
       const url = await uploadSketchFile(row.order_number, row.match_line_no || row.line_no_input || '', file)
-      await saveRowSketchUrl(rowKey, url)
-      setSketchMsg('✅ 已更新示意圖')
+      const urls = [...getSketchUrls(row), url]
+      await saveRowSketchUrls(rowKey, urls)
+      setSketchModalIndex(urls.length - 1)
+      setSketchMsg('✅ 已新增示意圖')
       setTimeout(() => setSketchMsg(''), 2000)
     } catch (e) {
       setSketchMsg(`❌ ${e instanceof Error ? e.message : String(e)}`)
     } finally {
       setSketchUploading(false)
     }
-  }, [uploadSketchFile, saveRowSketchUrl])
+  }, [uploadSketchFile, saveRowSketchUrls, getSketchUrls])
 
-  const handleClearSketch = useCallback(async (row: SheetRow) => {
+  // 移除單一張示意圖（保留其餘張數）
+  const handleRemoveSketchAt = useCallback(async (row: SheetRow, index: number) => {
     const rowKey = row.row_key || ''
     if (!rowKey) return
-    if (!confirm('確定移除這一列的示意圖？')) return
     setSketchUploading(true)
     try {
-      await saveRowSketchUrl(rowKey, null)
+      const urls = getSketchUrls(row).filter((_, i) => i !== index)
+      await saveRowSketchUrls(rowKey, urls)
+      setSketchModalIndex(i => Math.max(0, Math.min(i, urls.length - 1)))
     } catch (e) {
       setSketchMsg(`❌ ${e instanceof Error ? e.message : String(e)}`)
     } finally {
       setSketchUploading(false)
     }
-  }, [saveRowSketchUrl])
+  }, [saveRowSketchUrls, getSketchUrls])
 
-  // ── 批次自動比對：選一次本機/內網共用資料夾，依「SO訂單號#項號」自動比對出
+  const handleClearSketch = useCallback(async (row: SheetRow) => {
+    const rowKey = row.row_key || ''
+    if (!rowKey) return
+    if (!confirm('確定移除這一列的全部示意圖？')) return
+    setSketchUploading(true)
+    try {
+      await saveRowSketchUrls(rowKey, [])
+      setSketchModalIndex(0)
+    } catch (e) {
+      setSketchMsg(`❌ ${e instanceof Error ? e.message : String(e)}`)
+    } finally {
+      setSketchUploading(false)
+    }
+  }, [saveRowSketchUrls])
+
+  // ── 批次自動比對：選一次本機/內網共用資料夾（根目錄），依實際資料夾結構自動比對出
   // 這份出單表裡「還沒有示意圖」的列，逐一上傳並存回——之後所有人打開這份出單表
   // 都直接看得到，不用每次重新選資料夾（「預設填入」的機制）
+  //
+  // 真實資料夾結構（依現場資料夾範例）：
+  //   {訂單資料夾，內含 SO 單號} / #{項號}{品名} / 印刷 / 【商品示意圖】xxx.png（可能不只一張）
+  //                                             └ 美編 / （不採用，明確排除）
+  // 只認「印刷」子資料夾底下、檔名含「商品示意圖」的圖片/PDF，避免抓到印刷資料夾裡其他
+  // 生產檔案，或美編資料夾裡同名/類似命名的草稿檔。同一個 key 比對到多張全部收下，
+  // 存進 sketch_urls 陣列，預覽時可左右切換瀏覽。
   const sketchFolderInputRef = useRef<HTMLInputElement>(null)
   const [sketchBulkMatching, setSketchBulkMatching] = useState(false)
   const [sketchBulkProgress, setSketchBulkProgress] = useState({ done: 0, total: 0 })
 
   const handleBulkMatchSketchFolder = useCallback(async (files: FileList | null) => {
     if (!files || files.length === 0) return
-    // 檔名比對規則跟列印頁的示意圖穿插功能一致：SO+數字+#+數字，允許零填充與任意前後綴
-    const ORDER_LINE_PATTERN = /(SO\d+)#0*(\d+)(?!\d)/i
     const IMAGE_OR_PDF = /\.(jpe?g|png|gif|webp|bmp|pdf)$/i
-    const fileByKey = new Map<string, File>()
+    const ORDER_PATTERN = /SO\d+/i
+    const ITEM_FOLDER_PATTERN = /^#0*(\d+)/ // 品項資料夾以 #項號 開頭，如「#1透明拼板壓克力立牌…」
+
+    const filesByKey = new Map<string, File[]>()
     for (const file of Array.from(files)) {
-      if (!IMAGE_OR_PDF.test(file.name)) continue
-      const m = file.name.match(ORDER_LINE_PATTERN)
-      if (!m) continue
-      const key = `${m[1].toUpperCase()}#${parseInt(m[2], 10)}`
-      if (!fileByKey.has(key)) fileByKey.set(key, file) // 同 key 多檔取第一個（按檔名字母序，跟 FileList 原始順序一致即可）
+      const relPath = (file as unknown as { webkitRelativePath?: string }).webkitRelativePath || file.name
+      const segments = relPath.split('/')
+      const fileName = segments[segments.length - 1]
+      if (!IMAGE_OR_PDF.test(fileName)) continue
+      if (!fileName.includes('商品示意圖')) continue
+
+      // 找訂單資料夾（含 SO 單號的路徑片段）
+      const orderIdx = segments.findIndex(seg => ORDER_PATTERN.test(seg))
+      if (orderIdx === -1) continue
+      const orderMatch = segments[orderIdx].match(ORDER_PATTERN)
+      if (!orderMatch) continue
+      const orderNumber = orderMatch[0].toUpperCase()
+
+      // 找訂單資料夾之後、以 #項號 開頭的品項資料夾
+      let itemNumber: number | null = null
+      for (let i = orderIdx + 1; i < segments.length - 1; i++) {
+        const m = segments[i].match(ITEM_FOLDER_PATTERN)
+        if (m) { itemNumber = parseInt(m[1], 10); break }
+      }
+      if (itemNumber === null) continue
+
+      // 品項資料夾跟檔案之間必須經過「印刷」，且不能經過「美編」
+      const middleSegments = segments.slice(orderIdx + 1, segments.length - 1)
+      if (!middleSegments.includes('印刷')) continue
+      if (middleSegments.includes('美編')) continue
+
+      const key = `${orderNumber}#${itemNumber}`
+      const arr = filesByKey.get(key) ?? []
+      arr.push(file)
+      filesByKey.set(key, arr)
     }
-    if (fileByKey.size === 0) {
-      setSketchMsg('❌ 這個資料夾裡沒有找到符合「SO單號#項號」命名的圖片/PDF')
+    if (filesByKey.size === 0) {
+      setSketchMsg('❌ 這個資料夾裡沒有找到符合「訂單資料夾 / #項號資料夾 / 印刷 / 商品示意圖⋯」結構的檔案')
       setTimeout(() => setSketchMsg(''), 4000)
       return
     }
 
     const targets = sheetRows.filter(r => {
-      if (r.sketch_url) return false // 已經有示意圖的列不覆蓋，避免蓋掉先前人工核對過的結果
+      if (getSketchUrls(r).length > 0) return false // 已經有示意圖的列不覆蓋，避免蓋掉先前人工核對過的結果
       const lineNo = r.match_line_no || r.line_no_input || ''
       if (!r.order_number || !lineNo) return false
-      return fileByKey.has(`${r.order_number.toUpperCase()}#${parseInt(lineNo, 10)}`)
+      return filesByKey.has(`${r.order_number.toUpperCase()}#${parseInt(lineNo, 10)}`)
     })
     if (targets.length === 0) {
       setSketchMsg('ℹ️ 沒有可自動比對的列（可能都已經有示意圖，或這份出單表沒有符合的訂單）')
@@ -3252,23 +3320,29 @@ export default function DailyOrderSheetPage() {
 
     setSketchBulkMatching(true)
     setSketchBulkProgress({ done: 0, total: targets.length })
-    const urlByRowKey = new Map<string, string>()
+    const urlsByRowKey = new Map<string, string[]>()
     for (const row of targets) {
       const lineNo = row.match_line_no || row.line_no_input || ''
-      const file = fileByKey.get(`${row.order_number.toUpperCase()}#${parseInt(lineNo, 10)}`)
-      if (!file || !row.row_key) continue
-      try {
-        const url = await uploadSketchFile(row.order_number, lineNo, file)
-        urlByRowKey.set(row.row_key, url)
-      } catch (e) {
-        console.error(`示意圖上傳失敗（${row.order_number}#${lineNo}）：`, e)
+      const matchedFiles = filesByKey.get(`${row.order_number.toUpperCase()}#${parseInt(lineNo, 10)}`) ?? []
+      if (matchedFiles.length === 0 || !row.row_key) continue
+      const urls: string[] = []
+      for (const file of matchedFiles) {
+        try {
+          const url = await uploadSketchFile(row.order_number, lineNo, file)
+          urls.push(url)
+        } catch (e) {
+          console.error(`示意圖上傳失敗（${row.order_number}#${lineNo}）：`, e)
+        }
       }
+      if (urls.length > 0) urlsByRowKey.set(row.row_key, urls)
       setSketchBulkProgress(p => ({ ...p, done: p.done + 1 }))
     }
 
-    if (urlByRowKey.size > 0) {
+    if (urlsByRowKey.size > 0) {
       const next: SheetRow[] = sheetRows.map(r =>
-        r.row_key && urlByRowKey.has(r.row_key) ? { ...r, sketch_url: urlByRowKey.get(r.row_key)! } : r
+        r.row_key && urlsByRowKey.has(r.row_key)
+          ? { ...r, sketch_urls: urlsByRowKey.get(r.row_key)!, sketch_url: urlsByRowKey.get(r.row_key)![0] }
+          : r
       )
       setSheetRows(next)
       try {
@@ -3279,7 +3353,8 @@ export default function DailyOrderSheetPage() {
         })
         const j = await res.json()
         if (!res.ok || !j.success) throw new Error(j.error || `HTTP ${res.status}`)
-        setSketchMsg(`✅ 已自動比對並存入 ${urlByRowKey.size} / ${targets.length} 筆示意圖`)
+        const totalImgs = Array.from(urlsByRowKey.values()).reduce((s, a) => s + a.length, 0)
+        setSketchMsg(`✅ 已自動比對 ${urlsByRowKey.size} / ${targets.length} 筆列（共 ${totalImgs} 張示意圖）`)
       } catch (e) {
         setSketchMsg(`❌ 存回出單表失敗：${e instanceof Error ? e.message : String(e)}`)
       }
@@ -3288,7 +3363,7 @@ export default function DailyOrderSheetPage() {
     }
     setSketchBulkMatching(false)
     setTimeout(() => setSketchMsg(''), 6000)
-  }, [sheetRows, selectedDate, currentRawText, uploadSketchFile])
+  }, [sheetRows, selectedDate, currentRawText, uploadSketchFile, getSketchUrls])
 
   const handleChangeFactory = useCallback((idx: number, factory: 'T' | 'C' | 'O') => {
     setSheetRows(prev => prev.map((r, i) => {
@@ -4214,17 +4289,22 @@ export default function DailyOrderSheetPage() {
                               </div>
                             </td>
                             <td className="px-2 py-2 text-center">
-                              <button
-                                onClick={() => setSketchModalRowKey(sk)}
-                                title={row.sketch_url ? '點擊預覽/更換示意圖' : '點擊選取示意圖'}
-                                className={`px-2 py-1 rounded text-xs border transition-colors ${
-                                  row.sketch_url
-                                    ? 'bg-cyan-900/40 text-cyan-300 border-cyan-700/50 hover:bg-cyan-800/60'
-                                    : 'bg-slate-800 text-slate-500 border-slate-700 hover:bg-slate-700 hover:text-slate-300'
-                                }`}
-                              >
-                                {row.sketch_url ? '🖼 示意圖' : '+ 示意圖'}
-                              </button>
+                              {(() => {
+                                const sketchCount = getSketchUrls(row).length
+                                return (
+                                  <button
+                                    onClick={() => { setSketchModalRowKey(sk); setSketchModalIndex(0) }}
+                                    title={sketchCount > 0 ? '點擊預覽/管理示意圖' : '點擊選取示意圖'}
+                                    className={`px-2 py-1 rounded text-xs border transition-colors ${
+                                      sketchCount > 0
+                                        ? 'bg-cyan-900/40 text-cyan-300 border-cyan-700/50 hover:bg-cyan-800/60'
+                                        : 'bg-slate-800 text-slate-500 border-slate-700 hover:bg-slate-700 hover:text-slate-300'
+                                    }`}
+                                  >
+                                    {sketchCount > 0 ? `🖼 示意圖${sketchCount > 1 ? `(${sketchCount})` : ''}` : '+ 示意圖'}
+                                  </button>
+                                )
+                              })()}
                             </td>
                             <td className="px-2 py-2">
                               {row.mo_number ? (
@@ -4448,12 +4528,15 @@ export default function DailyOrderSheetPage() {
       <PoOrderModal docNo={poModalId} onClose={() => setPoModalId(null)} />
       <MoRouteModal moNumber={moModalId} onClose={() => setMoModalId(null)} />
 
-      {/* 示意圖預覽/選檔 Modal */}
+      {/* 示意圖預覽/選檔 Modal（同一列可能存多張，可左右切換瀏覽） */}
       {sketchModalRowKey && (() => {
         const row = sheetRows.find(r => (r.row_key || '') === sketchModalRowKey)
         if (!row) return null
         const lineNo = row.match_line_no || row.line_no_input || ''
-        const isPdf = (row.sketch_url ?? '').toLowerCase().endsWith('.pdf')
+        const urls = getSketchUrls(row)
+        const idx = urls.length > 0 ? Math.min(sketchModalIndex, urls.length - 1) : 0
+        const currentUrl = urls[idx]
+        const isPdf = (currentUrl ?? '').toLowerCase().endsWith('.pdf')
         return (
           <div
             className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
@@ -4476,15 +4559,43 @@ export default function DailyOrderSheetPage() {
                   {row.item_code}　{row.item_name}
                 </div>
 
-                {row.sketch_url ? (
-                  isPdf ? (
-                    <iframe src={row.sketch_url} className="w-full h-[50vh] rounded-lg bg-white border border-slate-700" title="示意圖預覽" />
-                  ) : (
-                    <div className="flex items-center justify-center bg-slate-950 rounded-lg border border-slate-800 p-3">
-                      {/* eslint-disable-next-line @next/next/no-img-element -- Supabase Storage 網址，非本地靜態資源 */}
-                      <img src={row.sketch_url} alt="示意圖" className="max-w-full max-h-[50vh] object-contain" />
+                {currentUrl ? (
+                  <div className="flex flex-col gap-2">
+                    <div className="relative">
+                      {isPdf ? (
+                        <iframe src={currentUrl} className="w-full h-[50vh] rounded-lg bg-white border border-slate-700" title="示意圖預覽" />
+                      ) : (
+                        <div className="flex items-center justify-center bg-slate-950 rounded-lg border border-slate-800 p-3">
+                          {/* eslint-disable-next-line @next/next/no-img-element -- Supabase Storage 網址，非本地靜態資源 */}
+                          <img src={currentUrl} alt="示意圖" className="max-w-full max-h-[50vh] object-contain" />
+                        </div>
+                      )}
+                      {urls.length > 1 && (
+                        <>
+                          <button
+                            onClick={() => setSketchModalIndex(i => (i - 1 + urls.length) % urls.length)}
+                            className="absolute left-2 top-1/2 -translate-y-1/2 w-8 h-8 flex items-center justify-center rounded-full bg-slate-900/80 border border-slate-700 text-slate-200 hover:bg-slate-800 hover:text-cyan-300"
+                          >‹</button>
+                          <button
+                            onClick={() => setSketchModalIndex(i => (i + 1) % urls.length)}
+                            className="absolute right-2 top-1/2 -translate-y-1/2 w-8 h-8 flex items-center justify-center rounded-full bg-slate-900/80 border border-slate-700 text-slate-200 hover:bg-slate-800 hover:text-cyan-300"
+                          >›</button>
+                        </>
+                      )}
                     </div>
-                  )
+                    {urls.length > 1 && (
+                      <div className="flex items-center justify-center gap-3 text-xs text-slate-400">
+                        <span>{idx + 1} / {urls.length}</span>
+                        <button
+                          onClick={() => void handleRemoveSketchAt(row, idx)}
+                          disabled={sketchUploading}
+                          className="text-red-400 hover:text-red-300 disabled:opacity-50 transition-colors"
+                        >
+                          🗑 移除這張
+                        </button>
+                      </div>
+                    )}
+                  </div>
                 ) : (
                   <div className="h-40 flex items-center justify-center rounded-lg border-2 border-dashed border-slate-700 text-slate-500 text-sm">
                     尚未設定示意圖，比對錯誤或還沒有的話請在下方手動選取檔案
@@ -4497,7 +4608,7 @@ export default function DailyOrderSheetPage() {
 
                 <div className="flex items-center gap-3 pt-2 border-t border-slate-800">
                   <label className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors cursor-pointer ${sketchUploading ? 'bg-slate-800 text-slate-500' : 'bg-cyan-700 hover:bg-cyan-600 text-white'}`}>
-                    {sketchUploading ? '上傳中…' : row.sketch_url ? '🔄 重新選取檔案' : '📁 選取檔案'}
+                    {sketchUploading ? '上傳中…' : '📁 新增示意圖檔案'}
                     <input
                       type="file"
                       accept="image/*,application/pdf"
@@ -4510,13 +4621,13 @@ export default function DailyOrderSheetPage() {
                       }}
                     />
                   </label>
-                  {row.sketch_url && (
+                  {urls.length > 0 && (
                     <button
                       onClick={() => void handleClearSketch(row)}
                       disabled={sketchUploading}
                       className="px-3 py-2 rounded-lg bg-slate-800 hover:bg-red-900/50 disabled:opacity-50 text-slate-400 hover:text-red-300 text-sm transition-colors"
                     >
-                      🗑 移除
+                      🗑 清除全部
                     </button>
                   )}
                   <span className="text-[11px] text-slate-500 ml-auto">選檔視窗可直接瀏覽內網共用資料夾</span>
