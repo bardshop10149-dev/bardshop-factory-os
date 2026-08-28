@@ -4566,6 +4566,24 @@ export default function DailyOrderSheetPage() {
       <PoOrderModal docNo={poModalId} onClose={() => setPoModalId(null)} />
       <MoRouteModal moNumber={moModalId} onClose={() => setMoModalId(null)} />
 
+      {/* 自動比對示意圖進行中：全螢幕鎖定，從選好資料夾那一刻起到跑完都不能做其他操作，
+          避免使用者搞不清楚到底還在跑還是已經死掉，中途誤觸其他按鈕 */}
+      {sketchBulkMatching && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/70 backdrop-blur-sm">
+          <div className="bg-slate-900 border border-cyan-700/50 rounded-2xl shadow-2xl px-8 py-7 flex flex-col items-center gap-4 max-w-sm text-center">
+            <div className="w-10 h-10 border-4 border-slate-700 border-t-cyan-400 rounded-full animate-spin" />
+            <div className="text-white font-bold text-base">
+              {sketchBulkPhase === 'scanning' ? '正在掃描資料夾…' : '正在上傳示意圖…'}
+            </div>
+            <div className="text-cyan-300 font-mono text-sm">
+              {sketchBulkProgress.done} / {sketchBulkProgress.total}
+            </div>
+            {sketchMsg && <div className="text-xs text-slate-400">{sketchMsg}</div>}
+            <div className="text-[11px] text-slate-500">處理完成前請勿關閉頁面或進行其他操作</div>
+          </div>
+        </div>
+      )}
+
       {/* 示意圖預覽/選檔 Modal（同一列可能存多張，可左右切換瀏覽） */}
       {sketchModalRowKey && (() => {
         const row = sheetRows.find(r => (r.row_key || '') === sketchModalRowKey)
