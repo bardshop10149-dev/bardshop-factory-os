@@ -5,6 +5,38 @@ import { guardAuth, guardPermission } from '@/lib/requireAuth'
 export const dynamic = 'force-dynamic'
 
 const TABLE = 'daily_order_sheets'
+const DONE_STATES = new Set(['已備料', '無需備料', '已批備料'])
+
+// 從一天的完整 rows 算出列表頁要顯示的待處理計數——寫入時（POST/PATCH）算好存成獨立欄位，
+// 讓列表 GET 不必再把每天的完整 rows JSONB 都抓下來重算一次（見下方無 date 參數的 GET）。
+function computeSheetCounts(rowsArr: Array<Record<string, unknown>>) {
+  const pendingMos = new Set<string>()
+  let pendingPrCount = 0
+  let pendingCCount = 0
+  for (const row of rowsArr) {
+    if (row.mo_status === '已匯入製令') {
+      const mo = typeof row.mo_number === 'string' ? row.mo_number : ''
+      if (mo) {
+        const status = typeof row.material_prep_status === 'string' ? row.material_prep_status : ''
+        if (!DONE_STATES.has(status)) pendingMos.add(mo)
+      }
+    }
+    if (row.factory === 'O' && row.po_status !== 'no_po') {
+      const mo = typeof row.mo_number === 'string' ? row.mo_number.trim().toUpperCase() : ''
+      const pr = typeof row.pr_number === 'string' ? row.pr_number.trim().toUpperCase() : ''
+      if (!mo.startsWith('MPO') && !pr.startsWith('MPO')) pendingPrCount++
+    }
+    if (row.factory === 'C' && !row.po_number && row.po_status !== 'matched') {
+      pendingCCount++
+    }
+  }
+  return {
+    row_count: rowsArr.length,
+    pending_count: pendingMos.size,
+    pending_pr_count: pendingPrCount,
+    pending_c_count: pendingCCount,
+  }
+}
 
 // GET:
 //   無 date 參數 → 回傳所有已儲存日期 ([{sheet_date, row_count, updated_at}])
@@ -41,47 +73,14 @@ export async function GET(request: NextRequest) {
     }
 
     if (!date) {
+      // 只選預先算好的計數欄位，不選 rows——實測 rows 整包抓下來（86 天）約 5.8MB、
+      // 讓這支列表查詢多花 100ms 以上，只為了算幾個小數字，划不來
       const { data, error } = await supabase
         .from(TABLE)
-        .select('sheet_date, rows, updated_at')
+        .select('sheet_date, row_count, pending_count, pending_pr_count, pending_c_count, updated_at')
         .order('sheet_date', { ascending: false })
       if (error) throw error
-      const DONE_STATES = new Set(['已備料', '無需備料', '已批備料'])
-      const list = (data ?? []).map((r: { sheet_date: string; rows: unknown[]; updated_at: string }) => {
-        const rowsArr = Array.isArray(r.rows) ? (r.rows as Array<Record<string, unknown>>) : []
-        const pendingMos = new Set<string>()
-        let pendingPrCount = 0
-        let pendingCCount = 0
-        for (const row of rowsArr) {
-          // 批備料待處理計數
-          if (row.mo_status === '已匯入製令') {
-            const mo = typeof row.mo_number === 'string' ? row.mo_number : ''
-            if (mo) {
-              const status = typeof row.material_prep_status === 'string' ? row.material_prep_status : ''
-              if (!DONE_STATES.has(status)) pendingMos.add(mo)
-            }
-          }
-          // 委外請購待處理計數（factory=O，非 no_po，未匯入 MPO）
-          if (row.factory === 'O' && row.po_status !== 'no_po') {
-            const mo = typeof row.mo_number === 'string' ? row.mo_number.trim().toUpperCase() : ''
-            const pr = typeof row.pr_number === 'string' ? row.pr_number.trim().toUpperCase() : ''
-            if (!mo.startsWith('MPO') && !pr.startsWith('MPO')) pendingPrCount++
-          }
-          // 常平採購待處理計數（factory=C，無 po_number，非 matched）
-          if (row.factory === 'C' && !row.po_number && row.po_status !== 'matched') {
-            pendingCCount++
-          }
-        }
-        return {
-          sheet_date: r.sheet_date,
-          row_count: rowsArr.length,
-          pending_count: pendingMos.size,
-          pending_pr_count: pendingPrCount,
-          pending_c_count: pendingCCount,
-          updated_at: r.updated_at,
-        }
-      })
-      return NextResponse.json({ success: true, sheets: list }, { headers: { 'Cache-Control': 'no-store' } })
+      return NextResponse.json({ success: true, sheets: data ?? [] }, { headers: { 'Cache-Control': 'no-store' } })
     }
 
     // ?date=X&meta=1 — 只回傳 updated_at，供前端輪詢偵測「其他人是否更新過」用，
@@ -204,6 +203,7 @@ export async function POST(request: NextRequest) {
         sheet_date,
         raw_text,
         rows: mergedRows,
+        ...computeSheetCounts(mergedRows),
         updated_at: new Date().toISOString(),
         updated_by: guard.member.email,
         updated_by_name: guard.member.realName ?? guard.member.email,
@@ -290,6 +290,7 @@ export async function PATCH(request: NextRequest) {
       .from(TABLE)
       .update({
         rows: updatedRows,
+        ...computeSheetCounts(updatedRows),
         updated_at: new Date().toISOString(),
         updated_by: guard.member.email,
         updated_by_name: guard.member.realName ?? guard.member.email,
