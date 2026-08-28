@@ -225,9 +225,19 @@ export default function ProcessGenPage() {
         const pan  = parseFloat(String(r.plate_count ?? '').replace(/,/g, '')) || 0
         const factory = (['T', 'C', 'O'].includes(String(r.factory ?? ''))) ? String(r.factory) as 'T'|'C'|'O' : undefined
         // 依廠區選擇對應單號：台北=製令號MOT / 常平=採購單號POC / 委外=請購單號MPO
+        // 常平/委外常見同一張採購/請購單裡集合多筆銷售單序號（同品項編碼也可能重複開在
+        // 同一張單上），製令號本身天生就帶行號（如 MOT26082700201/202）能唯一識別到行，
+        // 但採購/請購單號是整張單共用、不分行——若原樣送給 SARA，Manufacturing Order
+        // Number 加 Product Name 會完全相同，SARA 那邊只會留下最後處理的一筆、其餘消失。
+        // 因此常平/委外一律加上「-行號」（po_sub_no/pr_sub_no，ARGO 採購/請購單上的實際
+        // 行號）組成唯一識別，格式跟製令號本身帶行號的精神一致。
+        const poSubNo = String(r.po_sub_no ?? '').trim()
+        const prSubNo = String(r.pr_sub_no ?? '').trim()
+        const poNumber = String(r.po_number ?? '').trim()
+        const prNumber = String(r.pr_number ?? '').trim()
         const refNumber =
-          factory === 'C' ? String(r.po_number ?? '').trim() || undefined :
-          factory === 'O' ? String(r.pr_number ?? '').trim() || undefined :
+          factory === 'C' ? (poNumber ? `${poNumber}${poSubNo ? `-${poSubNo}` : ''}` : undefined) :
+          factory === 'O' ? (prNumber ? `${prNumber}${prSubNo ? `-${prSubNo}` : ''}` : undefined) :
                             String(r.mo_number ?? '').trim() || undefined
         parsed.push({
           order_number: order,
@@ -277,26 +287,28 @@ export default function ProcessGenPage() {
       }
 
       // ── 從 erp_pj_sync 查詢 C/O 廠列的請購/採購單序號（lot_number 用）────
+      // r.mo_number 現在是「單號-行號」的組合（見上方 refNumber），這裡查 erp_pj_sync
+      // 要用不含行號的裸單號；行號本身只有一個 doc+item 對到多筆時才會不準，用
+      // doc_no+item_code+sub_no 三者一起比對才能正確對回同一筆採購行，而不是隨便取第一筆。
+      const bareDocNo = (mo: string) => mo.replace(/-\d+$/, '')
       const coRows = parsed.filter(r => (r.factory === 'C' || r.factory === 'O') && r.mo_number)
       if (coRows.length > 0) {
-        const docNos = [...new Set(coRows.map(r => r.mo_number!))]
+        const docNos = [...new Set(coRows.map(r => bareDocNo(r.mo_number!)))]
         const { data: syncRows } = await supabase
           .from('erp_pj_sync')
           .select('doc_no, sub_no, item_code')
           .in('doc_no', docNos)
           .in('doc_type', ['採購單號', '請購單號'])
         if (syncRows?.length) {
-          // key = doc_no|item_code → sub_no（若同一 doc+item 有多筆，取第一筆）
-          const syncMap = new Map<string, string>()
-          for (const sr of syncRows) {
-            const k = `${sr.doc_no}|${sr.item_code ?? ''}`
-            if (!syncMap.has(k)) syncMap.set(k, String(sr.sub_no ?? ''))
-          }
+          // key = doc_no|item_code|sub_no（sub_no 本身就取自 mo_number 的行號，三者一起比對
+          // 才能正確對回同一筆採購行，避免同一張單同一品項多行時互相覆蓋）
+          const syncSet = new Set(syncRows.map(sr => `${sr.doc_no}|${sr.item_code ?? ''}|${sr.sub_no ?? ''}`))
           for (const r of parsed) {
             if ((r.factory === 'C' || r.factory === 'O') && r.mo_number && !r.line_seq) {
               // 僅在 match_line_no 未能提供序號時，才以採購單行號作為 fallback
-              const seq = syncMap.get(`${r.mo_number}|${r.item_code}`)
-              if (seq) r.line_seq = seq
+              const doc = bareDocNo(r.mo_number)
+              const subNo = r.mo_number.slice(doc.length + 1) // 去掉 "doc-" 前綴後剩下的行號
+              if (subNo && syncSet.has(`${doc}|${r.item_code}|${subNo}`)) r.line_seq = subNo
             }
           }
         }

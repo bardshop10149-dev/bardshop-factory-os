@@ -91,10 +91,17 @@ export default function SingleOrderConvert({ onAppended }: { onAppended: () => v
           const qty = parseFloat(String(r.quantity ?? '').replace(/,/g, '')) || 0
           if (qty <= 0) continue
           const factory = ['T', 'C', 'O'].includes(String(r.factory ?? '')) ? String(r.factory) as 'T' | 'C' | 'O' : undefined
-          // 依廠區選擇對應單號：台北=製令 / 常平=採購單 / 委外=請購單（與 process-gen 一致）
+          // 依廠區選擇對應單號：台北=製令 / 常平=採購單 / 委外=請購單（與 process-gen 一致）。
+          // 常平/委外一律加上「-行號」（po_sub_no/pr_sub_no）：採購/請購單是整張單共用、不分行，
+          // 同一張單同一品項可能開多筆銷售單序號，裸單號送給 SARA 會讓 Manufacturing Order
+          // Number + Product Name 完全相同、只留下最後一筆（見 process-gen 同一套邏輯）。
+          const poSubNo = String(r.po_sub_no ?? '').trim()
+          const prSubNo = String(r.pr_sub_no ?? '').trim()
+          const poNumber = String(r.po_number ?? '').trim()
+          const prNumber = String(r.pr_number ?? '').trim()
           const refNumber =
-            factory === 'C' ? String(r.po_number ?? '').trim() || undefined :
-            factory === 'O' ? String(r.pr_number ?? '').trim() || undefined :
+            factory === 'C' ? (poNumber ? `${poNumber}${poSubNo ? `-${poSubNo}` : ''}` : undefined) :
+            factory === 'O' ? (prNumber ? `${prNumber}${prSubNo ? `-${prSubNo}` : ''}` : undefined) :
                               String(r.mo_number ?? '').trim() || undefined
           parsed.push({
             sheet_date: sheet.sheet_date,

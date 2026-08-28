@@ -49,8 +49,10 @@ interface SheetRowRec {
   mo_status?: string | null
   mo_number?: string
   po_number?: string | null
+  po_sub_no?: string | null
   po_status?: string | null
   pr_number?: string | null
+  pr_sub_no?: string | null
   pr_status?: string | null
   match_line_no?: string | null
   material_prep_status?: string | null
@@ -328,9 +330,17 @@ export default function ChangeOrderPanel({ onApplied }: Props) {
       // 不能只比對單號——同一張單可能有好幾個序號，只改了其中一個，其他序號已同步的列不該被清掉。
       const kept = existing.filter(r => !(r[0] === queriedOrderNumber && r[4] === selectedLineNo))
 
+      // 常平/委外的採購/請購單是整張單共用、不分行，同一張單同一品項可能開多筆銷售單序號；
+      // 若原樣送裸單號給 SARA，Manufacturing Order Number + Product Name 會跟同單其他序號
+      // 完全相同，SARA 只會留下最後一筆。一律加上「-行號」（po_sub_no/pr_sub_no）唯一識別。
+      const coRefNumber = src.factory === 'C'
+        ? (src.po_number ? `${src.po_number}${src.po_sub_no ? `-${src.po_sub_no}` : ''}` : undefined)
+        : src.factory === 'O'
+          ? (src.pr_number ? `${src.pr_number}${src.pr_sub_no ? `-${src.pr_sub_no}` : ''}` : undefined)
+          : undefined
       const saraRow: SaraRow = {
         order_number: queriedOrderNumber,
-        mfg_order_number: src.mo_number || src.po_number || src.pr_number || queriedOrderNumber,
+        mfg_order_number: src.mo_number || coRefNumber || queriedOrderNumber,
         product_name: src.item_code ?? '',
         product_desc: src.item_name ?? '',
         lot_number: selectedLineNo,
