@@ -1236,6 +1236,8 @@ export default function DailyOrderSheetPage() {
       pr_number: r.pr_number ?? undefined,
       pr_sub_no: r.pr_sub_no ?? undefined,
       is_sample: r.is_sample || undefined,
+      // 帶入這一列已存好的示意圖，讓列印頁自動接在這張單據後面穿插，不用再另外選一次資料夾比對
+      sketch_urls: getSketchUrls(r),
     }))
 
     sessionStorage.setItem('mo_print_selection', JSON.stringify(moRecords))

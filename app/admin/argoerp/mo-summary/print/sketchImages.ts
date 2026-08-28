@@ -73,10 +73,9 @@ async function loadPdfjs() {
   return pdfjsLoaderPromise
 }
 
-/** 把一個 PDF 檔的每一頁都轉成一張 PNG dataURL（多頁 PDF 會展開成多張示意圖頁） */
-async function renderPdfPages(file: File): Promise<string[]> {
+/** 把一份 PDF 的 ArrayBuffer 逐頁轉成 PNG dataURL（多頁 PDF 會展開成多張示意圖頁） */
+async function renderPdfBufferPages(buf: ArrayBuffer): Promise<string[]> {
   const pdfjs = await loadPdfjs()
-  const buf = await file.arrayBuffer()
   const pdf = await pdfjs.getDocument({ data: buf }).promise
   const urls: string[] = []
   // 示意圖通常張數不多，此為本機瀏覽器運算，逐頁處理即可
@@ -93,6 +92,17 @@ async function renderPdfPages(file: File): Promise<string[]> {
     urls.push(canvas.toDataURL('image/png'))
   }
   return urls
+}
+
+/** 把一個本機 PDF 檔的每一頁都轉成一張 PNG dataURL */
+async function renderPdfPages(file: File): Promise<string[]> {
+  return renderPdfBufferPages(await file.arrayBuffer())
+}
+
+/** 把一個遠端 PDF 網址（如已存在 Supabase Storage 的示意圖）的每一頁轉成 PNG dataURL */
+async function renderPdfUrlPages(url: string): Promise<string[]> {
+  const res = await fetch(url)
+  return renderPdfBufferPages(await res.arrayBuffer())
 }
 
 /**
@@ -113,4 +123,25 @@ export async function resolveSketchImages(matches: MatchedSketch[]): Promise<str
     }
   }
   return urls
+}
+
+/**
+ * 把每日出單表該列已存好的示意圖網址（Supabase Storage 公開網址，可能混合圖片與 PDF）
+ * 解析成可直接 <img> 顯示的網址清單——圖片原樣使用；PDF 逐頁轉成 PNG dataURL，跟本機
+ * 資料夾比對出的示意圖走同一套轉圖邏輯，列印排版才會一致。
+ */
+export async function resolveSketchUrls(urls: string[]): Promise<string[]> {
+  const out: string[] = []
+  for (const url of urls) {
+    if (PDF_EXT.test(url)) {
+      try {
+        out.push(...await renderPdfUrlPages(url))
+      } catch (e) {
+        console.error(`示意圖 PDF 轉圖失敗（${url}）：`, e)
+      }
+    } else {
+      out.push(url)
+    }
+  }
+  return out
 }

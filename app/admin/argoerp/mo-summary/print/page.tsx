@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, Suspense, Fragment } from 'react'
 import { useSearchParams } from 'next/navigation'
 import { supabase } from '@/lib/supabaseClient'
-import { matchSketchFiles, resolveSketchImages, makeSketchLookupKey, type MatchedSketch } from './sketchImages'
+import { matchSketchFiles, resolveSketchImages, resolveSketchUrls, makeSketchLookupKey, type MatchedSketch } from './sketchImages'
 
 // ── 假資料（?demo=1 預覽用）──────────────────────────────────
 const DEMO_RECORDS: MoRecord[] = [
@@ -133,6 +133,7 @@ interface MoRecord {
   pr_number?: string | null   // ERP 請購單號（委外 O 列印請購單時使用）
   pr_sub_no?: string | null   // ERP 請購單項號
   is_sample?: string          // 打樣/追加單號（每日出單表原始欄位，非布林值，儘管欄位名稱是 is_sample）
+  sketch_urls?: string[]      // 每日出單表該列已存好的示意圖網址（優先於下方選資料夾比對出的結果）
 }
 
 interface SoLine {
@@ -586,6 +587,12 @@ function MoPrintContent() {
   const [sketchLoadedCount, setSketchLoadedCount] = useState(0)
   const [sketchFolderPicked, setSketchFolderPicked] = useState(false)
 
+  // 每日出單表該列已存好的示意圖（sketch_urls）——優先於選資料夾即時比對的結果，見下方
+  // visibleRecords.map 裡的 sketchUrls 判斷。這裡只需要把其中的 PDF 轉成圖片（跟本機
+  // 資料夾比對走同一套轉圖邏輯，排版才會一致），一般圖片網址不需要額外處理。
+  const [resolvedSketchMap, setResolvedSketchMap] = useState<Map<number, string[]>>(new Map())
+  const [resolvingSketchUrls, setResolvingSketchUrls] = useState(false)
+
   const handlePickSketchFolder = useCallback(async (files: FileList | null) => {
     if (!files || files.length === 0) return
     const matches = matchSketchFiles(files)
@@ -608,6 +615,36 @@ function MoPrintContent() {
       setSketchLoading(false)
     }
   }, [])
+
+  // 每筆 record 各自已存好的 sketch_urls（若有）轉成可列印的圖片網址，index 當 key
+  // （mo_number 在 C/O 廠列可能是空字串，會有多筆撞 key，用陣列 index 不會有這個問題）
+  useEffect(() => {
+    const targets = records
+      .map((r, idx) => ({ r, idx }))
+      .filter(({ r }) => r.sketch_urls && r.sketch_urls.length > 0)
+    if (targets.length === 0) {
+      setResolvedSketchMap(new Map())
+      return
+    }
+    let cancelled = false
+    setResolvingSketchUrls(true)
+    void (async () => {
+      const map = new Map<number, string[]>()
+      for (const { r, idx } of targets) {
+        if (cancelled) return
+        try {
+          map.set(idx, await resolveSketchUrls(r.sketch_urls!))
+        } catch (e) {
+          console.error(`示意圖轉圖失敗（第 ${idx} 筆）：`, e)
+        }
+      }
+      if (!cancelled) {
+        setResolvedSketchMap(map)
+        setResolvingSketchUrls(false)
+      }
+    })()
+    return () => { cancelled = true }
+  }, [records])
 
   const soLineLookup = useMemo(() => {
     const map = new Map<string, SoLine>()
@@ -654,8 +691,8 @@ function MoPrintContent() {
   }, [visibleCount, records.length])
 
   const handlePrintClick = useCallback(async () => {
-    if (sketchLoading) {
-      alert('示意圖還在轉檔中，請稍候轉檔完成（工具列會顯示進度）再列印，避免漏印示意圖。')
+    if (sketchLoading || resolvingSketchUrls) {
+      alert('示意圖還在轉檔中，請稍候轉檔完成再列印，避免漏印示意圖。')
       return
     }
     if (visibleCount < records.length) {
@@ -663,7 +700,7 @@ function MoPrintContent() {
       await new Promise<void>(resolve => window.setTimeout(resolve, 80))
     }
     window.print()
-  }, [visibleCount, records.length, sketchLoading])
+  }, [visibleCount, records.length, sketchLoading, resolvingSketchUrls])
 
   useEffect(() => {
     // ── Demo 模式：使用假資料，不讀 sessionStorage ──
@@ -891,7 +928,10 @@ function MoPrintContent() {
             style={{ display: 'none' }}
             onChange={e => { void handlePickSketchFolder(e.target.files); e.target.value = '' }}
           />
-          <span style={{ fontSize: '11px', color: sketchFolderPicked ? '#22c55e' : '#64748b' }} title="檔名需含「SO銷售單號#項號」，例如 SO260805024#1.jpg">
+          {resolvingSketchUrls && (
+            <span style={{ fontSize: '11px', color: '#22c55e' }}>📎 出單表示意圖轉檔中…</span>
+          )}
+          <span style={{ fontSize: '11px', color: sketchFolderPicked ? '#22c55e' : '#64748b' }} title="檔名需含「SO銷售單號#項號」，例如 SO260805024#1.jpg（若已透過每日出單表帶入示意圖則不需要選資料夾）">
             {sketchLoading
               ? `示意圖轉檔中… ${sketchLoadedCount}/${sketchMatches.size}`
               : sketchFolderPicked
@@ -933,10 +973,16 @@ function MoPrintContent() {
 
       {/* ── 頁面容器 ───────────────────────────────────────── */}
       <div className="mo-pages-wrapper" style={{ background: '#64748b', padding: '24px 16px', minHeight: '100vh' }}>
-        {visibleRecords.map((mo) => {
-          // 示意圖穿插：依「來源訂單#項號」查詢是否有比對到的示意圖，緊跟在這張單據後面插入
+        {visibleRecords.map((mo, idx) => {
+          // 示意圖穿插：優先用每日出單表該列已經存好的示意圖（sketch_urls，人工核對過或自動比對過的
+          // 結果，一經設定所有人都看得到，不用每次列印都重選資料夾，PDF 已在上面的 effect 轉成
+          // 圖片存在 resolvedSketchMap）；只有在沒有這筆資料時（例如直接從 mo-summary 表格列印，
+          // 非透過每日出單表）才退回用選資料夾即時比對的結果。
+          // 沒有示意圖的列兩種來源都會是空陣列，自然就不會印出任何示意圖頁。
           const lineNo = getLineNo(mo)
-          const sketchUrls = sketchImageMap.get(makeSketchLookupKey(mo.source_order ?? '', lineNo)) ?? []
+          const sketchUrls = (mo.sketch_urls && mo.sketch_urls.length > 0)
+            ? (resolvedSketchMap.get(idx) ?? [])
+            : sketchImageMap.get(makeSketchLookupKey(mo.source_order ?? '', lineNo)) ?? []
           const sketchPages = sketchUrls.map((url, i) => (
             <SketchCard key={`${mo.mo_number}-sketch-${i}`} url={url} label={`${mo.source_order ?? '—'} #${lineNo}`} />
           ))
