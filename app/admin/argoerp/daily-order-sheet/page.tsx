@@ -3275,11 +3275,56 @@ export default function DailyOrderSheetPage() {
   // 存進 sketch_urls 陣列，預覽時可左右切換瀏覽。
   const sketchFolderInputRef = useRef<HTMLInputElement>(null)
   const [sketchBulkMatching, setSketchBulkMatching] = useState(false)
-  const [sketchBulkPhase, setSketchBulkPhase] = useState<'scanning' | 'uploading'>('scanning')
+  const [sketchBulkPhase, setSketchBulkPhase] = useState<'picking' | 'scanning' | 'uploading'>('picking')
   const [sketchBulkProgress, setSketchBulkProgress] = useState({ done: 0, total: 0 })
+  const sketchPickerWatchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  const clearSketchPickerWatchdog = useCallback(() => {
+    if (sketchPickerWatchdogRef.current) {
+      clearTimeout(sketchPickerWatchdogRef.current)
+      sketchPickerWatchdogRef.current = null
+    }
+  }, [])
+
+  // 點下「自動比對示意圖」的當下就先鎖住畫面，不等瀏覽器跳出資料夾選擇視窗、也不等
+  // 選完資料夾後瀏覽器讀取內容——這兩段都是瀏覽器原生行為、我們的程式碼還沒開始跑，
+  // 沒有任何事件可監聽，但只要提前把鎖定畫面的狀態設起來，畫面在原生視窗關閉、瀏覽器
+  // 把控制權交還給網頁的那一刻就會立刻顯示，不會有「看起來像卡死」的空窗期。
+  // 保險機制：萬一使用者在原生視窗按了取消、卻沒有觸發任何事件（理論上不該發生），
+  // 5 分鐘後自動解鎖，避免鎖定畫面卡死打不開。
+  const handleOpenSketchFolderPicker = useCallback(() => {
+    setSketchMsg('')
+    setSketchBulkPhase('picking')
+    setSketchBulkMatching(true)
+    setSketchBulkProgress({ done: 0, total: 0 })
+    clearSketchPickerWatchdog()
+    sketchPickerWatchdogRef.current = setTimeout(() => {
+      setSketchBulkMatching(false)
+      setSketchMsg('❌ 選取資料夾逾時或未偵測到回應，請重新嘗試')
+      setTimeout(() => setSketchMsg(''), 6000)
+    }, 5 * 60 * 1000)
+    sketchFolderInputRef.current?.click()
+  }, [clearSketchPickerWatchdog])
+
+  // 使用者在原生資料夾選擇視窗按下「取消」時瀏覽器會觸發 input 的 cancel 事件（不會觸發
+  // change），要在這裡解鎖，否則畫面會一直卡在「請在跳出的視窗選擇資料夾」
+  useEffect(() => {
+    const input = sketchFolderInputRef.current
+    if (!input) return
+    const onCancel = () => {
+      clearSketchPickerWatchdog()
+      setSketchBulkMatching(false)
+    }
+    input.addEventListener('cancel', onCancel)
+    return () => input.removeEventListener('cancel', onCancel)
+  }, [clearSketchPickerWatchdog])
 
   const handleBulkMatchSketchFolder = useCallback(async (files: FileList | null) => {
-    if (!files || files.length === 0) return
+    clearSketchPickerWatchdog()
+    if (!files || files.length === 0) {
+      setSketchBulkMatching(false)
+      return
+    }
     // 選好資料夾後立刻給回饋（瀏覽器列舉資料夾內容、尤其是網路磁碟機，可能要花好幾秒到
     // 好幾十秒，這段時間下面的比對邏輯還沒開始跑，先讓按鈕跟訊息有反應，避免看起來像卡死。
     // 瀏覽器列舉資料夾本身沒有任何進度事件可以監聽（File API 沒有提供），所以「選完資料夾
@@ -3397,7 +3442,7 @@ export default function DailyOrderSheetPage() {
       setSketchBulkMatching(false)
       setTimeout(() => setSketchMsg(''), 6000)
     }
-  }, [sheetRows, selectedDate, currentRawText, uploadSketchFile, getSketchUrls])
+  }, [sheetRows, selectedDate, currentRawText, uploadSketchFile, getSketchUrls, clearSketchPickerWatchdog])
 
   const handleChangeFactory = useCallback((idx: number, factory: 'T' | 'C' | 'O') => {
     setSheetRows(prev => prev.map((r, i) => {
@@ -3574,14 +3619,14 @@ export default function DailyOrderSheetPage() {
                   onChange={e => { void handleBulkMatchSketchFolder(e.target.files); e.target.value = '' }}
                 />
                 <button
-                  onClick={() => sketchFolderInputRef.current?.click()}
+                  onClick={handleOpenSketchFolderPicker}
                   disabled={sketchBulkMatching}
                   className="px-4 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 disabled:opacity-50 text-slate-300 text-sm font-medium transition-colors"
                   title="選一次本機/內網共用資料夾，依「SO單號#項號」自動比對出這份出單表裡還沒有示意圖的列並存入"
                 >
                   {sketchBulkMatching
-                    ? (sketchBulkPhase === 'scanning'
-                        ? `📁 掃描中… ${sketchBulkProgress.done}/${sketchBulkProgress.total}`
+                    ? (sketchBulkPhase === 'picking' ? '📁 請選擇資料夾…'
+                        : sketchBulkPhase === 'scanning' ? `📁 掃描中… ${sketchBulkProgress.done}/${sketchBulkProgress.total}`
                         : `📁 上傳中… ${sketchBulkProgress.done}/${sketchBulkProgress.total}`)
                     : '📁 自動比對示意圖'}
                 </button>
@@ -4566,18 +4611,25 @@ export default function DailyOrderSheetPage() {
       <PoOrderModal docNo={poModalId} onClose={() => setPoModalId(null)} />
       <MoRouteModal moNumber={moModalId} onClose={() => setMoModalId(null)} />
 
-      {/* 自動比對示意圖進行中：全螢幕鎖定，從選好資料夾那一刻起到跑完都不能做其他操作，
-          避免使用者搞不清楚到底還在跑還是已經死掉，中途誤觸其他按鈕 */}
+      {/* 自動比對示意圖進行中：全螢幕鎖定，從點下按鈕那一刻起（還沒跳出資料夾選擇視窗
+          就先鎖住）到整個流程跑完都不能做其他操作，避免使用者搞不清楚到底還在跑還是
+          已經死掉、中途誤觸其他按鈕 */}
       {sketchBulkMatching && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/70 backdrop-blur-sm">
           <div className="bg-slate-900 border border-cyan-700/50 rounded-2xl shadow-2xl px-8 py-7 flex flex-col items-center gap-4 max-w-sm text-center">
             <div className="w-10 h-10 border-4 border-slate-700 border-t-cyan-400 rounded-full animate-spin" />
             <div className="text-white font-bold text-base">
-              {sketchBulkPhase === 'scanning' ? '正在掃描資料夾…' : '正在上傳示意圖…'}
+              {sketchBulkPhase === 'picking' ? '請在跳出的視窗中選擇資料夾'
+                : sketchBulkPhase === 'scanning' ? '正在掃描資料夾…'
+                : '正在上傳示意圖…'}
             </div>
-            <div className="text-cyan-300 font-mono text-sm">
-              {sketchBulkProgress.done} / {sketchBulkProgress.total}
-            </div>
+            {sketchBulkPhase === 'picking' ? (
+              <div className="text-xs text-slate-400">選好資料夾後瀏覽器需要一點時間讀取內容，尤其是網路磁碟機或檔案很多時，請耐心等候</div>
+            ) : (
+              <div className="text-cyan-300 font-mono text-sm">
+                {sketchBulkProgress.done} / {sketchBulkProgress.total}
+              </div>
+            )}
             {sketchMsg && <div className="text-xs text-slate-400">{sketchMsg}</div>}
             <div className="text-[11px] text-slate-500">處理完成前請勿關閉頁面或進行其他操作</div>
           </div>
