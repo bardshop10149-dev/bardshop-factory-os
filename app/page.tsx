@@ -1026,7 +1026,7 @@ export default function HomePage() {
                   onClick={() => { setShowQaModal(false); router.push('/qa/report-sales-design'); }}
                 >
                   <div className="mb-2 text-teal-400 font-bold text-lg">未生產異常回報</div>
-                  <div className="text-xs text-slate-300 mb-2">業務美編・尚未生產</div>
+                  <div className="text-xs text-red-400 font-semibold mb-2">尚未生產</div>
                   <span className="px-3 py-1 rounded border border-teal-600 text-teal-300 text-xs font-mono bg-teal-900/30">前往建立</span>
                 </div>
                 <div
@@ -1034,7 +1034,7 @@ export default function HomePage() {
                   onClick={() => { setShowQaModal(false); router.push('/qa/report'); }}
                 >
                   <div className="mb-2 text-teal-400 font-bold text-lg">生產中異常回報</div>
-                  <div className="text-xs text-slate-300 mb-2">負責建立新的異常單</div>
+                  <div className="text-xs text-slate-300 mb-2">生產中</div>
                   <span className="px-3 py-1 rounded border border-teal-600 text-teal-300 text-xs font-mono bg-teal-900/30">前往建立</span>
                 </div>
                 <div
