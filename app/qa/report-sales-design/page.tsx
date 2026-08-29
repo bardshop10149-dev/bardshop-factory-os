@@ -15,7 +15,7 @@
 // - 「尚未生產」目前以異常原因自動前綴【尚未生產】標記，之後要升級成正式欄位再一起改
 
 import Link from 'next/link'
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { supabase } from '../../../lib/supabaseClient'
 
 interface PersonnelOption {
@@ -25,6 +25,42 @@ interface PersonnelOption {
 
 const PRE_PRODUCTION_TAG = '【尚未生產】'
 const getTodayDateInput = () => new Date().toISOString().slice(0, 10)
+
+// members.department 與 qa_anomaly_option_items 的部門寫法不一致，需對照；
+// 表上沒有對應選項的部門（管理部、雷射切割）刻意不列 → 不預填，由使用者自選。
+const DEPT_MAP: Record<string, string> = {
+  美術編輯部: '美編部',
+  印刷部: '生產部-印刷課',
+  生產管理部: '生產部-生管課',
+}
+
+/**
+ * 從該部門的人員選項中找出登入者。選項格式多為「美編-怡妏」，帳號存的是
+ * 暱稱（怡妏）或本名（易怡妏），故取 '-' 後的名字部分做比對。
+ * 完全相等優先於包含；同名同時存在有前綴與無前綴兩筆時取有前綴的（新命名慣例）；
+ * 仍不唯一就回 null——預填帶錯人比不帶更糟。
+ */
+function matchPersonnel(cands: PersonnelOption[], names: string[]): string | null {
+  const namePart = (v: string) => {
+    const i = v.lastIndexOf('-')
+    return (i >= 0 ? v.slice(i + 1) : v).trim()
+  }
+  const score = (p: string, n: string) =>
+    p === n ? 2 : n.length >= 2 && (p.includes(n) || n.includes(p)) ? 1 : 0
+  let hits = cands
+    .map((c) => {
+      const p = namePart(c.option_value)
+      return { v: c.option_value, s: Math.max(0, ...names.map((n) => score(p, n))) }
+    })
+    .filter((h) => h.s > 0)
+  if (hits.length === 0) return null
+  const top = Math.max(...hits.map((h) => h.s))
+  hits = hits.filter((h) => h.s === top)
+  const prefixed = hits.filter((h) => h.v.includes('-'))
+  const pool = prefixed.length > 0 ? prefixed : hits
+  const uniq = [...new Set(pool.map((h) => h.v))]
+  return uniq.length === 1 ? uniq[0] : null
+}
 
 export default function SalesDesignAnomalyReportPage() {
   // ── 表單欄位 ──────────────────────────────────────────────
@@ -70,6 +106,35 @@ export default function SalesDesignAnomalyReportPage() {
   }, [])
 
   const personnelOf = (dept: string) => personnelOptions.filter((p) => !dept || p.department_value === dept)
+
+  // ── 依登入帳號預填「異常回報-部門／人員」──────────────────
+  // 只是預設值：使用者已手動動過就不覆蓋（touchedRef），比對不到就留白。
+  const reporterTouchedRef = useRef(false)
+  useEffect(() => {
+    if (departmentOptions.length === 0 || personnelOptions.length === 0) return
+    let cancelled = false
+    const prefill = async () => {
+      const { data: auth } = await supabase.auth.getUser()
+      const email = auth.user?.email
+      if (!email || cancelled) return
+      const { data } = await supabase
+        .from('members')
+        .select('department, nickname, real_name')
+        .eq('email', email)
+        .limit(1)
+      const me = (data ?? [])[0] as { department?: string; nickname?: string; real_name?: string } | undefined
+      if (!me || cancelled || reporterTouchedRef.current) return
+      const raw = (me.department ?? '').trim()
+      const dept = departmentOptions.includes(raw) ? raw : DEPT_MAP[raw] ?? ''
+      if (!dept) return
+      setReporterDepartment((prev) => prev || dept)
+      const names = [me.nickname, me.real_name].map((n) => (n ?? '').trim()).filter(Boolean)
+      const pick = matchPersonnel(personnelOptions.filter((p) => p.department_value === dept), names)
+      if (pick) setReporter((prev) => prev || pick)
+    }
+    void prefill()
+    return () => { cancelled = true }
+  }, [departmentOptions, personnelOptions])
 
   // ── 送出 ─────────────────────────────────────────────────
   const handleSubmit = async () => {
@@ -211,7 +276,7 @@ export default function SalesDesignAnomalyReportPage() {
               <label className={labelCls}>異常回報-部門</label>
               <select
                 value={reporterDepartment}
-                onChange={(e) => { setReporterDepartment(e.target.value); setReporter('') }}
+                onChange={(e) => { reporterTouchedRef.current = true; setReporterDepartment(e.target.value); setReporter('') }}
                 className={inputCls}
               >
                 <option value="">請選擇</option>
@@ -222,7 +287,12 @@ export default function SalesDesignAnomalyReportPage() {
             </div>
             <div>
               <label className={labelCls}>異常回報-人員</label>
-              <select value={reporter} onChange={(e) => setReporter(e.target.value)} className={inputCls} disabled={!reporterDepartment}>
+              <select
+                value={reporter}
+                onChange={(e) => { reporterTouchedRef.current = true; setReporter(e.target.value) }}
+                className={inputCls}
+                disabled={!reporterDepartment}
+              >
                 <option value="">{reporterDepartment ? '請選擇' : '請先選部門'}</option>
                 {personnelOf(reporterDepartment).map((p) => (
                   <option key={p.option_value} value={p.option_value}>{p.option_value}</option>
