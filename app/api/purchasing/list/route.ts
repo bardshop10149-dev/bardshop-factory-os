@@ -22,8 +22,8 @@ export async function GET(request: NextRequest) {
   const orderTo = params.get('to')
   // 單據狀態（ARGO HOLD_STATUS）白名單；count 模式（首頁徽章）固定 OPEN
   const poStatus = (params.get('status') ?? 'OPEN').trim().toUpperCase()
-  if (!['OPEN', 'CLOSE', 'VOID'].includes(poStatus)) {
-    return NextResponse.json({ success: false, error: 'status 必須是 OPEN/CLOSE/VOID' }, { status: 400 })
+  if (!['ALL', 'OPEN', 'CLOSE', 'VOID'].includes(poStatus)) {
+    return NextResponse.json({ success: false, error: 'status 必須是 ALL/OPEN/CLOSE/VOID' }, { status: 400 })
   }
   const supabase = getSupabaseAdminClient()
 

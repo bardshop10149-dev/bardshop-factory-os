@@ -198,7 +198,7 @@ export default function PurchasingPage() {
   const [sortDue, setSortDue]   = useState<'asc' | 'desc' | null>(null)  // 依交期排序
   const [hideArrived, setHideArrived] = useState(false)  // 排除已全部到倉
   const [cpFilter, setCpFilter] = useState<'all' | 'only' | 'exclude'>('all')  // 常平／非常平
-  const [poStatus, setPoStatus] = useState<'OPEN' | 'CLOSE' | 'VOID'>('OPEN')  // 單據狀態（伺服器端過濾，切換即重查）
+  const [poStatus, setPoStatus] = useState<'ALL' | 'OPEN' | 'CLOSE' | 'VOID'>('ALL')  // 單據狀態（伺服器端過濾，切換即重查；預設全部顯示 Snow 2026-08-30）
   const [savingKeys, setSavingKeys] = useState<Set<string>>(new Set())
   const [msg, setMsg]           = useState('')
   const [buyerOptions, setBuyerOptions] = useState<{ id: string; name: string | null }[]>([])
@@ -797,7 +797,7 @@ export default function PurchasingPage() {
             >{cpFilter === 'exclude' ? '✓ 只看非常平' : '只看非常平'}</button>
             <span className="w-px h-4 bg-slate-700" />
             {/* 單據狀態（ARGO HOLD_STATUS）：伺服器端過濾，切換立即重查 */}
-            {(['OPEN', 'CLOSE', 'VOID'] as const).map(s => (
+            {(['ALL', 'OPEN', 'CLOSE', 'VOID'] as const).map(s => (
               <button
                 key={s}
                 type="button"
@@ -806,10 +806,11 @@ export default function PurchasingPage() {
                   setPoStatus(s)
                   if (searched) void fetchPage(1, appliedFilters, { sort: sortDue, cp: cpFilter, status: s })
                 }}
-                title={`查詢 ${s} 狀態的採購單（切換後立即重新查詢）`}
+                title={s === 'ALL' ? '顯示全部狀態的採購單（切換後立即重新查詢）' : `查詢 ${s} 狀態的採購單（切換後立即重新查詢）`}
                 className={`px-2.5 py-1 rounded border transition-colors font-mono ${
                   poStatus === s
-                    ? s === 'OPEN' ? 'bg-emerald-900/50 border-emerald-600/60 text-emerald-300'
+                    ? s === 'ALL' ? 'bg-cyan-900/50 border-cyan-600/60 text-cyan-300'
+                    : s === 'OPEN' ? 'bg-emerald-900/50 border-emerald-600/60 text-emerald-300'
                     : s === 'CLOSE' ? 'bg-slate-700 border-slate-500 text-slate-200'
                     : 'bg-rose-900/50 border-rose-600/60 text-rose-300'
                     : 'bg-slate-800 border-slate-700 text-slate-400 hover:text-slate-200'

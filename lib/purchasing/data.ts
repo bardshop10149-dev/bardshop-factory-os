@@ -76,12 +76,13 @@ function toSlashDate(d?: string | null): string | null {
 async function fetchAllOpenPoRows(supabase: SupabaseAdmin, range?: { orderFrom?: string | null; orderTo?: string | null; poStatus?: string | null }): Promise<PjSyncRow[]> {
   const from = toSlashDate(range?.orderFrom)
   const to = toSlashDate(range?.orderTo)
+  const status = (range?.poStatus || 'OPEN').toUpperCase()
   const buildQuery = (withCount: boolean) => {
     let q = supabase
       .from('erp_pj_sync')
       .select(PO_SELECT, withCount ? { count: 'exact' } : undefined)
       .eq('doc_type', '採購單號')
-      .eq('status', range?.poStatus || 'OPEN')
+    if (status !== 'ALL') q = q.eq('status', status)
     if (from) q = q.gte('start_date', from)
     if (to) q = q.lte('start_date', to)
     return q.order('doc_no', { ascending: true }).order('sub_no', { ascending: true })
@@ -498,7 +499,9 @@ export async function loadPoPage(supabase: SupabaseAdmin, p: PageParams, timings
     .from('erp_pj_sync')
     .select(PO_SELECT, { count: 'exact' })
     .eq('doc_type', '採購單號')
-    .eq('status', (p.poStatus || 'OPEN').toUpperCase())
+  // ALL = 不過濾單據狀態(OPEN/CLOSE/VOID 全看,Snow 2026-08-30)
+  const pageStatus = (p.poStatus || 'OPEN').toUpperCase()
+  if (pageStatus !== 'ALL') q = q.eq('status', pageStatus)
   const oFrom = toSlashDate(p.orderFrom), oTo = toSlashDate(p.orderTo)
   if (oFrom) q = q.gte('start_date', oFrom)
   if (oTo) q = q.lte('start_date', oTo)
