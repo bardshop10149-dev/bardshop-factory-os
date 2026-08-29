@@ -128,7 +128,7 @@ const EMPTY_FILTERS: Filters = {
 }
 
 /** 追蹤列表欄位（w = 預設欄寬 px，可拖拉表頭右緣調整） */
-// w = 標準寬、wc = 精簡（一屏）寬；sortable=交期可點表頭排序
+// w = 標準寬、wc = 精簡（一屏）寬；sortable=可點表頭排序（'due'=交期、'order'=下單日，互斥）
 const LIST_COLS = [
   { key: 'po',        label: '採購單號',   w: 118, wc: 92 },
   { key: 'sub',       label: '序',         w: 40,  wc: 32 },
@@ -136,8 +136,8 @@ const LIST_COLS = [
   { key: 'qty',       label: '數量',       w: 84,  wc: 60, right: true },
   { key: 'buyer',     label: '承辦人',     w: 90,  wc: 66, center: true },
   { key: 'vendor',    label: '供應商',     w: 140, wc: 100 },
-  { key: 'orderDate', label: '下單日',     w: 92,  wc: 74 },
-  { key: 'due',       label: '交期',       w: 100, wc: 82, sortable: true },
+  { key: 'orderDate', label: '下單日',     w: 92,  wc: 74, sortable: 'order' as const },
+  { key: 'due',       label: '交期',       w: 100, wc: 82, sortable: 'due' as const },
   { key: 'so',        label: 'SO單號',     w: 110, wc: 88 },
   { key: 'pr',        label: '請購單號',   w: 118, wc: 92 },
   { key: 'progress',  label: '進度',       w: 150, wc: 122 },
@@ -196,6 +196,7 @@ export default function PurchasingPage() {
   const [page, setPage]         = useState(1)        // 追蹤列表分頁（每頁 PAGE_SIZE 筆）
   const [compact, setCompact]   = useState(false)    // 精簡（一屏）模式：較窄欄寬 + 較小字
   const [sortDue, setSortDue]   = useState<'asc' | 'desc' | null>(null)  // 依交期排序
+  const [sortOrd, setSortOrd]   = useState<'asc' | 'desc' | null>(null)  // 依下單日排序（與交期排序互斥）
   const [hideArrived, setHideArrived] = useState(false)  // 排除已全部到倉
   const [cpFilter, setCpFilter] = useState<'all' | 'only' | 'exclude'>('all')  // 常平／非常平
   const [poStatus, setPoStatus] = useState<'ALL' | 'OPEN' | 'CLOSE' | 'VOID'>('ALL')  // 單據狀態（伺服器端過濾，切換即重查；預設全部顯示 Snow 2026-08-30）
@@ -238,7 +239,7 @@ export default function PurchasingPage() {
   }, [])
 
   // 追蹤列表：伺服器端過濾/排序/分頁（mode=page），一次只撈當頁 100 筆 → 次秒級
-  const fetchPage = useCallback(async (pageNum: number, f: Filters, opts: { sort: 'asc' | 'desc' | null; cp: 'all' | 'only' | 'exclude'; status: string }) => {
+  const fetchPage = useCallback(async (pageNum: number, f: Filters, opts: { sort: 'asc' | 'desc' | null; sortOrd?: 'asc' | 'desc' | null; cp: 'all' | 'only' | 'exclude'; status: string }) => {
     setLoading(true)
     setError(null)
     const t0 = performance.now()
@@ -256,6 +257,7 @@ export default function PurchasingPage() {
       set('buyer', buyerTerm)
       if (opts.cp !== 'all') qs.set('cp', opts.cp)
       if (opts.sort) qs.set('sortDue', opts.sort)
+      if (opts.sortOrd) qs.set('sortOrder', opts.sortOrd)
       const res = await fetch(`/api/purchasing/list?${qs}`)
       if (res.status === 403) { setForbidden(true); return }
       const json = await res.json()
@@ -295,8 +297,8 @@ export default function PurchasingPage() {
   const handleSearch = useCallback(() => {
     setAppliedFilters(filters)
     setSearched(true)
-    void fetchPage(1, filters, { sort: sortDue, cp: cpFilter, status: poStatus })
-  }, [filters, sortDue, cpFilter, poStatus, fetchPage])
+    void fetchPage(1, filters, { sort: sortDue, sortOrd, cp: cpFilter, status: poStatus })
+  }, [filters, sortDue, sortOrd, cpFilter, poStatus, fetchPage])
 
   const flash = (text: string) => {
     setMsg(text)
@@ -323,14 +325,14 @@ export default function PurchasingPage() {
       // 已查詢過且有變動才重撈，避免多打一次重 API
       if (changed > 0) {
         if (tab === 'due' && dueLoaded) void fetchDue()
-        else if (searched) void fetchPage(page, appliedFilters, { sort: sortDue, cp: cpFilter, status: poStatus })
+        else if (searched) void fetchPage(page, appliedFilters, { sort: sortDue, sortOrd, cp: cpFilter, status: poStatus })
       }
     } catch (e) {
       flash(`❌ 更新失敗：${e instanceof Error ? e.message : String(e)}`)
     } finally {
       setDbSyncing(false)
     }
-  }, [dbSyncing, searched, tab, dueLoaded, page, appliedFilters, sortDue, cpFilter, poStatus, fetchPage, fetchDue, loadSyncStatus])
+  }, [dbSyncing, searched, tab, dueLoaded, page, appliedFilters, sortDue, sortOrd, cpFilter, poStatus, fetchPage, fetchDue, loadSyncStatus])
 
   const markSaving = (key: string, on: boolean) => {
     setSavingKeys(prev => {
@@ -391,8 +393,8 @@ export default function PurchasingPage() {
   const safePage = Math.min(page, totalPages)
 
   const goToPage = useCallback((n: number) => {
-    void fetchPage(n, appliedFilters, { sort: sortDue, cp: cpFilter, status: poStatus })
-  }, [appliedFilters, sortDue, cpFilter, poStatus, fetchPage])
+    void fetchPage(n, appliedFilters, { sort: sortDue, sortOrd, cp: cpFilter, status: poStatus })
+  }, [appliedFilters, sortDue, sortOrd, cpFilter, poStatus, fetchPage])
 
   const dueGroups = useMemo(() => {
     const groups = { red: [] as PoTrackingLine[], amber: [] as PoTrackingLine[], yellow: [] as PoTrackingLine[] }
@@ -618,7 +620,7 @@ export default function PurchasingPage() {
           >{dbSyncing ? '⏳ 同步中…' : '⬇ 更新資料庫'}</button>
           <button
             type="button"
-            onClick={() => { if (tab === 'due') void fetchDue(); else if (searched) void fetchPage(safePage, appliedFilters, { sort: sortDue, cp: cpFilter, status: poStatus }) }}
+            onClick={() => { if (tab === 'due') void fetchDue(); else if (searched) void fetchPage(safePage, appliedFilters, { sort: sortDue, sortOrd, cp: cpFilter, status: poStatus }) }}
             disabled={loading}
             className="px-3 py-1.5 rounded bg-slate-800 hover:bg-slate-700 disabled:text-slate-600 text-xs font-semibold text-slate-300 transition-colors"
           >{loading ? '載入中…' : '🔄 重新整理'}</button>
@@ -782,7 +784,7 @@ export default function PurchasingPage() {
               onClick={() => {
                 const next = cpFilter === 'only' ? 'all' : 'only'
                 setCpFilter(next)
-                if (searched) void fetchPage(1, appliedFilters, { sort: sortDue, cp: next, status: poStatus })
+                if (searched) void fetchPage(1, appliedFilters, { sort: sortDue, sortOrd, cp: next, status: poStatus })
               }}
               className={`px-2.5 py-1 rounded border transition-colors ${cpFilter === 'only' ? 'bg-orange-900/50 border-orange-600/60 text-orange-300' : 'bg-slate-800 border-slate-700 text-slate-400 hover:text-slate-200'}`}
             >{cpFilter === 'only' ? '✓ 只看常平' : '只看常平'}</button>
@@ -791,7 +793,7 @@ export default function PurchasingPage() {
               onClick={() => {
                 const next = cpFilter === 'exclude' ? 'all' : 'exclude'
                 setCpFilter(next)
-                if (searched) void fetchPage(1, appliedFilters, { sort: sortDue, cp: next, status: poStatus })
+                if (searched) void fetchPage(1, appliedFilters, { sort: sortDue, sortOrd, cp: next, status: poStatus })
               }}
               className={`px-2.5 py-1 rounded border transition-colors ${cpFilter === 'exclude' ? 'bg-fuchsia-900/50 border-fuchsia-600/60 text-fuchsia-300' : 'bg-slate-800 border-slate-700 text-slate-400 hover:text-slate-200'}`}
             >{cpFilter === 'exclude' ? '✓ 只看非常平' : '只看非常平'}</button>
@@ -804,7 +806,7 @@ export default function PurchasingPage() {
                 onClick={() => {
                   if (poStatus === s || loading) return
                   setPoStatus(s)
-                  if (searched) void fetchPage(1, appliedFilters, { sort: sortDue, cp: cpFilter, status: s })
+                  if (searched) void fetchPage(1, appliedFilters, { sort: sortDue, sortOrd, cp: cpFilter, status: s })
                 }}
                 title={s === 'ALL' ? '顯示全部狀態的採購單（切換後立即重新查詢）' : `查詢 ${s} 狀態的採購單（切換後立即重新查詢）`}
                 className={`px-2.5 py-1 rounded border transition-colors font-mono ${
@@ -817,7 +819,7 @@ export default function PurchasingPage() {
                 }`}
               >{poStatus === s ? `✓ ${s}` : s}</button>
             ))}
-            <span>點「交期」表頭可排序；拖表頭右緣調欄寬</span>
+            <span>點「下單日」「交期」表頭可排序；拖表頭右緣調欄寬</span>
           </div>
 
           {/* ─── 追蹤列表（欄寬可拖拉表頭右緣調整、表頭固定、垂直/水平捲軸都在表格內常駐） ─── */}
@@ -832,18 +834,27 @@ export default function PurchasingPage() {
                 <tr>
                   {LIST_COLS.map(c => {
                     const isSort = c.sortable
+                    // 交期 / 下單日 各自獨立排序，點其一自動取消另一個（伺服器端單一排序鍵）
+                    const dir = c.sortable === 'due' ? sortDue : c.sortable === 'order' ? sortOrd : null
                     return (
                     <th
                       key={c.key}
                       onClick={isSort ? () => {
-                        const next = sortDue === 'asc' ? 'desc' : sortDue === 'desc' ? null : 'asc'
-                        setSortDue(next)
-                        if (searched) void fetchPage(1, appliedFilters, { sort: next, cp: cpFilter, status: poStatus })
+                        const next = dir === 'asc' ? 'desc' : dir === 'desc' ? null : 'asc'
+                        if (c.sortable === 'due') {
+                          setSortDue(next)
+                          setSortOrd(null)
+                          if (searched) void fetchPage(1, appliedFilters, { sort: next, sortOrd: null, cp: cpFilter, status: poStatus })
+                        } else {
+                          setSortOrd(next)
+                          setSortDue(null)
+                          if (searched) void fetchPage(1, appliedFilters, { sort: null, sortOrd: next, cp: cpFilter, status: poStatus })
+                        }
                       } : undefined}
                       className={`sticky top-0 z-10 bg-slate-900 border-b border-slate-700 border-r border-r-slate-700/80 px-2 py-2 whitespace-nowrap overflow-hidden text-slate-400 font-medium select-none ${c.right ? 'text-right' : c.center ? 'text-center' : 'text-left'} ${isSort ? 'cursor-pointer hover:text-cyan-300' : ''}`}
-                      title={isSort ? '點擊依交期排序（升冪 / 降冪 / 取消）' : undefined}
+                      title={isSort ? `點擊依${c.label}排序（升冪 / 降冪 / 取消）` : undefined}
                     >
-                      {c.label}{isSort && (sortDue === 'asc' ? ' ▲' : sortDue === 'desc' ? ' ▼' : ' ⇅')}
+                      {c.label}{isSort && (dir === 'asc' ? ' ▲' : dir === 'desc' ? ' ▼' : ' ⇅')}
                       <span
                         onMouseDown={e => { e.stopPropagation(); startResize(c.key, e) }}
                         title="拖拉調整欄寬"

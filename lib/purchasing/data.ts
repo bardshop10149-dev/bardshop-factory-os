@@ -465,6 +465,7 @@ export interface PageParams {
   cp?: 'all' | 'only' | 'exclude'   // 常平（C01510）快篩
   srcNo?: string | null             // 來源單號：SO/RO 直接比對；MO 先反查 erp_mo_lines 的來源訂單
   sortDue?: 'asc' | 'desc' | null   // 依交期排序
+  sortOrderDate?: 'asc' | 'desc' | null   // 依下單日排序（與交期排序互斥，前端點表頭切換）
 }
 
 /** 伺服器端過濾/排序/分頁；只 enrich 當頁列。回傳 { lines, total }。 */
@@ -527,7 +528,9 @@ export async function loadPoPage(supabase: SupabaseAdmin, p: PageParams, timings
   if (srcList) q = q.or(`extra->>SO_PROJECT_ID.in.(${srcList.join(',')}),extra->>MBP_LOT_NO.in.(${srcList.join(',')})`)
   else if (srcRaw) q = q.or(`extra->>SO_PROJECT_ID.ilike.*${srcRaw}*,extra->>MBP_LOT_NO.ilike.*${srcRaw}*`)
 
-  if (p.sortDue) q = q.order('end_date', { ascending: p.sortDue === 'asc', nullsFirst: false })
+  // start_date 為 YYYY/MM/DD 斜線文字，字典序=時間序，可直接排
+  if (p.sortOrderDate) q = q.order('start_date', { ascending: p.sortOrderDate === 'asc', nullsFirst: false })
+  else if (p.sortDue) q = q.order('end_date', { ascending: p.sortDue === 'asc', nullsFirst: false })
   q = q.order('doc_no', { ascending: true }).order('sub_no', { ascending: true })
 
   const offset = Math.max(0, (p.page - 1) * p.pageSize)
