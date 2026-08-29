@@ -59,6 +59,12 @@ function chunk<T>(arr: T[], size: number): T[][] {
 
 const norm = (s: string | null | undefined) => String(s ?? '').trim().toUpperCase()
 
+/** 來源單欄原文(可能夾雜中文註記/斜線)→ 第一個 SO/SOB/RO 單號 token(大寫);抽不出回 null */
+function extractSoToken(s: string | null | undefined): string | null {
+  const m = String(s ?? '').toUpperCase().match(/(?:SOB|SO|RO)\d{6,}/)
+  return m ? m[0] : null
+}
+
 /** 常平出貨日原文/運輸方式欄 → 採購專區貨運下拉的合法值(po_line_tracking CHECK 限定四種)。
  *  對不上的(貨拉拉/梁二哥/廠商寄送…)回 null——完整原文本來就會進備註,不硬塞。 */
 function deriveShipMethod(...texts: (string | null | undefined)[]): ShipMethod | null {
@@ -134,20 +140,21 @@ export async function POST(request: NextRequest) {
     // 每個 chunk 內還要 range 分頁,否則靜默截斷、後面的單全誤判「對不到」(2026-08-29 踩過)
     const PAGE = 1000
     const poNos = [...new Set(rows.map((r) => r.po_no.trim()).filter(Boolean))]
-    type PjLine = { doc_no: string; sub_no: string; item_code: string | null }
+    type PjLine = { doc_no: string; sub_no: string; item_code: string | null; so: string | null; vendor: string | null }
+    const PJ_LINE_SELECT = 'doc_no, sub_no, item_code, so:extra->>SO_PROJECT_ID, vendor:customer_vendor'
     const pjLines: PjLine[] = []
     for (const part of chunk(poNos, IN_CHUNK)) {
       for (let offset = 0; ; offset += PAGE) {
         const { data, error } = await supabase
           .from('erp_pj_sync')
-          .select('doc_no, sub_no, item_code')
+          .select(PJ_LINE_SELECT)
           .eq('doc_type', '採購單號')
           .in('doc_no', part)
           .order('doc_no', { ascending: true })
           .order('sub_no', { ascending: true })
           .range(offset, offset + PAGE - 1)
         if (error) throw new Error(error.message)
-        const page = (data ?? []) as PjLine[]
+        const page = (data ?? []) as unknown as PjLine[]
         pjLines.push(...page)
         if (page.length < PAGE) break
       }
@@ -160,16 +167,63 @@ export async function POST(request: NextRequest) {
       lineIndex.set(k, list)
     }
 
-    type Matched = { row: MarkRow; lines: PjLine[]; status: 'matched' | 'multi_line' | 'no_line' }
+    // 後備比對索引:(來源SO單號+品號) → 常平廠商(C01510)的採購行。
+    // 工作表偶有整批列標錯採購單號(2026-08-29 實例:POC2026062501 區塊其實是 2502 的行,
+    // 出貨日文字全填在標錯那批)——單號對不到時用來源單+品號對回,常平出貨資訊才不會斷。
+    // 只收常平廠商行,避免同 SO 同品號跨廠商誤配。
+    const CHANGPING_VENDOR = 'C01510'
+    const soItemIndex = new Map<string, PjLine[]>()
+    {
+      const soTokens = [...new Set(rows.map((r) => extractSoToken(r.so_no)).filter(Boolean))] as string[]
+      const wanted = new Set(soTokens)
+      // 常平行的 SO 需另撈:標錯單號時行不在 poNos 撈回的集合裡 → 依 SO 直接查
+      for (const part of chunk(soTokens, IN_CHUNK)) {
+        for (let offset = 0; ; offset += PAGE) {
+          const { data, error } = await supabase
+            .from('erp_pj_sync')
+            .select(PJ_LINE_SELECT)
+            .eq('doc_type', '採購單號')
+            .eq('customer_vendor', CHANGPING_VENDOR)
+            .in('extra->>SO_PROJECT_ID', part)
+            .order('doc_no', { ascending: true })
+            .order('sub_no', { ascending: true })
+            .range(offset, offset + PAGE - 1)
+          if (error) throw new Error(error.message)
+          const page = (data ?? []) as unknown as PjLine[]
+          for (const l of page) {
+            const so = norm(l.so)
+            if (!so || !wanted.has(so)) continue
+            const k = `${so}|${norm(l.item_code)}`
+            const list = soItemIndex.get(k) ?? []
+            if (!list.some((x) => x.doc_no === l.doc_no && x.sub_no === l.sub_no)) list.push(l)
+            soItemIndex.set(k, list)
+          }
+          if (page.length < PAGE) break
+        }
+      }
+    }
+
+    type Matched = { row: MarkRow; lines: PjLine[]; status: string }
     const matched: Matched[] = rows.map((row) => {
-      const lines = lineIndex.get(`${norm(row.po_no)}|${norm(row.item_code)}`) ?? []
-      const status = lines.length === 0 ? 'no_line' : lines.length === 1 ? 'matched' : 'multi_line'
+      let lines = lineIndex.get(`${norm(row.po_no)}|${norm(row.item_code)}`) ?? []
+      let via = ''
+      if (lines.length === 0) {
+        const so = extractSoToken(row.so_no)
+        if (so) {
+          lines = soItemIndex.get(`${so}|${norm(row.item_code)}`) ?? []
+          if (lines.length > 0) via = '_by_so'
+        }
+      }
+      const status = lines.length === 0 ? 'no_line' : (lines.length === 1 ? 'matched' : 'multi_line') + via
       if (status === 'no_line') {
         stats.unmatched++
         actions.push(`對不到採購行:${row.po_no} / ${row.item_code ?? '-'}(${row.sheet} r${row.row_no ?? '?'})`)
       }
       return { row, lines, status }
     })
+    // 有出貨文字的列排後面(pendingLineWrites 後寫者勝):同一行同時被
+    // 「標錯單號但有文字」與「單號正確但空白」的列對到時,真文字要蓋過「日期未填」
+    matched.sort((a, b) => (a.row.ship_date_text ? 1 : 0) - (b.row.ship_date_text ? 1 : 0))
 
     // ---- 2) 讀既有 po_line_tracking,套出貨燈 + 備註 ----
     const lampDocs = [...new Set(matched.flatMap((m) => m.lines.map((l) => l.doc_no)))]
@@ -259,7 +313,9 @@ export async function POST(request: NextRequest) {
       if (!rowChanged) stats.already_applied++
       const summary = parts.join(';')
       applyResults.set(m.row.mark_key, { applied: true, note: summary })
-      actions.push(`${m.row.po_no} ${m.row.item_code ?? ''} → ${summary}${m.status === 'multi_line' ? `(同品號 ${m.lines.length} 行全套用)` : ''}`)
+      actions.push(`${m.row.po_no} ${m.row.item_code ?? ''} → ${summary}`
+        + (m.status.startsWith('multi_line') ? `(同品號 ${m.lines.length} 行全套用)` : '')
+        + (m.status.endsWith('_by_so') ? '(工作表單號對不到,用來源單+品號對回)' : ''))
     }
 
     // ---- 2b) 批次寫入採購行追蹤:只寫「最終狀態 ≠ 原始」的行,統計也以此為準 ----
