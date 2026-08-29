@@ -68,7 +68,6 @@ export default function SalesDesignAnomalyReportPage() {
   const [orderNumber, setOrderNumber] = useState('')
   const [itemCode, setItemCode] = useState('')
   const [itemName, setItemName] = useState('')
-  const [category, setCategory] = useState('')
   const [reporterDepartment, setReporterDepartment] = useState('')
   const [reporter, setReporter] = useState('')
   const [handlerDepartment, setHandlerDepartment] = useState('')
@@ -79,7 +78,8 @@ export default function SalesDesignAnomalyReportPage() {
   const [doneMsg, setDoneMsg] = useState('')
 
   // ── 選項（與既有異常單同一來源）───────────────────────────
-  const [categoryOptions, setCategoryOptions] = useState<string[]>([])
+  // 註：刻意沒有「異常分類」欄——尚未生產的異常先讓使用者自由手寫異常原因，
+  // 累積夠多再歸納分類，屆時再加欄位。
   const [departmentOptions, setDepartmentOptions] = useState<string[]>([])
   const [personnelOptions, setPersonnelOptions] = useState<PersonnelOption[]>([])
 
@@ -94,7 +94,6 @@ export default function SalesDesignAnomalyReportPage() {
         return
       }
       const rows = (data as Array<{ option_type: string; option_value: string; department_value?: string }>) ?? []
-      setCategoryOptions(rows.filter((r) => r.option_type === 'category').map((r) => r.option_value).filter(Boolean))
       setDepartmentOptions(rows.filter((r) => r.option_type === 'department').map((r) => r.option_value).filter(Boolean))
       setPersonnelOptions(
         rows
@@ -170,7 +169,7 @@ export default function SalesDesignAnomalyReportPage() {
         qa_department: reporterDepartment.trim() || null,
         qa_reporter: reporter.trim() || null,
         qa_handlers: handlerPersonnel.trim() ? [handlerPersonnel.trim()] : [],
-        qa_category: category || null,
+        qa_category: null,
         qa_responsible: [],
         handler_department: handlerDepartment.trim() || null,
         item_code: itemCode.trim() || null,
@@ -184,7 +183,6 @@ export default function SalesDesignAnomalyReportPage() {
       setOrderNumber('')
       setItemCode('')
       setItemName('')
-      setCategory('')
       setReporterDepartment('')
       setReporter('')
       setHandlerDepartment('')
@@ -210,12 +208,7 @@ export default function SalesDesignAnomalyReportPage() {
         {/* Header */}
         <div className="flex items-end justify-between mb-6">
           <div>
-            <h1 className="text-3xl font-bold text-white tracking-tight flex items-center gap-3">
-              異常回報單（業務美編）
-              <span className="px-2 py-0.5 rounded border border-amber-600/60 bg-amber-950/40 text-amber-300 text-sm font-medium">
-                尚未生產
-              </span>
-            </h1>
+            <h1 className="text-3xl font-bold text-white tracking-tight">異常回報單（尚未生產）</h1>
             <p className="text-teal-500 text-xs font-mono mt-1 tracking-widest">QA REPORT FORM · PRE-PRODUCTION</p>
           </div>
           <Link href="/" className="px-3 py-2 rounded border border-slate-700 text-slate-300 hover:bg-slate-800 text-sm">
@@ -257,17 +250,6 @@ export default function SalesDesignAnomalyReportPage() {
               <label className={labelCls}>品名/名稱（選填）</label>
               <input value={itemName} onChange={(e) => setItemName(e.target.value)} className={inputCls} />
             </div>
-          </div>
-
-          {/* 分類 */}
-          <div>
-            <label className={labelCls}>異常分類</label>
-            <select value={category} onChange={(e) => setCategory(e.target.value)} className={inputCls}>
-              <option value="">請選擇</option>
-              {categoryOptions.map((c) => (
-                <option key={c} value={c}>{c}</option>
-              ))}
-            </select>
           </div>
 
           {/* 回報者 */}
