@@ -932,6 +932,19 @@ export default function HomePage() {
                 <span className="px-3 py-1 rounded border border-slate-600 text-slate-500 text-xs font-mono bg-slate-800">🔧 維修中</span>
               </div>
 
+              {/* 未生產異常回報（捷徑 → 尚未生產的異常回報單） */}
+              <div
+                className="bg-amber-500/10 border border-amber-400 rounded-xl p-5 cursor-pointer hover:bg-amber-500/20 transition-all flex items-center gap-4"
+                onClick={() => { setShowInfoModal(false); router.push('/qa/report-sales-design'); }}
+              >
+                <div className="text-3xl">🚨</div>
+                <div className="flex-1">
+                  <div className="text-amber-300 font-bold text-lg mb-1">未生產異常回報</div>
+                  <div className="text-xs text-red-400 font-semibold">尚未生產</div>
+                </div>
+                <span className="px-3 py-1 rounded border border-amber-500 text-amber-300 text-xs font-mono bg-amber-900/30">前往 →</span>
+              </div>
+
               {/* 產期詢問/預留 */}
               <div
                 className="bg-amber-500/10 border border-amber-400 rounded-xl p-5 cursor-pointer hover:bg-amber-500/20 transition-all flex items-center gap-4"
