@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getSupabaseAdminClient, formatSupabaseAdminError } from '@/lib/supabaseAdmin'
+import { type ShipMethod } from '@/lib/purchasing/types'
 
 export const dynamic = 'force-dynamic'
 
@@ -56,6 +57,18 @@ function chunk<T>(arr: T[], size: number): T[][] {
 
 const norm = (s: string | null | undefined) => String(s ?? '').trim().toUpperCase()
 
+/** 常平出貨日原文/運輸方式欄 → 採購專區貨運下拉的合法值(po_line_tracking CHECK 限定四種)。
+ *  對不上的(貨拉拉/梁二哥/廠商寄送…)回 null——完整原文本來就會進備註,不硬塞。 */
+function deriveShipMethod(...texts: (string | null | undefined)[]): ShipMethod | null {
+  const s = texts.filter(Boolean).join(' ')
+  if (!s) return null
+  if (/順豐|顺丰|SF/i.test(s)) return '順豐'
+  if (/海特快|海快/.test(s)) return '海特快'          // 要在通用「海運」之前判
+  if (/空運|空运/.test(s)) return '空運'              // 含「貨代空運」
+  if (/海運|海运|船運|船运|普船/.test(s)) return '一般海運'
+  return null
+}
+
 /** 既有備註 + 出貨資訊 → 新備註。只增/換自己的 NOTE_TAG 行,保留其他內容;總長壓在 500 內。 */
 function mergeNote(existing: string | null, shipInfo: string): { note: string; changed: boolean } {
   const keep = (existing ?? '')
@@ -100,7 +113,7 @@ export async function POST(request: NextRequest) {
   const supabase = getSupabaseAdminClient()
   const now = new Date().toISOString()
   const actions: string[] = []
-  const stats = { rows: rows.length, new_marks: 0, lamps_lit: 0, notes_updated: 0, already_applied: 0, unmatched: 0 }
+  const stats = { rows: rows.length, new_marks: 0, lamps_lit: 0, notes_updated: 0, methods_filled: 0, dates_filled: 0, already_applied: 0, unmatched: 0 }
 
   try {
     // ---- 0) 快照表存在性探測(非 dry-run 先確認,避免燈亮了快照卻寫不進的半套狀態) ----
@@ -170,6 +183,9 @@ export async function POST(request: NextRequest) {
       }
       const shipInfo = (m.row.ship_date_text ?? '').trim() || '已出貨(工作表黃底,日期未填)'
       const shippedAtNew = m.row.ship_date ? `${m.row.ship_date}T04:00:00.000Z` : now
+      // 常平出貨日文字優先(通常「8/25 順豐」同時帶日期+方式),沒有再退運輸方式欄
+      const methodNew = deriveShipMethod(m.row.ship_date_text, m.row.transport)
+      const shipDateNew = m.row.ship_date ?? null
       const parts: string[] = []
       let rowChanged = false
       for (const line of m.lines) {
@@ -177,22 +193,33 @@ export async function POST(request: NextRequest) {
         const t = trackingMap.get(key)
         const { note, changed: noteChanged } = mergeNote(t?.note ?? null, shipInfo)
         const lampChanged = !t?.shipped_at
-        if (!lampChanged && !noteChanged) {
+        // 貨運/日期只在 EIP 欄位還空著時帶入(採購手動選過的一律不動)
+        const methodChanged = !t?.ship_method && methodNew != null
+        const dateChanged = !t?.expected_ship_date && shipDateNew != null
+        if (!lampChanged && !noteChanged && !methodChanged && !dateChanged) {
           parts.push(`${line.doc_no}#${line.sub_no} 已套用過`)
           continue
         }
         rowChanged = true
         if (lampChanged) stats.lamps_lit++
         if (noteChanged) stats.notes_updated++
-        parts.push(`${line.doc_no}#${line.sub_no} ${lampChanged ? '亮出貨燈' : ''}${lampChanged && noteChanged ? '+' : ''}${noteChanged ? '備註' : ''}`)
+        if (methodChanged) stats.methods_filled++
+        if (dateChanged) stats.dates_filled++
+        const done = [
+          lampChanged ? '亮出貨燈' : '',
+          noteChanged ? '備註' : '',
+          methodChanged ? `貨運=${methodNew}` : '',
+          dateChanged ? `日期=${shipDateNew}` : '',
+        ].filter(Boolean).join('+')
+        parts.push(`${line.doc_no}#${line.sub_no} ${done}`)
         if (!dryRun) {
           const payload = {
             doc_no: line.doc_no,
             sub_no: line.sub_no,
             sent_at: t?.sent_at ?? null,
             shipped_at: t?.shipped_at ?? shippedAtNew,
-            ship_method: t?.ship_method ?? null,
-            expected_ship_date: t?.expected_ship_date ?? null,
+            ship_method: t?.ship_method ?? methodNew,
+            expected_ship_date: t?.expected_ship_date ?? shipDateNew,
             note,
             updated_by: UPDATED_BY,
             updated_at: now,
