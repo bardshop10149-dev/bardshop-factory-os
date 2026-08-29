@@ -34,10 +34,17 @@
 
 ### 上線前置(缺一不可)
 1. Supabase SQL Editor 執行 `sql/20260828_changping_ship_marks.sql`
-   (沒跑之前 import 會 fail-fast、不會動到出貨燈;list 回 500)
-2. 釘釘:把 SNOW HUNG 加為「訂單工作表」資料夾成員(檢視即可)——
-   否則 API 下載 403(space ACL;UI 看得到是因為管理員身分,API 只認明確成員)
-3. 團隊管理勾「常平訂單資料區」權限給需要的人(管理員自動可見)
+   (沒跑之前 import 會 fail-fast、不會動到出貨燈;list 回 500)——**2026-08-29 已執行**
+2. 團隊管理勾「常平訂單資料區」權限給需要的人(管理員自動可見)
+3. PR 合併部署後,啟用本機排程:`schtasks /Change /TN ChangpingShipSync /ENABLE`
+
+### 下載方式(2026-08-29 Snow 拍板改版)
+- **桌面釘釘 UI 自動化下載**(`changping_ship_download_ui.py`,沿用上傳同一套 UIA 機制):
+  釘雲碟→團隊文件→訂單工作表→檔案列右鍵→下載→「另存新檔」對話框填目標路徑。
+  實測全程約 15 秒,冪等可重跑;需互動桌面(與 ChangpingUiDaily 相同限制)。
+- 原 storage API 下載留作備援(`CHANGPING_SHIP_DOWNLOAD_METHOD=api`),但需應用開通
+  `Storage.DownloadInfo.Read` scope——Snow 決定不開,故預設 ui。
+- 2026-08-29 已完成單張真實訂單端對端測試(POC2026062502#11:出貨燈亮+備註附加+快照入庫+重跑冪等)。
 
 ### 設計決策
 - 只掃「NNN年生產訂單」分頁:中轉/外發分頁的淺金(F2C150/FFD966)是表格格式非標記(2026-08-04 盤點驗證)
