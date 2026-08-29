@@ -8,7 +8,7 @@ export const dynamic = 'force-dynamic'
 // 權限:changping_ship(管理員自動通過)
 // 表由 service_role 持有,前端不直連 —— 一律經此 API。
 
-const MAX_ROWS = 2000
+const MAX_ROWS = 6000   // 全量後標記約 4~5 千筆;超過取 last_seen 最新的
 
 // 型別推導吃不了串接的 select 字串 → 照 lib/purchasing/data.ts 慣例以介面斷言
 interface MarkRec {

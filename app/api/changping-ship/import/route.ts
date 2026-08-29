@@ -3,6 +3,8 @@ import { getSupabaseAdminClient, formatSupabaseAdminError } from '@/lib/supabase
 import { type ShipMethod } from '@/lib/purchasing/types'
 
 export const dynamic = 'force-dynamic'
+// 全量同步(數千列)要跑幾十個批次查詢/寫入;Vercel 預設 function 時限太短
+export const maxDuration = 300
 
 // POST:常平出貨標記匯入(本機排程 changping_ship_sync.py 07:00 呼叫)
 // 驗證:Header `Authorization: Bearer <WEBHOOK_SECRET>`(同 /api/webhook/sync,不走 cookie)
@@ -128,17 +130,27 @@ export async function POST(request: NextRequest) {
     }
 
     // ---- 1) 對應採購行:erp_pj_sync (doc_no, item_code) → sub_no ----
+    // 注意:PostgREST 單次查詢上限 1000 列,一個 chunk(200 張單)的行數常超過 →
+    // 每個 chunk 內還要 range 分頁,否則靜默截斷、後面的單全誤判「對不到」(2026-08-29 踩過)
+    const PAGE = 1000
     const poNos = [...new Set(rows.map((r) => r.po_no.trim()).filter(Boolean))]
     type PjLine = { doc_no: string; sub_no: string; item_code: string | null }
     const pjLines: PjLine[] = []
     for (const part of chunk(poNos, IN_CHUNK)) {
-      const { data, error } = await supabase
-        .from('erp_pj_sync')
-        .select('doc_no, sub_no, item_code')
-        .eq('doc_type', '採購單號')
-        .in('doc_no', part)
-      if (error) throw new Error(error.message)
-      pjLines.push(...((data ?? []) as PjLine[]))
+      for (let offset = 0; ; offset += PAGE) {
+        const { data, error } = await supabase
+          .from('erp_pj_sync')
+          .select('doc_no, sub_no, item_code')
+          .eq('doc_type', '採購單號')
+          .in('doc_no', part)
+          .order('doc_no', { ascending: true })
+          .order('sub_no', { ascending: true })
+          .range(offset, offset + PAGE - 1)
+        if (error) throw new Error(error.message)
+        const page = (data ?? []) as PjLine[]
+        pjLines.push(...page)
+        if (page.length < PAGE) break
+      }
     }
     const lineIndex = new Map<string, PjLine[]>()
     for (const l of pjLines) {
@@ -167,21 +179,36 @@ export async function POST(request: NextRequest) {
     }
     const trackingMap = new Map<string, Tracking>()
     for (const part of chunk(lampDocs, IN_CHUNK)) {
-      const { data, error } = await supabase
-        .from('po_line_tracking')
-        .select('doc_no, sub_no, sent_at, shipped_at, ship_method, expected_ship_date, note')
-        .in('doc_no', part)
-      if (error) throw new Error(error.message)
-      for (const t of (data ?? []) as Tracking[]) trackingMap.set(`${t.doc_no}|${t.sub_no}`, t)
+      for (let offset = 0; ; offset += PAGE) {
+        const { data, error } = await supabase
+          .from('po_line_tracking')
+          .select('doc_no, sub_no, sent_at, shipped_at, ship_method, expected_ship_date, note')
+          .in('doc_no', part)
+          .order('doc_no', { ascending: true })
+          .order('sub_no', { ascending: true })
+          .range(offset, offset + PAGE - 1)
+        if (error) throw new Error(error.message)
+        const page = (data ?? []) as Tracking[]
+        for (const t of page) trackingMap.set(`${t.doc_no}|${t.sub_no}`, t)
+        if (page.length < PAGE) break
+      }
     }
 
     const applyResults = new Map<string, { applied: boolean; note: string }>()
+    // 逐筆 upsert 幾千行會逾時 → 先在記憶體算完(同行去重,後列覆蓋前列=與逐筆語意一致),最後批次寫
+    const pendingLineWrites = new Map<string, Tracking & { updated_by: string; updated_at: string }>()
+    // 原始快照:最後用「最終狀態 vs 原始」算真實統計＋略過無變化的行
+    // (同一行分多批出貨時,逐列會 A→B 來回改寫,逐列統計會把「最終沒變」也算成更新)
+    const originalTracking = new Map(trackingMap)
     for (const m of matched) {
       if (m.lines.length === 0) {
         applyResults.set(m.row.mark_key, { applied: false, note: '對不到採購行' })
         continue
       }
-      const shipInfo = (m.row.ship_date_text ?? '').trim() || '已出貨(工作表黃底,日期未填)'
+      // 出貨日原文可能含換行(多行批註)——備註的管理行必須是單行,
+      // 否則下一輪換行後的內容會被誤當使用者文字保留、無限疊加(2026-08-29 踩過)
+      const shipInfo = ((m.row.ship_date_text ?? '').trim() || '已出貨(工作表黃底,日期未填)')
+        .replace(/\s*\r?\n\s*/g, ' / ')
       const shippedAtNew = m.row.ship_date ? `${m.row.ship_date}T04:00:00.000Z` : now
       // 常平出貨日文字優先(通常「8/25 順豐」同時帶日期+方式),沒有再退運輸方式欄
       const methodNew = deriveShipMethod(m.row.ship_date_text, m.row.transport)
@@ -224,10 +251,7 @@ export async function POST(request: NextRequest) {
             updated_by: UPDATED_BY,
             updated_at: now,
           }
-          const { error } = await supabase
-            .from('po_line_tracking')
-            .upsert(payload, { onConflict: 'doc_no,sub_no' })
-          if (error) throw new Error(`po_line_tracking ${key}: ${error.message}`)
+          pendingLineWrites.set(key, payload)
           // 之後同批還會再讀到同一行時,要以更新後狀態為準
           trackingMap.set(key, { ...payload })
         }
@@ -236,6 +260,33 @@ export async function POST(request: NextRequest) {
       const summary = parts.join(';')
       applyResults.set(m.row.mark_key, { applied: true, note: summary })
       actions.push(`${m.row.po_no} ${m.row.item_code ?? ''} → ${summary}${m.status === 'multi_line' ? `(同品號 ${m.lines.length} 行全套用)` : ''}`)
+    }
+
+    // ---- 2b) 批次寫入採購行追蹤:只寫「最終狀態 ≠ 原始」的行,統計也以此為準 ----
+    if (!dryRun) {
+      stats.lamps_lit = 0
+      stats.notes_updated = 0
+      stats.methods_filled = 0
+      stats.dates_filled = 0
+      const writes: (typeof pendingLineWrites extends Map<string, infer V> ? V : never)[] = []
+      for (const [key, p] of pendingLineWrites) {
+        const o = originalTracking.get(key)
+        if (o && o.sent_at === p.sent_at && o.shipped_at === p.shipped_at && o.ship_method === p.ship_method
+          && o.expected_ship_date === p.expected_ship_date && o.note === p.note) {
+          continue   // 最終沒變 → 不寫(也不洗 updated_at/by)
+        }
+        if (!o?.shipped_at && p.shipped_at) stats.lamps_lit++
+        if ((o?.note ?? null) !== (p.note ?? null)) stats.notes_updated++
+        if (!o?.ship_method && p.ship_method) stats.methods_filled++
+        if (!o?.expected_ship_date && p.expected_ship_date) stats.dates_filled++
+        writes.push(p)
+      }
+      for (const part of chunk(writes, IN_CHUNK)) {
+        const { error } = await supabase
+          .from('po_line_tracking')
+          .upsert(part, { onConflict: 'doc_no,sub_no' })
+        if (error) throw new Error(`po_line_tracking 批次寫入: ${error.message}`)
+      }
     }
 
     // ---- 3) 標記快照 upsert(dry_run 完全跳過 → 建表前也能先測比對) ----
@@ -280,28 +331,51 @@ export async function POST(request: NextRequest) {
           ...(res?.applied ? { applied_at: now, apply_note: res.note } : { apply_note: res?.note ?? null }),
         }
       })
-      for (const part of chunk(upserts, IN_CHUNK)) {
+      // 防禦性去重:同鍵在同一批出現兩次會觸發 ON CONFLICT cannot affect row a second time
+      const dedup = new Map<string, (typeof upserts)[number]>()
+      for (const u of upserts) dedup.set(u.mark_key, u)
+      for (const part of chunk([...dedup.values()], IN_CHUNK)) {
         const { error } = await supabase
           .from('changping_ship_marks')
           .upsert(part, { onConflict: 'mark_key' })
         if (error) throw new Error(`changping_ship_marks upsert: ${error.message}`)
       }
 
-      // 下架:整批快照(非 only_po)時,同分頁但這次沒掃到的標記 → still_marked=false
+      // 下架:整批快照(非 only_po)時,同分頁但這次沒掃到的標記 → still_marked=false。
+      // 不能用 not-in URL(數千 key 會爆 URL 長度)→ 先分頁讀出現存 active keys,記憶體取差集再分塊更新
       if (!onlyPo && sheets.length > 0) {
-        const keySet = keys.length > 0 ? `(${keys.map((k) => `"${k.replace(/"/g, '')}"`).join(',')})` : null
-        let q = supabase
-          .from('changping_ship_marks')
-          .update({ still_marked: false, last_seen_at: now })
-          .in('sheet', sheets)
-          .eq('still_marked', true)
-        if (keySet) q = q.not('mark_key', 'in', keySet)
-        const { error } = await q
-        if (error) throw new Error(`still_marked 下架: ${error.message}`)
+        const activeKeys: string[] = []
+        const PAGE = 1000
+        for (let offset = 0; ; offset += PAGE) {
+          const { data, error } = await supabase
+            .from('changping_ship_marks')
+            .select('mark_key')
+            .in('sheet', sheets)
+            .eq('still_marked', true)
+            .order('mark_key', { ascending: true })
+            .range(offset, offset + PAGE - 1)
+          if (error) throw new Error(`still_marked 讀取: ${error.message}`)
+          const page = (data ?? []) as { mark_key: string }[]
+          activeKeys.push(...page.map((x) => x.mark_key))
+          if (page.length < PAGE) break
+        }
+        const payloadKeySet = new Set(keys)
+        const stale = activeKeys.filter((k) => !payloadKeySet.has(k))
+        for (const part of chunk(stale, IN_CHUNK)) {
+          const { error } = await supabase
+            .from('changping_ship_marks')
+            .update({ still_marked: false, last_seen_at: now })
+            .in('mark_key', part)
+          if (error) throw new Error(`still_marked 下架: ${error.message}`)
+        }
       }
     }
 
-    return NextResponse.json({ success: true, dry_run: dryRun, stats, actions })
+    // 全量首跑 actions 可達數千筆,回應只帶前 200 筆避免爆量
+    const cappedActions = actions.length > 200
+      ? [...actions.slice(0, 200), `…另 ${actions.length - 200} 筆(略)`]
+      : actions
+    return NextResponse.json({ success: true, dry_run: dryRun, stats, actions: cappedActions })
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)
     return NextResponse.json({ success: false, error: formatSupabaseAdminError(msg) }, { status: 500 })
