@@ -67,14 +67,23 @@ function ReceiveCell({ l }: { l: PoTrackingLine }) {
   )
 }
 
-/** 備註輸入格：手打、自動換行（textarea 原生換行）、右下角可拖拉調高度；
+/** 備註輸入格：手打、自動換行（textarea 原生換行）、高度自動貼合內容、右下角仍可拖拉；
  *  失焦才儲存（打字中不打 API），Escape 還原成上次儲存值 */
 function NoteCell({ value, saving, onSave }: { value: string | null; saving: boolean; onSave: (next: string) => void }) {
   const [draft, setDraft] = useState(value ?? '')
+  const boxRef = useRef<HTMLTextAreaElement | null>(null)
   // 重新查詢／他列儲存回寫後，同步外部值
   useEffect(() => { setDraft(value ?? '') }, [value])
+  // 高度貼合內容（常平出貨備註常 3~6 行，固定兩行會被截斷）；上限 240px，再長才捲動
+  useEffect(() => {
+    const el = boxRef.current
+    if (!el) return
+    el.style.height = 'auto'
+    el.style.height = `${Math.min(el.scrollHeight + 2, 240)}px`
+  }, [draft])
   return (
     <textarea
+      ref={boxRef}
       value={draft}
       onChange={e => setDraft(e.target.value)}
       onBlur={() => { if (draft.trim() !== (value ?? '').trim()) onSave(draft) }}
