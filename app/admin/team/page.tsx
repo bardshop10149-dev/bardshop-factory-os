@@ -84,6 +84,7 @@ export default function TeamPage() {
         { key: 'info_board', label: '業務資訊看板 (Info Board)' },
         { key: 'argo_tool', label: 'ARGO 外掛區 (ARGO Tool)' },
         { key: 'purchasing', label: '採購專區 (Purchasing)' },
+        { key: 'changping_ship', label: '常平訂單資料區 (Changping POC)' },
       ]
     }
   ]
