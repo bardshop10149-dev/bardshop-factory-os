@@ -63,7 +63,7 @@ function deriveShipMethod(...texts: (string | null | undefined)[]): ShipMethod |
   const s = texts.filter(Boolean).join(' ')
   if (!s) return null
   if (/順豐|顺丰|SF/i.test(s)) return '順豐'
-  if (/海特快|海快/.test(s)) return '海特快'          // 要在通用「海運」之前判
+  if (/海特快|海特|海快/.test(s)) return '海特快'      // 常平常只寫「海特」;要在通用「海運」之前判
   if (/空運|空运/.test(s)) return '空運'              // 含「貨代空運」
   if (/海運|海运|船運|船运|普船/.test(s)) return '一般海運'
   return null
