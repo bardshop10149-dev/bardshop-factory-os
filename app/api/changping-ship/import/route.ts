@@ -44,6 +44,10 @@ interface ImportBody {
   only_po?: string[] | null
   sheets?: string[]
   rows?: MarkRow[]
+  /** 增量模式(Snow 2026-08-30:只寫變量):rows 只含新增/變動列,
+   *  removed_keys 明列要下架的標記;跳過「不在快照就下架」的全量掃描 */
+  incremental?: boolean
+  removed_keys?: string[]
 }
 
 const NOTE_MAX_LEN = 500
@@ -107,6 +111,7 @@ export async function POST(request: NextRequest) {
   }
 
   const dryRun = Boolean(body.dry_run)
+  const incremental = Boolean(body.incremental)
   const onlyPo = Array.isArray(body.only_po) && body.only_po.length > 0
     ? new Set(body.only_po.map(norm))
     : null
@@ -121,7 +126,7 @@ export async function POST(request: NextRequest) {
   const supabase = getSupabaseAdminClient()
   const now = new Date().toISOString()
   const actions: string[] = []
-  const stats = { rows: rows.length, new_marks: 0, lamps_lit: 0, notes_updated: 0, methods_filled: 0, dates_filled: 0, already_applied: 0, unmatched: 0 }
+  const stats = { rows: rows.length, new_marks: 0, lamps_lit: 0, notes_updated: 0, methods_filled: 0, dates_filled: 0, already_applied: 0, unmatched: 0, unmarked: 0 }
 
   try {
     // ---- 0) 快照表存在性探測(非 dry-run 先確認,避免燈亮了快照卻寫不進的半套狀態) ----
@@ -397,9 +402,21 @@ export async function POST(request: NextRequest) {
         if (error) throw new Error(`changping_ship_marks upsert: ${error.message}`)
       }
 
-      // 下架:整批快照(非 only_po)時,同分頁但這次沒掃到的標記 → still_marked=false。
+      // 下架(增量模式):客戶端明列消失的標記,直接下架,不做全量差集掃描
+      if (incremental) {
+        const removed = (body.removed_keys ?? []).filter((k) => typeof k === 'string' && k)
+        stats.unmarked = removed.length
+        for (const part of chunk(removed, IN_CHUNK)) {
+          const { error } = await supabase
+            .from('changping_ship_marks')
+            .update({ still_marked: false, last_seen_at: now })
+            .in('mark_key', part)
+            .eq('still_marked', true)
+          if (error) throw new Error(`still_marked 下架(增量): ${error.message}`)
+        }
+      } else if (!onlyPo && sheets.length > 0) {
+      // 下架(全量快照):同分頁但這次沒掃到的標記 → still_marked=false。
       // 不能用 not-in URL(數千 key 會爆 URL 長度)→ 先分頁讀出現存 active keys,記憶體取差集再分塊更新
-      if (!onlyPo && sheets.length > 0) {
         const activeKeys: string[] = []
         const PAGE = 1000
         for (let offset = 0; ; offset += PAGE) {
@@ -417,6 +434,7 @@ export async function POST(request: NextRequest) {
         }
         const payloadKeySet = new Set(keys)
         const stale = activeKeys.filter((k) => !payloadKeySet.has(k))
+        stats.unmarked = stale.length
         for (const part of chunk(stale, IN_CHUNK)) {
           const { error } = await supabase
             .from('changping_ship_marks')
@@ -431,7 +449,17 @@ export async function POST(request: NextRequest) {
     const cappedActions = actions.length > 200
       ? [...actions.slice(0, 200), `…另 ${actions.length - 200} 筆(略)`]
       : actions
-    return NextResponse.json({ success: true, dry_run: dryRun, stats, actions: cappedActions })
+    return NextResponse.json({
+      success: true,
+      dry_run: dryRun,
+      stats,
+      actions: cappedActions,
+      // 增量同步的握手旗標:客戶端見此旗標才敢送增量(舊版伺服器缺它→退回全量,
+      // 否則舊版會把「沒送的列」當成消失整批下架)
+      supports_incremental: true,
+      // 對不到採購行的標記鍵(僅本次送來的列):客戶端存起來,之後每晚重試(ERP 晚開單補得回來)
+      unmatched_keys: matched.filter((m) => m.status === 'no_line').map((m) => m.row.mark_key),
+    })
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)
     return NextResponse.json({ success: false, error: formatSupabaseAdminError(msg) }, { status: 500 })
