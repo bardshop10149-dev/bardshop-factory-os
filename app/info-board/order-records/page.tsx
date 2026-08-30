@@ -43,6 +43,16 @@ interface MoLine {
   synced_at: string
 }
 
+/** 採購追蹤資訊（來自 po-public；該端點結構性不含供應商與付款欄位） */
+interface PoTrack {
+  progress: string
+  received_qty: number | null
+  po_status: string | null
+  ship_method: string | null
+  expected_ship_date: string | null
+  note: string | null
+}
+
 // ─── ERP 同步資料彈跳視窗 (採購單 erp_pj_sync / 製令 erp_mo_lines) ────
 function PjSyncModal({ docNo, onClose }: { docNo: string; onClose: () => void }) {
   const isMo = docNo.startsWith('MO')
@@ -54,7 +64,7 @@ function PjSyncModal({ docNo, onClose }: { docNo: string; onClose: () => void })
   const [loading, setLoading] = useState(true)
   const [err, setErr] = useState<string | null>(null)
   // 採購追蹤（進度＝採購手動點的已出貨；入庫＝ARGO 回寫的實際入庫量），key = sub_no
-  const [track, setTrack] = useState<Record<string, { progress: string; received_qty: number | null; po_status: string | null }>>({})
+  const [track, setTrack] = useState<Record<string, PoTrack>>({})
   // 製令才查塔台製程／各站報工（非製令傳 null，hook 內部會跳過）
   const moRoute = useMoRoute(isMo ? docNo : null)
 
@@ -90,7 +100,7 @@ function PjSyncModal({ docNo, onClose }: { docNo: string; onClose: () => void })
     }
   }, [docNo, isMo])
 
-  // 採購單才抓進度／入庫（po-public 只回進度、入庫量、交期，不含供應商與付款）
+  // 採購單才抓進度／入庫／貨運／備註（po-public 結構性不含供應商與付款）
   useEffect(() => {
     if (!docNo || !docNo.startsWith('PO')) return
     let alive = true
@@ -98,9 +108,16 @@ function PjSyncModal({ docNo, onClose }: { docNo: string; onClose: () => void })
       .then(res => (res.ok ? res.json() : null))
       .then(json => {
         if (!alive || !json?.success) return
-        const map: Record<string, { progress: string; received_qty: number | null; po_status: string | null }> = {}
-        for (const l of json.lines as { sub_no: string; progress: string; received_qty: number | null; po_status: string | null }[]) {
-          map[String(l.sub_no)] = { progress: l.progress, received_qty: l.received_qty, po_status: l.po_status ?? null }
+        const map: Record<string, PoTrack> = {}
+        for (const l of json.lines as ({ sub_no: string } & PoTrack)[]) {
+          map[String(l.sub_no)] = {
+            progress: l.progress,
+            received_qty: l.received_qty,
+            po_status: l.po_status ?? null,
+            ship_method: l.ship_method ?? null,
+            expected_ship_date: l.expected_ship_date ?? null,
+            note: l.note ?? null,
+          }
         }
         setTrack(map)
       })
@@ -243,6 +260,7 @@ function PjSyncModal({ docNo, onClose }: { docNo: string; onClose: () => void })
                   {isPo && <th className="px-4 py-2 border-b border-slate-800 text-emerald-400">進度</th>}
                   {isPo && <th className="px-4 py-2 border-b border-slate-800 text-emerald-400">入庫</th>}
                   {isPo && <th className="px-4 py-2 border-b border-slate-800 text-cyan-400">銷售單/序</th>}
+                  {isPo && <th className="px-4 py-2 border-b border-slate-800 text-emerald-400">貨運/預計出貨</th>}
                   <th className="px-4 py-2 border-b border-slate-800">備註</th>
                 </tr>
               </thead>
@@ -287,7 +305,24 @@ function PjSyncModal({ docNo, onClose }: { docNo: string; onClose: () => void })
                           <div className="text-slate-500">{String(rx?.SO_LINE_NO ?? '—')}</div>
                         </td>
                       )}
-                      <td className="px-4 py-2 text-slate-500 text-xs max-w-[180px] truncate" title={r.remark ?? ''}>{r.remark || '—'}</td>
+                      {isPo && (() => {
+                        const t = track[String(r.sub_no)]
+                        return (
+                          <td className="px-4 py-2 text-xs whitespace-nowrap">
+                            <div className="text-slate-300">{t?.ship_method || '—'}</div>
+                            <div className="text-slate-500">{t?.expected_ship_date || '—'}</div>
+                          </td>
+                        )
+                      })()}
+                      {/* 備註：上排＝ARGO 單身備註；下排＝採購在採購專區手打的備註（來源不同，分開標示） */}
+                      <td className="px-4 py-2 text-xs max-w-[200px]">
+                        <div className="text-slate-500 truncate" title={r.remark ?? ''}>{r.remark || '—'}</div>
+                        {isPo && track[String(r.sub_no)]?.note && (
+                          <div className="text-amber-300/80 truncate" title={track[String(r.sub_no)]?.note ?? ''}>
+                            採購：{track[String(r.sub_no)]?.note}
+                          </div>
+                        )}
+                      </td>
                     </tr>
                   )
                 })}

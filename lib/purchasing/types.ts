@@ -83,6 +83,7 @@ export interface PublicPoLine {
   progress: Progress
   ship_method: ShipMethod | null
   expected_ship_date: string | null
+  note: string | null                 // 採購手打備註。非供應商／付款資訊，跨區可見
 }
 
 /** 各式 ARGO 文字日期（YYYYMMDD / YYYY/MM/DD / YYYY-MM-DD…）→ YYYY-MM-DD */
