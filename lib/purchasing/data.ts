@@ -40,11 +40,14 @@ interface PjSyncRow {
   sales_name: string | null
   so_line_no: string | null
   received_qty: string | null
+  reject_qty: string | null
+  close_flag: string | null
 }
 
 const PO_SELECT = 'doc_no, sub_no, item_code, description, qty, unit, status, start_date, end_date, customer_vendor, '
   + 'so_project_id:extra->>SO_PROJECT_ID, mbp_lot_no:extra->>MBP_LOT_NO, sales_id:extra->>SALES_ID, '
-  + 'sales_name:extra->>SALES_NAME, so_line_no:extra->>SO_LINE_NO, received_qty:extra->>RECEIVED_QTY'
+  + 'sales_name:extra->>SALES_NAME, so_line_no:extra->>SO_LINE_NO, received_qty:extra->>RECEIVED_QTY, '
+  + 'reject_qty:extra->>REJECT_QTY, close_flag:extra->>CLOSE_FLAG'
 
 interface PrCandidate {
   doc_no: string
@@ -82,6 +85,9 @@ async function fetchAllOpenPoRows(supabase: SupabaseAdmin, range?: { orderFrom?:
       .from('erp_pj_sync')
       .select(PO_SELECT, withCount ? { count: 'exact' } : undefined)
       .eq('doc_type', '採購單號')
+      // 排除單身已結案的行（表頭可能還 OPEN，但採購已個別勾結案）。
+      // 舊資料尚無 CLOSE_FLAG，故 null 視為未結案；不能寫 not.eq.Y，否則 null 會一起被濾掉。
+      .or('extra->>CLOSE_FLAG.is.null,extra->>CLOSE_FLAG.neq.Y')
     if (status !== 'ALL') q = q.eq('status', status)
     if (from) q = q.gte('start_date', from)
     if (to) q = q.lte('start_date', to)
@@ -411,6 +417,10 @@ export async function loadPoTrackingLines(supabase: SupabaseAdmin, opts: LoadOpt
         const v = Number(r.received_qty)
         return r.received_qty != null && r.received_qty !== '' && Number.isFinite(v) ? v : null
       })(),
+      reject_qty: (() => {
+        const v = Number(r.reject_qty)
+        return r.reject_qty != null && r.reject_qty !== '' && Number.isFinite(v) ? v : null
+      })(),
       po_status: r.status,
       order_date: normalizeDateText(r.start_date),
       due_date: dueDate,
@@ -465,6 +475,8 @@ export interface PageParams {
   cp?: 'all' | 'only' | 'exclude'   // 常平（C01510）快篩
   srcNo?: string | null             // 來源單號：SO/RO 直接比對；MO 先反查 erp_mo_lines 的來源訂單
   sortDue?: 'asc' | 'desc' | null   // 依交期排序
+  shipped?: 'all' | 'yes' | 'no'    // 廠商出貨狀態。shipped_at 在 po_line_tracking（非主表），
+                                    // 不能直接下 where，故走兩階段查詢
 }
 
 /** 伺服器端過濾/排序/分頁；只 enrich 當頁列。回傳 { lines, total }。 */
@@ -495,46 +507,98 @@ export async function loadPoPage(supabase: SupabaseAdmin, p: PageParams, timings
     if (vendorNameCodes.length === 0) return { lines: [], total: 0 }
   }
 
-  let q = supabase
-    .from('erp_pj_sync')
-    .select(PO_SELECT, { count: 'exact' })
-    .eq('doc_type', '採購單號')
-  // ALL = 不過濾單據狀態(OPEN/CLOSE/VOID 全看,Snow 2026-08-30)
-  const pageStatus = (p.poStatus || 'OPEN').toUpperCase()
-  if (pageStatus !== 'ALL') q = q.eq('status', pageStatus)
-  const oFrom = toSlashDate(p.orderFrom), oTo = toSlashDate(p.orderTo)
-  if (oFrom) q = q.gte('start_date', oFrom)
-  if (oTo) q = q.lte('start_date', oTo)
-  const dFrom = toSlashDate(p.dueFrom), dTo = toSlashDate(p.dueTo)
-  if (dFrom) q = q.gte('end_date', dFrom)
-  if (dTo) q = q.lte('end_date', dTo)
-  const vc = sanitizeTerm(p.vendorCode)
-  if (vc) q = q.ilike('customer_vendor', `%${vc}%`)
-  if (vendorNameCodes) q = q.in('customer_vendor', vendorNameCodes)
-  const ic = sanitizeTerm(p.itemCode)
-  if (ic) q = q.ilike('item_code', `%${ic}%`)
-  const pn = sanitizeTerm(p.poNo)
-  if (pn) q = q.ilike('doc_no', `%${pn}%`)
-  const pf = sanitizeTerm(p.poFrom).toUpperCase()
-  if (pf) q = q.gte('doc_no', pf)
-  const pt = sanitizeTerm(p.poTo).toUpperCase()
-  if (pt) q = q.lte('doc_no', pt + '￿')
-  const by = sanitizeTerm(p.buyer)
-  if (by) q = q.or(`extra->>SALES_ID.ilike.*${by}*,extra->>SALES_NAME.ilike.*${by}*`)
-  if (p.cp === 'only') q = q.eq('customer_vendor', CHANGPING_VENDOR)
-  else if (p.cp === 'exclude') q = q.neq('customer_vendor', CHANGPING_VENDOR)
-  // 多個 .or() 之間為 AND（PostgREST 各 or= 參數彼此 AND），不影響承辦人條件
-  if (srcList) q = q.or(`extra->>SO_PROJECT_ID.in.(${srcList.join(',')}),extra->>MBP_LOT_NO.in.(${srcList.join(',')})`)
-  else if (srcRaw) q = q.or(`extra->>SO_PROJECT_ID.ilike.*${srcRaw}*,extra->>MBP_LOT_NO.ilike.*${srcRaw}*`)
+  // 查詢條件建構：select 當參數，好讓「出貨狀態」篩選能用同一組條件查兩次
+  // （一次取全部 key 做比對與計數、一次取當頁完整欄位），兩邊條件必須完全一致，
+  // 否則 total 會對不上頁面內容。
+  const buildQuery = (select: string) => {
+    let q = supabase
+      .from('erp_pj_sync')
+      .select(select, { count: 'exact' })
+      .eq('doc_type', '採購單號')
+      // 排除單身已結案的行（表頭可能還 OPEN，但採購已個別勾結案）。
+      // 舊資料尚無 CLOSE_FLAG，故 null 視為未結案；不能寫 not.eq.Y，否則 null 會一起被濾掉。
+      .or('extra->>CLOSE_FLAG.is.null,extra->>CLOSE_FLAG.neq.Y')
+    // ALL = 不過濾單據狀態(OPEN/CLOSE/VOID 全看,Snow 2026-08-30)
+    const pageStatus = (p.poStatus || 'OPEN').toUpperCase()
+    if (pageStatus !== 'ALL') q = q.eq('status', pageStatus)
+    const oFrom = toSlashDate(p.orderFrom), oTo = toSlashDate(p.orderTo)
+    if (oFrom) q = q.gte('start_date', oFrom)
+    if (oTo) q = q.lte('start_date', oTo)
+    const dFrom = toSlashDate(p.dueFrom), dTo = toSlashDate(p.dueTo)
+    if (dFrom) q = q.gte('end_date', dFrom)
+    if (dTo) q = q.lte('end_date', dTo)
+    const vc = sanitizeTerm(p.vendorCode)
+    if (vc) q = q.ilike('customer_vendor', `%${vc}%`)
+    if (vendorNameCodes) q = q.in('customer_vendor', vendorNameCodes)
+    const ic = sanitizeTerm(p.itemCode)
+    if (ic) q = q.ilike('item_code', `%${ic}%`)
+    const pn = sanitizeTerm(p.poNo)
+    if (pn) q = q.ilike('doc_no', `%${pn}%`)
+    const pf = sanitizeTerm(p.poFrom).toUpperCase()
+    if (pf) q = q.gte('doc_no', pf)
+    const pt = sanitizeTerm(p.poTo).toUpperCase()
+    if (pt) q = q.lte('doc_no', pt + '￿')
+    const by = sanitizeTerm(p.buyer)
+    if (by) q = q.or(`extra->>SALES_ID.ilike.*${by}*,extra->>SALES_NAME.ilike.*${by}*`)
+    if (p.cp === 'only') q = q.eq('customer_vendor', CHANGPING_VENDOR)
+    else if (p.cp === 'exclude') q = q.neq('customer_vendor', CHANGPING_VENDOR)
+    // 多個 .or() 之間為 AND（PostgREST 各 or= 參數彼此 AND），不影響承辦人條件
+    if (srcList) q = q.or(`extra->>SO_PROJECT_ID.in.(${srcList.join(',')}),extra->>MBP_LOT_NO.in.(${srcList.join(',')})`)
+    else if (srcRaw) q = q.or(`extra->>SO_PROJECT_ID.ilike.*${srcRaw}*,extra->>MBP_LOT_NO.ilike.*${srcRaw}*`)
+    if (p.sortDue) q = q.order('end_date', { ascending: p.sortDue === 'asc', nullsFirst: false })
+    return q.order('doc_no', { ascending: true }).order('sub_no', { ascending: true })
+  }
 
-  if (p.sortDue) q = q.order('end_date', { ascending: p.sortDue === 'asc', nullsFirst: false })
-  q = q.order('doc_no', { ascending: true }).order('sub_no', { ascending: true })
-
+  const shipFilter = p.shipped === 'yes' || p.shipped === 'no' ? p.shipped : null
   const offset = Math.max(0, (p.page - 1) * p.pageSize)
-  const { data, error, count } = await q.range(offset, offset + p.pageSize - 1)
-  if (error) throw new Error(error.message)
-  const rows = (data ?? []) as unknown as PjSyncRow[]
-  const total = count ?? rows.length
+  let rows: PjSyncRow[]
+  let total: number
+
+  if (shipFilter) {
+    // 出貨狀態存在 po_line_tracking，主表沒有這欄，不能直接下 where。
+    // 兩階段：先取符合其他條件的所有 key（欄位少、量小），與追蹤表比對後自行分頁，
+    // 再用當頁 doc_no 取回完整欄位。若改成「撈完當頁才過濾」，每頁會被剔到剩沒幾筆、頁數也會虛胖。
+    const keys: { doc_no: string; sub_no: string }[] = []
+    for (let from = 0; ; from += 1000) {
+      const { data, error } = await buildQuery('doc_no, sub_no').range(from, from + 999)
+      if (error) throw new Error(error.message)
+      const batch = (data ?? []) as unknown as { doc_no: string; sub_no: string }[]
+      keys.push(...batch)
+      if (batch.length < 1000) break
+    }
+    // 必須分頁讀完：單次查詢上限 1000 列，已出貨的行遠超過這個數，
+    // 少讀到的會被誤判成「未出貨」而混進未出貨清單。
+    const shippedKeys = new Set<string>()
+    for (let from = 0; ; from += 1000) {
+      const { data, error } = await supabase
+        .from('po_line_tracking')
+        .select('doc_no, sub_no')
+        .not('shipped_at', 'is', null)
+        .range(from, from + 999)
+      if (error) throw new Error(error.message)
+      const batch = data ?? []
+      for (const r of batch) shippedKeys.add(`${r.doc_no}|${r.sub_no}`)
+      if (batch.length < 1000) break
+    }
+    const matched = keys.filter((k) => shippedKeys.has(`${k.doc_no}|${k.sub_no}`) === (shipFilter === 'yes'))
+    total = matched.length
+    const pageKeys = matched.slice(offset, offset + p.pageSize)
+    if (pageKeys.length === 0) {
+      const tEmpty = Date.now()
+      if (timings) { timings.po_ms = tEmpty - t0; timings.total_ms = tEmpty - t0; timings.rows = 0 }
+      return { lines: [], total }
+    }
+    const wantKeys = new Set(pageKeys.map((k) => `${k.doc_no}|${k.sub_no}`))
+    const { data, error } = await buildQuery(PO_SELECT)
+      .in('doc_no', [...new Set(pageKeys.map((k) => k.doc_no))])
+    if (error) throw new Error(error.message)
+    rows = ((data ?? []) as unknown as PjSyncRow[]).filter((r) => wantKeys.has(`${r.doc_no}|${r.sub_no}`))
+  } else {
+    const { data, error, count } = await buildQuery(PO_SELECT).range(offset, offset + p.pageSize - 1)
+    if (error) throw new Error(error.message)
+    rows = (data ?? []) as unknown as PjSyncRow[]
+    total = count ?? rows.length
+  }
   const tPo = Date.now()
   if (rows.length === 0) {
     if (timings) { timings.po_ms = tPo - t0; timings.total_ms = tPo - t0; timings.rows = 0 }
@@ -618,6 +682,10 @@ export async function loadPoPage(supabase: SupabaseAdmin, p: PageParams, timings
       received_qty: (() => {
         const v = Number(r.received_qty)
         return r.received_qty != null && r.received_qty !== '' && Number.isFinite(v) ? v : null
+      })(),
+      reject_qty: (() => {
+        const v = Number(r.reject_qty)
+        return r.reject_qty != null && r.reject_qty !== '' && Number.isFinite(v) ? v : null
       })(),
       po_status: r.status,
       order_date: normalizeDateText(r.start_date),

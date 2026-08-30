@@ -39,10 +39,13 @@ function applyLineTransition(x: PoTrackingLine, patch: LinePatch): PoTrackingLin
 }
 
 /** 入庫狀態：null=無資料、none=未入庫、partial=部分入庫、full=已全數入庫 */
-function receiveState(l: Pick<PoTrackingLine, 'qty' | 'received_qty'>): 'none' | 'partial' | 'full' | null {
+function receiveState(l: Pick<PoTrackingLine, 'qty' | 'received_qty' | 'reject_qty'>): 'none' | 'partial' | 'full' | null {
   if (l.received_qty == null) return null
-  if (l.received_qty <= 0) return 'none'
-  if (l.qty != null && l.received_qty >= l.qty) return 'full'
+  const rejected = l.reject_qty ?? 0
+  if (l.received_qty <= 0 && rejected <= 0) return 'none'
+  // 驗退的部分廠商不會再補，到貨＋退貨湊滿訂購量就算結束
+  // （例：訂 5、到貨 4、退貨 1 → 已結束，不是「部分入庫」）
+  if (l.qty != null && l.received_qty + rejected >= l.qty) return 'full'
   return 'partial'
 }
 
@@ -54,14 +57,21 @@ function ReceiveCell({ l }: { l: PoTrackingLine }) {
     none:    ['未入庫',   'bg-slate-800 text-slate-500 border-slate-600'],
     partial: ['部分入庫', 'bg-sky-900/60 text-sky-300 border-sky-700/50'],
     full:    ['已全數入庫', 'bg-emerald-900/60 text-emerald-400 border-emerald-700/50'],
+    fullWithReject: ['已到貨(含退)', 'bg-emerald-900/60 text-emerald-400 border-emerald-700/50'],
   } as const
-  const [label, cls] = styles[state]
+  const rejected = l.reject_qty ?? 0
+  const [label, cls] = styles[state === 'full' && rejected > 0 ? 'fullWithReject' : state]
   return (
     <div>
       <span className={state === 'none' ? 'text-slate-500' : 'text-white font-medium'}>
         {(l.received_qty ?? 0).toLocaleString()}
         <span className="text-slate-500 font-normal"> / {l.qty != null ? l.qty.toLocaleString() : '—'}</span>
       </span>
+      {rejected > 0 && (
+        <span className="ml-1 text-[10px] text-amber-400" title="驗退量，廠商不會再補">
+          退{rejected.toLocaleString()}
+        </span>
+      )}
       <span className={`block w-fit mt-0.5 text-[10px] px-1.5 py-0.5 rounded font-semibold border ${cls}`}>{label}</span>
     </div>
   )
@@ -197,6 +207,7 @@ export default function PurchasingPage() {
   const [compact, setCompact]   = useState(false)    // 精簡（一屏）模式：較窄欄寬 + 較小字
   const [sortDue, setSortDue]   = useState<'asc' | 'desc' | null>(null)  // 依交期排序
   const [hideArrived, setHideArrived] = useState(false)  // 排除已全部到倉
+  const [shipFilter, setShipFilter] = useState<'all' | 'yes' | 'no'>('all')  // 廠商出貨狀態（伺服器端過濾）
   const [cpFilter, setCpFilter] = useState<'all' | 'only' | 'exclude'>('all')  // 常平／非常平
   const [poStatus, setPoStatus] = useState<'ALL' | 'OPEN' | 'CLOSE' | 'VOID'>('ALL')  // 單據狀態（伺服器端過濾，切換即重查；預設全部顯示 Snow 2026-08-30）
   const [savingKeys, setSavingKeys] = useState<Set<string>>(new Set())
@@ -238,7 +249,7 @@ export default function PurchasingPage() {
   }, [])
 
   // 追蹤列表：伺服器端過濾/排序/分頁（mode=page），一次只撈當頁 100 筆 → 次秒級
-  const fetchPage = useCallback(async (pageNum: number, f: Filters, opts: { sort: 'asc' | 'desc' | null; cp: 'all' | 'only' | 'exclude'; status: string }) => {
+  const fetchPage = useCallback(async (pageNum: number, f: Filters, opts: { sort: 'asc' | 'desc' | null; cp: 'all' | 'only' | 'exclude'; status: string; shipped?: 'all' | 'yes' | 'no' }) => {
     setLoading(true)
     setError(null)
     const t0 = performance.now()
@@ -256,6 +267,7 @@ export default function PurchasingPage() {
       set('buyer', buyerTerm)
       if (opts.cp !== 'all') qs.set('cp', opts.cp)
       if (opts.sort) qs.set('sortDue', opts.sort)
+      if (opts.shipped === 'yes' || opts.shipped === 'no') qs.set('shipped', opts.shipped)
       const res = await fetch(`/api/purchasing/list?${qs}`)
       if (res.status === 403) { setForbidden(true); return }
       const json = await res.json()
@@ -295,8 +307,8 @@ export default function PurchasingPage() {
   const handleSearch = useCallback(() => {
     setAppliedFilters(filters)
     setSearched(true)
-    void fetchPage(1, filters, { sort: sortDue, cp: cpFilter, status: poStatus })
-  }, [filters, sortDue, cpFilter, poStatus, fetchPage])
+    void fetchPage(1, filters, { sort: sortDue, cp: cpFilter, status: poStatus, shipped: shipFilter })
+  }, [filters, sortDue, cpFilter, poStatus, shipFilter, fetchPage])
 
   const flash = (text: string) => {
     setMsg(text)
@@ -323,14 +335,14 @@ export default function PurchasingPage() {
       // 已查詢過且有變動才重撈，避免多打一次重 API
       if (changed > 0) {
         if (tab === 'due' && dueLoaded) void fetchDue()
-        else if (searched) void fetchPage(page, appliedFilters, { sort: sortDue, cp: cpFilter, status: poStatus })
+        else if (searched) void fetchPage(page, appliedFilters, { sort: sortDue, cp: cpFilter, status: poStatus, shipped: shipFilter })
       }
     } catch (e) {
       flash(`❌ 更新失敗：${e instanceof Error ? e.message : String(e)}`)
     } finally {
       setDbSyncing(false)
     }
-  }, [dbSyncing, searched, tab, dueLoaded, page, appliedFilters, sortDue, cpFilter, poStatus, fetchPage, fetchDue, loadSyncStatus])
+  }, [dbSyncing, searched, tab, dueLoaded, page, appliedFilters, sortDue, cpFilter, poStatus, shipFilter, fetchPage, fetchDue, loadSyncStatus])
 
   const markSaving = (key: string, on: boolean) => {
     setSavingKeys(prev => {
@@ -391,8 +403,8 @@ export default function PurchasingPage() {
   const safePage = Math.min(page, totalPages)
 
   const goToPage = useCallback((n: number) => {
-    void fetchPage(n, appliedFilters, { sort: sortDue, cp: cpFilter, status: poStatus })
-  }, [appliedFilters, sortDue, cpFilter, poStatus, fetchPage])
+    void fetchPage(n, appliedFilters, { sort: sortDue, cp: cpFilter, status: poStatus, shipped: shipFilter })
+  }, [appliedFilters, sortDue, cpFilter, poStatus, shipFilter, fetchPage])
 
   const dueGroups = useMemo(() => {
     const groups = { red: [] as PoTrackingLine[], amber: [] as PoTrackingLine[], yellow: [] as PoTrackingLine[] }
@@ -618,7 +630,7 @@ export default function PurchasingPage() {
           >{dbSyncing ? '⏳ 同步中…' : '⬇ 更新資料庫'}</button>
           <button
             type="button"
-            onClick={() => { if (tab === 'due') void fetchDue(); else if (searched) void fetchPage(safePage, appliedFilters, { sort: sortDue, cp: cpFilter, status: poStatus }) }}
+            onClick={() => { if (tab === 'due') void fetchDue(); else if (searched) void fetchPage(safePage, appliedFilters, { sort: sortDue, cp: cpFilter, status: poStatus, shipped: shipFilter }) }}
             disabled={loading}
             className="px-3 py-1.5 rounded bg-slate-800 hover:bg-slate-700 disabled:text-slate-600 text-xs font-semibold text-slate-300 transition-colors"
           >{loading ? '載入中…' : '🔄 重新整理'}</button>
@@ -782,7 +794,7 @@ export default function PurchasingPage() {
               onClick={() => {
                 const next = cpFilter === 'only' ? 'all' : 'only'
                 setCpFilter(next)
-                if (searched) void fetchPage(1, appliedFilters, { sort: sortDue, cp: next, status: poStatus })
+                if (searched) void fetchPage(1, appliedFilters, { sort: sortDue, cp: next, status: poStatus, shipped: shipFilter })
               }}
               className={`px-2.5 py-1 rounded border transition-colors ${cpFilter === 'only' ? 'bg-orange-900/50 border-orange-600/60 text-orange-300' : 'bg-slate-800 border-slate-700 text-slate-400 hover:text-slate-200'}`}
             >{cpFilter === 'only' ? '✓ 只看常平' : '只看常平'}</button>
@@ -791,7 +803,7 @@ export default function PurchasingPage() {
               onClick={() => {
                 const next = cpFilter === 'exclude' ? 'all' : 'exclude'
                 setCpFilter(next)
-                if (searched) void fetchPage(1, appliedFilters, { sort: sortDue, cp: next, status: poStatus })
+                if (searched) void fetchPage(1, appliedFilters, { sort: sortDue, cp: next, status: poStatus, shipped: shipFilter })
               }}
               className={`px-2.5 py-1 rounded border transition-colors ${cpFilter === 'exclude' ? 'bg-fuchsia-900/50 border-fuchsia-600/60 text-fuchsia-300' : 'bg-slate-800 border-slate-700 text-slate-400 hover:text-slate-200'}`}
             >{cpFilter === 'exclude' ? '✓ 只看非常平' : '只看非常平'}</button>
@@ -804,7 +816,7 @@ export default function PurchasingPage() {
                 onClick={() => {
                   if (poStatus === s || loading) return
                   setPoStatus(s)
-                  if (searched) void fetchPage(1, appliedFilters, { sort: sortDue, cp: cpFilter, status: s })
+                  if (searched) void fetchPage(1, appliedFilters, { sort: sortDue, cp: cpFilter, status: s, shipped: shipFilter })
                 }}
                 title={s === 'ALL' ? '顯示全部狀態的採購單（切換後立即重新查詢）' : `查詢 ${s} 狀態的採購單（切換後立即重新查詢）`}
                 className={`px-2.5 py-1 rounded border transition-colors font-mono ${
@@ -816,6 +828,29 @@ export default function PurchasingPage() {
                     : 'bg-slate-800 border-slate-700 text-slate-400 hover:text-slate-200'
                 }`}
               >{poStatus === s ? `✓ ${s}` : s}</button>
+            ))}
+            <span className="w-px h-4 bg-slate-700" />
+            {/* 廠商出貨狀態：依 po_line_tracking.shipped_at（採購標記的「出貨」里程碑）。
+                伺服器端過濾，切換即回第 1 頁重查；再按一次取消回到「全部」。 */}
+            {([['yes', '已出貨'], ['no', '未出貨']] as const).map(([v, label]) => (
+              <button
+                key={v}
+                type="button"
+                onClick={() => {
+                  if (loading) return
+                  const next = shipFilter === v ? 'all' : v
+                  setShipFilter(next)
+                  if (searched) void fetchPage(1, appliedFilters, { sort: sortDue, cp: cpFilter, status: poStatus, shipped: next })
+                }}
+                title={v === 'yes' ? '只看已標記「出貨」的採購行' : '只看尚未標記「出貨」的採購行'}
+                className={`px-2.5 py-1 rounded border transition-colors ${
+                  shipFilter === v
+                    ? v === 'yes'
+                      ? 'bg-sky-900/50 border-sky-600/60 text-sky-300'
+                      : 'bg-amber-900/50 border-amber-600/60 text-amber-300'
+                    : 'bg-slate-800 border-slate-700 text-slate-400 hover:text-slate-200'
+                }`}
+              >{shipFilter === v ? `✓ ${label}` : label}</button>
             ))}
             <span>點「交期」表頭可排序；拖表頭右緣調欄寬</span>
           </div>

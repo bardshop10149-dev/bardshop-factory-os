@@ -1201,7 +1201,7 @@ export async function POST(request: NextRequest) {
         SEGMENT,
         TABLE: 'PJ_PROJECTDETAIL',
         SHOWNULLCOLUMN: 'Y',
-        CUSTOMCOLUMN: 'PJT_PROJECT_ID,LINE_NO,MBP_PART,MBP_LOT_NO,ORDER_QTY_ORU,ACTUAL_QTY_ORU,UNIT_OF_MEASURE_ORU,DUEDATE,REMARK,REMARK2,PACKING,UNIT_PRICE_ORU,MBP_VER,PDL_SEQ_SO,TPN_PART_NO,SO_PROJECT_ID',
+        CUSTOMCOLUMN: 'PJT_PROJECT_ID,LINE_NO,MBP_PART,MBP_LOT_NO,ORDER_QTY_ORU,ACTUAL_QTY_ORU,REJECT_QTY_ORU,REJECT_QTY,CLOSE_FLAG,UNIT_OF_MEASURE_ORU,DUEDATE,REMARK,REMARK2,PACKING,UNIT_PRICE_ORU,MBP_VER,PDL_SEQ_SO,TPN_PART_NO,SO_PROJECT_ID',
         PJT_TYPE: "= 'PO'",
         LINE_NO: '>= 1',
         ...(poIncIds ? { PJT_PROJECT_ID: inClause(poIncIds) } : {}),
@@ -1253,6 +1253,11 @@ export async function POST(request: NextRequest) {
         extra: {
           UNIT_PRICE_ORU: getRecordValue(dtl, 'UNIT_PRICE_ORU') ?? null,
           RECEIVED_QTY:   toNumber(getRecordValue(dtl, 'ACTUAL_QTY_ORU')),   // 已入庫量（進貨單入庫後 ARGO 回寫）
+          // 驗退量：退掉的廠商不會再補，「到貨＋退貨＝訂購」就代表這一行處理完了
+          REJECT_QTY:     toNumber(getRecordValue(dtl, 'REJECT_QTY_ORU') ?? getRecordValue(dtl, 'REJECT_QTY')),
+          // 單身結案旗標：採購在 ARGO 勾「結案」後為 Y。
+          // 與表頭 HOLD_STATUS 是兩回事——表頭可能還 OPEN，但某幾行已個別結案。
+          CLOSE_FLAG:     String(getRecordValue(dtl, 'CLOSE_FLAG') ?? '').trim() || null,
           MBP_VER:        getRecordValue(dtl, 'MBP_VER') ?? null,
           MBP_LOT_NO:     String(getRecordValue(dtl, 'MBP_LOT_NO') ?? '').trim() || null,
           SO_PROJECT_ID:  String(getRecordValue(dtl, 'SO_PROJECT_ID') ?? '').trim() || null,
