@@ -1,0 +1,69 @@
+{
+  "backed_up_at": "2026-08-29",
+  "reason": "業務部人員選項去重(留前綴款)",
+  "rows": [
+    {
+      "id": 115,
+      "option_type": "personnel",
+      "option_value": "業務'-宜庭",
+      "created_at": "2026-04-16T06:44:18.617968+00:00",
+      "department_value": "業務部"
+    },
+    {
+      "id": 116,
+      "option_type": "personnel",
+      "option_value": "Andy錡",
+      "created_at": "2026-05-22T09:46:40.480607+00:00",
+      "department_value": "業務部"
+    },
+    {
+      "id": 117,
+      "option_type": "personnel",
+      "option_value": "E",
+      "created_at": "2026-05-22T09:47:15.713642+00:00",
+      "department_value": "業務部"
+    },
+    {
+      "id": 123,
+      "option_type": "personnel",
+      "option_value": "🇯🇵SHERRY 紫依♋️",
+      "created_at": "2026-05-22T09:50:52.988374+00:00",
+      "department_value": "業務部"
+    },
+    {
+      "id": 118,
+      "option_type": "personnel",
+      "option_value": "Fendi du",
+      "created_at": "2026-05-22T09:47:55.364615+00:00",
+      "department_value": "業務部"
+    },
+    {
+      "id": 119,
+      "option_type": "personnel",
+      "option_value": "Gareta Lin 小葛",
+      "created_at": "2026-05-22T09:48:26.078198+00:00",
+      "department_value": "業務部"
+    },
+    {
+      "id": 120,
+      "option_type": "personnel",
+      "option_value": "Jo爺",
+      "created_at": "2026-05-22T09:48:46.15053+00:00",
+      "department_value": "業務部"
+    },
+    {
+      "id": 121,
+      "option_type": "personnel",
+      "option_value": "Nikii H.",
+      "created_at": "2026-05-22T09:49:08.659968+00:00",
+      "department_value": "業務部"
+    },
+    {
+      "id": 122,
+      "option_type": "personnel",
+      "option_value": "張宜庭",
+      "created_at": "2026-05-22T09:49:36.073625+00:00",
+      "department_value": "業務部"
+    }
+  ]
+}
