@@ -1308,6 +1308,23 @@ export default function MaterialPrepPage() {
       return
     }
 
+    // ── 有勾選但會被排除的列：明確告知，不再無聲跳過 ──
+    // selectedImportRows 會過濾掉無需備料/無BOM/缺料的列，原本使用者勾了這些列、
+    // 按送出後它們被安靜地排除，畫面上只看到「涵蓋 N 筆製令」的總數，很難發現哪幾筆
+    // 沒送出去（2026-08-31 使用者回報：勾選的滑鼠墊沒批到料，直到現場缺料才發現）。
+    const importedRowKeySet = new Set(selectedImportRows.map(r => r.row_key))
+    const excludedRows = materialPrepRows
+      .filter(r => selectedRowKeys.has(r.row_key) && !importedRowKeySet.has(r.row_key))
+      .map(r => {
+        const reason = noNeedRowKeys.has(r.row_key) ? '已標記無需備料'
+          : r.status === '無BOM' ? '無BOM'
+          : '缺料（庫存不足需求量）'
+        return `・${r.mo_number}｜${r.selected_material_code || r.source_material_code || '-'}（${reason}）`
+      })
+    const excludedNote = excludedRows.length > 0
+      ? `\n\n⚠️ 注意：另有 ${excludedRows.length} 筆已勾選的列【不會】送出：\n${excludedRows.slice(0, 10).join('\n')}${excludedRows.length > 10 ? `\n…共 ${excludedRows.length} 筆` : ''}\n這些列送出後仍會停在「未備料」，需另行處理。`
+      : ''
+
     const importMos = Array.from(new Set(selectedImportRows.map(r => r.mo_number)))
     // 集單製令（MOS 開頭）由「集單匯出」頁自己建立、自己送 ARGO，從不會在 argoerp_mo_summary
     // 留下任何一列——對它們做 CAS 條件更新一定是 0 筆命中，會被誤判成「已被搶先標記」而整批
@@ -1342,7 +1359,7 @@ export default function MaterialPrepPage() {
       console.warn('[批備料] 預飛狀態檢查失敗，繼續執行')
     }
 
-    if (!window.confirm(`將送出 ${selectedImportRows.length} 筆批備料資料到 ARGO（涵蓋 ${importMos.length} 筆製令），完成後將這些製令標記為「已備料」。確定？`)) {
+    if (!window.confirm(`將送出 ${selectedImportRows.length} 筆批備料資料到 ARGO（涵蓋 ${importMos.length} 筆製令），完成後將這些製令標記為「已備料」。${excludedNote}\n\n確定？`)) {
       importInFlightRef.current = false
       return
     }
@@ -1478,7 +1495,10 @@ export default function MaterialPrepPage() {
         void lineNo // 保留供未來 debug 用
       }
 
-      setMaterialPrepMessage(`✅ 已送出 ${lockedImportRows.length} 筆到 ARGO，並將 ${lockedMos.length} 筆製令標記為「已備料」${argoRaw}`)
+      const excludedSummary = excludedRows.length > 0
+        ? `；⚠️ 有 ${excludedRows.length} 筆勾選列因缺料/無BOM/無需備料未送出，仍為未備料`
+        : ''
+      setMaterialPrepMessage(`✅ 已送出 ${lockedImportRows.length} 筆到 ARGO，並將 ${lockedMos.length} 筆製令標記為「已備料」${excludedSummary}${argoRaw}`)
       setMaterialPrepMsgExpanded(false)
 
       // 清除已完成製令的 noNeedRowKeys（避免殘留影響下次）
