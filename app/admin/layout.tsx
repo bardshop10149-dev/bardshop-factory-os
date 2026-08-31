@@ -277,7 +277,7 @@ function AdminNavbar() {
                       ? 'opacity-100 translate-y-0 pointer-events-auto'
                       : 'opacity-0 translate-y-2 pointer-events-none group-hover/menu:opacity-100 group-hover/menu:translate-y-0 group-hover/menu:pointer-events-auto'
                   }`}>
-                    <div className={`bg-[#0b1120] border rounded-xl shadow-2xl backdrop-blur-xl flex flex-col py-2 max-h-[70vh] overflow-y-auto ${colors.menuBorder}`}>
+                    <div className={`bg-[#0b1120] border rounded-xl shadow-2xl backdrop-blur-xl flex flex-col py-2 ${colors.menuBorder}`}>
                       <div className={`h-0.5 w-full bg-gradient-to-r from-transparent via-white/20 to-transparent opacity-50`}></div>
 
                       {renderGroupItems(group, colors)}
