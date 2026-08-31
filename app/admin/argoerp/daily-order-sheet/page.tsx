@@ -600,7 +600,8 @@ export default function DailyOrderSheetPage() {
       supabase
         .from('sara_wip_records')
         .select('work_order, mo_nbr, doc_nbr, product_name, product_subname, product_description, workcenter_name, job_name, job_sequence, status, wip_qty, real_end_time, report_resources, username')
-        .eq('workcenter_name', '印刷站2F')
+        // 不限站點：打樣/追加單的報工可能發生在任何站（織品類在印刷站6F、
+        // 包裝站等），原本寫死只查印刷站2F 導致其他品類一律查無資料
         .or(`mo_nbr.eq.${q},doc_nbr.eq.${q}`)
         .order('real_end_time', { ascending: false }),
     ])
@@ -4986,17 +4987,17 @@ export default function DailyOrderSheetPage() {
                     )}
                   </div>
 
-                  {/* ── 塔台報工紀錄（印刷站2F）── */}
+                  {/* ── 塔台報工紀錄（全站點）── */}
                   <div>
                     <div className="px-4 py-2 bg-slate-800/50 text-xs font-semibold text-slate-300 uppercase tracking-wide">
-                      塔台報工紀錄（印刷站2F）
+                      塔台報工紀錄
                       {legacyModal.saraWipRows.length > 0 && (
                         <span className="ml-2 font-normal text-slate-400 normal-case">共 {legacyModal.saraWipRows.length} 筆</span>
                       )}
                     </div>
                     {legacyModal.saraWipRows.length === 0 ? (
                       <div className="py-6 text-center space-y-1">
-                        <p className="text-slate-500 text-xs">未找到印刷站2F報工紀錄</p>
+                        <p className="text-slate-500 text-xs">未找到報工紀錄</p>
                       </div>
                     ) : (
                       <table className="w-full text-xs">

@@ -315,15 +315,16 @@ export async function syncWipRecords(): Promise<SyncResult> {
       afterId = json.next_after_id
     }
 
+    // ⚠️ 不可包含 doc_nbr / id_list 欄位：/data/wip 不提供這兩個欄位（一律回 null），
+    // 若放進 upsert payload 會把既有值（CSV 時代匯入的來源單號等）整批洗成空
+    // （2026-08-31 事故：追加單號比對因 doc_nbr 被洗掉而整批查無資料，事後另行回填）。
     const rows = Array.from(byWorkOrder.values()).map(r => ({
       work_order: r.work_order,
-      id_list: null,
       mo_nbr: r.mo_nbr ?? null,
       product_name: r.product_name ?? null,
       product_subname: r.product_subname ?? null,
       product_description: r.product_description ?? null,
       lot_nbr: r.lot_nbr ?? null,
-      doc_nbr: r.doc_nbr ?? null,
       workcenter_name: r.workcenter_name ?? null,
       job_name: r.job_name ?? null,
       job_sequence: r.job_sequence ?? null,
