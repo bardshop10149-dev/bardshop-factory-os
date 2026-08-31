@@ -26,6 +26,26 @@ function usePendingScheduleCount(): number {
   return count
 }
 
+// 「SARA 工序自動產生」待處理徽章：無途程且不符合自動規則而被跳過的列數，
+// 同產期詢問未讀的做法，讓生管不用點進頁面就知道有幾筆要人工補處理。
+const PROCESS_GEN_PATH = '/admin/sara/process-gen'
+function useSaraPendingCount(): number {
+  const [count, setCount] = useState(0)
+  useEffect(() => {
+    let cancelled = false
+    const fetchCount = () => {
+      fetch(`/api/sara/process-gen-pending?count=1`, { cache: 'no-store' })
+        .then(r => r.json())
+        .then(j => { if (!cancelled && j?.success) setCount(Number(j.count) || 0) })
+        .catch(() => { /* 靜默：導覽列提示非關鍵路徑 */ })
+    }
+    fetchCount()
+    const timer = setInterval(fetchCount, 60_000)
+    return () => { cancelled = true; clearInterval(timer) }
+  }, [])
+  return count
+}
+
 interface ThemeColors {
   text: string
   activeBg: string
@@ -41,6 +61,7 @@ function AdminNavbar() {
   const pathname = usePathname()
   const { favorites, toggleFavorite } = useFavorites()
   const pendingScheduleCount = usePendingScheduleCount()
+  const saraPendingCount = useSaraPendingCount()
 
   // 導覽選單原本只靠 CSS :hover 展開——觸控裝置（手機/平板）沒有滑鼠 hover 狀態，
   // 點擊完全沒反應（2026-08-27 使用者回報：手機版點不開選單）。改成同時支援點擊：
@@ -166,7 +187,8 @@ function AdminNavbar() {
         const isItemActive = pathname === directItem.path
         const isLocked = Boolean(directItem.locked)
         const isFav = favorites.includes(directItem.path)
-        const itemPendingCount = directItem.path === SCHEDULE_CONFIRM_PATH ? pendingScheduleCount : 0
+        const itemPendingCount = directItem.path === SCHEDULE_CONFIRM_PATH ? pendingScheduleCount
+          : directItem.path === PROCESS_GEN_PATH ? saraPendingCount : 0
         return (
           <div key={directItem.path} className={`group/item flex items-center px-4 py-2 transition-colors border-l-4 ${isLocked ? 'opacity-60 cursor-not-allowed' : 'hover:bg-slate-800/50'} ${isItemActive ? `border-${group.theme}-400 bg-slate-800/80` : 'border-transparent'}`}>
             <button
@@ -252,7 +274,7 @@ function AdminNavbar() {
                 return pathname === p || pathname.startsWith(p + '?')
               })
 
-              const groupPendingCount = group.title === '生產管理入口' ? pendingScheduleCount : 0
+              const groupPendingCount = group.title === '生產管理入口' ? pendingScheduleCount : group.title === '塔台SARA' ? saraPendingCount : 0
               const isGroupOpen = openGroup === group.title
 
               return (
@@ -300,7 +322,7 @@ function AdminNavbar() {
                   const p = (item as { path: string }).path
                   return pathname === p || pathname.startsWith(p + '?')
                 })
-                const groupPendingCount = group.title === '生產管理入口' ? pendingScheduleCount : 0
+                const groupPendingCount = group.title === '生產管理入口' ? pendingScheduleCount : group.title === '塔台SARA' ? saraPendingCount : 0
                 const isGroupOpen = openGroup === group.title
 
                 return (
