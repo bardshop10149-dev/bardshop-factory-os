@@ -2,6 +2,9 @@
 // 注意：PublicPoLine 為跨區（如業務查詢）可見形狀 —— 絕不可加入供應商 / 付款欄位。
 
 export const SHIP_METHODS = ['順豐', '空運', '海特快', '一般海運'] as const
+
+/** 常平出貨資訊在 po_line_tracking.note 裡的管理行前綴（changping-ship/import 寫入） */
+export const CP_SHIP_NOTE_TAG = '【常平出貨】'
 export type ShipMethod = typeof SHIP_METHODS[number]
 
 export const PAYMENT_PCTS = [0, 30, 50, 70, 100] as const
@@ -83,6 +86,8 @@ export interface PublicPoLine {
   progress: Progress
   ship_method: ShipMethod | null
   expected_ship_date: string | null
+  /** 常平出貨備註：只擷取 note 裡的【常平出貨】管理行（採購內部手打備註不外流） */
+  cp_ship_note: string | null
 }
 
 /** 各式 ARGO 文字日期（YYYYMMDD / YYYY/MM/DD / YYYY-MM-DD…）→ YYYY-MM-DD */

@@ -54,7 +54,7 @@ function PjSyncModal({ docNo, onClose }: { docNo: string; onClose: () => void })
   const [loading, setLoading] = useState(true)
   const [err, setErr] = useState<string | null>(null)
   // 採購追蹤（進度＝採購手動點的已出貨；入庫＝ARGO 回寫的實際入庫量），key = sub_no
-  const [track, setTrack] = useState<Record<string, { progress: string; received_qty: number | null; po_status: string | null }>>({})
+  const [track, setTrack] = useState<Record<string, { progress: string; received_qty: number | null; po_status: string | null; ship_method: string | null; expected_ship_date: string | null; cp_ship_note: string | null }>>({})
   // 製令才查塔台製程／各站報工（非製令傳 null，hook 內部會跳過）
   const moRoute = useMoRoute(isMo ? docNo : null)
 
@@ -98,9 +98,16 @@ function PjSyncModal({ docNo, onClose }: { docNo: string; onClose: () => void })
       .then(res => (res.ok ? res.json() : null))
       .then(json => {
         if (!alive || !json?.success) return
-        const map: Record<string, { progress: string; received_qty: number | null; po_status: string | null }> = {}
-        for (const l of json.lines as { sub_no: string; progress: string; received_qty: number | null; po_status: string | null }[]) {
-          map[String(l.sub_no)] = { progress: l.progress, received_qty: l.received_qty, po_status: l.po_status ?? null }
+        const map: Record<string, { progress: string; received_qty: number | null; po_status: string | null; ship_method: string | null; expected_ship_date: string | null; cp_ship_note: string | null }> = {}
+        for (const l of json.lines as { sub_no: string; progress: string; received_qty: number | null; po_status: string | null; ship_method: string | null; expected_ship_date: string | null; cp_ship_note: string | null }[]) {
+          map[String(l.sub_no)] = {
+            progress: l.progress,
+            received_qty: l.received_qty,
+            po_status: l.po_status ?? null,
+            ship_method: l.ship_method ?? null,
+            expected_ship_date: l.expected_ship_date ?? null,
+            cp_ship_note: l.cp_ship_note ?? null,
+          }
         }
         setTrack(map)
       })
@@ -244,6 +251,8 @@ function PjSyncModal({ docNo, onClose }: { docNo: string; onClose: () => void })
                   {isPo && <th className="px-4 py-2 border-b border-slate-800 text-emerald-400">入庫</th>}
                   {isPo && <th className="px-4 py-2 border-b border-slate-800 text-cyan-400">銷售單/序</th>}
                   <th className="px-4 py-2 border-b border-slate-800">備註</th>
+                  {isPo && <th className="px-4 py-2 border-b border-slate-800 text-amber-400">運送</th>}
+                  {isPo && <th className="px-4 py-2 border-b border-slate-800 text-amber-400">常平出貨備註</th>}
                 </tr>
               </thead>
               <tbody>
@@ -288,6 +297,26 @@ function PjSyncModal({ docNo, onClose }: { docNo: string; onClose: () => void })
                         </td>
                       )}
                       <td className="px-4 py-2 text-slate-500 text-xs max-w-[180px] truncate" title={r.remark ?? ''}>{r.remark || '—'}</td>
+                      {isPo && (() => {
+                        const t = track[String(r.sub_no)]
+                        return (
+                          <td className="px-4 py-2 whitespace-nowrap text-xs">
+                            {t?.ship_method ? (
+                              <span className="px-1.5 py-0.5 rounded border border-amber-600/50 bg-amber-950/40 text-amber-300">{t.ship_method}</span>
+                            ) : (
+                              <span className="text-slate-600">—</span>
+                            )}
+                            {t?.expected_ship_date && (
+                              <div className="text-slate-500 mt-1">預計 {t.expected_ship_date}</div>
+                            )}
+                          </td>
+                        )
+                      })()}
+                      {isPo && (
+                        <td className="px-4 py-2 text-xs text-amber-200/80 max-w-[240px] whitespace-pre-wrap break-words">
+                          {track[String(r.sub_no)]?.cp_ship_note || <span className="text-slate-600">—</span>}
+                        </td>
+                      )}
                     </tr>
                   )
                 })}
