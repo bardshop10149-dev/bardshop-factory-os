@@ -31,7 +31,7 @@
     },
     {
       "path": "/api/sara/wip-sync",
-      "schedule": "30 0-13 * * *"
+      "schedule": "0,30 0-13 * * *"
     },
     {
       "path": "/api/cron/sara-process-gen",

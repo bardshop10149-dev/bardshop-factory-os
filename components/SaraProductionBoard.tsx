@@ -152,6 +152,7 @@ export default function SaraProductionBoard({ sectionId, sectionName }: { sectio
   const [finishedToday, setFinishedToday] = useState<WipRow[]>([])
   const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
+  const [resyncing, setResyncing] = useState(false)
   const [loadError, setLoadError] = useState('')
   const [refreshedAt, setRefreshedAt] = useState<Date | null>(null)
 
@@ -228,6 +229,23 @@ export default function SaraProductionBoard({ sectionId, sectionName }: { sectio
     const timer = setInterval(() => { void load() }, 60000)
     return () => clearInterval(timer)
   }, [load])
+
+  // 手動觸發「向塔台重新同步」：塔台每次重新排程會整批重算（工序ID/時間/機台都會變），
+  // 定時快照最多落後半小時；懷疑畫面舊了可按此立即抓最新（實測一輪約 10 秒）
+  const handleResync = useCallback(async () => {
+    if (resyncing) return
+    setResyncing(true)
+    try {
+      const res = await fetch('/api/sara/wip-sync', { method: 'POST' })
+      const j = await res.json().catch(() => null)
+      if (!res.ok || j?.status !== 'ok') throw new Error(j?.error || `HTTP ${res.status}`)
+      await load()
+    } catch (e) {
+      setLoadError(`向塔台同步失敗：${e instanceof Error ? e.message : String(e)}`)
+    } finally {
+      setResyncing(false)
+    }
+  }, [resyncing, load])
 
   // 依站點分欄（進行中優先排前面的站，其次今日有完成量的站）
   const workcenters = useMemo(() => {
@@ -313,9 +331,19 @@ export default function SaraProductionBoard({ sectionId, sectionName }: { sectio
             資料一律以塔台（SARA）為準（站點：{boardWorkcenters.join('、')}），本頁不提供修改；要更正請至塔台操作，下次同步自動反映。
           </p>
         </div>
-        <div className="text-right text-[11px] text-slate-500 shrink-0">
-          <div>塔台最新報工時間：<span className="text-slate-300 font-mono">{lastSyncedAt ? fmtClock(lastSyncedAt) : '—'}</span></div>
-          <div>畫面更新於：<span className="text-slate-300 font-mono">{refreshedAt ? refreshedAt.toLocaleTimeString('zh-TW', { hour12: false }) : '—'}</span>（每分鐘自動刷新）</div>
+        <div className="flex items-center gap-3 shrink-0">
+          <div className="text-right text-[11px] text-slate-500">
+            <div>塔台最新報工時間：<span className="text-slate-300 font-mono">{lastSyncedAt ? fmtClock(lastSyncedAt) : '—'}</span></div>
+            <div>畫面更新於：<span className="text-slate-300 font-mono">{refreshedAt ? refreshedAt.toLocaleTimeString('zh-TW', { hour12: false }) : '—'}</span>（每分鐘自動刷新）</div>
+          </div>
+          <button
+            onClick={() => void handleResync()}
+            disabled={resyncing}
+            title="塔台每次重新排程會整批重算，定時快照最多落後半小時；按此立即向塔台抓最新排程（約 10 秒）"
+            className="px-3 py-2 rounded-lg bg-slate-800 border border-slate-700 text-slate-300 text-xs font-medium hover:bg-slate-700 hover:border-emerald-600 hover:text-emerald-300 disabled:opacity-50 transition-colors"
+          >
+            {resyncing ? '⏳ 同步中…' : '🔄 立即同步塔台'}
+          </button>
         </div>
       </div>
 
