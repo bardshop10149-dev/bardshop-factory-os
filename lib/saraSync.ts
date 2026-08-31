@@ -257,6 +257,10 @@ export async function syncReports(
 // 路徑都不存在）。回應含分頁欄位 { data, truncated, limit, next_after_id }，
 // 用 { after_id } 當游標翻頁；頁與頁之間可能有少量重疊列，以 work_order 去重即可。
 // 寫入 sara_wip_records（塔台報工紀錄頁面讀的表，取代原本人工匯出 CSV 再匯入的流程）。
+//
+// ⚠️ 永久保存原則：塔台端只保留 6 個月的報工紀錄，sara_wip_records 是我們自己的
+// 長期資料庫——同步一律只 upsert、絕對不可對此表做任何刪除，塔台端過期消失的
+// 紀錄要繼續留在這裡（2026-08-31 使用者要求）。
 
 /** 依製令/單號前綴推導廠區標籤（人工 CSV 匯入時是整批手選，自動同步改用前綴判斷） */
 function wipSiteLabel(moNbr: string | null): string | null {
