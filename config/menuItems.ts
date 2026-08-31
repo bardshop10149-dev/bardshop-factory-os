@@ -144,6 +144,7 @@ export const NAV_GROUPS: Array<{ title: string; theme: string; items: MenuEntry[
     title: '產線排程看板',
     theme: 'purple',
     items: [
+      { name: '塔台即時看板', path: '/admin/production/sara-live', icon: '...' },
       { name: '印刷排程', path: '/admin/production/printing', icon: '...' },
       { name: '雷切排程', path: '/admin/production/laser', icon: '...' },
       { name: '後加工排程', path: '/admin/production/post', icon: '...' },
