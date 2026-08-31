@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useCallback, useRef } from 'react'
+import { useState, useCallback, useEffect, useRef } from 'react'
 import { supabase } from '../../../../lib/supabaseClient'
 import { buildSaraRow, type SaraRow } from '../../../../lib/sara/buildSaraRow'
 
@@ -765,6 +765,40 @@ export default function ProcessGenPage() {
     })
   }, [singleRows, moNumber, quantity, itemCode])
 
+  // ── 自動轉換待處理清單（每日 17:50 排程跳過的列，導覽列徽章數字的明細）──
+
+  interface PendingItem {
+    sheet_date: string; order_number: string; item_code: string; item_spec: string
+    factory: string; quantity: number; line_seq: string; reason: string; created_at: string
+  }
+  const [pendingItems, setPendingItems] = useState<PendingItem[]>([])
+  const [pendingBusy, setPendingBusy] = useState(false)
+
+  const fetchPending = useCallback(async () => {
+    try {
+      const res = await fetch('/api/sara/process-gen-pending', { cache: 'no-store' })
+      const j = await res.json() as { success: boolean; items?: PendingItem[] }
+      if (j.success) setPendingItems(j.items ?? [])
+    } catch { /* 非關鍵路徑 */ }
+  }, [])
+  useEffect(() => { void fetchPending() }, [fetchPending])
+
+  const dismissPending = useCallback(async (keys: string[] | null) => {
+    if (!confirm(keys ? '確定移除這筆待處理項？（已處理完成才移除，移除後導覽列數字同步減少）' : '確定清空全部待處理項？')) return
+    setPendingBusy(true)
+    try {
+      const res = await fetch('/api/sara/process-gen-pending', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(keys ? { keys } : {}),
+      })
+      const j = await res.json()
+      if (j.success) await fetchPending()
+    } finally {
+      setPendingBusy(false)
+    }
+  }, [fetchPending])
+
   // ── 統計 ──────────────────────────────────────────────────────
 
   const successCount = saraRows.filter(r => !r._noRoute).length
@@ -777,8 +811,67 @@ export default function ProcessGenPage() {
 
       <div>
         <h1 className="text-xl font-bold text-emerald-300">SARA 工序格式產生器</h1>
-        <p className="text-xs text-slate-400 mt-0.5">由每日出單表 CSV 查詢途程，自動產出塔台 SARA_101 匯入格式</p>
+        <p className="text-xs text-slate-400 mt-0.5">由每日出單表 CSV 查詢途程，自動產出塔台 SARA_101 匯入格式・每日 17:50 自動轉換當日出單表</p>
       </div>
+
+      {/* ── 自動轉換待處理清單（導覽列紅色數字的明細）── */}
+      {pendingItems.length > 0 && (
+        <div className="bg-red-950/30 border border-red-700/50 rounded-xl p-4 space-y-2">
+          <div className="flex items-center justify-between gap-2">
+            <h2 className="text-sm font-bold text-red-300">
+              🔔 自動轉換待處理（{pendingItems.length} 筆）——每日排程跳過、需人工處理的列
+            </h2>
+            <button
+              onClick={() => void dismissPending(null)}
+              disabled={pendingBusy}
+              className="px-2.5 py-1 rounded text-[11px] bg-slate-800 border border-slate-700 text-slate-400 hover:text-red-300 hover:border-red-700 disabled:opacity-50"
+            >
+              全部清除
+            </button>
+          </div>
+          <p className="text-[11px] text-slate-400">
+            處理方式：至「途程列表」為品項設定正確途程（明天排程會自動補送），或在下方載入該日出單表手動產生並加入交換區；處理完成後點「已處理」移除。
+          </p>
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead className="text-slate-400">
+                <tr className="border-b border-red-900/40">
+                  <th className="px-2 py-1.5 text-left whitespace-nowrap">出單日</th>
+                  <th className="px-2 py-1.5 text-left whitespace-nowrap">訂單/序號</th>
+                  <th className="px-2 py-1.5 text-left whitespace-nowrap">品項編碼</th>
+                  <th className="px-2 py-1.5 text-left">品名規格</th>
+                  <th className="px-2 py-1.5 text-center whitespace-nowrap">廠別</th>
+                  <th className="px-2 py-1.5 text-right whitespace-nowrap">數量</th>
+                  <th className="px-2 py-1.5 text-left">原因</th>
+                  <th className="px-2 py-1.5"></th>
+                </tr>
+              </thead>
+              <tbody>
+                {pendingItems.map((it, i) => (
+                  <tr key={`${it.order_number}-${it.item_code}-${it.line_seq}-${i}`} className="border-b border-red-900/20">
+                    <td className="px-2 py-1.5 font-mono text-slate-400 whitespace-nowrap">{it.sheet_date}</td>
+                    <td className="px-2 py-1.5 font-mono text-cyan-300 whitespace-nowrap">{it.order_number}{it.line_seq ? ` #${it.line_seq}` : ''}</td>
+                    <td className="px-2 py-1.5 font-mono text-purple-300 whitespace-nowrap">{it.item_code}</td>
+                    <td className="px-2 py-1.5 text-slate-300 max-w-[260px] truncate" title={it.item_spec}>{it.item_spec}</td>
+                    <td className="px-2 py-1.5 text-center text-slate-400">{FACTORY_LABEL[it.factory] ?? it.factory}</td>
+                    <td className="px-2 py-1.5 text-right font-mono text-emerald-300">{it.quantity}</td>
+                    <td className="px-2 py-1.5 text-amber-300/90 max-w-[280px] truncate" title={it.reason}>{it.reason}</td>
+                    <td className="px-2 py-1.5 whitespace-nowrap">
+                      <button
+                        onClick={() => void dismissPending([`${it.order_number}||${it.item_code}||${it.line_seq}`])}
+                        disabled={pendingBusy}
+                        className="px-2 py-0.5 rounded text-[10px] bg-slate-800 border border-slate-700 text-slate-300 hover:bg-emerald-900/50 hover:text-emerald-300 hover:border-emerald-700 disabled:opacity-50"
+                      >
+                        ✓ 已處理
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
 
       {/* ── Tabs ── */}
       <div className="flex gap-1 bg-slate-900 p-1 rounded-lg w-fit border border-slate-800">
