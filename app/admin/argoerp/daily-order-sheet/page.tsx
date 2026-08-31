@@ -485,7 +485,15 @@ export default function DailyOrderSheetPage() {
   const [globalSearching, setGlobalSearching] = useState(false)
   const [globalResults, setGlobalResults] = useState<{ sheet_date: string; rows: SheetRow[] }[] | null>(null)
   const [sampleRefInputs, setSampleRefInputs] = useState<Record<string, string>>({})
-  const [legacyModal, setLegacyModal] = useState<{ query: string; rows: LegacyReceiptRow[]; saraWipRows: SaraWipRow[]; loading: boolean } | null>(null)
+  // factoryInfo：追加單號在出單表歷史上的廠區分布（T/C/O 各幾筆、對應的製令/採購/請購單號），
+  // 供彈窗頂端顯示「此單為常平/委外生產」的醒目提示
+  const [legacyModal, setLegacyModal] = useState<{
+    query: string
+    rows: LegacyReceiptRow[]
+    saraWipRows: SaraWipRow[]
+    factoryInfo: { factory: string; count: number; docs: string[] }[]
+    loading: boolean
+  } | null>(null)
   const [dueDateModal, setDueDateModal] = useState<DueDateAnomaly[] | null>(null)
   const [dueDateCopied, setDueDateCopied] = useState(false)
   // ---- 交期閾值設定（從 Supabase app_settings 載入）----
@@ -589,8 +597,8 @@ export default function DailyOrderSheetPage() {
   const handleLegacyLookup = useCallback(async (orderNo: string) => {
     const q = orderNo.trim()
     if (!q) return
-    setLegacyModal({ query: q, rows: [], saraWipRows: [], loading: true })
-    const [legacyRes, saraWipRes] = await Promise.all([
+    setLegacyModal({ query: q, rows: [], saraWipRows: [], factoryInfo: [], loading: true })
+    const [legacyRes, saraWipRes, sheetRes] = await Promise.all([
       supabase
         .from('legacy_inventory_receipts')
         .select('entry_no, entry_date, order_number, source_location, handler_name, item_name, good_qty')
@@ -604,11 +612,46 @@ export default function DailyOrderSheetPage() {
         // 包裝站等），原本寫死只查印刷站2F 導致其他品類一律查無資料
         .or(`mo_nbr.eq.${q},doc_nbr.eq.${q}`)
         .order('real_end_time', { ascending: false }),
+      // 追加單號的廠區判斷：回查出單表歷史，看這張單當時是台北/常平/委外哪個廠生產、
+      // 對應到哪些製令/採購/請購單號，供彈窗頂端顯示醒目提示
+      fetch(`/api/argoerp/daily-order-sheet?search=${encodeURIComponent(q)}`, { cache: 'no-store' })
+        .then(r => r.json()).catch(() => null),
     ])
+
+    const factoryAgg = new Map<string, { count: number; docs: Set<string> }>()
+    const sheetResults = (sheetRes as { success?: boolean; results?: { rows: Record<string, unknown>[] }[] } | null)
+    for (const sheet of sheetResults?.results ?? []) {
+      for (const r of sheet.rows ?? []) {
+        if (String(r.order_number ?? '') !== q) continue
+        const f = String(r.factory ?? '')
+        if (!['T', 'C', 'O'].includes(f)) continue
+        if (!factoryAgg.has(f)) factoryAgg.set(f, { count: 0, docs: new Set() })
+        const agg = factoryAgg.get(f)!
+        agg.count++
+        const doc = f === 'C' ? String(r.po_number ?? '').trim()
+          : f === 'O' ? String(r.pr_number ?? '').trim()
+          : String(r.mo_number ?? '').trim()
+        if (doc) agg.docs.add(doc)
+      }
+    }
+
+    // 出單表歷史查不到（例如更早期的單）時，退而用報工紀錄的站點推斷廠區
+    const wipRows = saraWipRes.error || !saraWipRes.data ? [] : (saraWipRes.data as SaraWipRow[])
+    if (factoryAgg.size === 0) {
+      for (const w of wipRows) {
+        const wc = w.workcenter_name ?? ''
+        const f = wc.includes('常平') ? 'C' : (wc.includes('轉運') || wc.includes('委外')) ? 'O' : null
+        if (!f) continue
+        if (!factoryAgg.has(f)) factoryAgg.set(f, { count: 0, docs: new Set() })
+        factoryAgg.get(f)!.count++
+      }
+    }
+
     setLegacyModal({
       query: q,
       rows: legacyRes.error || !legacyRes.data ? [] : (legacyRes.data as LegacyReceiptRow[]),
-      saraWipRows: saraWipRes.error || !saraWipRes.data ? [] : (saraWipRes.data as SaraWipRow[]),
+      saraWipRows: wipRows,
+      factoryInfo: [...factoryAgg.entries()].map(([factory, v]) => ({ factory, count: v.count, docs: [...v.docs] })),
       loading: false,
     })
   }, [])
@@ -4934,9 +4977,33 @@ export default function DailyOrderSheetPage() {
           <div className="bg-slate-900 border border-slate-700 rounded-xl shadow-2xl w-full max-w-4xl max-h-[85vh] flex flex-col" onClick={e => e.stopPropagation()}>
             {/* Header */}
             <div className="px-5 py-4 border-b border-slate-700 flex items-center justify-between shrink-0">
-              <div>
+              <div className="min-w-0">
                 <h2 className="text-white font-semibold">入庫比對</h2>
                 <p className="text-slate-400 text-sm mt-0.5">訂貨單號：<span className="font-mono text-amber-300">{legacyModal.query}</span></p>
+                {/* 廠區判斷：這張追加單當時是哪個廠生產的（常平/委外會特別標示對應單號） */}
+                {legacyModal.factoryInfo.length > 0 && (
+                  <div className="flex flex-wrap items-center gap-1.5 mt-1.5">
+                    {legacyModal.factoryInfo.map(fi => {
+                      const style = fi.factory === 'C'
+                        ? 'bg-orange-900/50 text-orange-300 border-orange-600/50'
+                        : fi.factory === 'O'
+                        ? 'bg-violet-900/50 text-violet-300 border-violet-600/50'
+                        : 'bg-sky-900/50 text-sky-300 border-sky-600/50'
+                      const label = fi.factory === 'C' ? '🟠 常平生產' : fi.factory === 'O' ? '🟣 委外生產' : '🔵 台北生產'
+                      const docLabel = fi.factory === 'C' ? '採購單' : fi.factory === 'O' ? '請購單' : '製令'
+                      return (
+                        <span key={fi.factory} className={`px-2 py-0.5 rounded-full border text-[11px] font-bold ${style}`}>
+                          {label}{fi.count > 0 ? ` ${fi.count} 筆` : ''}
+                          {fi.docs.length > 0 && (
+                            <span className="font-mono font-normal ml-1">
+                              {docLabel} {fi.docs.slice(0, 3).join('、')}{fi.docs.length > 3 ? '…' : ''}
+                            </span>
+                          )}
+                        </span>
+                      )
+                    })}
+                  </div>
+                )}
               </div>
               <button onClick={() => setLegacyModal(null)} className="text-slate-500 hover:text-white transition-colors text-xl leading-none">✕</button>
             </div>
