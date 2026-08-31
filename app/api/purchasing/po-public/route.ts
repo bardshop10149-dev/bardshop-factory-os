@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { getSupabaseAdminClient, formatSupabaseAdminError } from '@/lib/supabaseAdmin'
 import { guardAuth } from '@/lib/requireAuth'
 import type { PublicPoLine, ShipMethod } from '@/lib/purchasing/types'
-import { normalizeDateText, milestoneOf } from '@/lib/purchasing/types'
+import { normalizeDateText, milestoneOf, CP_SHIP_NOTE_TAG } from '@/lib/purchasing/types'
 
 export const dynamic = 'force-dynamic'
 
@@ -49,12 +49,12 @@ export async function GET(request: NextRequest) {
       }
     }
 
-    const trackingMap = new Map<string, { sent_at: string | null; shipped_at: string | null; ship_method: string | null; expected_ship_date: string | null }>()
+    const trackingMap = new Map<string, { sent_at: string | null; shipped_at: string | null; ship_method: string | null; expected_ship_date: string | null; note: string | null }>()
     const docNos = [...new Set(rows.map((r) => r.doc_no))]
     if (docNos.length > 0) {
       const { data, error } = await supabase
         .from('po_line_tracking')
-        .select('doc_no, sub_no, sent_at, shipped_at, ship_method, expected_ship_date')
+        .select('doc_no, sub_no, sent_at, shipped_at, ship_method, expected_ship_date, note')
         .in('doc_no', docNos)
       if (error) throw new Error(error.message)
       for (const t of data ?? []) trackingMap.set(`${t.doc_no}|${t.sub_no}`, t)
@@ -77,6 +77,13 @@ export async function GET(request: NextRequest) {
         progress: milestoneOf({ sent_at: t?.sent_at ?? null, shipped_at: t?.shipped_at ?? null, qty: r.qty, received_qty: receivedQty }),
         ship_method: (t?.ship_method ?? null) as ShipMethod | null,
         expected_ship_date: t?.expected_ship_date ?? null,
+        // note 是採購手打＋系統管理行的混合欄；跨區只擷取【常平出貨】行並去前綴
+        cp_ship_note:
+          (t?.note ?? '')
+            .split('\n')
+            .filter((l) => l.trimStart().startsWith(CP_SHIP_NOTE_TAG))
+            .map((l) => l.trimStart().slice(CP_SHIP_NOTE_TAG.length).trim())
+            .join('\n') || null,
       }
     })
 
