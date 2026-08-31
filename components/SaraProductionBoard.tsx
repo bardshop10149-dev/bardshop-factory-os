@@ -1,17 +1,31 @@
 'use client'
 
-// 塔台即時看板（唯讀）
+// 塔台產線看板（唯讀）——六個產線排程看板（印刷/雷切/後加工/包裝/委外/常平）共用的本體。
 //
-// 資料來源：sara_wip_records（由 /api/cron/sara-wip-sync 定時從塔台 /data/wip 同步進來，
-// 見 lib/saraSync.ts 的 syncWipRecords）。本頁面完全唯讀——不提供任何修改操作，
-// 顯示內容一律以塔台回報為準；要更正資料請至塔台系統操作，下次同步自動反映。
+// 2026-08-31 起這六個看板改以塔台（SARA）資料為準、完全唯讀：不提供任何修改操作，
+// 要更正資料請至塔台系統操作，下次同步自動反映。每個看板依 SECTION_WORKCENTERS
+// 對應到塔台的站點，只顯示自己站點的報工與排程。
 //
-// 時間欄位注意：sara_wip_records 的 real_start_time/real_end_time 儲存的是台北當地
-// 時鐘值（沿用人工 CSV 匯入時代的慣例，字面值即台北時間，僅型別上被標成 UTC），
-// 所以顯示直接切字串、計算經過時間時用「現在的台北時鐘」對減，不做時區轉換。
+// 資料來源：
+//   sara_wip_records  ＝報工紀錄（/api/cron/sara-wip-sync 定時從塔台 /data/wip 同步）
+//   sara_wip_schedule ＝排程（/api/sara/wip-sync 每小時同步，經 /api/sara/wip-schedule 代讀）
+//
+// 時間欄位注意：real_start_time/real_end_time 儲存的是台北當地時鐘值（沿用人工 CSV
+// 匯入時代的慣例，字面值即台北時間，僅型別上被標成 UTC），所以顯示直接切字串、
+// 計算經過時間時用「現在的台北時鐘」對減，不做時區轉換。
 
 import { useState, useEffect, useCallback, useMemo } from 'react'
-import { supabase } from '../../../../lib/supabaseClient'
+import { supabase } from '../lib/supabaseClient'
+
+/** 六個看板 → 塔台站點的對應（塔台實際出現過的 workcenter_name） */
+export const SECTION_WORKCENTERS: Record<string, string[]> = {
+  printing:   ['印刷站2F', '印刷站6F', 'UV印刷'],
+  laser:      ['雷切站'],
+  post:       ['後加工站'],
+  packaging:  ['包裝站'],
+  outsourced: ['轉運站', '委外製作'],
+  changping:  ['常平廠'],
+}
 
 interface WipRow {
   work_order: string
@@ -132,7 +146,8 @@ function planClock(ts: string | null): string {
 
 const DOW_ZH = ['日', '一', '二', '三', '四', '五', '六'] as const
 
-export default function SaraLiveBoardPage() {
+export default function SaraProductionBoard({ sectionId, sectionName }: { sectionId: string, sectionName: string }) {
+  const boardWorkcenters = useMemo(() => SECTION_WORKCENTERS[sectionId] ?? [], [sectionId])
   const [activeRows, setActiveRows] = useState<WipRow[]>([])
   const [finishedToday, setFinishedToday] = useState<WipRow[]>([])
   const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(null)
@@ -140,8 +155,8 @@ export default function SaraLiveBoardPage() {
   const [loadError, setLoadError] = useState('')
   const [refreshedAt, setRefreshedAt] = useState<Date | null>(null)
 
-  // 排程檢視
-  const [view, setView] = useState<'now' | 'schedule'>('now')
+  // 這六頁本來就是「排程看板」，預設先看排程週曆，即時現況為次要分頁
+  const [view, setView] = useState<'now' | 'schedule'>('schedule')
   const [schedRows, setSchedRows] = useState<ScheduleRow[]>([])
   const [schedSyncedAt, setSchedSyncedAt] = useState<string | null>(null)
   const [schedMode, setSchedMode] = useState<'station' | 'machine'>('machine')
@@ -163,6 +178,7 @@ export default function SaraLiveBoardPage() {
           .from('sara_wip_records')
           .select('work_order,mo_nbr,product_name,product_description,lot_nbr,workcenter_name,job_name,job_sequence,status,wip_qty,real_start_time,real_end_time,report_resources,username,site_label')
           .in('status', ['running', 'pause'])
+          .in('workcenter_name', boardWorkcenters)
           .gte('real_start_time', activeCutoff)
           .order('real_start_time', { ascending: false })
           .limit(500),
@@ -170,6 +186,7 @@ export default function SaraLiveBoardPage() {
           .from('sara_wip_records')
           .select('work_order,mo_nbr,product_name,product_description,lot_nbr,workcenter_name,job_name,job_sequence,status,wip_qty,real_start_time,real_end_time,report_resources,username,site_label')
           .eq('status', 'finished')
+          .in('workcenter_name', boardWorkcenters)
           .gte('real_end_time', todayStart)
           .order('real_end_time', { ascending: false })
           .limit(1000),
@@ -193,7 +210,7 @@ export default function SaraLiveBoardPage() {
         const schedRes = await fetch('/api/sara/wip-schedule', { cache: 'no-store' })
         const schedJson = await schedRes.json() as { success: boolean; rows?: ScheduleRow[]; synced_at?: string | null }
         if (schedRes.ok && schedJson.success) {
-          setSchedRows(schedJson.rows ?? [])
+          setSchedRows((schedJson.rows ?? []).filter(r => boardWorkcenters.includes(r.workcenter_name ?? '')))
           setSchedSyncedAt(schedJson.synced_at ?? null)
         }
       } catch {
@@ -204,7 +221,7 @@ export default function SaraLiveBoardPage() {
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [boardWorkcenters])
 
   useEffect(() => {
     void load()
@@ -289,11 +306,11 @@ export default function SaraLiveBoardPage() {
       <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
         <div className="min-w-0">
           <h1 className="text-xl font-bold text-white flex items-center gap-2">
-            📡 塔台即時看板
-            <span className="px-2 py-0.5 rounded-full bg-slate-800 border border-slate-600 text-slate-400 text-[10px] font-medium">唯讀</span>
+            📡 {sectionName}排程看板
+            <span className="px-2 py-0.5 rounded-full bg-slate-800 border border-slate-600 text-slate-400 text-[10px] font-medium">唯讀・塔台資料</span>
           </h1>
           <p className="text-xs text-slate-500 mt-1">
-            資料一律以塔台（SARA）現場報工為準，本頁不提供修改；要更正請至塔台操作，下次同步自動反映。
+            資料一律以塔台（SARA）為準（站點：{boardWorkcenters.join('、')}），本頁不提供修改；要更正請至塔台操作，下次同步自動反映。
           </p>
         </div>
         <div className="text-right text-[11px] text-slate-500 shrink-0">
