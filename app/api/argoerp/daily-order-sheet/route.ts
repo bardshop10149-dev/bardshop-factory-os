@@ -51,6 +51,28 @@ export async function GET(request: NextRequest) {
 
     const search = searchParams.get('search')
 
+    // ?dup_index=1 — 回傳所有日期裡「訂單號+序號」的輕量索引（只有這兩個欄位+日期，不含
+    // 完整 rows），供貼上解析資料時偵測「這筆訂單+序號是否已經在其他日期的出單表出現過」
+    // （重複發單警示）。跟下面 !date 的列表查詢一樣要整包掃 rows，但只在使用者貼上資料
+    // 這種低頻操作才會呼叫，不像列表查詢是每次進頁面就打一次，可以接受這個成本。
+    if (searchParams.get('dup_index') === '1') {
+      const { data, error } = await supabase.from(TABLE).select('sheet_date, rows')
+      if (error) throw error
+      const index: { order_number: string; line: string; sheet_date: string }[] = []
+      for (const sheet of (data ?? []) as { sheet_date: string; rows: unknown }[]) {
+        const rowsArr = Array.isArray(sheet.rows) ? sheet.rows as Array<Record<string, unknown>> : []
+        for (const row of rowsArr) {
+          const orderNo = typeof row.order_number === 'string' ? row.order_number : ''
+          const line = typeof row.line_no_input === 'string' && row.line_no_input
+            ? row.line_no_input
+            : (typeof row.match_line_no === 'string' ? row.match_line_no : '')
+          if (!orderNo || !line) continue
+          index.push({ order_number: orderNo, line, sheet_date: sheet.sheet_date })
+        }
+      }
+      return NextResponse.json({ success: true, index }, { headers: { 'Cache-Control': 'no-store' } })
+    }
+
     // ?search=<query> — 跨日期單號搜尋（不需 date 參數）
     if (!date && search) {
       const q = search.trim().toLowerCase()

@@ -741,6 +741,9 @@ export default function DailyOrderSheetPage() {
                 if (stored.due_date_alert_dismissed !== undefined) base.due_date_alert_dismissed = stored.due_date_alert_dismissed
                 if (stored.factory_alert            !== undefined) base.factory_alert            = stored.factory_alert
                 if (stored.factory_alert_dismissed  !== undefined) base.factory_alert_dismissed  = stored.factory_alert_dismissed
+                if (stored.duplicate_alert          !== undefined) base.duplicate_alert          = stored.duplicate_alert
+                if (stored.duplicate_alert_dismissed !== undefined) base.duplicate_alert_dismissed = stored.duplicate_alert_dismissed
+                if (stored.duplicate_alert_dates    !== undefined) base.duplicate_alert_dates    = stored.duplicate_alert_dates
                 if (stored.sketch_url               !== undefined) base.sketch_url               = stored.sketch_url
                 if (stored.sketch_urls              !== undefined) base.sketch_urls              = stored.sketch_urls
               } else {
@@ -1001,31 +1004,56 @@ export default function DailyOrderSheetPage() {
   }, [sheetRows, selectedDate, moMachines, rowMachines])
 
   // ---- 解析貼上資料 ----
-  const handleParse = useCallback(() => {
+  const handleParse = useCallback(async () => {
     setParseError('')
     setParseWarnings([])
     if (!rawText.trim()) { setParseError('請先貼上資料'); return }
     const { rows, error, duplicateWarnings } = parseSourceRows(rawText, selectedDate)
     if (error) { setParseError(error); return }
 
+    // 重複發單偵測：查詢「訂單號+序號」在其他日期的出單表是否已經出現過（排除今天自己這份，
+    // 重新貼今天的資料不算重複）。偵測失敗不影響貼上功能本身，靜默略過即可。
+    const crossDateDupMap = new Map<string, string[]>()
+    try {
+      const dupRes = await fetch('/api/argoerp/daily-order-sheet?dup_index=1', { cache: 'no-store' })
+      const dupJson = await dupRes.json() as { success: boolean; index?: { order_number: string; line: string; sheet_date: string }[] }
+      if (dupJson.success && Array.isArray(dupJson.index)) {
+        for (const entry of dupJson.index) {
+          if (entry.sheet_date === selectedDate) continue
+          const key = `${entry.order_number}|${entry.line}`
+          const arr = crossDateDupMap.get(key) ?? []
+          if (!arr.includes(entry.sheet_date)) arr.push(entry.sheet_date)
+          crossDateDupMap.set(key, arr)
+        }
+      }
+    } catch {
+      // 略過，不阻擋貼上
+    }
+
     // 首次匯入警示：以出單日（selectedDate）為第0天，只在這一列「第一次出現」時判斷一次，
     // 之後重新解析/載入同一列時原樣保留（見下方合併邏輯），不會重複觸發或蓋掉已取消的警示
     const sheetDateObjForAlert = new Date(selectedDate)
     sheetDateObjForAlert.setHours(0, 0, 0, 0)
 
-    const sheetRowsNew: SheetRow[] = rows.map(r => ({
-      ...r,
-      row_key: createRowKey(r),
-      mo_status: null,
-      // 若原始資料已填入序號（B欄），直接預填 match_line_no，無需比對
-      ...(r.line_no_input
-        ? { match_line_no: r.line_no_input, match_status: 'matched' as MatchStatus, match_reason: '原始資料直接填入' }
-        : {}),
-      due_date_alert: computeDueDateAlert(r, sheetDateObjForAlert, dueDateThresholds),
-      due_date_alert_dismissed: false,
-      factory_alert: computeFactoryAlert(r),
-      factory_alert_dismissed: false,
-    }))
+    const sheetRowsNew: SheetRow[] = rows.map(r => {
+      const dupDates = r.line_no_input ? crossDateDupMap.get(`${r.order_number}|${r.line_no_input}`) : undefined
+      return {
+        ...r,
+        row_key: createRowKey(r),
+        mo_status: null,
+        // 若原始資料已填入序號（B欄），直接預填 match_line_no，無需比對
+        ...(r.line_no_input
+          ? { match_line_no: r.line_no_input, match_status: 'matched' as MatchStatus, match_reason: '原始資料直接填入' }
+          : {}),
+        due_date_alert: computeDueDateAlert(r, sheetDateObjForAlert, dueDateThresholds),
+        due_date_alert_dismissed: false,
+        factory_alert: computeFactoryAlert(r),
+        factory_alert_dismissed: false,
+        duplicate_alert: !!(dupDates && dupDates.length > 0),
+        duplicate_alert_dismissed: false,
+        duplicate_alert_dates: dupDates,
+      }
+    })
 
     // 保留已有狀態（相同 row_key 的保留舊狀態）
     // 使用複合鍵避免同 row_key 但不同序號的列互相覆蓋（如同一工單同品號有多筆）
@@ -1101,6 +1129,9 @@ export default function DailyOrderSheetPage() {
           due_date_alert_dismissed:  old.due_date_alert_dismissed,
           factory_alert:             old.factory_alert,
           factory_alert_dismissed:   old.factory_alert_dismissed,
+          duplicate_alert:           old.duplicate_alert,
+          duplicate_alert_dismissed: old.duplicate_alert_dismissed,
+          duplicate_alert_dates:     old.duplicate_alert_dates,
           sketch_url:                old.sketch_url,
           sketch_urls:               old.sketch_urls,
         }
@@ -1134,6 +1165,9 @@ export default function DailyOrderSheetPage() {
         due_date_alert_dismissed:  old.due_date_alert_dismissed,
         factory_alert:             old.factory_alert,
         factory_alert_dismissed:   old.factory_alert_dismissed,
+        duplicate_alert:           old.duplicate_alert,
+        duplicate_alert_dismissed: old.duplicate_alert_dismissed,
+        duplicate_alert_dates:     old.duplicate_alert_dates,
         sketch_url:                old.sketch_url,
         sketch_urls:               old.sketch_urls,
       }
@@ -1146,6 +1180,15 @@ export default function DailyOrderSheetPage() {
     setParseError('')
     if (duplicateWarnings.length > 0) {
       setParseWarnings(duplicateWarnings)
+    }
+    // 用 alert() 強制提示，而非放在貼上區塊裡的橫幅——貼上區塊解析成功後會立刻收合
+    // （showPasteArea 變 false），橫幅會跟著一起消失、使用者根本看不到；alert() 才能
+    // 保證解析當下一定會被看到。表格裡每一列仍會留著可取消的「⚠ 重複發單」徽章供事後追蹤。
+    const freshCrossDateDupWarnings = merged
+      .filter(r => r.duplicate_alert && !r.duplicate_alert_dismissed && r.duplicate_alert_dates?.length)
+      .map(r => `・${r.order_number} 序號 ${r.line_no_input || r.match_line_no} 已於 ${r.duplicate_alert_dates!.join('、')} 的出單表出現過`)
+    if (freshCrossDateDupWarnings.length > 0) {
+      alert(`⚠️ 疑似重複發單（${freshCrossDateDupWarnings.length} 筆）：\n\n${freshCrossDateDupWarnings.join('\n')}\n\n請確認是否為誤重複貼上/發單。表格中對應列已標示紅色警示徽章，可點擊取消。`)
     }
     // 解析後立即存回 DB，確保所有轉單頁面都能取到最新出單表（不依賴後續採購比對才觸發）
     setSaving(true)
@@ -3137,9 +3180,9 @@ export default function DailyOrderSheetPage() {
     }
   }, [sheetRows, selectedDate, currentRawText])
 
-  // 取消首次匯入警示（交期/廠區）：僅標記為已取消，警示紀錄本身保留供追溯
-  const handleDismissAlert = useCallback(async (rowKey: string, kind: 'due_date' | 'factory') => {
-    const field = kind === 'due_date' ? 'due_date_alert_dismissed' : 'factory_alert_dismissed'
+  // 取消首次匯入警示（交期/廠區/重複發單）：僅標記為已取消，警示紀錄本身保留供追溯
+  const handleDismissAlert = useCallback(async (rowKey: string, kind: 'due_date' | 'factory' | 'duplicate') => {
+    const field = kind === 'due_date' ? 'due_date_alert_dismissed' : kind === 'factory' ? 'factory_alert_dismissed' : 'duplicate_alert_dismissed'
     const next: SheetRow[] = sheetRows.map(r => (r.row_key || '') === rowKey ? { ...r, [field]: true } : r)
     setSheetRows(next)
     setSaving(true)
@@ -4103,7 +4146,8 @@ export default function DailyOrderSheetPage() {
                         // 首次匯入警示（交期／廠區）：只要有一個未取消，整列標紅底，優先權最高
                         const showDueDateAlert = !!row.due_date_alert && !row.due_date_alert_dismissed
                         const showFactoryAlert = !!row.factory_alert && !row.factory_alert_dismissed
-                        const hasActiveAlert = showDueDateAlert || showFactoryAlert
+                        const showDuplicateAlert = !!row.duplicate_alert && !row.duplicate_alert_dismissed
+                        const hasActiveAlert = showDueDateAlert || showFactoryAlert || showDuplicateAlert
                         return (
                           <tr
                             key={`${row.row_key || 'row'}::${idx}`}
@@ -4168,7 +4212,7 @@ export default function DailyOrderSheetPage() {
                                 </div>
                               )}
                               {/* 首次匯入警示 badge：點擊取消警示（整列紅底同時解除） */}
-                              {(showDueDateAlert || showFactoryAlert) && (
+                              {(showDueDateAlert || showFactoryAlert || showDuplicateAlert) && (
                                 <div className="mt-0.5 flex gap-1 flex-wrap">
                                   {showDueDateAlert && (
                                     <button
@@ -4183,6 +4227,13 @@ export default function DailyOrderSheetPage() {
                                       title="委外(O)廠列的品項編碼未以 C 開頭，點擊取消此警示"
                                       className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-red-600 text-white border border-red-400/60 hover:bg-red-500 transition-colors"
                                     >⚠ 廠區</button>
+                                  )}
+                                  {showDuplicateAlert && (
+                                    <button
+                                      onClick={() => void handleDismissAlert(sk, 'duplicate')}
+                                      title={`同一個訂單號＋序號已於${row.duplicate_alert_dates?.length ? `${row.duplicate_alert_dates.join('、')} ` : ''}的出單表出現過，疑似重複發單，點擊取消此警示`}
+                                      className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-red-600 text-white border border-red-400/60 hover:bg-red-500 transition-colors"
+                                    >⚠ 重複發單</button>
                                   )}
                                 </div>
                               )}

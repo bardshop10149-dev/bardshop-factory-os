@@ -71,6 +71,12 @@ export interface SheetRow extends SourceRow {
   // 廠區警示——委外(O)廠列的品項編碼未以 C 開頭
   factory_alert?: boolean
   factory_alert_dismissed?: boolean
+  // 重複發單警示——貼上解析時，這一列的「訂單號+序號」在其他日期的出單表已經出現過，
+  // 可能是誤重複貼入/重複發單
+  duplicate_alert?: boolean
+  duplicate_alert_dismissed?: boolean
+  // 被偵測到重複的其他日期（YYYY-MM-DD），供警示訊息顯示
+  duplicate_alert_dates?: string[]
   // 示意圖（舊版單張欄位，僅供相容舊資料讀取，新資料一律寫入 sketch_urls）
   sketch_url?: string | null
   // 示意圖：對應這一列（訂單號#項號）的圖片/PDF，可能不只一張（同一品項常有多個版本/角度），
