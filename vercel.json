@@ -28,6 +28,10 @@
     {
       "path": "/api/cron/sara-wip-sync",
       "schedule": "0 1,4,7,10,13 * * *"
+    },
+    {
+      "path": "/api/sara/wip-sync",
+      "schedule": "30 0-13 * * *"
     }
   ]
 }
