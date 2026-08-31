@@ -82,15 +82,60 @@ function AdminNavbar() {
 
   // 一個分類群組底下的項目列表——桌機浮動下拉選單、手機收合選單共用同一份，
   // 避免我的最愛/角標/子選單這些邏輯要維護兩份、彼此漂移。
-  const renderGroupItems = (group: (typeof NAV_GROUPS)[number], colors: ThemeColors) => (
+  const renderGroupItems = (group: (typeof NAV_GROUPS)[number], colors: ThemeColors, variant: 'desktop' | 'mobile' = 'desktop') => (
     <>
       {group.items.map((item) => {
-        // ── 子選單群組（向下展開）
+        // ── 子選單群組
         if ('children' in item && Array.isArray(item.children)) {
           type Child = { name: string; path: string }
           const sub = item as { name: string; children: Child[] }
           const isSubActive = sub.children.some(c => pathname === c.path || pathname.startsWith(c.path + '?'))
           const isSubOpen = openSubGroup === sub.name
+
+          const childLinks = sub.children.map(child => {
+            const isChildActive = pathname === child.path
+            const isFav = favorites.includes(child.path)
+            return (
+              <div key={child.path} className={`group/item flex items-center px-4 py-2 transition-colors border-l-4 hover:bg-slate-800/50 ${isChildActive ? `border-${group.theme}-400 bg-slate-800/80` : 'border-transparent'}`}>
+                <button
+                  onClick={(e) => { e.preventDefault(); e.stopPropagation(); toggleFavorite(child.path) }}
+                  className={`mr-3 p-1 rounded-full transition-all ${isFav ? 'text-yellow-400 hover:text-yellow-300 hover:bg-yellow-400/10' : 'text-slate-600 hover:text-slate-400'}`}
+                  title={isFav ? '移除常用' : '加入常用'}
+                >
+                  <svg className="w-4 h-4" fill={isFav ? 'currentColor' : 'none'} stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11.049 2.927c.3-.921 1.603-.921 1.902 0l1.519 4.674a1 1 0 00.95.69h4.915c.969 0 1.371 1.24.588 1.81l-3.976 2.888a1 1 0 00-.363 1.118l1.518 4.674c.3.922-.755 1.688-1.538 1.118l-3.976-2.888a1 1 0 00-1.176 0l-3.976 2.888c-.783.57-1.838-.197-1.538-1.118l1.518-4.674a1 1 0 00-.363-1.118l-3.976-2.888c-.784-.57-.38-1.81.588-1.81h4.914a1 1 0 00.951-.69l1.519-4.674z" /></svg>
+                </button>
+                <Link href={child.path} onClick={closeAllMenus} className={`flex-1 text-sm font-medium tracking-wide ${isChildActive ? colors.text : `text-slate-400 ${colors.hoverText} hover:text-white`}`}>
+                  {child.name}
+                </Link>
+              </div>
+            )
+          })
+
+          // 桌機：滑鼠移過去往右浮出（跟改版前一樣），不佔用/推擠其他項目的排版位置，
+          // 避免像手風琴那樣因為內容展開把下面的項目往下推、選單看起來一直在跳動
+          if (variant === 'desktop') {
+            return (
+              <div key={sub.name} className="relative group/sub">
+                <div className={`flex items-center px-4 py-2 transition-colors border-l-4 hover:bg-slate-800/50 cursor-default select-none ${isSubActive ? `border-${group.theme}-400 bg-slate-800/80` : 'border-transparent'}`}>
+                  <span className="mr-3 w-6 h-6 shrink-0" />
+                  <span className={`flex-1 text-sm font-medium tracking-wide ${isSubActive ? colors.text : 'text-slate-400 group-hover/sub:text-white'}`}>
+                    {sub.name}
+                  </span>
+                  <svg className="w-3 h-3 text-slate-500 ml-2 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                  </svg>
+                </div>
+                {/* 往右展開的子選單 */}
+                <div className="absolute left-full top-0 pl-1 w-56 opacity-0 -translate-x-2 pointer-events-none group-hover/sub:opacity-100 group-hover/sub:translate-x-0 group-hover/sub:pointer-events-auto transition-all duration-200 z-[60]">
+                  <div className={`bg-[#0b1120] border rounded-xl shadow-2xl backdrop-blur-xl flex flex-col py-2 ${colors.menuBorder}`}>
+                    {childLinks}
+                  </div>
+                </div>
+              </div>
+            )
+          }
+
+          // 手機/平板：往右展開會超出窄螢幕外，改用向下展開的手風琴（跟主選單同一路逐層收合）
           return (
             <div key={sub.name} className="relative group/sub">
               <button
@@ -105,29 +150,11 @@ function AdminNavbar() {
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
                 </svg>
               </button>
-              {/* 子選單：向下展開（避免在手機窄螢幕上往右展開超出畫面外） */}
               <div className={`pl-2 transition-all duration-200 overflow-hidden ${
-                isSubOpen ? 'max-h-96 opacity-100' : 'max-h-0 opacity-0 group-hover/sub:max-h-96 group-hover/sub:opacity-100'
+                isSubOpen ? 'max-h-96 opacity-100' : 'max-h-0 opacity-0'
               }`}>
                 <div className={`my-1 mx-2 rounded-lg border flex flex-col py-1 bg-black/20 ${colors.menuBorder}`}>
-                  {sub.children.map(child => {
-                    const isChildActive = pathname === child.path
-                    const isFav = favorites.includes(child.path)
-                    return (
-                      <div key={child.path} className={`group/item flex items-center px-4 py-2 transition-colors border-l-4 hover:bg-slate-800/50 ${isChildActive ? `border-${group.theme}-400 bg-slate-800/80` : 'border-transparent'}`}>
-                        <button
-                          onClick={(e) => { e.preventDefault(); e.stopPropagation(); toggleFavorite(child.path) }}
-                          className={`mr-3 p-1 rounded-full transition-all ${isFav ? 'text-yellow-400 hover:text-yellow-300 hover:bg-yellow-400/10' : 'text-slate-600 hover:text-slate-400'}`}
-                          title={isFav ? '移除常用' : '加入常用'}
-                        >
-                          <svg className="w-4 h-4" fill={isFav ? 'currentColor' : 'none'} stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11.049 2.927c.3-.921 1.603-.921 1.902 0l1.519 4.674a1 1 0 00.95.69h4.915c.969 0 1.371 1.24.588 1.81l-3.976 2.888a1 1 0 00-.363 1.118l1.518 4.674c.3.922-.755 1.688-1.538 1.118l-3.976-2.888a1 1 0 00-1.176 0l-3.976 2.888c-.783.57-1.838-.197-1.538-1.118l1.518-4.674a1 1 0 00-.363-1.118l-3.976-2.888c-.784-.57-.38-1.81.588-1.81h4.914a1 1 0 00.951-.69l1.519-4.674z" /></svg>
-                        </button>
-                        <Link href={child.path} onClick={closeAllMenus} className={`flex-1 text-sm font-medium tracking-wide ${isChildActive ? colors.text : `text-slate-400 ${colors.hoverText} hover:text-white`}`}>
-                          {child.name}
-                        </Link>
-                      </div>
-                    )
-                  })}
+                  {childLinks}
                 </div>
               </div>
             </div>
@@ -294,7 +321,7 @@ function AdminNavbar() {
                     </button>
                     {isGroupOpen && (
                       <div className="bg-[#0b1120] border-t border-white/5 flex flex-col py-1 max-h-[60vh] overflow-y-auto">
-                        {renderGroupItems(group, colors)}
+                        {renderGroupItems(group, colors, 'mobile')}
                       </div>
                     )}
                   </div>
