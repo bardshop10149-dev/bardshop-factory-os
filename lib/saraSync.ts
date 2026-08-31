@@ -167,12 +167,9 @@ export async function syncOrders(): Promise<SyncResult> {
 // ── 3b. 報工 ───────────────────────────────────────────────────────────
 export async function syncReports(
   reportPaths: string[] = [
+    '/data/wip',       // 塔台 2026-08-31 確認的報工紀錄端點
     '/data/report',
     '/data/work_report',
-    '/data/reports',
-    '/data/workreport',
-    '/data/report_list',
-    '/data/reporting',
   ],
   reportBody: unknown = {},
 ): Promise<SyncResult> {
@@ -251,6 +248,107 @@ export async function syncReports(
   } catch (e) {
     const msg = errMsg(e)
     await logSync('report', false, null, Date.now() - started, msg)
+    throw new Error(msg)
+  }
+}
+
+// ── 3c. 報工紀錄（/data/wip → sara_wip_records）───────────────────────
+// 塔台 2026-08-31 確認：報工紀錄要呼叫 /data/wip 取得（先前嘗試的 /data/report 等
+// 路徑都不存在）。回應含分頁欄位 { data, truncated, limit, next_after_id }，
+// 用 { after_id } 當游標翻頁；頁與頁之間可能有少量重疊列，以 work_order 去重即可。
+// 寫入 sara_wip_records（塔台報工紀錄頁面讀的表，取代原本人工匯出 CSV 再匯入的流程）。
+
+/** 依製令/單號前綴推導廠區標籤（人工 CSV 匯入時是整批手選，自動同步改用前綴判斷） */
+function wipSiteLabel(moNbr: string | null): string | null {
+  const v = (moNbr ?? '').trim().toUpperCase()
+  if (!v) return null
+  if (v.startsWith('MOT') || v.startsWith('MOS') || v.startsWith('RO')) return '台北'
+  if (v.startsWith('POC')) return '常平'
+  if (v.startsWith('MPO') || v.startsWith('POO')) return '委外'
+  return null
+}
+
+export async function syncWipRecords(): Promise<SyncResult> {
+  const started = Date.now()
+  try {
+    interface WipRow {
+      work_order: string
+      mo_nbr: string | null
+      product_name: string | null
+      product_subname: string | null
+      product_description: string | null
+      lot_nbr: string | null
+      doc_nbr: string | null
+      workcenter_name: string | null
+      job_name: string | null
+      job_sequence: number | null
+      status: string | null
+      source_type: string | null
+      wip_qty: number | null
+      real_start_time: string | null
+      real_end_time: string | null
+      report_resource_name: string | null
+      username: string | null
+      job_note: string | null
+    }
+    interface WipPage {
+      data?: WipRow[]
+      truncated?: boolean
+      next_after_id?: number | null
+    }
+
+    const byWorkOrder = new Map<string, WipRow>()
+    let afterId: number | null = null
+    const MAX_PAGES = 100 // 保險上限（5000 筆/頁 = 50 萬筆），避免 API 異常時無限迴圈
+    for (let page = 0; page < MAX_PAGES; page++) {
+      const body: Record<string, unknown> = afterId != null ? { after_id: afterId } : {}
+      const json: WipPage = await saraFetch<WipPage>('/data/wip', body)
+      for (const r of json.data ?? []) {
+        const wo = String(r.work_order ?? '').trim()
+        if (wo) byWorkOrder.set(wo, r)
+      }
+      if (!json.truncated || json.next_after_id == null) break
+      afterId = json.next_after_id
+    }
+
+    const rows = Array.from(byWorkOrder.values()).map(r => ({
+      work_order: r.work_order,
+      id_list: null,
+      mo_nbr: r.mo_nbr ?? null,
+      product_name: r.product_name ?? null,
+      product_subname: r.product_subname ?? null,
+      product_description: r.product_description ?? null,
+      lot_nbr: r.lot_nbr ?? null,
+      doc_nbr: r.doc_nbr ?? null,
+      workcenter_name: r.workcenter_name ?? null,
+      job_name: r.job_name ?? null,
+      job_sequence: r.job_sequence ?? null,
+      status: r.status ?? null,
+      source_type: r.source_type ?? null,
+      wip_qty: r.wip_qty ?? null,
+      real_start_time: r.real_start_time || null,
+      real_end_time: r.real_end_time || null,
+      report_resources: r.report_resource_name ?? null,
+      username: r.username ?? null,
+      site_label: wipSiteLabel(r.mo_nbr),
+    }))
+
+    if (rows.length > 0) {
+      const sb = getSupabaseAdminClient()
+      const CHUNK = 500
+      for (let i = 0; i < rows.length; i += CHUNK) {
+        const { error } = await sb
+          .from('sara_wip_records')
+          .upsert(rows.slice(i, i + CHUNK), { onConflict: 'work_order' })
+        if (error) throw new Error(errMsg(error))
+      }
+    }
+
+    await logSync('wip_records', true, rows.length, Date.now() - started)
+    return { count: rows.length }
+  } catch (e) {
+    const msg = errMsg(e)
+    await logSync('wip_records', false, null, Date.now() - started, msg)
     throw new Error(msg)
   }
 }

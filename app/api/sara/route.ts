@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { saraFetch, getSaraTokenCacheState, getSaraToken } from '@/lib/saraClient'
-import { syncWorkcenters, syncJobs, syncOrders, syncResources, syncLotRoutes, syncReports, type LotDetailItem } from '@/lib/saraSync'
+import { syncWorkcenters, syncJobs, syncOrders, syncResources, syncLotRoutes, syncReports, syncWipRecords, type LotDetailItem } from '@/lib/saraSync'
 import { guardPermission } from '@/lib/requireAuth'
 
 export const runtime = 'nodejs'
@@ -31,13 +31,11 @@ function getReportPaths(): string[] {
 
   if (fromEnv.length > 0) return fromEnv
 
+  // 塔台 2026-08-31 確認：報工紀錄的正確端點是 /data/wip（其餘為早期猜測的候選路徑，保留備援）
   return [
+    '/data/wip',
     '/data/report',
     '/data/work_report',
-    '/data/reports',
-    '/data/workreport',
-    '/data/report_list',
-    '/data/reporting',
   ]
 }
 
@@ -113,6 +111,7 @@ export async function POST(request: NextRequest) {
         case 'sync_jlb':        result = await syncJobs(); break
         case 'sync_order':      result = await syncOrders(); break
         case 'sync_report':     result = await syncReports(customReportPaths ?? getReportPaths(), reportRequestBody); break
+        case 'sync_wip_records': result = await syncWipRecords(); break
         case 'sync_resource':   result = await syncResources(); break
         case 'sync_lot_detail': {
           const items = (json.body as { items?: LotDetailItem[] } | undefined)?.items
