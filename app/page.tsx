@@ -290,6 +290,7 @@ export default function HomePage() {
   const canProductDev = hasFeaturePermission('product_dev')
   const canInfoBoard = hasFeaturePermission('info_board')
   const canPurchasing = hasFeaturePermission('purchasing')
+  const canChangpingShip = hasFeaturePermission('changping_ship')
   // 採購到期徽章：僅具權限者抓計數（API 端亦有 guardPermission 把關）
   const [purchasingDue, setPurchasingDue] = useState(0)
   useEffect(() => {
@@ -880,6 +881,35 @@ export default function HomePage() {
             </span>
           </Link>
 
+          {/* 常平訂單資料區 (Amber) — 訂單工作表黃底(常平已出貨)快照,每天 07:00 自動同步 */}
+          <Link href="/changping-ship"
+            onClick={guardFeatureAccess('changping_ship', '常平訂單資料區')}
+            onMouseEnter={() => setIsHovered('none')}
+            onMouseLeave={() => setIsHovered('none')}
+            className={`
+              group relative order-15 h-40 md:h-60 lg:h-64 rounded-2xl border border-slate-700 bg-slate-900/40 backdrop-blur-sm
+              flex flex-col items-center justify-center text-center p-3 md:p-6 transition-all duration-500 cursor-pointer
+              hover:border-amber-500 hover:bg-slate-800/60 hover:shadow-[0_0_30px_rgba(245,158,11,0.15)]
+              ${canChangpingShip ? '' : 'opacity-50 grayscale'}
+            `}
+          >
+            <div className="absolute top-4 right-4 flex items-center gap-1.5 px-2 py-1 bg-amber-500/10 rounded border border-amber-500/20">
+              <span className="text-[10px] text-amber-400 font-bold uppercase tracking-wider">Changping</span>
+            </div>
+            <div className="mb-3 md:mb-6 p-3 md:p-4 rounded-full bg-slate-800 group-hover:bg-amber-900/50 text-slate-400 group-hover:text-amber-400 transition-colors">
+              <svg className="w-7 h-7 md:w-10 md:h-10" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4" />
+              </svg>
+            </div>
+            <h2 className="text-base md:text-xl font-bold text-white mb-1 md:mb-2 group-hover:text-amber-400 transition-colors">常平訂單資料區</h2>
+            <p className="text-slate-500 text-[10px] md:text-xs mb-3 md:mb-6 group-hover:text-slate-300 px-1 md:px-2 hidden md:block">
+              訂單工作表黃底出貨追蹤。<br/>(Changping POC)
+            </p>
+            <span className="hidden md:inline-block px-4 py-2 rounded border border-slate-600 text-slate-300 text-xs font-mono group-hover:bg-amber-600 group-hover:border-amber-600 group-hover:text-white transition-all">
+              OPEN &rarr;
+            </span>
+          </Link>
+
         </div>
 
         <div className="mt-4 md:mt-8 text-center opacity-40 hover:opacity-100 transition-opacity pb-4 md:pb-0">
@@ -959,6 +989,19 @@ export default function HomePage() {
                 <span className="px-3 py-1 rounded border border-slate-600 text-slate-500 text-xs font-mono bg-slate-800">🔧 維修中</span>
               </div>
 
+              {/* 未生產異常回報（捷徑 → 尚未生產的異常回報單） */}
+              <div
+                className="bg-amber-500/10 border border-amber-400 rounded-xl p-5 cursor-pointer hover:bg-amber-500/20 transition-all flex items-center gap-4"
+                onClick={() => { setShowInfoModal(false); router.push('/qa/report-sales-design'); }}
+              >
+                <div className="text-3xl">🚨</div>
+                <div className="flex-1">
+                  <div className="text-amber-300 font-bold text-lg mb-1">未生產異常回報</div>
+                  <div className="text-xs text-red-400 font-semibold">尚未生產</div>
+                </div>
+                <span className="px-3 py-1 rounded border border-amber-500 text-amber-300 text-xs font-mono bg-amber-900/30">前往 →</span>
+              </div>
+
               {/* 產期詢問/預留 */}
               <div
                 className="bg-amber-500/10 border border-amber-400 rounded-xl p-5 cursor-pointer hover:bg-amber-500/20 transition-all flex items-center gap-4"
@@ -1036,7 +1079,7 @@ export default function HomePage() {
       {/* --- QA Modal --- */}
       {showQaModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-fade-in">
-          <div className="bg-slate-900 border border-teal-700 rounded-2xl w-full max-w-md shadow-2xl overflow-hidden relative">
+          <div className="bg-slate-900 border border-teal-700 rounded-2xl w-full max-w-2xl shadow-2xl overflow-hidden relative">
             <div className="bg-teal-800 p-4 flex justify-between items-center border-b border-teal-700">
               <h3 className="text-white font-bold flex items-center gap-2">
                 <span className="w-2 h-6 bg-teal-400 rounded-full"></span>
@@ -1050,10 +1093,18 @@ export default function HomePage() {
               <div className="flex gap-4">
                 <div
                   className="flex-1 bg-teal-700/20 border border-teal-600 rounded-xl p-4 cursor-pointer hover:bg-teal-700/40 transition-all text-center"
+                  onClick={() => { setShowQaModal(false); router.push('/qa/report-sales-design'); }}
+                >
+                  <div className="mb-2 text-teal-400 font-bold text-lg">未生產異常回報</div>
+                  <div className="text-xs text-red-400 font-semibold mb-2">尚未生產</div>
+                  <span className="px-3 py-1 rounded border border-teal-600 text-teal-300 text-xs font-mono bg-teal-900/30">前往建立</span>
+                </div>
+                <div
+                  className="flex-1 bg-teal-700/20 border border-teal-600 rounded-xl p-4 cursor-pointer hover:bg-teal-700/40 transition-all text-center"
                   onClick={() => { setShowQaModal(false); router.push('/qa/report'); }}
                 >
-                  <div className="mb-2 text-teal-400 font-bold text-lg">建立異常單</div>
-                  <div className="text-xs text-slate-300 mb-2">負責建立新的異常單</div>
+                  <div className="mb-2 text-teal-400 font-bold text-lg">生產中異常回報</div>
+                  <div className="text-xs text-slate-300 mb-2">生產中</div>
                   <span className="px-3 py-1 rounded border border-teal-600 text-teal-300 text-xs font-mono bg-teal-900/30">前往建立</span>
                 </div>
                 <div
