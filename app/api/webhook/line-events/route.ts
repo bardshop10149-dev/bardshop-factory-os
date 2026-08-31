@@ -9,7 +9,11 @@ import { verifyLineSignature } from '@/lib/lineSignature'
 export async function POST(request: NextRequest) {
   const rawBody = await request.text()
   const signature = request.headers.get('x-line-signature')
-  if (!verifyLineSignature(rawBody, signature, process.env.LINE_CHANNEL_SECRET)) {
+  // 支援多個官方帳號共用同一個 webhook（主帳號＝異常單通知；採購帳號＝每日採購/請購單彙總，
+  // 為免費額度各自獨立而分開兩個 OA）——任一 channel secret 驗過即放行
+  const ok = verifyLineSignature(rawBody, signature, process.env.LINE_CHANNEL_SECRET)
+    || verifyLineSignature(rawBody, signature, process.env.LINE_PURCHASING_CHANNEL_SECRET)
+  if (!ok) {
     return NextResponse.json({ error: 'Invalid signature' }, { status: 401 })
   }
 
