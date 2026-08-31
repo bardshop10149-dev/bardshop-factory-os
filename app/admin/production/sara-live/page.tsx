@@ -62,6 +62,76 @@ const SITE_BADGE: Record<string, string> = {
 // 必須用時間窗過濾，否則畫面會被幾千筆殭屍紀錄淹掉）
 const ACTIVE_WINDOW_HOURS = 48
 
+// ── 排程檢視 ──────────────────────────────────────────────────────────
+
+interface ScheduleRow {
+  jid: number
+  mo_nbr: string | null
+  doc_nbr: string | null
+  so_line_no: string | null
+  product_name: string | null
+  lot_nbr: string | null
+  workcenter_name: string | null
+  job_name: string | null
+  job_sequence: number | null
+  qty: number | null
+  wip_qty: number | null
+  system_status: string | null
+  is_running: boolean | null
+  plan_start_time: string | null
+  plan_end_time: string | null
+  real_start_time: string | null
+  resource_names: string | null
+  sourcing: string | null
+}
+
+// 機台群組（2026-08-31 生管定義：同一組操作人員的機台併成一欄）。
+// 之後要調整分組直接改這裡即可；沒列在群組裡的機台各自獨立一欄。
+const MACHINE_GROUPS: { name: string; members: string[] }[] = [
+  {
+    name: '7151（3/6/11）', // 周立婷、陳龍隆操作
+    members: ['7151#3', '7151#6', '7151#11'],
+  },
+  {
+    name: '7151（7/8/9/10）', // 聰、季操作
+    members: ['7151#7', '7151#8', '7151#9', '7151#10'],
+  },
+  {
+    name: '雷切機群（S400＋大黃蜂）', // 共同操作
+    members: [
+      '雷射切割機_S400#1_GCC', '雷射切割機_S400#2_GCC', '雷射切割機_S400#3_GCC',
+      '雷射切割機_大黃蜂#1', '雷射切割機_大黃蜂#2', '雷射切割機_大黃蜂#3',
+      '雷射切割機_大黃蜂#4', '雷射切割機_大黃蜂#5',
+    ],
+  },
+]
+
+const MACHINE_TO_GROUP = new Map<string, string>(
+  MACHINE_GROUPS.flatMap(g => g.members.map(m => [m, g.name] as [string, string]))
+)
+
+/** 塔台排程的資源欄可能是「機台,操作人員」組合（如 7151#8,瞿㻑倫）——拆出機台本體與人員 */
+function splitResource(resourceNames: string | null): { machine: string; operator: string | null } {
+  const raw = (resourceNames ?? '').trim()
+  if (!raw) return { machine: '(未指定機台)', operator: null }
+  const idx = raw.indexOf(',')
+  if (idx === -1) return { machine: raw, operator: null }
+  return { machine: raw.slice(0, idx).trim(), operator: raw.slice(idx + 1).trim() || null }
+}
+
+/** 機台 → 顯示群組名稱（有定義群組的併組，其餘用機台本名） */
+function machineGroupName(machine: string): string {
+  return MACHINE_TO_GROUP.get(machine) ?? machine
+}
+
+/** 'YYYY-MM-DD HH:mm' → 'HH:mm'；空值回 '—' */
+function planClock(ts: string | null): string {
+  if (!ts) return '—'
+  return ts.slice(11, 16) || '—'
+}
+
+const DOW_ZH = ['日', '一', '二', '三', '四', '五', '六'] as const
+
 export default function SaraLiveBoardPage() {
   const [activeRows, setActiveRows] = useState<WipRow[]>([])
   const [finishedToday, setFinishedToday] = useState<WipRow[]>([])
@@ -69,6 +139,15 @@ export default function SaraLiveBoardPage() {
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState('')
   const [refreshedAt, setRefreshedAt] = useState<Date | null>(null)
+
+  // 排程檢視
+  const [view, setView] = useState<'now' | 'schedule'>('now')
+  const [schedRows, setSchedRows] = useState<ScheduleRow[]>([])
+  const [schedSyncedAt, setSchedSyncedAt] = useState<string | null>(null)
+  const [schedMode, setSchedMode] = useState<'station' | 'machine'>('machine')
+  const [schedSelected, setSchedSelected] = useState<string | null>(null)
+  // 週曆位移：0=本週、1=下週、2=下下週…（跟既有排程看板一樣以週一為一週起點）
+  const [weekOffset, setWeekOffset] = useState(0)
 
   const load = useCallback(async () => {
     try {
@@ -108,6 +187,18 @@ export default function SaraLiveBoardPage() {
       const sync = (syncRes.data?.[0] as { real_end_time?: string } | undefined)?.real_end_time ?? null
       setLastSyncedAt(sync)
       setRefreshedAt(new Date())
+
+      // 排程資料（sara_wip_schedule 有 RLS，經 API 以 service role 代讀）
+      try {
+        const schedRes = await fetch('/api/sara/wip-schedule', { cache: 'no-store' })
+        const schedJson = await schedRes.json() as { success: boolean; rows?: ScheduleRow[]; synced_at?: string | null }
+        if (schedRes.ok && schedJson.success) {
+          setSchedRows(schedJson.rows ?? [])
+          setSchedSyncedAt(schedJson.synced_at ?? null)
+        }
+      } catch {
+        // 排程載入失敗不影響即時現況檢視
+      }
     } catch (e) {
       setLoadError(e instanceof Error ? e.message : String(e))
     } finally {
@@ -137,6 +228,60 @@ export default function SaraLiveBoardPage() {
   const totalRunning = activeRows.filter(r => r.status === 'running').length
   const totalPause = activeRows.filter(r => r.status === 'pause').length
   const totalFinishedQty = finishedToday.reduce((s, r) => s + (r.wip_qty ?? 0), 0)
+
+  // ── 排程檢視：依站點或機台群組彙整 ──
+  const todayStr = useMemo(() => {
+    const t = new Date(taipeiNowAsUtcMs())
+    return `${t.getUTCFullYear()}-${String(t.getUTCMonth() + 1).padStart(2, '0')}-${String(t.getUTCDate()).padStart(2, '0')}`
+  }, [refreshedAt])  // eslint-disable-line react-hooks/exhaustive-deps -- 隨每次刷新重算即可
+
+  const schedGroups = useMemo(() => {
+    const map = new Map<string, ScheduleRow[]>()
+    for (const r of schedRows) {
+      const key = schedMode === 'station'
+        ? (r.workcenter_name || '(未指定站點)')
+        : machineGroupName(splitResource(r.resource_names).machine)
+      if (!map.has(key)) map.set(key, [])
+      map.get(key)!.push(r)
+    }
+    for (const rows of map.values()) {
+      rows.sort((a, b) => (a.plan_start_time ?? '9999').localeCompare(b.plan_start_time ?? '9999'))
+    }
+    return Array.from(map.entries()).sort((a, b) => b[1].length - a[1].length)
+  }, [schedRows, schedMode])
+
+  const selectedGroupKey = schedSelected && schedGroups.some(([k]) => k === schedSelected)
+    ? schedSelected
+    : (schedGroups[0]?.[0] ?? null)
+  const selectedGroupRows = useMemo(() => {
+    if (!selectedGroupKey) return []
+    return schedGroups.find(([k]) => k === selectedGroupKey)?.[1] ?? []
+  }, [schedGroups, selectedGroupKey])
+
+  // 選定週的每一天（週一為起點，7 天）
+  const weekDates = useMemo(() => {
+    const now = new Date(taipeiNowAsUtcMs())
+    const base = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()))
+    const dow = base.getUTCDay() // 0=日
+    base.setUTCDate(base.getUTCDate() - (dow === 0 ? 6 : dow - 1) + weekOffset * 7)
+    return Array.from({ length: 7 }, (_, i) => {
+      const d = new Date(base)
+      d.setUTCDate(base.getUTCDate() + i)
+      return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`
+    })
+  }, [weekOffset, refreshedAt])  // eslint-disable-line react-hooks/exhaustive-deps -- 隨每次刷新重算即可
+
+  // 選定群組的排程依日期索引（供週曆格查表）
+  const selectedByDate = useMemo(() => {
+    const map = new Map<string, ScheduleRow[]>()
+    for (const r of selectedGroupRows) {
+      const d = (r.plan_start_time ?? '').slice(0, 10)
+      if (!d) continue
+      if (!map.has(d)) map.set(d, [])
+      map.get(d)!.push(r)
+    }
+    return map
+  }, [selectedGroupRows])
 
   return (
     <div className="min-h-screen bg-[#050b14] p-4 md:p-6">
@@ -183,7 +328,134 @@ export default function SaraLiveBoardPage() {
         </div>
       )}
 
-      {loading ? (
+      {/* 檢視切換 */}
+      <div className="flex items-center gap-2 mb-4">
+        <button
+          onClick={() => setView('now')}
+          className={`px-4 py-1.5 rounded-lg text-sm font-bold border transition-colors ${view === 'now' ? 'bg-cyan-800/60 text-cyan-200 border-cyan-600' : 'bg-slate-900 text-slate-400 border-slate-700 hover:text-white'}`}
+        >
+          ⚡ 即時現況
+        </button>
+        <button
+          onClick={() => setView('schedule')}
+          className={`px-4 py-1.5 rounded-lg text-sm font-bold border transition-colors ${view === 'schedule' ? 'bg-purple-800/60 text-purple-200 border-purple-600' : 'bg-slate-900 text-slate-400 border-slate-700 hover:text-white'}`}
+        >
+          🗓 排程檢視
+        </button>
+        {view === 'schedule' && (
+          <>
+            <div className="w-px h-6 bg-slate-800 mx-1" />
+            <button
+              onClick={() => { setSchedMode('machine'); setSchedSelected(null) }}
+              className={`px-3 py-1.5 rounded-lg text-xs font-bold border transition-colors ${schedMode === 'machine' ? 'bg-slate-700 text-white border-slate-500' : 'bg-slate-900 text-slate-500 border-slate-800 hover:text-white'}`}
+            >
+              依機台/群組
+            </button>
+            <button
+              onClick={() => { setSchedMode('station'); setSchedSelected(null) }}
+              className={`px-3 py-1.5 rounded-lg text-xs font-bold border transition-colors ${schedMode === 'station' ? 'bg-slate-700 text-white border-slate-500' : 'bg-slate-900 text-slate-500 border-slate-800 hover:text-white'}`}
+            >
+              依站點
+            </button>
+            <span className="text-[10px] text-slate-600 ml-2">排程同步於：{schedSyncedAt ? new Date(schedSyncedAt).toLocaleString('zh-TW', { timeZone: 'Asia/Taipei', hour12: false }) : '—'}</span>
+          </>
+        )}
+      </div>
+
+      {view === 'schedule' ? (
+        schedRows.length === 0 ? (
+          <div className="text-center py-24 text-slate-500 text-sm">尚無排程資料（可能還沒同步，稍後自動重試）</div>
+        ) : (
+          <div className="flex flex-col lg:flex-row gap-4 items-start">
+            {/* 左：群組選單 */}
+            <div className="w-full lg:w-64 shrink-0 bg-slate-950 border border-slate-800 rounded-xl p-2 flex lg:flex-col gap-1.5 overflow-x-auto lg:overflow-x-visible lg:max-h-[calc(100vh-320px)] lg:overflow-y-auto">
+              {schedGroups.map(([key, rows]) => (
+                <button
+                  key={key}
+                  onClick={() => setSchedSelected(key)}
+                  className={`shrink-0 lg:w-full text-left px-3 py-2 rounded-lg border text-xs transition-colors flex items-center justify-between gap-2 ${
+                    key === selectedGroupKey
+                      ? 'bg-purple-900/40 border-purple-600 text-white font-bold'
+                      : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-white hover:border-slate-600'
+                  }`}
+                >
+                  <span className="truncate">{key}</span>
+                  <span className="shrink-0 font-mono text-[10px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-400">{rows.length}</span>
+                </button>
+              ))}
+            </div>
+
+            {/* 右：選定群組的週曆排程（跟既有排程看板同樣的週檢視，可翻上/下週） */}
+            <div className="flex-1 min-w-0">
+              {/* 週切換列 */}
+              <div className="flex items-center gap-2 mb-3">
+                <button
+                  onClick={() => setWeekOffset(o => o - 1)}
+                  className="px-3 py-1.5 rounded-lg bg-slate-900 border border-slate-700 text-slate-300 text-xs hover:text-white hover:border-slate-500"
+                >◀ 上週</button>
+                <button
+                  onClick={() => setWeekOffset(0)}
+                  className={`px-3 py-1.5 rounded-lg border text-xs font-bold ${weekOffset === 0 ? 'bg-purple-800/60 text-purple-200 border-purple-600' : 'bg-slate-900 border-slate-700 text-slate-300 hover:text-white'}`}
+                >本週</button>
+                <button
+                  onClick={() => setWeekOffset(o => o + 1)}
+                  className="px-3 py-1.5 rounded-lg bg-slate-900 border border-slate-700 text-slate-300 text-xs hover:text-white hover:border-slate-500"
+                >下週 ▶</button>
+                <span className="text-xs text-slate-500 font-mono ml-2">
+                  {weekDates[0]?.slice(5)} ~ {weekDates[6]?.slice(5)}
+                  {weekOffset > 0 && <span className="ml-1 text-purple-400">（+{weekOffset} 週）</span>}
+                  {weekOffset < 0 && <span className="ml-1 text-slate-400">（{weekOffset} 週）</span>}
+                </span>
+                <span className="text-[10px] text-slate-600 ml-auto">本週共 {weekDates.reduce((s, d) => s + (selectedByDate.get(d)?.length ?? 0), 0)} 道工序</span>
+              </div>
+
+              {/* 週曆格：一天一欄 */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-7 gap-2">
+                {weekDates.map((date, i) => {
+                  const rows = selectedByDate.get(date) ?? []
+                  const isToday = date === todayStr
+                  return (
+                    <div key={date} className={`rounded-xl border flex flex-col min-h-[120px] ${isToday ? 'border-purple-600 bg-purple-950/20' : 'border-slate-800 bg-slate-950'}`}>
+                      <div className={`px-2 py-1.5 border-b text-center ${isToday ? 'border-purple-700/50 bg-purple-900/30' : 'border-slate-800 bg-slate-900/60'}`}>
+                        <div className={`text-[10px] ${isToday ? 'text-purple-300' : 'text-slate-500'}`}>週{DOW_ZH[(i + 1) % 7]}</div>
+                        <div className={`text-xs font-bold font-mono ${isToday ? 'text-purple-200' : 'text-slate-300'}`}>{date.slice(5)}{isToday ? '・今天' : ''}</div>
+                      </div>
+                      <div className="flex-1 p-1.5 space-y-1.5 overflow-y-auto max-h-[52vh]">
+                        {rows.length === 0 ? (
+                          <div className="text-center text-slate-700 text-[10px] py-3">—</div>
+                        ) : rows.map(r => {
+                          const { machine, operator } = splitResource(r.resource_names)
+                          const running = r.is_running === true || r.system_status === 'running'
+                          return (
+                            <div key={r.jid} className={`p-1.5 rounded-lg border text-[10px] ${running ? 'bg-yellow-950/30 border-yellow-700/50' : 'bg-slate-900 border-slate-800'}`}>
+                              <div className="flex items-center justify-between gap-1 mb-0.5">
+                                <span className="font-mono text-slate-400">{planClock(r.plan_start_time)}–{planClock(r.plan_end_time)}</span>
+                                {running && <span className="relative flex h-1.5 w-1.5 shrink-0"><span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-yellow-400 opacity-75"></span><span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-yellow-400"></span></span>}
+                              </div>
+                              <div className="font-mono font-bold text-cyan-300 truncate" title={r.mo_nbr ?? undefined}>{r.mo_nbr || '—'}</div>
+                              <div className="text-white font-semibold truncate" title={r.product_name ?? undefined}>{r.product_name || '—'}</div>
+                              <div className="text-slate-400 truncate">{r.job_name || '—'}</div>
+                              <div className="flex items-center justify-between gap-1 mt-0.5 text-slate-500">
+                                <span className="truncate">
+                                  {schedMode === 'machine'
+                                    ? (MACHINE_TO_GROUP.has(machine) ? machine : (r.workcenter_name || ''))
+                                    : machine}
+                                </span>
+                                <span className="text-emerald-300 font-mono shrink-0">{r.qty != null ? r.qty.toLocaleString() : '—'}</span>
+                              </div>
+                              {operator && <div className="text-slate-500 truncate">👤 {operator}</div>}
+                            </div>
+                          )
+                        })}
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
+          </div>
+        )
+      ) : loading ? (
         <div className="flex items-center justify-center py-24 text-slate-500">
           <svg className="animate-spin w-6 h-6 mr-2" fill="none" viewBox="0 0 24 24">
             <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
