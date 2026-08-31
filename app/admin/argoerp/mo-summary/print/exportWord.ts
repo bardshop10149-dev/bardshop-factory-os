@@ -29,6 +29,7 @@ interface MoRecord {
   po_number?: string | null
   pr_number?: string | null
   pr_sub_no?: string | null
+  is_sample?: string          // 打樣/追加單號（每日出單表原始欄位，非布林值，儘管欄位名稱是 is_sample）
 }
 
 interface SoLine {
@@ -205,6 +206,14 @@ function buildPoSection(
                   spacing: { before: 0, after: 40 },
                 }),
               ] : []),
+              // 打樣/追加單號（跟瀏覽器列印頁 PoCard 一致，一併帶到 Word 匯出）
+              new Paragraph({
+                children: [
+                  t('打樣/追加單號  ', { size: 16, color: '555555' }),
+                  t(mo.is_sample || '', { bold: true, size: 20 }),
+                ],
+                spacing: { before: 0, after: 40 },
+              }),
               new Paragraph({
                 children: [
                   t('□ 急件單   ', { size: 20, bold: true }),
