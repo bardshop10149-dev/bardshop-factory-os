@@ -5,9 +5,10 @@
 // 產生 SARA 工序列（沿用 process-gen 同一套 item_routes → route_operations →
 // operation_times 查詢與工時計算規則）→ 一鍵追加進交換區 CSV buffer。
 
-import { useCallback, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { supabase } from '../../../../lib/supabaseClient'
 import { buildSaraRow, type SaraRow } from '../../../../lib/sara/buildSaraRow'
+import { DEFAULT_PRIORITY_RULES, computePriorityFromDue, type PriorityRule } from '../../../../lib/sara/priorityRules'
 
 interface SheetHitRow {
   sheet_date: string
@@ -44,6 +45,18 @@ function fmtToday(): string {
 const FACTORY_LABEL: Record<string, string> = { T: '台北', C: '常平', O: '委外' }
 
 export default function SingleOrderConvert({ onAppended }: { onAppended: () => void }) {
+  // 交期優先度規則（與 process-gen / 每日自動轉換共用同一份，見 /api/sara/priority-rules）
+  const prioRulesRef = useRef<PriorityRule[]>(DEFAULT_PRIORITY_RULES)
+  useEffect(() => {
+    void (async () => {
+      try {
+        const res = await fetch('/api/sara/priority-rules', { cache: 'no-store' })
+        const j = await res.json() as { success: boolean; rules?: PriorityRule[] }
+        if (j.success && Array.isArray(j.rules)) prioRulesRef.current = j.rules
+      } catch { /* 載入失敗沿用預設規則 */ }
+    })()
+  }, [])
+
   const [orderInput, setOrderInput] = useState('')
   const [searching, setSearching] = useState(false)
   const [searchError, setSearchError] = useState('')
@@ -221,7 +234,7 @@ export default function SingleOrderConvert({ onAppended }: { onAppended: () => v
             lot_number: row.line_seq || row.order_number,
             prod_qty: row.quantity,
             due: row.due,
-            priority: '',
+            priority: computePriorityFromDue(row.due, prioRulesRef.current),
             earliest_start: today,
             job_seq: op.sequence,
             workcenter: station,
