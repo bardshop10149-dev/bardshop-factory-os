@@ -129,17 +129,20 @@ export default function ScheduleInquiryPage() {
     suggestTimerRef.current = setTimeout(async () => {
       // 跳脫 PostgREST or 條件中的特殊字元（逗號/括號），避免使用者輸入破壞查詢
       const safe = q.replace(/[,()]/g, ' ')
+      // 資料來源用 ERP 同步的銷售訂單明細（erp_so_lines：品號＋中文品名），
+      // 以 ERP 為準——不用系統內人工維護的 bom 表（該表已淘汰）
       const { data, error } = await supabase
-        .from('bom')
-        .select('product_code, product_name')
-        .or(`product_code.ilike.%${safe}%,product_name.ilike.%${safe}%`)
+        .from('erp_so_lines')
+        .select('mbp_part, description, synced_at')
+        .or(`mbp_part.ilike.%${safe}%,description.ilike.%${safe}%`)
+        .order('synced_at', { ascending: false })
         .limit(200)
       if (error || seq !== suggestSeqRef.current) return
       const uniq = new Map<string, string>()
-      for (const r of (data ?? []) as { product_code: string; product_name: string }[]) {
-        const code = (r.product_code ?? '').trim()
-        if (!code || code === '_MISSING_' || uniq.has(code)) continue
-        uniq.set(code, r.product_name ?? '')
+      for (const r of (data ?? []) as { mbp_part: string | null; description: string | null }[]) {
+        const code = (r.mbp_part ?? '').trim()
+        if (!code || uniq.has(code)) continue
+        uniq.set(code, (r.description ?? '').trim())
         if (uniq.size >= 15) break
       }
       setItemSuggest({ idx, list: [...uniq.entries()].map(([code, name]) => ({ code, name })) })
