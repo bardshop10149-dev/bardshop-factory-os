@@ -40,6 +40,10 @@
     {
       "path": "/api/cron/line-daily-po-pr",
       "schedule": "0 10 * * *"
+    },
+    {
+      "path": "/api/cron/sync/full-orders",
+      "schedule": "0 1-11 * * 1-5"
     }
   ]
 }

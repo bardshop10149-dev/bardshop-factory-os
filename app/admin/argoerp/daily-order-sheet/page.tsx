@@ -2080,8 +2080,26 @@ export default function DailyOrderSheetPage() {
       return
     }
     setSyncingPo(true)
-    setSaveMsg('')
+    setSaveMsg('🔄 正在向 ARGO 同步最新採購/請購單…')
     try {
+      // 【根除誤配】比對前先強制全量重新同步 erp_pj_sync（sync_po/sync_pr 皆不帶
+      // incrementalMinutes → 全量對帳，含刪除偵測）。
+      // 根因：erp_pj_sync 的增量同步（每 5 分鐘）只會新增/更新，「絕不刪除」——
+      // 一張採購單在 ARGO 被結案/整張刪除後，若沒有殘留任何近期異動可觸發增量更新，
+      // 舊的 OPEN 幽靈列會一直留著，直到每天 4 次的全量對帳（間隔可達 6 小時）才會被清除。
+      // 這段期間比對邏輯可能誤配到這張已經不存在的舊單。改為每次比對前都强制全量同步，
+      // 讓比對時使用的候選池必為當下最新狀態，而不是仰賴排程時機。
+      // 實測全量 sync_po ≈9-10 秒、sync_pr ≈4-5 秒（並行約 10 秒），對「比對」這種低頻手動
+      // 操作可接受；任一失敗不中斷比對（退回目前快取資料），只在結果訊息附註提醒。
+      const syncResults = await Promise.allSettled([
+        fetch('/api/argoerp', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'sync_po' }) })
+          .then(r => r.json()),
+        fetch('/api/argoerp', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'sync_pr' }) })
+          .then(r => r.json()),
+      ])
+      const syncFailed = syncResults.some(r => r.status === 'rejected' || (r.status === 'fulfilled' && r.value?.status !== 'ok'))
+
+      setSaveMsg('🔍 正在比對採購/請購單…')
       // 從 DB 拉最新 rows 只為取 po_confirmed（人工確認），基底保持 sheetRows（目前解析狀態）
       // 不可用 DB rows 整批替換，否則用戶剛貼入解析的新資料會被舊 DB rows 覆蓋
       const latestRes = await fetch(`/api/argoerp/daily-order-sheet?date=${selectedDate}`, { cache: 'no-store' })
@@ -2171,7 +2189,8 @@ export default function DailyOrderSheetPage() {
       const parts: string[] = []
       if (cRows.length > 0) parts.push(`常平 ${cMatched}/${cRows.length}${cNoMatch > 0 ? `（未配 ${cNoMatch}）` : ''}`)
       if (oRows.length > 0) parts.push(`委外 ${oMatched}/${oRows.length}${oNoMatch > 0 ? `（未配 ${oNoMatch}）` : ''}${oPrMatched > 0 ? `、請購 ${oPrMatched}` : ''}`)
-      setSaveMsg(`✅ 採購單比對完成：${parts.join('　')}`)
+      const syncWarn = syncFailed ? '　⚠️ ARGO 同步未完全成功，本次以現有快取比對（結果可能非最新，建議稍後重新比對）' : ''
+      setSaveMsg(`✅ 採購單比對完成：${parts.join('　')}${syncWarn}`)
       setTimeout(() => setSaveMsg(''), 6000)
     } catch (e) {
       setSaveMsg(`❌ 採購單比對失敗：${e instanceof Error ? e.message : String(e)}`)
@@ -2648,6 +2667,14 @@ export default function DailyOrderSheetPage() {
         ? await fetchClaimedDocMaps(selectedDate)
         : { po: new Map<string, string>(), pr: new Map<string, string>() }
       if (hasCRows || hasORows) {
+        setSaveMsg('🔄 全同步進行中：向 ARGO 同步最新採購/請購單…')
+        // 【根除誤配】比對前強制全量重新同步（見 runPoMatch 同段註解：erp_pj_sync 的增量
+        // 同步絕不刪除，PO 在 ARGO 結案/刪除後若無殘留異動可觸發增量更新，舊 OPEN 幽靈列
+        // 會留到下次全量對帳（間隔可達 6 小時）才清除，此段時間可能誤配到已不存在的舊單）
+        await Promise.allSettled([
+          fetch('/api/argoerp', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'sync_po' }) }),
+          fetch('/api/argoerp', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'sync_pr' }) }),
+        ])
         setSaveMsg('⏳ 全同步進行中：比對採購單…')
         type AllSyncCandidate = { doc_no: string; sub_no: string; item_code: string | null; qty: number; status: string | null; start_date: string | null; extra: Record<string, unknown> | null; _used: boolean }
 
