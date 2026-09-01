@@ -44,10 +44,6 @@
     {
       "path": "/api/cron/sync/full-orders",
       "schedule": "0 1-11 * * 1-5"
-    },
-    {
-      "path": "/api/cron/design-sheet-transfer",
-      "schedule": "0 8 * * *"
     }
   ]
 }

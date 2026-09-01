@@ -23,6 +23,12 @@ export const maxDuration = 60
 //
 // 已知範圍限制（v1）：不做「重複發單」跨日期偵測（duplicate_alert 一律 false）——
 // 這項檢查目前只在人工貼上時的 handleParse 觸發，之後如需要可比照 dup_index 查詢補上。
+//
+// 【2026-09-01 暫停自動排程】使用者要求先人工測試無誤再上線，已從 vercel.json 的
+// crons 移除，目前只能手動觸發測試（下方認證邏輯不變，仍接受 CRON_SECRET/WEBHOOK_SECRET）：
+//   curl -X POST -H "Authorization: Bearer $WEBHOOK_SECRET" "<網域>/api/cron/design-sheet-transfer?date=YYYY-MM-DD"
+// 確認測試無誤後，把以下區塊加回 vercel.json 的 crons 陣列（16:00 台北 = 08:00 UTC）：
+//   { "path": "/api/cron/design-sheet-transfer", "schedule": "0 8 * * *" }
 
 const TABLE_DESIGN = 'design_daily_sheets'
 const TABLE_PROD = 'daily_order_sheets'
