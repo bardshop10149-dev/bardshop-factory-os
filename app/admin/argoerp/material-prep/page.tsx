@@ -1334,12 +1334,16 @@ export default function MaterialPrepPage() {
     const bypassImportMos = importMos.filter(mo => mo.startsWith('MOS'))
 
     // ── 預飛檢查：確認選取的製令在 mo-summary 中確實仍是未備料狀態 ──
+    // 同時記下「哪些 MO 完全沒有 argoerp_mo_summary 列」（existingSummaryMoSet 之外的），
+    // 供下方鎖定步驟區分處理——查詢失敗時設為 null，鎖定步驟會退回舊行為（全部走 CAS）。
+    let existingSummaryMoSet: Set<string> | null = null
     try {
       const { data: summaryRows, error: checkErr } = await supabase
         .from('argoerp_mo_summary')
         .select('mo_number, prep_status')
         .in('mo_number', importMos)
       if (checkErr) throw checkErr
+      existingSummaryMoSet = new Set((summaryRows ?? []).map(r => r.mo_number as string))
 
       const alreadyDone = (summaryRows ?? [])
         .filter(r => r.prep_status === '已備料' || r.prep_status === '無需備料')
@@ -1376,17 +1380,56 @@ export default function MaterialPrepPage() {
     // 成功鎖定但實際未送出成功的 MO 復原回「未備料」。
     let lockedMos: string[] = [...bypassImportMos]
     try {
-      if (casImportMos.length > 0) {
+      // 【修法】casImportMos 裡「argoerp_mo_summary 完全沒有列」的製令，跟 MOS 集單同個
+      // 原因（見上方 casImportMos/bypassImportMos 註解）不能走 PATCH+CAS——UPDATE 對不存在
+      // 的列必定 0 筆命中，會被誤判成「已被搶先標記為已備料」，即使實際上根本沒人備過料
+      // （2026-09-01 使用者回報：明明沒有批備料，匯入卻顯示「已被選走」，即此成因）。
+      // 這類製令改用 POST 直接 INSERT 一筆新列（unique index on mo_number 本身就是鎖：
+      // 若真的有另一人同時間也在幫同一張從未有列的製令備料，兩邊都 INSERT 會有一邊撞
+      // 23505，該筆才正確視為「被搶先」）。
+      const newSummaryMos = existingSummaryMoSet
+        ? casImportMos.filter(mo => !existingSummaryMoSet!.has(mo))
+        : []
+      const existingCasMos = existingSummaryMoSet
+        ? casImportMos.filter(mo => existingSummaryMoSet!.has(mo))
+        : casImportMos
+
+      if (newSummaryMos.length > 0) {
+        const insertRes = await fetch('/api/argoerp/mo-summary', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            records: newSummaryMos.map(mo => ({
+              mo_number: mo,
+              factory: moRecords.find(r => r.mo_number === mo)?.factory ?? '',
+              product_code: moRecords.find(r => r.mo_number === mo)?.product_code ?? '',
+              planned_qty: moRecords.find(r => r.mo_number === mo)?.planned_qty ?? '',
+              prep_status: '已備料',
+            })),
+          }),
+        })
+        const insertJson = await insertRes.json()
+        if (insertRes.ok && insertJson?.success) {
+          lockedMos = [...lockedMos, ...newSummaryMos]
+        } else if (insertJson?.duplicate) {
+          // 真的被別人同時搶先 INSERT 走了——這才是貨真價實的「已被選走」
+          window.alert(`⚠️ 以下製令剛被其他人同時建立備料紀錄，本次不會重複送出 ARGO：\n\n${newSummaryMos.join('\n')}`)
+        } else {
+          throw new Error(insertJson?.error || `HTTP ${insertRes.status}`)
+        }
+      }
+
+      if (existingCasMos.length > 0) {
         const lockRes = await fetch('/api/argoerp/mo-summary', {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ mo_numbers: casImportMos, prep_status: '已備料', expected_prep_status: '未備料' }),
+          body: JSON.stringify({ mo_numbers: existingCasMos, prep_status: '已備料', expected_prep_status: '未備料' }),
         })
         const lockJson = await lockRes.json()
         if (!lockRes.ok || !lockJson?.success) {
           throw new Error(lockJson?.error || `HTTP ${lockRes.status}`)
         }
-        const casLockedMos: string[] = Array.isArray(lockJson.updated_mo_numbers) ? lockJson.updated_mo_numbers : casImportMos
+        const casLockedMos: string[] = Array.isArray(lockJson.updated_mo_numbers) ? lockJson.updated_mo_numbers : existingCasMos
         const skippedMos: string[] = Array.isArray(lockJson.skipped_mo_numbers) ? lockJson.skipped_mo_numbers : []
         lockedMos = [...lockedMos, ...casLockedMos]
 
