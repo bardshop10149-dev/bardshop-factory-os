@@ -1,7 +1,8 @@
 'use client'
 
-import { useState, useEffect, useCallback, useMemo, type ReactNode } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef, type ReactNode } from 'react'
 import { NavButton } from '../../../components/NavButton'
+import { supabase } from '../../../lib/supabaseClient'
 
 interface ProductItem { item_code: string; item_name: string; quantity: string }
 
@@ -113,6 +114,46 @@ export default function ScheduleInquiryPage() {
   const removeItem = (idx: number) => setFormItems(items => items.filter((_, i) => i !== idx))
   const updateItem = (idx: number, field: keyof ProductItem, value: string) =>
     setFormItems(items => { const next = [...items]; next[idx] = { ...next[idx], [field]: value }; return next })
+
+  // ── 品項編碼自動完成：輸入 2 字以上即模糊搜尋 bom 產品主檔（編碼與中文品名皆納入比對），
+  //    點選建議後自動帶入品名 ──
+  const [itemSuggest, setItemSuggest] = useState<{ idx: number; list: { code: string; name: string }[] } | null>(null)
+  const suggestTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const suggestSeqRef = useRef(0)
+
+  const searchItemSuggestions = useCallback((idx: number, raw: string) => {
+    if (suggestTimerRef.current) clearTimeout(suggestTimerRef.current)
+    const q = raw.trim()
+    if (q.length < 2) { setItemSuggest(null); return }
+    const seq = ++suggestSeqRef.current
+    suggestTimerRef.current = setTimeout(async () => {
+      // 跳脫 PostgREST or 條件中的特殊字元（逗號/括號），避免使用者輸入破壞查詢
+      const safe = q.replace(/[,()]/g, ' ')
+      const { data, error } = await supabase
+        .from('bom')
+        .select('product_code, product_name')
+        .or(`product_code.ilike.%${safe}%,product_name.ilike.%${safe}%`)
+        .limit(200)
+      if (error || seq !== suggestSeqRef.current) return
+      const uniq = new Map<string, string>()
+      for (const r of (data ?? []) as { product_code: string; product_name: string }[]) {
+        const code = (r.product_code ?? '').trim()
+        if (!code || code === '_MISSING_' || uniq.has(code)) continue
+        uniq.set(code, r.product_name ?? '')
+        if (uniq.size >= 15) break
+      }
+      setItemSuggest({ idx, list: [...uniq.entries()].map(([code, name]) => ({ code, name })) })
+    }, 300)
+  }, [])
+
+  const pickItemSuggestion = useCallback((idx: number, code: string, name: string) => {
+    setFormItems(items => {
+      const next = [...items]
+      next[idx] = { ...next[idx], item_code: code, item_name: name }
+      return next
+    })
+    setItemSuggest(null)
+  }, [])
 
   // 除了備註以外全部必填；訂單編號必填但允許先送出、之後再補（唯一可後補的欄位）
   const validateForm = (): string | null => {
@@ -363,12 +404,30 @@ export default function ScheduleInquiryPage() {
                   <div className="flex flex-col gap-3">
                     {formItems.map((item, idx) => (
                       <div key={idx} className="grid grid-cols-[minmax(0,1fr)_minmax(0,1.6fr)_100px_32px] gap-2.5 items-center">
-                        <input
-                          value={item.item_code}
-                          onChange={e => updateItem(idx, 'item_code', e.target.value)}
-                          placeholder="編碼"
-                          className={`${inputCls} min-w-0 text-sm py-3`}
-                        />
+                        <div className="relative min-w-0">
+                          <input
+                            value={item.item_code}
+                            onChange={e => { updateItem(idx, 'item_code', e.target.value); searchItemSuggestions(idx, e.target.value) }}
+                            onBlur={() => setTimeout(() => setItemSuggest(prev => (prev?.idx === idx ? null : prev)), 150)}
+                            onKeyDown={e => { if (e.key === 'Escape') setItemSuggest(null) }}
+                            placeholder="編碼（可輸入中文搜尋）"
+                            className={`${inputCls} min-w-0 text-sm py-3`}
+                          />
+                          {itemSuggest?.idx === idx && itemSuggest.list.length > 0 && (
+                            <div className="absolute left-0 right-[-260px] top-full mt-1 z-30 bg-[#0d1626] border border-[#2a3b57] rounded-[10px] shadow-2xl max-h-64 overflow-y-auto">
+                              {itemSuggest.list.map(s => (
+                                <button
+                                  key={s.code}
+                                  onMouseDown={e => { e.preventDefault(); pickItemSuggestion(idx, s.code, s.name) }}
+                                  className="w-full text-left px-3.5 py-2.5 hover:bg-amber-500/10 border-b border-[#1a2740] last:border-b-0 transition-colors"
+                                >
+                                  <div className="font-mono text-[13px] text-amber-300">{s.code}</div>
+                                  <div className="text-[12px] text-[#8fa1bd] truncate">{s.name}</div>
+                                </button>
+                              ))}
+                            </div>
+                          )}
+                        </div>
                         <input
                           value={item.item_name}
                           onChange={e => updateItem(idx, 'item_name', e.target.value)}
