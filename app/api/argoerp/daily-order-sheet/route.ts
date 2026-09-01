@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { getSupabaseAdminClient, formatSupabaseAdminError } from '@/lib/supabaseAdmin'
+import { getSupabaseAdminClient, describeError } from '@/lib/supabaseAdmin'
 import { guardAuth, guardPermission } from '@/lib/requireAuth'
 
 export const dynamic = 'force-dynamic'
@@ -129,7 +129,7 @@ export async function GET(request: NextRequest) {
     if (error) throw error
     return NextResponse.json({ success: true, sheet: data }, { headers: { 'Cache-Control': 'no-store' } })
   } catch (e) {
-    const msg = e instanceof Error ? formatSupabaseAdminError(e.message) : String(e)
+    const msg = describeError(e)
     return NextResponse.json({ success: false, error: msg }, { status: 500 })
   }
 }
@@ -236,7 +236,7 @@ export async function POST(request: NextRequest) {
     if (error) throw error
     return NextResponse.json({ success: true, sheet: data })
   } catch (e) {
-    const msg = e instanceof Error ? formatSupabaseAdminError(e.message) : String(e)
+    const msg = describeError(e)
     return NextResponse.json({ success: false, error: msg }, { status: 500 })
   }
 }
@@ -323,7 +323,7 @@ export async function PATCH(request: NextRequest) {
 
     return NextResponse.json({ success: true, updated: updates.length })
   } catch (e) {
-    const msg = e instanceof Error ? formatSupabaseAdminError(e.message) : String(e)
+    const msg = describeError(e)
     return NextResponse.json({ success: false, error: msg }, { status: 500 })
   }
 }
@@ -343,7 +343,7 @@ export async function DELETE(request: NextRequest) {
     if (error) throw error
     return NextResponse.json({ success: true })
   } catch (e) {
-    const msg = e instanceof Error ? formatSupabaseAdminError(e.message) : String(e)
+    const msg = describeError(e)
     return NextResponse.json({ success: false, error: msg }, { status: 500 })
   }
 }
