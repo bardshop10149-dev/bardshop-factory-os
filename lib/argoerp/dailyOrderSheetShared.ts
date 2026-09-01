@@ -127,6 +127,173 @@ export function detectFactory(docType: string): 'T' | 'C' | 'O' {
   return 'T'
 }
 
+// 廠區警示（首次匯入警示功能）：委外(O)廠列的品項編碼／料號規定要以 C 開頭，
+// 不是的話代表廠區可能填錯，需要人工確認。空品號（如「改單/示意圖」列）不計。
+export function computeFactoryAlert(row: { factory: string; item_code: string }): boolean {
+  if (row.factory !== 'O') return false
+  const code = (row.item_code ?? '').trim().toUpperCase()
+  if (!code) return false
+  return !code.startsWith('C')
+}
+
+// 交期警示預設閾值（工作天）；使用者可在 app_settings key='due_date_thresholds' 覆寫
+export const DUE_THRESHOLD_DEFAULTS: Record<string, number> = { T: 4, C: 5, O: 5 }
+
+export function parseDeliveryDate(s: string): Date | null {
+  const t = (s ?? '').trim()
+  if (!t) return null
+  let y: number, m: number, d: number
+  if (/^\d{8}$/.test(t)) {
+    y = +t.slice(0, 4); m = +t.slice(4, 6); d = +t.slice(6, 8)
+  } else {
+    const parts = t.slice(0, 10).split(/[/-]/)
+    if (parts.length < 3) return null
+    y = +parts[0]; m = +parts[1]; d = +parts[2]
+  }
+  if (!y || !m || !d) return null
+  const dt = new Date(y, m - 1, d)
+  return isNaN(dt.getTime()) ? null : dt
+}
+
+/**
+ * 從「出單表日期」（day 0）開始，計算到 to 有幾個工作天（週一～週五）。
+ * from 本身是 day 0，所以從 from+1 起算。如果 to <= from，回傳 0。
+ */
+export function countWorkingDaysFrom(from: Date, to: Date): number {
+  const start = new Date(from)
+  start.setHours(0, 0, 0, 0)
+  const end = new Date(to)
+  end.setHours(0, 0, 0, 0)
+  if (end <= start) return 0
+  let count = 0
+  const cur = new Date(start)
+  cur.setDate(cur.getDate() + 1) // day 1
+  while (cur <= end) {
+    const dow = cur.getDay()
+    if (dow !== 0 && dow !== 6) count++
+    cur.setDate(cur.getDate() + 1)
+  }
+  return count
+}
+
+// 交期警示（首次匯入警示功能）：以出單日為第0天，交期距離出單日不足該廠別設定的工作天數
+export function computeDueDateAlert(
+  row: { factory: string; delivery_date: string },
+  sheetDateObj: Date,
+  thresholds: Record<string, number>,
+): boolean {
+  const threshold = thresholds[row.factory]
+  if (threshold === undefined) return false
+  if (!row.delivery_date) return false
+  const dueDate = parseDeliveryDate(row.delivery_date)
+  if (!dueDate) return false
+  return countWorkingDaysFrom(sheetDateObj, dueDate) < threshold
+}
+
+const DONE_STATES = new Set(['已備料', '無需備料', '已批備料'])
+
+// 從一天的完整 rows 算出列表頁要顯示的待處理計數——寫入時（POST/PATCH）算好存成獨立欄位，
+// 讓列表 GET 不必再把每天的完整 rows JSONB 都抓下來重算一次。
+// 抽自 app/api/argoerp/daily-order-sheet/route.ts，供該路由本身與美編出單表 16:00
+// 轉入排程（app/api/cron/design-sheet-transfer/route.ts）共用，避免各自維護造成漂移。
+export function computeSheetCounts(rowsArr: Array<Record<string, unknown>>) {
+  const pendingMos = new Set<string>()
+  let pendingPrCount = 0
+  let pendingCCount = 0
+  for (const row of rowsArr) {
+    if (row.mo_status === '已匯入製令') {
+      const mo = typeof row.mo_number === 'string' ? row.mo_number : ''
+      if (mo) {
+        const status = typeof row.material_prep_status === 'string' ? row.material_prep_status : ''
+        if (!DONE_STATES.has(status)) pendingMos.add(mo)
+      }
+    }
+    if (row.factory === 'O' && row.po_status !== 'no_po') {
+      const mo = typeof row.mo_number === 'string' ? row.mo_number.trim().toUpperCase() : ''
+      const pr = typeof row.pr_number === 'string' ? row.pr_number.trim().toUpperCase() : ''
+      if (!mo.startsWith('MPO') && !pr.startsWith('MPO')) pendingPrCount++
+    }
+    if (row.factory === 'C' && !row.po_number && row.po_status !== 'matched') {
+      pendingCCount++
+    }
+  }
+  return {
+    row_count: rowsArr.length,
+    pending_count: pendingMos.size,
+    pending_pr_count: pendingPrCount,
+    pending_c_count: pendingCCount,
+  }
+}
+
+// 受保護欄位：所有可由外部 PATCH（集單同步、批備料、採購比對等）寫入的欄位——
+// incoming row 這些欄位為空、但 DB 既有列有值時，保留 DB 值，避免整批 POST 覆蓋掉。
+const PRESERVE_IF_EMPTY = [
+  'mo_number', 'mo_status',
+  'material_prep_status', 'argo_slip_no',
+  'po_number', 'po_sub_no', 'po_status', 'po_qty_erp', 'po_confirmed',
+  'pr_number', 'pr_sub_no', 'pr_status',
+  'match_status', 'match_line_no', 'match_pdl_seq', 'match_reason',
+  'machine',
+] as const
+
+/**
+ * 把「即將整批寫入」的 incoming rows 與資料庫既有 rows 合併：對每一筆 incoming row，
+ * 依 row_key（找不到則退用「訂單號+序號」次要索引）找出對應的既有列，把既有列上
+ * PRESERVE_IF_EMPTY 欄位的值（如製令/採購/請購單號、備料狀態、機台）補回 incoming row
+ * 對應欄位為空的地方——確保整批覆寫（POST 貼上重新解析、美編出單表轉入等）不會
+ * 把外部 PATCH（批備料、採購比對等）已經寫入的狀態洗掉。
+ * 抽自 app/api/argoerp/daily-order-sheet/route.ts 的 POST handler，供該路由與
+ * 美編出單表 16:00 轉入排程共用。
+ */
+export function mergeIncomingRowsWithExisting(
+  existingRows: Array<Record<string, unknown>>,
+  incomingRows: Array<Record<string, unknown>>,
+): Array<Record<string, unknown>> {
+  const existingMap = new Map(existingRows.map(r => [r.row_key as string, r]))
+  const existingByOrderSeq = new Map<string, Array<Record<string, unknown>>>()
+  for (const r of existingRows) {
+    const orderNo = typeof r.order_number === 'string' ? r.order_number : ''
+    const seq = typeof r.line_no_input === 'string' && r.line_no_input
+      ? r.line_no_input
+      : (typeof r.match_line_no === 'string' ? r.match_line_no : '')
+    if (!orderNo || !seq) continue
+    const key = `${orderNo}|${seq}`
+    const arr = existingByOrderSeq.get(key) ?? []
+    arr.push(r)
+    existingByOrderSeq.set(key, arr)
+  }
+  const osConsumed = new Map<string, number>()
+
+  return incomingRows.map(row => {
+    let ex = existingMap.get(row.row_key as string)
+    const lineNoInput = typeof row.line_no_input === 'string' ? row.line_no_input : ''
+    const orderNo = typeof row.order_number === 'string' ? row.order_number : ''
+    if (!ex && lineNoInput && orderNo) {
+      const key = `${orderNo}|${lineNoInput}`
+      const candidates = existingByOrderSeq.get(key)
+      if (candidates && candidates.length > 0) {
+        const idx = osConsumed.get(key) ?? 0
+        ex = candidates[Math.min(idx, candidates.length - 1)]
+        osConsumed.set(key, idx + 1)
+      }
+    }
+    if (!ex) return row
+    const out = { ...row }
+    for (const field of PRESERVE_IF_EMPTY) {
+      if ((out[field] === null || out[field] === undefined || out[field] === '') && ex[field] != null && ex[field] !== '') {
+        out[field] = ex[field]
+      }
+    }
+    // 特殊案例：同步明確找不到對應採購單（po_status='no_match'，po_number=null）時，
+    // 不保留 DB 舊的 po_number，否則該列在 order-batch-export-c 篩選中消失（有 po_number 被排除）
+    if (row.po_status === 'no_match' && (row.po_number == null || row.po_number === '')) {
+      out.po_number = null
+      out.po_sub_no = null
+    }
+    return out
+  })
+}
+
 // 序號（B欄 line_no_input，或已比對出的 match_line_no）決定「同一張工單裡的哪一筆」，
 // 必須納入 row_key 組成 —— 否則同工單/同品號/同數量/同交期但不同序號的多筆列會產生相同
 // row_key，導致以 row_key 為鍵的操作（勾選 selectedKeys、逐列機台指派 rowMachines、

@@ -1,42 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getSupabaseAdminClient, describeError } from '@/lib/supabaseAdmin'
 import { guardAuth, guardPermission } from '@/lib/requireAuth'
+import { computeSheetCounts, mergeIncomingRowsWithExisting } from '@/lib/argoerp/dailyOrderSheetShared'
 
 export const dynamic = 'force-dynamic'
 
 const TABLE = 'daily_order_sheets'
-const DONE_STATES = new Set(['已備料', '無需備料', '已批備料'])
-
-// 從一天的完整 rows 算出列表頁要顯示的待處理計數——寫入時（POST/PATCH）算好存成獨立欄位，
-// 讓列表 GET 不必再把每天的完整 rows JSONB 都抓下來重算一次（見下方無 date 參數的 GET）。
-function computeSheetCounts(rowsArr: Array<Record<string, unknown>>) {
-  const pendingMos = new Set<string>()
-  let pendingPrCount = 0
-  let pendingCCount = 0
-  for (const row of rowsArr) {
-    if (row.mo_status === '已匯入製令') {
-      const mo = typeof row.mo_number === 'string' ? row.mo_number : ''
-      if (mo) {
-        const status = typeof row.material_prep_status === 'string' ? row.material_prep_status : ''
-        if (!DONE_STATES.has(status)) pendingMos.add(mo)
-      }
-    }
-    if (row.factory === 'O' && row.po_status !== 'no_po') {
-      const mo = typeof row.mo_number === 'string' ? row.mo_number.trim().toUpperCase() : ''
-      const pr = typeof row.pr_number === 'string' ? row.pr_number.trim().toUpperCase() : ''
-      if (!mo.startsWith('MPO') && !pr.startsWith('MPO')) pendingPrCount++
-    }
-    if (row.factory === 'C' && !row.po_number && row.po_status !== 'matched') {
-      pendingCCount++
-    }
-  }
-  return {
-    row_count: rowsArr.length,
-    pending_count: pendingMos.size,
-    pending_pr_count: pendingPrCount,
-    pending_c_count: pendingCCount,
-  }
-}
 
 // GET:
 //   無 date 參數 → 回傳所有已儲存日期 ([{sheet_date, row_count, updated_at}])
@@ -159,65 +128,7 @@ export async function POST(request: NextRequest) {
       .eq('sheet_date', sheet_date)
       .maybeSingle()
     const existingRows = Array.isArray(existing?.rows) ? (existing!.rows as Record<string, unknown>[]) : []
-    const existingMap = new Map(existingRows.map(r => [r.row_key as string, r]))
-    // 次要索引：訂單號＋序號（B欄 line_no_input）是 ERP 層面真正穩定的身分——row_key 還
-    // 額外納入了品名/備註/數量/交期，這些欄位事後被修正時 row_key 會變，導致主鍵查無舊列，
-    // 使無需備料／MO／採購單等既有狀態被誤判成全新列而消失。同訂單同序號理論上只有一筆，
-    // 若真的重複則依序消耗候選。
-    const existingByOrderSeq = new Map<string, Record<string, unknown>[]>()
-    for (const r of existingRows) {
-      const orderNo = typeof r.order_number === 'string' ? r.order_number : ''
-      const seq = typeof r.line_no_input === 'string' && r.line_no_input
-        ? r.line_no_input
-        : (typeof r.match_line_no === 'string' ? r.match_line_no : '')
-      if (!orderNo || !seq) continue
-      const key = `${orderNo}|${seq}`
-      const arr = existingByOrderSeq.get(key) ?? []
-      arr.push(r)
-      existingByOrderSeq.set(key, arr)
-    }
-    const osConsumed = new Map<string, number>()
-
-    // 若 incoming row 某個欄位為空但 DB 已有值，保留 DB 值
-    // （避免當 daily-order-sheet 頁面是在外部 PATCH 發生前載入時，POST 覆蓋掉 PATCH 的結果）
-    // 受保護欄位：所有可由外部 PATCH（集單同步、批備料、採購比對等）寫入的欄位
-    const PRESERVE_IF_EMPTY = [
-      'mo_number', 'mo_status',
-      'material_prep_status', 'argo_slip_no',
-      'po_number', 'po_sub_no', 'po_status', 'po_qty_erp', 'po_confirmed',
-      'pr_number', 'pr_sub_no', 'pr_status',
-      'match_status', 'match_line_no', 'match_pdl_seq', 'match_reason',
-      'machine',
-    ] as const
-    const mergedRows = (rows as Record<string, unknown>[]).map(row => {
-      let ex = existingMap.get(row.row_key as string)
-      const lineNoInput = typeof row.line_no_input === 'string' ? row.line_no_input : ''
-      const orderNo = typeof row.order_number === 'string' ? row.order_number : ''
-      if (!ex && lineNoInput && orderNo) {
-        const key = `${orderNo}|${lineNoInput}`
-        const candidates = existingByOrderSeq.get(key)
-        if (candidates && candidates.length > 0) {
-          const idx = osConsumed.get(key) ?? 0
-          ex = candidates[Math.min(idx, candidates.length - 1)]
-          osConsumed.set(key, idx + 1)
-        }
-      }
-      if (!ex) return row
-      const out = { ...row }
-      for (const field of PRESERVE_IF_EMPTY) {
-        if ((out[field] === null || out[field] === undefined || out[field] === '') && ex[field] != null && ex[field] !== '') {
-          out[field] = ex[field]
-        }
-      }
-      // 特殊案例：同步明確找不到對應採購單（po_status='no_match'，po_number=null）時，
-      // 不保留 DB 舊的 po_number，否則該列在 order-batch-export-c 篩選中消失（有 po_number 被排除）
-      // 注意：po_confirmed=true 的列由 matchPoRows guard 保護，同步不會對其設 no_match
-      if (row.po_status === 'no_match' && (row.po_number == null || row.po_number === '')) {
-        out.po_number = null
-        out.po_sub_no = null
-      }
-      return out
-    })
+    const mergedRows = mergeIncomingRowsWithExisting(existingRows, rows as Record<string, unknown>[])
 
     const { data, error } = await supabase
       .from(TABLE)

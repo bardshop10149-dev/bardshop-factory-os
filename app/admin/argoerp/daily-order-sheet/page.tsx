@@ -10,6 +10,11 @@ import {
   createRowKey,
   detectFactory,
   clearStaleDocsOnFactoryChange,
+  computeFactoryAlert,
+  computeDueDateAlert,
+  parseDeliveryDate,
+  countWorkingDaysFrom,
+  DUE_THRESHOLD_DEFAULTS,
   type SourceRow,
   type MatchStatus,
   type SheetRow,
@@ -314,46 +319,9 @@ const STATUS_LABELS: Record<string, { label: string; cls: string }> = {
   '已匯入採單': { label: '已匯入採單', cls: 'bg-orange-900/50 text-orange-300 border-orange-700/50' },
 }
 
-// ── 交期檢查工具函式 ──────────────────────────────────────────────────────────
-
-/** 解析日期字串（支援 YYYY/M/D、YYYY-MM-DD、YYYYMMDD），回傳 Date 或 null */
-function parseDeliveryDate(s: string): Date | null {
-  const t = (s ?? '').trim()
-  if (!t) return null
-  let y: number, m: number, d: number
-  if (/^\d{8}$/.test(t)) {
-    y = +t.slice(0, 4); m = +t.slice(4, 6); d = +t.slice(6, 8)
-  } else {
-    const parts = t.slice(0, 10).split(/[\/\-]/)
-    if (parts.length < 3) return null
-    y = +parts[0]; m = +parts[1]; d = +parts[2]
-  }
-  if (!y || !m || !d) return null
-  const dt = new Date(y, m - 1, d)
-  return isNaN(dt.getTime()) ? null : dt
-}
-
-/**
- * 從「出單表日期」（day 0）開始，計算到 to 有幾個工作天（週一～週五）。
- * from 本身是 day 0，所以從 from+1 起算。
- * 如果 to <= from，回傳 0。
- */
-function countWorkingDaysFrom(from: Date, to: Date): number {
-  const start = new Date(from)
-  start.setHours(0, 0, 0, 0)
-  const end = new Date(to)
-  end.setHours(0, 0, 0, 0)
-  if (end <= start) return 0
-  let count = 0
-  const cur = new Date(start)
-  cur.setDate(cur.getDate() + 1) // day 1
-  while (cur <= end) {
-    const dow = cur.getDay()
-    if (dow !== 0 && dow !== 6) count++
-    cur.setDate(cur.getDate() + 1)
-  }
-  return count
-}
+// parseDeliveryDate / countWorkingDaysFrom / computeDueDateAlert 已抽至
+// lib/argoerp/dailyOrderSheetShared.ts 共用（見上方 import），供美編出單表 16:00
+// 轉入排程沿用同一套交期警示判斷邏輯。
 
 const FACTORY_LABEL_ZH: Record<string, string> = { T: '台北', C: '常平', O: '委外' }
 
@@ -368,34 +336,7 @@ interface DueDateAnomaly {
   reason: string
 }
 
-/**
- * 交期警示（首次匯入警示功能）：以出單日（day 0）計算到交期的工作天數，
- * 不足該廠別設定的天數即觸發警示。跟既有「交期檢查」Modal（handleDueDateCheck）
- * 共用同一套判斷基準，差別只在這裡是匯入當下就標記在列上、可個別點擊取消。
- */
-function computeDueDateAlert(
-  row: { factory: string; delivery_date: string },
-  sheetDateObj: Date,
-  thresholds: Record<string, number>,
-): boolean {
-  const threshold = thresholds[row.factory]
-  if (threshold === undefined) return false
-  if (!row.delivery_date) return false
-  const dueDate = parseDeliveryDate(row.delivery_date)
-  if (!dueDate) return false
-  return countWorkingDaysFrom(sheetDateObj, dueDate) < threshold
-}
-
-/**
- * 廠區警示（首次匯入警示功能）：委外(O)廠列的品項編碼／料號規定要以 C 開頭，
- * 不是的話代表廠區可能填錯，需要人工確認。空品號（如「改單/示意圖」列）不計。
- */
-function computeFactoryAlert(row: { factory: string; item_code: string }): boolean {
-  if (row.factory !== 'O') return false
-  const code = (row.item_code ?? '').trim().toUpperCase()
-  if (!code) return false
-  return !code.startsWith('C')
-}
+// computeDueDateAlert / computeFactoryAlert 已抽至 lib/argoerp/dailyOrderSheetShared.ts 共用（見上方 import）
 
 type OutsourcePrefix = 'MOT' | 'POC' | 'POO' | 'MPO'
 
@@ -422,6 +363,15 @@ function getOutsourcePrefixStyles(prefix: OutsourcePrefix | null): { rowBg: stri
       return { rowBg: 'bg-purple-950/20', text: 'text-purple-300 hover:text-purple-100', badge: 'bg-purple-900/40 text-purple-300 border-purple-700/50' }
   }
 }
+
+// 退單移到美編出單表時，只帶原始編輯欄位（SourceRow 的欄位），排除生管端才有的
+// 製令/採購/請購/比對/機台等狀態——這幾筆重新回到美編手上等於是全新的一筆
+const SOURCE_ROW_KEYS_FOR_RETURN = [
+  'order_number', 'line_no_input', 'doc_type', 'receiver', 'is_sample', 'has_material',
+  'designer', 'customer', 'line_nickname', 'handler', 'issuer', 'item_code', 'item_name',
+  'note', 'packing', 'quantity', 'delivery_date', 'plate_count', 'upload_ro', 'order_status',
+  'pm_note', 'assigned_machine',
+] as const
 
 // ===== 頁面元件 =====
 export default function DailyOrderSheetPage() {
@@ -496,8 +446,7 @@ export default function DailyOrderSheetPage() {
   } | null>(null)
   const [dueDateModal, setDueDateModal] = useState<DueDateAnomaly[] | null>(null)
   const [dueDateCopied, setDueDateCopied] = useState(false)
-  // ---- 交期閾值設定（從 Supabase app_settings 載入）----
-  const DUE_THRESHOLD_DEFAULTS: Record<string, number> = { T: 4, C: 5, O: 5 }
+  // ---- 交期閾值設定（從 Supabase app_settings 載入；預設值 DUE_THRESHOLD_DEFAULTS 見上方 import）----
   const [dueDateThresholds, setDueDateThresholds] = useState<Record<string, number>>(DUE_THRESHOLD_DEFAULTS)
   const [dueDateThresholdsLoaded, setDueDateThresholdsLoaded] = useState(false)
   const [showThresholdModal, setShowThresholdModal] = useState(false)
@@ -3599,6 +3548,57 @@ export default function DailyOrderSheetPage() {
     }
   }, [sheetRows, selectedKeys, selectedDate, currentRawText])
 
+  // ---- 退單：把勾選的列移到「美編天地」隔一天的每日出單表，並從本日出單表移除 ----
+  // 用途：出單表已經匯入生管，但發現這幾筆資料需要美編重新確認/修正，退回去讓美編
+  // 隔天重新處理，會再透過每天 16:00 的排程轉回來（見 /api/cron/design-sheet-transfer）
+  const handleMoveToNextDaySheet = useCallback(async () => {
+    if (selectedKeys.size === 0) return
+    // 用 UTC 解析/運算日期字串，避免瀏覽器在 UTC+8 時區下 setDate()+toISOString() 少算一天
+    // （new Date('YYYY-MM-DDT00:00:00') 以本地時區解讀，toISOString() 轉回 UTC 會往前跨到前一天）
+    const nextDay = (() => {
+      const d = new Date(selectedDate + 'T00:00:00Z')
+      d.setUTCDate(d.getUTCDate() + 1)
+      return d.toISOString().slice(0, 10)
+    })()
+    if (!confirm(`確定要把勾選的 ${selectedKeys.size} 筆移到美編天地 ${nextDay} 的每日出單表嗎？\n（這幾筆會從今天的出單表移除，隔天 16:00 排程會重新轉回來）`)) return
+
+    const toMove = sheetRows.filter((r, i) => selectedKeys.has(r.row_key || String(i)))
+    const remaining = sheetRows.filter((r, i) => !selectedKeys.has(r.row_key || String(i)))
+    const designRows = toMove.map(r => {
+      const out: Record<string, string> = {}
+      for (const k of SOURCE_ROW_KEYS_FOR_RETURN) out[k] = (r as unknown as Record<string, string>)[k] ?? ''
+      return out
+    })
+
+    setSaving(true)
+    try {
+      const sendRes = await fetch('/api/design/daily-sheet', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ target_date: nextDay, rows: designRows }),
+      })
+      const sendJson = await sendRes.json()
+      if (!sendRes.ok || !sendJson.success) throw new Error(sendJson.error || `HTTP ${sendRes.status}`)
+
+      const saveRes = await fetch('/api/argoerp/daily-order-sheet', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sheet_date: selectedDate, raw_text: currentRawText, rows: remaining }),
+      })
+      const saveJson = await saveRes.json()
+      if (!saveRes.ok || !saveJson.success) throw new Error(saveJson.error || `HTTP ${saveRes.status}`)
+
+      setSheetRows(remaining)
+      setSelectedKeys(new Set())
+      setSaveMsg(`✅ 已將 ${toMove.length} 筆移到美編天地 ${nextDay} 出單表`)
+      setTimeout(() => setSaveMsg(''), 5000)
+    } catch (e) {
+      setSaveMsg(`❌ 退單失敗：${e instanceof Error ? e.message : String(e)}`)
+    } finally {
+      setSaving(false)
+    }
+  }, [sheetRows, selectedKeys, selectedDate, currentRawText])
+
   const factoryBadge = (f: 'T' | 'C' | 'O', docType?: string) => {
     if ((docType ?? '').includes('集單'))
       return <span className="px-1.5 py-0.5 rounded text-xs font-medium bg-violet-900/40 text-violet-300">集單</span>
@@ -3789,6 +3789,14 @@ export default function DailyOrderSheetPage() {
                 >
                   <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2zm8-12V5a2 2 0 00-2-2H9a2 2 0 00-2 2v4h10z" /></svg>
                   列印{selectedKeys.size > 0 ? ` (${selectedKeys.size})` : ''}
+                </button>
+                <button
+                  onClick={() => void handleMoveToNextDaySheet()}
+                  disabled={selectedKeys.size === 0 || saving}
+                  className="px-4 py-2 rounded-lg bg-rose-800 hover:bg-rose-700 disabled:bg-slate-700 disabled:text-slate-500 text-white text-sm font-medium transition-colors"
+                  title="退單：移到美編天地隔一天的每日出單表，隔天 16:00 排程會重新轉回來"
+                >
+                  ↩️ 移到隔日出單表{selectedKeys.size > 0 ? ` (${selectedKeys.size})` : ''}
                 </button>
               </>
             )}
