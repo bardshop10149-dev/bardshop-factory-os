@@ -22,6 +22,7 @@
 
 import { getSupabaseAdminClient } from '../supabaseAdmin'
 import { buildSaraRow, type SaraRow } from './buildSaraRow'
+import { DEFAULT_PRIORITY_RULES, PRIORITY_RULES_SETTINGS_KEY, computePriorityFromDue, normalizePriorityRules, taipeiTodayMs } from './priorityRules'
 
 const BUFFER_KEY = 'sara_csv_buffer'
 const SENT_LEDGER_KEY = 'sara_auto_gen_sent'
@@ -255,7 +256,10 @@ export async function runAutoProcessGen(sheetDate: string): Promise<AutoGenResul
   const bufferRows = Array.isArray(existingBuffer) ? existingBuffer : []
   const inBufferKeys = new Set(bufferRows.map(r => `${r[0] ?? ''}||${r[1] ?? ''}`))
 
-  // 6. 逐列產生
+  // 6. 逐列產生（Priority Level 依交期規則自動判斷，規則可於工序產生器頁面編輯）
+  const priorityRulesRaw = await readSetting<unknown>(PRIORITY_RULES_SETTINGS_KEY)
+  const priorityRules = priorityRulesRaw != null ? normalizePriorityRules(priorityRulesRaw) : DEFAULT_PRIORITY_RULES
+  const todayMs = taipeiTodayMs()
   const today = fmtTodayTaipei()
   const outRows: string[][] = []
   const pendingNoRoute: PendingItem[] = []
@@ -295,7 +299,7 @@ export async function runAutoProcessGen(sheetDate: string): Promise<AutoGenResul
         product_name: p.item_code, product_desc: p.item_spec,
         lot_number: p.line_seq || p.order_number,
         prod_qty: p.quantity, due: p.due,
-        priority: '', earliest_start: today,
+        priority: computePriorityFromDue(p.due, priorityRules, todayMs), earliest_start: today,
         job_seq: op.sequence, workcenter: station, job_name: op.op_name,
         job_qty: jobQty, outsourcing: '', est_time: calcEst(std, p.quantity, p.pan_count, station),
         time_unit: '分鐘', bom: '', mat_req_qty: '',

@@ -3,6 +3,7 @@
 import { useState, useCallback, useEffect, useRef } from 'react'
 import { supabase } from '../../../../lib/supabaseClient'
 import { buildSaraRow, type SaraRow } from '../../../../lib/sara/buildSaraRow'
+import { DEFAULT_PRIORITY_RULES, computePriorityFromDue, type PriorityRule } from '../../../../lib/sara/priorityRules'
 
 // ── 型別 ─────────────────────────────────────────────────────────
 
@@ -112,6 +113,63 @@ const FACTORY_BADGE: Record<string, string> = {
 export default function ProcessGenPage() {
   const fileRef = useRef<HTMLInputElement>(null)
   const [activeTab, setActiveTab] = useState<'batch' | 'single'>('batch')
+
+  // ── 交期優先度規則（Priority Level 1-99；手動與每日自動轉換共用同一份，存 app_settings）──
+  const [priorityRules, setPriorityRules] = useState<PriorityRule[]>(DEFAULT_PRIORITY_RULES)
+  const priorityRulesRef = useRef<PriorityRule[]>(DEFAULT_PRIORITY_RULES)
+  const [prioEditing, setPrioEditing] = useState(false)
+  const [prioDraft, setPrioDraft] = useState<{ max_days: string; priority: string }[]>([])
+  const [prioSaving, setPrioSaving] = useState(false)
+  const [prioMsg, setPrioMsg] = useState('')
+
+  useEffect(() => {
+    void (async () => {
+      try {
+        const res = await fetch('/api/sara/priority-rules', { cache: 'no-store' })
+        const j = await res.json() as { success: boolean; rules?: PriorityRule[] }
+        if (j.success && Array.isArray(j.rules)) {
+          setPriorityRules(j.rules)
+          priorityRulesRef.current = j.rules
+        }
+      } catch { /* 載入失敗沿用預設規則 */ }
+    })()
+  }, [])
+
+  /** 供各產生路徑呼叫：依交期算 Priority Level（讀 ref，callback 不需把規則放進依賴） */
+  const prioFor = (due: string) => computePriorityFromDue(due, priorityRulesRef.current)
+
+  const startPrioEdit = () => {
+    setPrioDraft(priorityRules.map(r => ({ max_days: String(r.max_days), priority: String(r.priority) })))
+    setPrioEditing(true)
+    setPrioMsg('')
+  }
+
+  const savePrioRules = async () => {
+    const rules = prioDraft
+      .map(d => ({ max_days: Number(d.max_days), priority: Number(d.priority) }))
+      .filter(r => Number.isFinite(r.max_days) && r.max_days >= 0 && Number.isInteger(r.priority) && r.priority >= 1 && r.priority <= 99)
+      .sort((a, b) => a.max_days - b.max_days)
+    if (rules.length === 0) { setPrioMsg('❌ 至少要有一條有效規則（天數 ≥0、優先度 1-99）'); return }
+    setPrioSaving(true)
+    try {
+      const res = await fetch('/api/sara/priority-rules', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ rules }),
+      })
+      const j = await res.json() as { success: boolean; rules?: PriorityRule[]; error?: string }
+      if (!res.ok || !j.success) throw new Error(j.error || `HTTP ${res.status}`)
+      setPriorityRules(j.rules ?? rules)
+      priorityRulesRef.current = j.rules ?? rules
+      setPrioEditing(false)
+      setPrioMsg('✅ 已儲存，之後的手動與每日自動轉換都會套用')
+      setTimeout(() => setPrioMsg(''), 4000)
+    } catch (e) {
+      setPrioMsg(`❌ 儲存失敗：${e instanceof Error ? e.message : String(e)}`)
+    } finally {
+      setPrioSaving(false)
+    }
+  }
 
   // Batch state
   const [dataSource, setDataSource]   = useState<'csv' | 'sheet'>('sheet')
@@ -422,7 +480,7 @@ export default function ProcessGenPage() {
             product_name: row.item_code, product_desc: row.item_spec,
             lot_number: row.line_seq || row.order_number,
             prod_qty: row.quantity, due: row.due,
-            priority: '', earliest_start: today,
+            priority: prioFor(row.due), earliest_start: today,
             job_seq: '', workcenter: '', job_name: '', job_qty: row.quantity,
             outsourcing: '', est_time: 0, time_unit: '分鐘', bom: '', mat_req_qty: '',
             customer: row.customer,
@@ -440,7 +498,7 @@ export default function ProcessGenPage() {
             product_name: row.item_code, product_desc: row.item_spec,
             lot_number: row.line_seq || row.order_number,
             prod_qty: row.quantity, due: row.due,
-            priority: '', earliest_start: today,
+            priority: prioFor(row.due), earliest_start: today,
             job_seq: '', workcenter: '', job_name: '', job_qty: row.quantity,
             outsourcing: '', est_time: 0, time_unit: '分鐘', bom: '', mat_req_qty: '',
             customer: row.customer,
@@ -461,7 +519,7 @@ export default function ProcessGenPage() {
             product_name: row.item_code, product_desc: row.item_spec,
             lot_number: row.line_seq || row.order_number,
             prod_qty: row.quantity, due: row.due,
-            priority: '', earliest_start: today,
+            priority: prioFor(row.due), earliest_start: today,
             job_seq: op.sequence, workcenter: station, job_name: op.op_name,
             job_qty: jobQty, outsourcing: '', est_time: est, time_unit: '分鐘',
             bom: '', mat_req_qty: '',
@@ -532,7 +590,7 @@ export default function ProcessGenPage() {
         product_name: orig.item_code, product_desc: orig.item_spec,
         lot_number: orig.line_seq || orig.order_number,
         prod_qty: orig.quantity, due: orig.due,
-        priority: '', earliest_start: today,
+        priority: prioFor(orig.due), earliest_start: today,
         job_seq: '', workcenter: '', job_name: '', job_qty: orig.quantity,
         outsourcing: '', est_time: 0, time_unit: '分鐘', bom: '', mat_req_qty: '',
         customer: orig.customer, factory: orig.factory, _noRoute: true,
@@ -578,7 +636,7 @@ export default function ProcessGenPage() {
         product_name: orig.item_code, product_desc: orig.item_spec,
         lot_number: orig.line_seq || orig.order_number,
         prod_qty: orig.quantity, due: orig.due,
-        priority: '', earliest_start: today,
+        priority: prioFor(orig.due), earliest_start: today,
         job_seq: '', workcenter: '', job_name: '', job_qty: orig.quantity,
         outsourcing: '', est_time: 0, time_unit: '分鐘', bom: '', mat_req_qty: '',
         customer: orig.customer, factory: orig.factory, _noRoute: true,
@@ -630,7 +688,7 @@ export default function ProcessGenPage() {
           product_name: row.item_code, product_desc: row.item_spec,
           lot_number: row.line_seq || row.order_number,
           prod_qty: row.quantity, due: row.due,
-          priority: '', earliest_start: today,
+          priority: prioFor(row.due), earliest_start: today,
           job_seq: op.sequence, workcenter: station, job_name: op.op_name,
           job_qty: jobQty, outsourcing: '', est_time: est, time_unit: '分鐘',
           bom: '', mat_req_qty: '',
@@ -765,7 +823,7 @@ export default function ProcessGenPage() {
     })
   }, [singleRows, moNumber, quantity, itemCode])
 
-  // ── 自動轉換待處理清單（每日 17:50 排程跳過的列，導覽列徽章數字的明細）──
+  // ── 自動轉換待處理清單（每日 17:05 排程跳過的列，導覽列徽章數字的明細）──
 
   interface PendingItem {
     sheet_date: string; order_number: string; item_code: string; item_spec: string
@@ -811,7 +869,62 @@ export default function ProcessGenPage() {
 
       <div>
         <h1 className="text-xl font-bold text-emerald-300">SARA 工序格式產生器</h1>
-        <p className="text-xs text-slate-400 mt-0.5">由每日出單表 CSV 查詢途程，自動產出塔台 SARA_101 匯入格式・每日 17:50 自動轉換當日出單表</p>
+        <p className="text-xs text-slate-400 mt-0.5">由每日出單表 CSV 查詢途程，自動產出塔台 SARA_101 匯入格式・每日 17:05 自動轉換當日出單表</p>
+      </div>
+
+      {/* ── 交期優先度規則（Priority Level）── */}
+      <div className="bg-slate-900 border border-slate-800 rounded-xl px-4 py-3">
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+          <span className="text-xs font-bold text-emerald-300 whitespace-nowrap">⚡ 交期優先度（Priority Level）</span>
+          {!prioEditing ? (
+            <>
+              <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
+                {priorityRules.map((r, i) => {
+                  const prevMax = i === 0 ? -1 : priorityRules[i - 1].max_days
+                  const range = r.max_days - prevMax === 1 ? `${r.max_days} 天` : `${prevMax + 1}~${r.max_days} 天`
+                  return (
+                    <span key={i} className="px-2 py-0.5 rounded bg-slate-800 border border-slate-700 text-slate-300 font-mono whitespace-nowrap">
+                      {i === 0 ? `≤${r.max_days} 天` : range} → <span className="text-amber-300 font-bold">{r.priority}</span>
+                    </span>
+                  )
+                })}
+                <span className="px-2 py-0.5 rounded bg-slate-800/50 border border-slate-800 text-slate-500 font-mono whitespace-nowrap">
+                  &gt;{priorityRules[priorityRules.length - 1]?.max_days ?? 0} 天 → 不填
+                </span>
+              </div>
+              <button onClick={startPrioEdit} className="px-3 py-1 rounded text-xs bg-slate-800 border border-slate-700 text-slate-300 hover:text-emerald-300 hover:border-emerald-700 transition-colors">
+                ✏️ 編輯規則
+              </button>
+            </>
+          ) : (
+            <div className="flex flex-wrap items-center gap-2">
+              {prioDraft.map((d, i) => (
+                <span key={i} className="flex items-center gap-1 px-2 py-1 rounded bg-slate-800 border border-slate-700 text-[11px]">
+                  <span className="text-slate-500">≤</span>
+                  <input
+                    value={d.max_days}
+                    onChange={e => setPrioDraft(prev => prev.map((x, xi) => xi === i ? { ...x, max_days: e.target.value } : x))}
+                    className="w-10 bg-slate-950 border border-slate-700 rounded px-1 py-0.5 text-center text-slate-200 font-mono"
+                  />
+                  <span className="text-slate-500">天 →</span>
+                  <input
+                    value={d.priority}
+                    onChange={e => setPrioDraft(prev => prev.map((x, xi) => xi === i ? { ...x, priority: e.target.value } : x))}
+                    className="w-10 bg-slate-950 border border-slate-700 rounded px-1 py-0.5 text-center text-amber-300 font-mono"
+                  />
+                  <button onClick={() => setPrioDraft(prev => prev.filter((_, xi) => xi !== i))} className="text-slate-600 hover:text-red-400 ml-0.5">✕</button>
+                </span>
+              ))}
+              <button onClick={() => setPrioDraft(prev => [...prev, { max_days: '', priority: '' }])} className="px-2 py-1 rounded text-[11px] bg-slate-800 border border-slate-700 text-slate-400 hover:text-white">＋ 加一級</button>
+              <button onClick={() => void savePrioRules()} disabled={prioSaving} className="px-3 py-1 rounded text-xs bg-emerald-700 hover:bg-emerald-600 text-white font-bold disabled:opacity-50">
+                {prioSaving ? '儲存中…' : '儲存'}
+              </button>
+              <button onClick={() => setPrioEditing(false)} disabled={prioSaving} className="px-2 py-1 rounded text-xs bg-slate-800 border border-slate-700 text-slate-400 hover:text-white">取消</button>
+            </div>
+          )}
+          {prioMsg && <span className={`text-[11px] ${prioMsg.startsWith('✅') ? 'text-emerald-400' : 'text-red-400'}`}>{prioMsg}</span>}
+        </div>
+        <p className="text-[10px] text-slate-600 mt-1.5">依「交期距今天數」自動填入 SARA 的 Priority Level（1-99，越大越優先）；手動產生與每日 17:05 自動轉換都套用此規則，超出最大天數的不填由塔台自行排程。</p>
       </div>
 
       {/* ── 自動轉換待處理清單（導覽列紅色數字的明細）── */}

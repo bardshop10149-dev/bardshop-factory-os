@@ -272,10 +272,10 @@ export default function MaterialsPage() {
 
       <div className="flex flex-wrap gap-3">
         <Link
-          href="/admin/materials/bom"
+          href="/admin/argoerp/erp-db/bom"
           className="px-4 py-2 rounded border border-slate-700 bg-slate-900 text-slate-300 hover:bg-slate-800 text-sm font-bold"
         >
-          BOM表
+          BOM表（ERP）
         </Link>
         <Link
           href="/admin/materials/substitute"

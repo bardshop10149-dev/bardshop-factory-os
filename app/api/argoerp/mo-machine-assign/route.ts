@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { getSupabaseAdminClient, formatSupabaseAdminError } from '@/lib/supabaseAdmin'
+import { getSupabaseAdminClient, describeError } from '@/lib/supabaseAdmin'
 import { guardPermission } from '@/lib/requireAuth'
 
 const TABLE = 'argoerp_mo_machine_assign'
@@ -27,7 +27,7 @@ export async function GET(request: NextRequest) {
     if (error) throw error
     return NextResponse.json({ success: true, assignments: data ?? [] })
   } catch (e) {
-    const msg = e instanceof Error ? formatSupabaseAdminError(e.message) : String(e)
+    const msg = describeError(e)
     return NextResponse.json({ success: false, error: msg }, { status: 500 })
   }
 }
@@ -43,13 +43,20 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ success: false, error: 'assignments 陣列不可為空' }, { status: 400 })
     }
 
-    const rows = assignments
-      .filter(a => a.mo_number?.trim())
-      .map(a => ({
-        mo_number: a.mo_number.trim(),
-        machine: a.machine ?? '',
-        updated_at: new Date().toISOString(),
-      }))
+    // 依 mo_number 去重：委外的 MPO 請購單號一張會掛在多列上，出單表整批送來時同一單號
+    // 會重複出現，同一批 upsert 內重複的 conflict key 會被 Postgres 以
+    // 「ON CONFLICT DO UPDATE cannot affect row a second time」(21000) 拒絕。
+    // 同單號的機台值本就相同（前端以單號為 key），保留最後一筆即可。
+    const dedup = new Map<string, string>()
+    for (const a of assignments) {
+      const mo = a.mo_number?.trim()
+      if (mo) dedup.set(mo, a.machine ?? '')
+    }
+    const rows = [...dedup.entries()].map(([mo_number, machine]) => ({
+      mo_number,
+      machine,
+      updated_at: new Date().toISOString(),
+    }))
 
     if (rows.length === 0) {
       return NextResponse.json({ success: false, error: 'mo_number 不可為空' }, { status: 400 })
@@ -64,7 +71,7 @@ export async function POST(request: NextRequest) {
     if (error) throw error
     return NextResponse.json({ success: true, upserted: rows.length })
   } catch (e) {
-    const msg = e instanceof Error ? formatSupabaseAdminError(e.message) : String(e)
+    const msg = describeError(e)
     return NextResponse.json({ success: false, error: msg }, { status: 500 })
   }
 }

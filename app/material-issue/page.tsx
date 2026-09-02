@@ -273,16 +273,13 @@ export default function MaterialIssuePage() {
         }
       }
 
-      // 4. Get material names (bom + material_inventory_list fallback) + units (mm_bom_part_units)
+      // 4. Get material names (ERP 同步的 material_inventory_list) + units (mm_bom_part_units)
+      //    （原本優先查系統內人工維護的 bom 表——該表已淘汰，一律以 ERP 同步資料為準）
       const matCodes = [...new Set(prepLines.map(r => r.mbp_part).filter(Boolean))] as string[]
       const nameMap = new Map<string, string>()
       const unitMap = new Map<string, string>()
       if (matCodes.length > 0) {
-        const [bomRes, unitRes, invRes] = await Promise.all([
-          supabase
-            .from('bom')
-            .select('material_code, material_name')
-            .in('material_code', matCodes),
+        const [unitRes, invRes] = await Promise.all([
           supabase
             .from('mm_bom_part_units')
             .select('part_code, unit_of_measure')
@@ -292,10 +289,6 @@ export default function MaterialIssuePage() {
             .select('item_code, item_name')
             .in('item_code', matCodes),
         ])
-        for (const r of (bomRes.data ?? []) as Array<{ material_code: string; material_name: string | null }>) {
-          if (r.material_name && !nameMap.has(r.material_code)) nameMap.set(r.material_code, r.material_name)
-        }
-        // Fallback: material_inventory_list for codes not in bom
         for (const r of (invRes.data ?? []) as Array<{ item_code: string; item_name: string | null }>) {
           if (r.item_name && !nameMap.has(r.item_code)) nameMap.set(r.item_code, r.item_name)
         }

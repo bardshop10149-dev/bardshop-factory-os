@@ -1334,6 +1334,10 @@ export default function MaterialPrepPage() {
     const bypassImportMos = importMos.filter(mo => mo.startsWith('MOS'))
 
     // ── 預飛檢查：確認選取的製令在 mo-summary 中確實仍是未備料狀態 ──
+    // ⚠️ argoerp_mo_summary 有 RLS，瀏覽器端讀這張表一律回 0 筆，所以這段檢查實際上
+    // 永遠查不到任何資料、也就永遠不會示警。保留它不影響正確性（真正的把關是下方
+    // 伺服器端的 CAS 鎖定），但**不可**用它的結果去判斷「哪些製令沒有紀錄」——
+    // 2026-09-02 就是這樣誤判成「全部都是新製令」而導致整批無法備料。
     try {
       const { data: summaryRows, error: checkErr } = await supabase
         .from('argoerp_mo_summary')
@@ -1376,11 +1380,31 @@ export default function MaterialPrepPage() {
     // 成功鎖定但實際未送出成功的 MO 復原回「未備料」。
     let lockedMos: string[] = [...bypassImportMos]
     try {
+      // 【修法】「這張製令在 argoerp_mo_summary 有沒有列」一律交給伺服器端判斷
+      // （create_if_missing）——該表有 RLS，瀏覽器端讀它一律回 0 筆，前端無從得知真實狀態。
+      // 2026-09-01 曾在前端做這個判斷，結果全部製令被誤判成「新的」而改送 INSERT，
+      // 撞上既有列的唯一鍵，整批顯示「剛被其他人建立備料紀錄」而無法備料（那些製令
+      // 其實都是未備料、完全正常）。伺服器端用 service role 才看得到真實資料。
       if (casImportMos.length > 0) {
+        const insertSeed: Record<string, { factory?: string; product_code?: string; planned_qty?: string }> = {}
+        for (const mo of casImportMos) {
+          const rec = moRecords.find(r => r.mo_number === mo)
+          insertSeed[mo] = {
+            factory: rec?.factory || 'T',
+            product_code: rec?.product_code ?? '',
+            planned_qty: rec?.planned_qty ?? '',
+          }
+        }
         const lockRes = await fetch('/api/argoerp/mo-summary', {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ mo_numbers: casImportMos, prep_status: '已備料', expected_prep_status: '未備料' }),
+          body: JSON.stringify({
+            mo_numbers: casImportMos,
+            prep_status: '已備料',
+            expected_prep_status: '未備料',
+            create_if_missing: true,
+            insert_seed: insertSeed,
+          }),
         })
         const lockJson = await lockRes.json()
         if (!lockRes.ok || !lockJson?.success) {

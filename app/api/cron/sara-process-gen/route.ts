@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { runAutoProcessGen } from '@/lib/sara/autoProcessGen'
 
 // 每日排程：把當天出單表自動轉成 SARA 工序列寫入交換區（詳見 lib/sara/autoProcessGen.ts）。
-// 排在自動開單（17:10）之後跑，讓當天轉單完成的列都能帶到正確的製令/採購/請購單號。
+// 每天 17:05（台北時間）執行，排在自動開單（17:01）之後跑，讓當天轉單完成的列都能帶到正確的製令/採購/請購單號。
 //
 // 觸發方式與驗證：跟現有 /api/cron/* 一致——Vercel Cron 以 GET 呼叫，
 // 自動帶 `Authorization: Bearer <CRON_SECRET>`；也接受 POST + WEBHOOK_SECRET 供手動測試。

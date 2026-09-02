@@ -236,6 +236,17 @@ export async function PATCH(request: NextRequest) {
 
     const supabase = getSupabaseAdminClient()
 
+    // create_if_missing：CAS 之外，對「本表尚無此製令」的情況直接建立一筆並視為鎖定成功。
+    //
+    // 為什麼一定要在伺服器端判斷（2026-09-02 事故）：argoerp_mo_summary 有 RLS，
+    // 瀏覽器端（anon/authenticated）讀這張表一律回 0 筆。先前把「哪些製令沒有紀錄」
+    // 交給前端預飛查詢判斷，結果永遠誤判成「全部都是新製令」，於是對已存在的列送 INSERT
+    // 撞上唯一鍵，整批被擋下並顯示「剛被其他人建立備料紀錄」——但那些製令其實都是未備料、
+    // 完全可以正常備料。改為在這裡用 service role 判斷，才看得到真實狀態。
+    const createIfMissing = body?.create_if_missing === true
+    const insertSeed: Record<string, { factory?: string; product_code?: string; planned_qty?: string }> =
+      (body?.insert_seed && typeof body.insert_seed === 'object') ? body.insert_seed : {}
+
     let query = supabase
       .from(TABLE)
       .update({ prep_status: prepStatus })
@@ -264,14 +275,47 @@ export async function PATCH(request: NextRequest) {
     const updatedSet = new Set(updatedMoNumbers)
     // 只有在使用 CAS（expected_prep_status）時才有意義去算「被跳過」的清單；
     // 一般無條件更新如果請求的 mo_number 在表裡不存在也不算「被搶先」，維持舊行為不回報。
-    const skippedMoNumbers = expectedPrepStatus !== undefined
+    let skippedMoNumbers = expectedPrepStatus !== undefined
       ? moNumbers.filter(mo => !updatedSet.has(mo))
       : []
+    let createdMoNumbers: string[] = []
+
+    // 沒被 CAS 更新到的，可能是「已被別人搶先」也可能是「本表根本沒有這筆」——
+    // 用 service role 查出真正不存在的那些，補建立一筆並視為鎖定成功。
+    if (createIfMissing && skippedMoNumbers.length > 0) {
+      const { data: existingRows, error: existErr } = await supabase
+        .from(TABLE).select('mo_number').in('mo_number', skippedMoNumbers)
+      if (existErr) {
+        return NextResponse.json({ success: false, error: formatSupabaseAdminError(existErr.message) }, { status: 500 })
+      }
+      const existingSet = new Set((existingRows ?? []).map(r => r.mo_number as string))
+      const missing = skippedMoNumbers.filter(mo => !existingSet.has(mo))
+
+      if (missing.length > 0) {
+        const rows = missing.map(mo => ({
+          mo_number: mo,
+          factory: insertSeed[mo]?.factory || 'T',
+          product_code: insertSeed[mo]?.product_code ?? null,
+          planned_qty: insertSeed[mo]?.planned_qty ?? null,
+          prep_status: prepStatus,
+        }))
+        // ignoreDuplicates：若同一瞬間有別人也建立了同一筆，讓對方的先成立、
+        // 本次不覆蓋也不報錯；下方再以實際存在與否決定要不要算進鎖定成功。
+        const { error: insErr } = await supabase.from(TABLE).upsert(rows, { onConflict: 'mo_number', ignoreDuplicates: true })
+        if (insErr) {
+          return NextResponse.json({ success: false, error: formatSupabaseAdminError(insErr.message) }, { status: 500 })
+        }
+        createdMoNumbers = missing
+        const createdSet = new Set(missing)
+        skippedMoNumbers = skippedMoNumbers.filter(mo => !createdSet.has(mo))
+      }
+    }
 
     return NextResponse.json({
       success: true,
       updated: updatedMoNumbers.length,
-      updated_mo_numbers: updatedMoNumbers,
+      updated_mo_numbers: [...updatedMoNumbers, ...createdMoNumbers],
+      created_mo_numbers: createdMoNumbers,
       skipped_mo_numbers: skippedMoNumbers,
     })
   } catch (e) {

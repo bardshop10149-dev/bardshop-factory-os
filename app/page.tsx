@@ -228,18 +228,21 @@ export default function HomePage() {
       const seen = new Set<string>();
       const allRows: { product_code: string; product_name: string }[] = [];
       let from = 0;
+      // 資料來源用 ERP 同步的銷售訂單明細（品號＋中文品名），以 ERP 為準
+      //（系統內人工維護的 bom 表已淘汰）
       while (true) {
         const { data, error } = await supabase
-          .from('bom')
-          .select('product_code, product_name')
-          .order('product_code', { ascending: true })
+          .from('erp_so_lines')
+          .select('mbp_part, description')
+          .order('mbp_part', { ascending: true })
           .range(from, from + PAGE - 1);
         if (error) throw new Error(error.message);
-        const chunk = (data ?? []) as { product_code: string; product_name: string }[];
+        const chunk = (data ?? []) as { mbp_part: string | null; description: string | null }[];
         for (const row of chunk) {
-          if (!seen.has(row.product_code)) {
-            seen.add(row.product_code);
-            allRows.push(row);
+          const code = (row.mbp_part ?? '').trim();
+          if (code && !seen.has(code)) {
+            seen.add(code);
+            allRows.push({ product_code: code, product_name: (row.description ?? '').trim() });
           }
         }
         if (chunk.length < PAGE) break;

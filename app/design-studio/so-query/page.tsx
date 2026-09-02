@@ -59,6 +59,35 @@ function sanitizeCell(v: string | number | null | undefined): string {
     .trim()
 }
 
+// 轉成「每日出單表」的結構化欄位（給「傳送到出單表」用，與 buildExcelRow 的欄位對應一致，
+// 差別是這裡回傳物件供 API 存 JSONB，不是 TSV 字串）
+function buildSourceRowFields(r: SoLine) {
+  return {
+    order_number: r.project_id,
+    line_no_input: r.line_no,
+    doc_type: '',
+    receiver: '',
+    is_sample: r.tpn_part_no ?? '',
+    has_material: '',
+    designer: '',
+    customer: r.partner_name ?? '',
+    line_nickname: '',
+    handler: r.sales_name ?? '',
+    issuer: '',
+    item_code: r.mbp_part ?? '',
+    item_name: r.description ?? '',
+    note: r.remark2 ?? '',
+    packing: r.packing ?? '',
+    quantity: r.order_qty_oru != null ? String(r.order_qty_oru) : '',
+    delivery_date: fmtDate(r.duedate),
+    plate_count: '',
+    upload_ro: '',
+    order_status: '',
+    pm_note: '',
+    assigned_machine: '',
+  }
+}
+
 function buildExcelRow(r: SoLine): string {
   const cols = [
     r.project_id,                          // 工單編號
@@ -236,6 +265,38 @@ export default function SoQueryPage() {
     setTimeout(() => setCopyMsg(''), 3000)
   }, [rows, selectedIds])
 
+  // 傳送到出單表：寫入美編天地的每日出單表（不指定日期，由伺服器依 16:00 規則
+  // 自動判斷今天或隔天），之後每天 16:00 排程會轉入生管的每日出單表
+  const [sending, setSending] = useState(false)
+  const handleSendToSheet = useCallback(async () => {
+    if (selectedIds.size === 0) return
+    setSending(true)
+    setCopyMsg('')
+    try {
+      const selected = rows
+        .filter(r => selectedIds.has(r.id))
+        .sort((a, b) => {
+          if (a.project_id < b.project_id) return -1
+          if (a.project_id > b.project_id) return 1
+          return (parseInt(a.line_no, 10) || 0) - (parseInt(b.line_no, 10) || 0)
+        })
+      const res = await fetch('/api/design/daily-sheet', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ rows: selected.map(buildSourceRowFields) }),
+      })
+      const json = await res.json()
+      if (!res.ok || !json.success) throw new Error(json.error || `HTTP ${res.status}`)
+      setCopyMsg(`✅ 已傳送 ${selected.length} 筆到 ${json.target_date} 美編出單表`)
+      setSelectedIds(new Set())
+    } catch (e) {
+      setCopyMsg(`❌ 傳送失敗：${e instanceof Error ? e.message : String(e)}`)
+    } finally {
+      setSending(false)
+      setTimeout(() => setCopyMsg(''), 5000)
+    }
+  }, [rows, selectedIds])
+
   const COLS = 14 // colSpan 數量（含勾選欄與採購欄）
 
   const allSelected = rows.length > 0 && rows.every(r => selectedIds.has(r.id))
@@ -307,6 +368,17 @@ export default function SoQueryPage() {
               className="px-5 py-2 rounded bg-emerald-800 hover:bg-emerald-700 disabled:bg-slate-700 disabled:text-slate-500 text-sm font-semibold text-white transition-colors"
             >
               {selectedIds.size > 0 ? `複製 ${selectedIds.size} 筆` : '一鍵複製'}
+            </button>
+          )}
+          {rows.length > 0 && (
+            <button
+              type="button"
+              onClick={() => void handleSendToSheet()}
+              disabled={selectedIds.size === 0 || sending}
+              title="傳送到美編天地的每日出單表（預設今天；已過16:00自動送到隔天）"
+              className="px-5 py-2 rounded bg-amber-700 hover:bg-amber-600 disabled:bg-slate-700 disabled:text-slate-500 text-sm font-semibold text-white transition-colors"
+            >
+              {sending ? '傳送中…' : `📤 傳送到出單表${selectedIds.size > 0 ? ` (${selectedIds.size})` : ''}`}
             </button>
           )}
         </div>

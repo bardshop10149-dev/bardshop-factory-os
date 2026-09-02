@@ -274,7 +274,7 @@ function InfoGrid({ rows }: {
 function SketchCard({ url, label }: { url: string; label: string }) {
   return (
     <div
-      className="mo-card sketch-card"
+      className="mo-card sketch-card print-keep-color"
       style={{
         width: '210mm',
         background: 'white',
@@ -834,19 +834,28 @@ function MoPrintContent() {
         @media print {
           .mo-toolbar { display: none !important; }
           .no-print { display: none !important; }
-          html { -webkit-filter: grayscale(100%) !important; filter: grayscale(100%) !important; }
+          /* 灰階只套在「單據頁」（製令/採購/請購），示意圖頁保留原色。
+             注意：CSS filter 套在祖先層之後，子層無法再還原成彩色，所以絕對不能像原本那樣
+             對 html 整頁套 grayscale——那會連示意圖一起變黑白，即使印表機設定彩色也救不回來。
+             搭配「印表機設為彩色列印」即可達成：單據黑白、示意圖彩色。 */
+          .mo-card:not(.sketch-card) {
+            -webkit-filter: grayscale(100%) !important;
+            filter: grayscale(100%) !important;
+          }
           * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
-          .mo-card,
-          .mo-card * {
+          .mo-card:not(.sketch-card),
+          .mo-card:not(.sketch-card) * {
             color: #000 !important;
             text-shadow: none !important;
             box-shadow: none !important;
           }
-          .mo-card th,
-          .mo-card td,
-          .mo-card tr,
-          .mo-card div,
-          .mo-card span {
+          /* 示意圖頁：只去掉陰影，不動顏色 */
+          .sketch-card { box-shadow: none !important; }
+          .mo-card:not(.sketch-card) th,
+          .mo-card:not(.sketch-card) td,
+          .mo-card:not(.sketch-card) tr,
+          .mo-card:not(.sketch-card) div,
+          .mo-card:not(.sketch-card) span {
             background: #fff !important;
             border-color: #bbb !important;
           }

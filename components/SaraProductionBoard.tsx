@@ -16,6 +16,7 @@
 
 import { useState, useEffect, useCallback, useMemo } from 'react'
 import { supabase } from '../lib/supabaseClient'
+import { getSection } from '../config/productionSections'
 
 /** 六個看板 → 塔台站點的對應（塔台實際出現過的 workcenter_name） */
 export const SECTION_WORKCENTERS: Record<string, string[]> = {
@@ -146,8 +147,29 @@ function planClock(ts: string | null): string {
 
 const DOW_ZH = ['日', '一', '二', '三', '四', '五', '六'] as const
 
+/** 兩個 'YYYY-MM-DD HH:mm' 之間的分鐘數；無法解析時回 null */
+function planDurationMin(start: string | null, end: string | null): number | null {
+  if (!start || !end) return null
+  const s = Date.parse(start.replace(' ', 'T') + ':00Z')
+  const e = Date.parse(end.replace(' ', 'T') + ':00Z')
+  if (!Number.isFinite(s) || !Number.isFinite(e)) return null
+  const min = (e - s) / 60000
+  return min > 0 ? min : null
+}
+
+/** 工時長度文字（1h30m / 45m）；無法計算時回空字串 */
+function durationLabel(start: string | null, end: string | null): string {
+  const min = planDurationMin(start, end)
+  if (min == null) return ''
+  const h = Math.floor(min / 60)
+  const m = Math.round(min % 60)
+  return h > 0 ? (m > 0 ? `${h}h${m}m` : `${h}h`) : `${m}m`
+}
+
 export default function SaraProductionBoard({ sectionId, sectionName }: { sectionId: string, sectionName: string }) {
   const boardWorkcenters = useMemo(() => SECTION_WORKCENTERS[sectionId] ?? [], [sectionId])
+  // 本區塊的主色/圖示（與「產線電子看板」入口頁卡片同一組設定）
+  const section = useMemo(() => getSection(sectionId), [sectionId])
   const [activeRows, setActiveRows] = useState<WipRow[]>([])
   const [finishedToday, setFinishedToday] = useState<WipRow[]>([])
   const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(null)
@@ -299,7 +321,9 @@ export default function SaraProductionBoard({ sectionId, sectionName }: { sectio
     const base = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()))
     const dow = base.getUTCDay() // 0=日
     base.setUTCDate(base.getUTCDate() - (dow === 0 ? 6 : dow - 1) + weekOffset * 7)
-    return Array.from({ length: 7 }, (_, i) => {
+    // 只顯示週一～週五：週末產線不排程、空欄佔掉版面寬度，去掉之後每欄才有足夠寬度
+    // 放下與入口頁一致尺寸的卡片（2026-09-02 生管指示）
+    return Array.from({ length: 5 }, (_, i) => {
       const d = new Date(base)
       d.setUTCDate(base.getUTCDate() + i)
       return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`
@@ -319,52 +343,61 @@ export default function SaraProductionBoard({ sectionId, sectionName }: { sectio
   }, [selectedGroupRows])
 
   return (
-    <div className="min-h-screen bg-[#050b14] p-4 md:p-6">
-      {/* 頁首 */}
-      <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
-        <div className="min-w-0">
-          <h1 className="text-xl font-bold text-white flex items-center gap-2">
-            📡 {sectionName}排程看板
-            <span className="px-2 py-0.5 rounded-full bg-slate-800 border border-slate-600 text-slate-400 text-[10px] font-medium">唯讀・塔台資料</span>
-          </h1>
-          <p className="text-xs text-slate-500 mt-1">
-            資料一律以塔台（SARA）為準（站點：{boardWorkcenters.join('、')}），本頁不提供修改；要更正請至塔台操作，下次同步自動反映。
-          </p>
-        </div>
-        <div className="flex items-center gap-3 shrink-0">
-          <div className="text-right text-[11px] text-slate-500">
-            <div>塔台最新報工時間：<span className="text-slate-300 font-mono">{lastSyncedAt ? fmtClock(lastSyncedAt) : '—'}</span></div>
-            <div>畫面更新於：<span className="text-slate-300 font-mono">{refreshedAt ? refreshedAt.toLocaleTimeString('zh-TW', { hour12: false }) : '—'}</span>（每分鐘自動刷新）</div>
+    <div className="min-h-screen bg-[#050b14] p-6 md:p-8">
+      {/* 頁首——沿用「產線電子看板」入口頁的設計語彙：漸層圖示磚 + 粗標題 +
+          等寬大寫英文副標，並用該區塊自己的主色，讓入口卡片與看板視覺連貫 */}
+      <div className="relative overflow-hidden rounded-2xl border border-slate-800 bg-slate-900 mb-6">
+        <div className={`absolute top-0 right-0 w-64 h-64 bg-gradient-to-br ${section.gradient} opacity-20 blur-3xl rounded-full -translate-y-1/2 translate-x-1/3 pointer-events-none`} />
+        <div className="relative z-10 p-6 md:p-8 flex flex-wrap items-start justify-between gap-6">
+          <div className="flex items-start gap-5 min-w-0">
+            <div className={`w-14 h-14 shrink-0 rounded-xl bg-gradient-to-br ${section.gradient} flex items-center justify-center shadow-lg`}>
+              <svg className="w-8 h-8 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d={section.iconPath} />
+              </svg>
+            </div>
+            <div className="min-w-0">
+              <div className="flex items-center gap-2.5 flex-wrap">
+                <h1 className="text-2xl font-bold text-white tracking-tight">{sectionName}排程看板</h1>
+                <span className="px-2 py-0.5 rounded-full bg-slate-800 border border-slate-700 text-slate-400 text-[10px] font-medium">唯讀・塔台資料</span>
+              </div>
+              <p className="text-xs font-mono text-slate-500 uppercase tracking-wider mt-1">{section.eng}</p>
+              <p className="text-slate-400 text-sm leading-relaxed mt-3 max-w-2xl">
+                資料一律以塔台（SARA）為準（站點：{boardWorkcenters.join('、')}），本頁不提供修改；要更正請至塔台操作，下次同步自動反映。
+              </p>
+            </div>
           </div>
-          <button
-            onClick={() => void handleResync()}
-            disabled={resyncing}
-            title="塔台每次重新排程會整批重算，定時快照最多落後半小時；按此立即向塔台抓最新排程（約 10 秒）"
-            className="px-3 py-2 rounded-lg bg-slate-800 border border-slate-700 text-slate-300 text-xs font-medium hover:bg-slate-700 hover:border-emerald-600 hover:text-emerald-300 disabled:opacity-50 transition-colors"
-          >
-            {resyncing ? '⏳ 同步中…' : '🔄 立即同步塔台'}
-          </button>
+          <div className="flex items-center gap-4 shrink-0">
+            <div className="text-right text-[11px] text-slate-500 leading-relaxed">
+              <div>塔台最新報工：<span className="text-slate-300 font-mono">{lastSyncedAt ? fmtClock(lastSyncedAt) : '—'}</span></div>
+              <div>畫面更新於：<span className="text-slate-300 font-mono">{refreshedAt ? refreshedAt.toLocaleTimeString('zh-TW', { hour12: false }) : '—'}</span></div>
+              <div className="text-slate-600">每分鐘自動刷新</div>
+            </div>
+            <button
+              onClick={() => void handleResync()}
+              disabled={resyncing}
+              title="塔台每次重新排程會整批重算，定時快照最多落後半小時；按此立即向塔台抓最新排程（約 10 秒）"
+              className="px-4 py-2.5 rounded-xl bg-slate-800 border border-slate-700 text-slate-300 text-xs font-bold hover:bg-slate-700 hover:border-slate-500 hover:text-white disabled:opacity-50 transition-colors"
+            >
+              {resyncing ? '同步中…' : '🔄 立即同步塔台'}
+            </button>
+          </div>
         </div>
       </div>
 
-      {/* 總覽列 */}
-      <div className="flex flex-wrap gap-3 mb-5">
-        <div className="px-4 py-2 rounded-xl bg-yellow-950/40 border border-yellow-700/40">
-          <div className="text-[10px] text-yellow-500/80">進行中</div>
-          <div className="text-2xl font-bold text-yellow-300 font-mono">{totalRunning}</div>
-        </div>
-        <div className="px-4 py-2 rounded-xl bg-amber-950/40 border border-amber-700/40">
-          <div className="text-[10px] text-amber-500/80">暫停中</div>
-          <div className="text-2xl font-bold text-amber-300 font-mono">{totalPause}</div>
-        </div>
-        <div className="px-4 py-2 rounded-xl bg-emerald-950/40 border border-emerald-700/40">
-          <div className="text-[10px] text-emerald-500/80">今日完成筆數</div>
-          <div className="text-2xl font-bold text-emerald-300 font-mono">{finishedToday.length}</div>
-        </div>
-        <div className="px-4 py-2 rounded-xl bg-emerald-950/40 border border-emerald-700/40">
-          <div className="text-[10px] text-emerald-500/80">今日完成數量</div>
-          <div className="text-2xl font-bold text-emerald-300 font-mono">{totalFinishedQty.toLocaleString()}</div>
-        </div>
+      {/* 總覽列——改為與入口頁一致的卡片語彙（深色面 + 細邊框 + 大圓角 + 寬鬆內距） */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+        {[
+          { label: '進行中', eng: 'Running', value: totalRunning, tone: 'text-amber-300' },
+          { label: '暫停中', eng: 'Paused', value: totalPause, tone: totalPause > 0 ? 'text-orange-300' : 'text-slate-500' },
+          { label: '今日完成筆數', eng: 'Done Today', value: finishedToday.length, tone: 'text-emerald-300' },
+          { label: '今日完成數量', eng: 'Qty Today', value: totalFinishedQty.toLocaleString(), tone: 'text-emerald-300' },
+        ].map(s => (
+          <div key={s.label} className="rounded-2xl border border-slate-800 bg-slate-900 px-5 py-4">
+            <div className="text-[11px] text-slate-400">{s.label}</div>
+            <div className="text-[9px] font-mono text-slate-600 uppercase tracking-wider">{s.eng}</div>
+            <div className={`text-3xl font-bold font-mono mt-1.5 ${s.tone}`}>{s.value}</div>
+          </div>
+        ))}
       </div>
 
       {loadError && (
@@ -377,13 +410,13 @@ export default function SaraProductionBoard({ sectionId, sectionName }: { sectio
       <div className="flex items-center gap-2 mb-4">
         <button
           onClick={() => setView('now')}
-          className={`px-4 py-1.5 rounded-lg text-sm font-bold border transition-colors ${view === 'now' ? 'bg-cyan-800/60 text-cyan-200 border-cyan-600' : 'bg-slate-900 text-slate-400 border-slate-700 hover:text-white'}`}
+          className={`px-4 py-2 rounded-xl text-sm font-bold border transition-colors ${view === 'now' ? `bg-gradient-to-br ${section.gradient} text-white border-transparent shadow-lg` : 'bg-slate-900 text-slate-400 border-slate-800 hover:text-white hover:border-slate-600'}`}
         >
           ⚡ 即時現況
         </button>
         <button
           onClick={() => setView('schedule')}
-          className={`px-4 py-1.5 rounded-lg text-sm font-bold border transition-colors ${view === 'schedule' ? 'bg-purple-800/60 text-purple-200 border-purple-600' : 'bg-slate-900 text-slate-400 border-slate-700 hover:text-white'}`}
+          className={`px-4 py-2 rounded-xl text-sm font-bold border transition-colors ${view === 'schedule' ? `bg-gradient-to-br ${section.gradient} text-white border-transparent shadow-lg` : 'bg-slate-900 text-slate-400 border-slate-800 hover:text-white hover:border-slate-600'}`}
         >
           🗓 排程檢視
         </button>
@@ -413,7 +446,7 @@ export default function SaraProductionBoard({ sectionId, sectionName }: { sectio
         ) : (
           <div className="flex flex-col lg:flex-row gap-4 items-start">
             {/* 左：群組選單 */}
-            <div className="w-full lg:w-64 shrink-0 bg-slate-950 border border-slate-800 rounded-xl p-2 flex lg:flex-col gap-1.5 overflow-x-auto lg:overflow-x-visible lg:max-h-[calc(100vh-320px)] lg:overflow-y-auto">
+            <div className="w-full lg:w-64 shrink-0 bg-slate-900 border border-slate-800 rounded-2xl p-3 flex lg:flex-col gap-1.5 overflow-x-auto lg:overflow-x-visible lg:max-h-[calc(100vh-320px)] lg:overflow-y-auto">
               {schedGroups.map(([key, rows]) => (
                 <button
                   key={key}
@@ -440,55 +473,98 @@ export default function SaraProductionBoard({ sectionId, sectionName }: { sectio
                 >◀ 上週</button>
                 <button
                   onClick={() => setWeekOffset(0)}
-                  className={`px-3 py-1.5 rounded-lg border text-xs font-bold ${weekOffset === 0 ? 'bg-purple-800/60 text-purple-200 border-purple-600' : 'bg-slate-900 border-slate-700 text-slate-300 hover:text-white'}`}
+                  className={`px-3 py-1.5 rounded-lg border text-xs font-bold ${weekOffset === 0 ? `${section.accentBg} ${section.accentText} ${section.accentBorder}` : 'bg-slate-900 border-slate-700 text-slate-300 hover:text-white'}`}
                 >本週</button>
                 <button
                   onClick={() => setWeekOffset(o => o + 1)}
                   className="px-3 py-1.5 rounded-lg bg-slate-900 border border-slate-700 text-slate-300 text-xs hover:text-white hover:border-slate-500"
                 >下週 ▶</button>
                 <span className="text-xs text-slate-500 font-mono ml-2">
-                  {weekDates[0]?.slice(5)} ~ {weekDates[6]?.slice(5)}
-                  {weekOffset > 0 && <span className="ml-1 text-purple-400">（+{weekOffset} 週）</span>}
+                  {weekDates[0]?.slice(5)} ~ {weekDates[weekDates.length - 1]?.slice(5)}
+                  <span className="ml-1.5 text-slate-600">（週一～週五）</span>
+                  {weekOffset > 0 && <span className={`ml-1 ${section.accentText}`}>（+{weekOffset} 週）</span>}
                   {weekOffset < 0 && <span className="ml-1 text-slate-400">（{weekOffset} 週）</span>}
                 </span>
                 <span className="text-[10px] text-slate-600 ml-auto">本週共 {weekDates.reduce((s, d) => s + (selectedByDate.get(d)?.length ?? 0), 0)} 道工序</span>
               </div>
 
-              {/* 週曆格：一天一欄 */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-7 gap-2">
+              {/* 週曆格：一天一欄（週一～週五 5 欄，每欄夠寬放下模板尺寸的卡片）。
+                  欄內不再限制高度、不做內部捲動——工序多的日子直接往下延伸，由頁面本身捲動，
+                  避免出現多條內部捲軸把畫面切得很碎。 */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-5 gap-4 items-start">
                 {weekDates.map((date, i) => {
                   const rows = selectedByDate.get(date) ?? []
                   const isToday = date === todayStr
                   return (
-                    <div key={date} className={`rounded-xl border flex flex-col min-h-[120px] ${isToday ? 'border-purple-600 bg-purple-950/20' : 'border-slate-800 bg-slate-950'}`}>
-                      <div className={`px-2 py-1.5 border-b text-center ${isToday ? 'border-purple-700/50 bg-purple-900/30' : 'border-slate-800 bg-slate-900/60'}`}>
-                        <div className={`text-[10px] ${isToday ? 'text-purple-300' : 'text-slate-500'}`}>週{DOW_ZH[(i + 1) % 7]}</div>
-                        <div className={`text-xs font-bold font-mono ${isToday ? 'text-purple-200' : 'text-slate-300'}`}>{date.slice(5)}{isToday ? '・今天' : ''}</div>
+                    <div key={date} className={`rounded-2xl border flex flex-col min-h-[120px] ${isToday ? `${section.accentBorder} ${section.accentBg}` : 'border-slate-800 bg-slate-900/50'}`}>
+                      <div className={`px-3 py-3 border-b text-center ${isToday ? `${section.accentBorder} bg-white/[0.03]` : 'border-slate-800 bg-slate-900/60'}`}>
+                        <div className={`text-[11px] font-mono uppercase tracking-wider ${isToday ? section.accentText : 'text-slate-500'}`}>週{DOW_ZH[(i + 1) % 7]}</div>
+                        <div className={`text-sm font-bold font-mono mt-0.5 ${isToday ? 'text-white' : 'text-slate-300'}`}>{date.slice(5)}{isToday ? '・今天' : ''}</div>
                       </div>
-                      <div className="flex-1 p-1.5 space-y-1.5 overflow-y-auto max-h-[52vh]">
+                      <div className="flex-1 p-4 space-y-4">
                         {rows.length === 0 ? (
                           <div className="text-center text-slate-700 text-[10px] py-3">—</div>
                         ) : rows.map(r => {
                           const { machine, operator } = splitResource(r.resource_names)
                           const running = r.is_running === true || r.system_status === 'running'
+                          const dur = durationLabel(r.plan_start_time, r.plan_end_time)
+                          const where = schedMode === 'machine'
+                            ? (MACHINE_TO_GROUP.has(machine) ? machine : (r.workcenter_name || ''))
+                            : machine
                           return (
-                            <div key={r.jid} className={`p-1.5 rounded-lg border text-[10px] ${running ? 'bg-yellow-950/30 border-yellow-700/50' : 'bg-slate-900 border-slate-800'}`}>
-                              <div className="flex items-center justify-between gap-1 mb-0.5">
-                                <span className="font-mono text-slate-400">{planClock(r.plan_start_time)}–{planClock(r.plan_end_time)}</span>
-                                {running && <span className="relative flex h-1.5 w-1.5 shrink-0"><span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-yellow-400 opacity-75"></span><span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-yellow-400"></span></span>}
+                            // 卡片完全比照「產線電子看板」入口頁的卡片：漸層圖示磚 → 粗標題 →
+                            // 等寬大寫副標 → 說明文字 → 底部收尾行，外加光暈與 hover 上浮。
+                            <div
+                              key={r.jid}
+                              title={`${planClock(r.plan_start_time)}–${planClock(r.plan_end_time)}${dur ? `（${dur}）` : ''}\n${r.mo_nbr ?? ''}\n${r.product_name ?? ''}\n${r.job_name ?? ''}`}
+                              className={`group relative overflow-hidden rounded-2xl border bg-slate-900 p-6 transition-all duration-300 hover:-translate-y-1 hover:shadow-2xl ${
+                                running ? 'border-amber-600/60' : 'border-slate-800 hover:border-slate-600'
+                              }`}
+                            >
+                              {/* 背景光暈特效（同入口頁卡片）：進行中用琥珀，其餘用該區塊主色 */}
+                              <div className={`absolute top-0 right-0 w-32 h-32 bg-gradient-to-br ${running ? 'from-amber-500 to-orange-600' : section.gradient} opacity-20 blur-3xl group-hover:opacity-30 transition-opacity rounded-full -translate-y-1/2 translate-x-1/2 pointer-events-none`} />
+
+                              <div className="relative z-10">
+                                {/* 漸層圖示磚（同入口頁）：進行中用琥珀漸層＋脈動點，其餘用區塊主色 */}
+                                <div className={`w-12 h-12 rounded-xl bg-gradient-to-br ${running ? 'from-amber-500 to-orange-600' : section.gradient} flex items-center justify-center shadow-lg mb-4 group-hover:scale-110 transition-transform duration-300 relative`}>
+                                  <svg className="w-7 h-7 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d={section.iconPath} />
+                                  </svg>
+                                  {running && (
+                                    <span className="absolute -top-1 -right-1 flex h-3 w-3">
+                                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-300 opacity-75" />
+                                      <span className="relative inline-flex rounded-full h-3 w-3 bg-amber-400 border-2 border-slate-900" />
+                                    </span>
+                                  )}
+                                </div>
+
+                                {/* 粗標題：品號 */}
+                                <h3 className="text-lg font-bold text-white mb-1 group-hover:text-cyan-400 transition-colors break-all leading-snug">
+                                  {r.product_name || r.mo_nbr || '—'}
+                                </h3>
+
+                                {/* 等寬大寫副標：時間區間＋工時 */}
+                                <p className="text-xs font-mono text-slate-500 uppercase tracking-wider mb-4">
+                                  {planClock(r.plan_start_time)}–{planClock(r.plan_end_time)}
+                                  {dur && <span className="ml-1.5 text-slate-600">{dur}</span>}
+                                </p>
+
+                                {/* 說明文字：製令號／工序 */}
+                                <p className="text-slate-400 text-sm leading-relaxed mb-6 break-all">
+                                  <span className="font-mono">{r.mo_nbr || '—'}</span>
+                                  {r.job_name && <span className="text-slate-500">・{r.job_name}</span>}
+                                </p>
+
+                                {/* 底部收尾行：機台/人員在左、數量在右（同入口頁「檢視看板 →」位階） */}
+                                <div className="flex items-center justify-between gap-2 text-sm font-bold text-slate-500 group-hover:text-slate-300 transition-colors">
+                                  <span className="truncate">{[where, operator].filter(Boolean).join('・') || '—'}</span>
+                                  {r.qty != null && (
+                                    <span className="font-mono shrink-0 text-slate-400">
+                                      {r.qty.toLocaleString()}<span className="text-slate-600 font-normal ml-0.5">件</span>
+                                    </span>
+                                  )}
+                                </div>
                               </div>
-                              <div className="font-mono font-bold text-cyan-300 truncate" title={r.mo_nbr ?? undefined}>{r.mo_nbr || '—'}</div>
-                              <div className="text-white font-semibold truncate" title={r.product_name ?? undefined}>{r.product_name || '—'}</div>
-                              <div className="text-slate-400 truncate">{r.job_name || '—'}</div>
-                              <div className="flex items-center justify-between gap-1 mt-0.5 text-slate-500">
-                                <span className="truncate">
-                                  {schedMode === 'machine'
-                                    ? (MACHINE_TO_GROUP.has(machine) ? machine : (r.workcenter_name || ''))
-                                    : machine}
-                                </span>
-                                <span className="text-emerald-300 font-mono shrink-0">{r.qty != null ? r.qty.toLocaleString() : '—'}</span>
-                              </div>
-                              {operator && <div className="text-slate-500 truncate">👤 {operator}</div>}
                             </div>
                           )
                         })}
