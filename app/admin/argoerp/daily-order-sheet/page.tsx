@@ -3430,11 +3430,24 @@ export default function DailyOrderSheetPage() {
           continue
         }
 
-        // 找訂單資料夾之後、以 #項號 開頭的品項資料夾
+        // 取項號：兩種實際存在的擺法都要支援
+        //   (a) 訂單資料夾之後有「#項號…」的品項資料夾（原本只支援這種）
+        //   (b) 沒有品項資料夾，項號直接寫在檔名裡，如
+        //       「印刷/【商品示意圖】SO260828017#3_….pdf」
+        //       —— 2026-09-02 使用者回報 SO260828017 在 RO 資料夾找得到卻沒比對出來，
+        //       原因就是這種擺法被判成「缺 #項號 資料夾」而整批跳過。
         let itemNumber: number | null = null
         for (let i = orderIdx + 1; i < segments.length - 1; i++) {
           const m = segments[i].match(ITEM_FOLDER_PATTERN)
           if (m) { itemNumber = parseInt(m[1], 10); break }
+        }
+        if (itemNumber === null) {
+          // 優先取「訂單號緊接 #項號」（最明確）；退而求其次取檔名裡任一個 #數字
+          const upperName = fileName.toUpperCase()
+          const tight = upperName.match(new RegExp(`${orderNumber.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*#\\s*0*(\\d+)`))
+          const loose = tight ? null : fileName.match(/#\s*0*(\d+)/)
+          const m = tight ?? loose
+          if (m) itemNumber = parseInt(m[1], 10)
         }
         if (itemNumber === null) { skip.noItemFolder++; continue }
 
@@ -3459,7 +3472,7 @@ export default function DailyOrderSheetPage() {
       const diagParts: string[] = []
       if (skip.notSketchName > 0) diagParts.push(`檔名沒有「商品示意圖」${skip.notSketchName} 個`)
       if (skip.noOrder > 0) diagParts.push(`路徑找不到本出單表的訂單號 ${skip.noOrder} 個`)
-      if (skip.noItemFolder > 0) diagParts.push(`缺 #項號 資料夾 ${skip.noItemFolder} 個`)
+      if (skip.noItemFolder > 0) diagParts.push(`資料夾與檔名都找不到 #項號 ${skip.noItemFolder} 個`)
       if (skip.noPrintFolder > 0) diagParts.push(`不在「印刷」資料夾下 ${skip.noPrintFolder} 個`)
       if (skip.inDesignFolder > 0) diagParts.push(`在「美編」資料夾下（依規則排除）${skip.inDesignFolder} 個`)
       const diagText = diagParts.length > 0 ? `｜略過原因：${diagParts.join('、')}` : ''
