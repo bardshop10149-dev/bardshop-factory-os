@@ -321,7 +321,9 @@ export default function SaraProductionBoard({ sectionId, sectionName }: { sectio
     const base = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()))
     const dow = base.getUTCDay() // 0=日
     base.setUTCDate(base.getUTCDate() - (dow === 0 ? 6 : dow - 1) + weekOffset * 7)
-    return Array.from({ length: 7 }, (_, i) => {
+    // 只顯示週一～週五：週末產線不排程、空欄佔掉版面寬度，去掉之後每欄才有足夠寬度
+    // 放下與入口頁一致尺寸的卡片（2026-09-02 生管指示）
+    return Array.from({ length: 5 }, (_, i) => {
       const d = new Date(base)
       d.setUTCDate(base.getUTCDate() + i)
       return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`
@@ -478,25 +480,28 @@ export default function SaraProductionBoard({ sectionId, sectionName }: { sectio
                   className="px-3 py-1.5 rounded-lg bg-slate-900 border border-slate-700 text-slate-300 text-xs hover:text-white hover:border-slate-500"
                 >下週 ▶</button>
                 <span className="text-xs text-slate-500 font-mono ml-2">
-                  {weekDates[0]?.slice(5)} ~ {weekDates[6]?.slice(5)}
-                  {weekOffset > 0 && <span className="ml-1 text-purple-400">（+{weekOffset} 週）</span>}
+                  {weekDates[0]?.slice(5)} ~ {weekDates[weekDates.length - 1]?.slice(5)}
+                  <span className="ml-1.5 text-slate-600">（週一～週五）</span>
+                  {weekOffset > 0 && <span className={`ml-1 ${section.accentText}`}>（+{weekOffset} 週）</span>}
                   {weekOffset < 0 && <span className="ml-1 text-slate-400">（{weekOffset} 週）</span>}
                 </span>
                 <span className="text-[10px] text-slate-600 ml-auto">本週共 {weekDates.reduce((s, d) => s + (selectedByDate.get(d)?.length ?? 0), 0)} 道工序</span>
               </div>
 
-              {/* 週曆格：一天一欄 */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-7 gap-3">
+              {/* 週曆格：一天一欄（週一～週五 5 欄，每欄夠寬放下模板尺寸的卡片）。
+                  欄內不再限制高度、不做內部捲動——工序多的日子直接往下延伸，由頁面本身捲動，
+                  避免出現多條內部捲軸把畫面切得很碎。 */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-5 gap-4 items-start">
                 {weekDates.map((date, i) => {
                   const rows = selectedByDate.get(date) ?? []
                   const isToday = date === todayStr
                   return (
                     <div key={date} className={`rounded-2xl border flex flex-col min-h-[120px] ${isToday ? `${section.accentBorder} ${section.accentBg}` : 'border-slate-800 bg-slate-900/50'}`}>
-                      <div className={`px-2 py-2 border-b text-center ${isToday ? `${section.accentBorder} bg-white/[0.03]` : 'border-slate-800 bg-slate-900/60'}`}>
-                        <div className={`text-[10px] ${isToday ? section.accentText : 'text-slate-500'}`}>週{DOW_ZH[(i + 1) % 7]}</div>
-                        <div className={`text-xs font-bold font-mono ${isToday ? 'text-white' : 'text-slate-300'}`}>{date.slice(5)}{isToday ? '・今天' : ''}</div>
+                      <div className={`px-3 py-3 border-b text-center ${isToday ? `${section.accentBorder} bg-white/[0.03]` : 'border-slate-800 bg-slate-900/60'}`}>
+                        <div className={`text-[11px] font-mono uppercase tracking-wider ${isToday ? section.accentText : 'text-slate-500'}`}>週{DOW_ZH[(i + 1) % 7]}</div>
+                        <div className={`text-sm font-bold font-mono mt-0.5 ${isToday ? 'text-white' : 'text-slate-300'}`}>{date.slice(5)}{isToday ? '・今天' : ''}</div>
                       </div>
-                      <div className="flex-1 p-2.5 space-y-3 overflow-y-auto max-h-[58vh]">
+                      <div className="flex-1 p-4 space-y-4">
                         {rows.length === 0 ? (
                           <div className="text-center text-slate-700 text-[10px] py-3">—</div>
                         ) : rows.map(r => {
@@ -507,48 +512,51 @@ export default function SaraProductionBoard({ sectionId, sectionName }: { sectio
                             ? (MACHINE_TO_GROUP.has(machine) ? machine : (r.workcenter_name || ''))
                             : machine
                           return (
-                            // 卡片結構完全比照「產線電子看板」入口頁的卡片：
-                            // 深色面 + 細邊框 + 大圓角 + 寬鬆內距 + 光暈，內容依序為
-                            // 等寬大寫小標（時間）→ 粗標題（品號）→ 說明文字（製令/工序）→ 底部一行（機台/數量）。
-                            // 卡片一律等高（不再依工時縮放），維持模板的整齊節奏。
+                            // 卡片完全比照「產線電子看板」入口頁的卡片：漸層圖示磚 → 粗標題 →
+                            // 等寬大寫副標 → 說明文字 → 底部收尾行，外加光暈與 hover 上浮。
                             <div
                               key={r.jid}
                               title={`${planClock(r.plan_start_time)}–${planClock(r.plan_end_time)}${dur ? `（${dur}）` : ''}\n${r.mo_nbr ?? ''}\n${r.product_name ?? ''}\n${r.job_name ?? ''}`}
-                              className={`group relative overflow-hidden rounded-2xl border bg-slate-900 p-4 transition-all duration-300 hover:-translate-y-0.5 hover:shadow-2xl ${
+                              className={`group relative overflow-hidden rounded-2xl border bg-slate-900 p-6 transition-all duration-300 hover:-translate-y-1 hover:shadow-2xl ${
                                 running ? 'border-amber-600/60' : 'border-slate-800 hover:border-slate-600'
                               }`}
                             >
                               {/* 背景光暈特效（同入口頁卡片）：進行中用琥珀，其餘用該區塊主色 */}
-                              <div className={`absolute top-0 right-0 w-20 h-20 bg-gradient-to-br ${running ? 'from-amber-500 to-orange-600' : section.gradient} opacity-20 blur-3xl group-hover:opacity-30 transition-opacity rounded-full -translate-y-1/2 translate-x-1/2 pointer-events-none`} />
+                              <div className={`absolute top-0 right-0 w-32 h-32 bg-gradient-to-br ${running ? 'from-amber-500 to-orange-600' : section.gradient} opacity-20 blur-3xl group-hover:opacity-30 transition-opacity rounded-full -translate-y-1/2 translate-x-1/2 pointer-events-none`} />
 
                               <div className="relative z-10">
-                                {/* 等寬大寫小標：時間區間＋工時長度 */}
-                                <div className="flex items-center gap-2">
-                                  <p className="text-[10px] font-mono text-slate-500 uppercase tracking-wider">
-                                    {planClock(r.plan_start_time)}–{planClock(r.plan_end_time)}
-                                    {dur && <span className="ml-1.5 text-slate-600">{dur}</span>}
-                                  </p>
+                                {/* 漸層圖示磚（同入口頁）：進行中用琥珀漸層＋脈動點，其餘用區塊主色 */}
+                                <div className={`w-12 h-12 rounded-xl bg-gradient-to-br ${running ? 'from-amber-500 to-orange-600' : section.gradient} flex items-center justify-center shadow-lg mb-4 group-hover:scale-110 transition-transform duration-300 relative`}>
+                                  <svg className="w-7 h-7 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d={section.iconPath} />
+                                  </svg>
                                   {running && (
-                                    <span className="relative flex h-1.5 w-1.5 shrink-0 ml-auto">
-                                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75" />
-                                      <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-amber-400" />
+                                    <span className="absolute -top-1 -right-1 flex h-3 w-3">
+                                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-300 opacity-75" />
+                                      <span className="relative inline-flex rounded-full h-3 w-3 bg-amber-400 border-2 border-slate-900" />
                                     </span>
                                   )}
                                 </div>
 
-                                {/* 粗標題：品號（同入口頁的區塊名稱位階） */}
-                                <h3 className="text-sm font-bold text-white truncate mt-1 group-hover:text-cyan-400 transition-colors">
+                                {/* 粗標題：品號 */}
+                                <h3 className="text-lg font-bold text-white mb-1 group-hover:text-cyan-400 transition-colors break-all leading-snug">
                                   {r.product_name || r.mo_nbr || '—'}
                                 </h3>
 
+                                {/* 等寬大寫副標：時間區間＋工時 */}
+                                <p className="text-xs font-mono text-slate-500 uppercase tracking-wider mb-4">
+                                  {planClock(r.plan_start_time)}–{planClock(r.plan_end_time)}
+                                  {dur && <span className="ml-1.5 text-slate-600">{dur}</span>}
+                                </p>
+
                                 {/* 說明文字：製令號／工序 */}
-                                <p className="text-slate-400 text-[11px] leading-relaxed mt-1.5 truncate">
+                                <p className="text-slate-400 text-sm leading-relaxed mb-6 break-all">
                                   <span className="font-mono">{r.mo_nbr || '—'}</span>
                                   {r.job_name && <span className="text-slate-500">・{r.job_name}</span>}
                                 </p>
 
-                                {/* 底部一行：機台在左、數量在右（同入口頁「檢視看板 →」的收尾位階） */}
-                                <div className="flex items-center justify-between gap-2 mt-3 text-[11px] font-bold text-slate-500">
+                                {/* 底部收尾行：機台/人員在左、數量在右（同入口頁「檢視看板 →」位階） */}
+                                <div className="flex items-center justify-between gap-2 text-sm font-bold text-slate-500 group-hover:text-slate-300 transition-colors">
                                   <span className="truncate">{[where, operator].filter(Boolean).join('・') || '—'}</span>
                                   {r.qty != null && (
                                     <span className="font-mono shrink-0 text-slate-400">
