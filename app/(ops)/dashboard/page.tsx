@@ -2,69 +2,22 @@
 
 import Link from 'next/link'
 import { NavButton } from '../../../components/NavButton'
+import { PRODUCTION_SECTIONS } from '../../../config/productionSections'
 
-const CATEGORIES = [
-  {
-    id: 'printing',
-    name: '印刷產程',
-    eng: 'Printing Schedule',
-    desc: 'UV直噴、熱昇華、數位印刷排程監控',
-    color: 'from-blue-600 to-cyan-600',
-    icon: (
-      <svg className="w-8 h-8 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2.4-9h6.2M6 13h2m0 0l-.867 12.142A2 2 0 015.138 21H3.862a2 2 0 01-1.995-1.858L3 7m2 6h14m-2 0l.867 12.142A2 2 0 0018.862 21h1.276a2 2 0 001.995-1.858L21 7" /></svg>
-    )
-  },
-  {
-    id: 'laser',
-    name: '雷切產程',
-    eng: 'Laser Cutting',
-    desc: '雷射切割、板材裁切與雕刻進度',
-    color: 'from-red-600 to-rose-600',
-    icon: (
-      <svg className="w-8 h-8 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>
-    )
-  },
-  {
-    id: 'post',
-    name: '後加工產程',
-    eng: 'Post Processing',
-    desc: '壓克力貼合、配件組裝、打磨',
-    color: 'from-purple-600 to-violet-600',
-    icon: (
-      <svg className="w-8 h-8 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" /></svg>
-    )
-  },
-  {
-    id: 'packaging', 
-    name: '包裝產程',
-    eng: 'Packaging',
-    desc: '產品包裝、貼標、出貨前準備',
-    color: 'from-orange-500 to-amber-500',
-    icon: (
-      <svg className="w-8 h-8 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4" /></svg>
-    )
-  },
-  {
-    id: 'outsourced',
-    name: '委外產程',
-    eng: 'Outsourced',
-    desc: '外部廠商加工進度、轉運站追蹤',
-    color: 'from-slate-600 to-gray-500',
-    icon: (
-      <svg className="w-8 h-8 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4" /></svg>
-    )
-  },
-  {
-    id: 'changping',
-    name: '常平產程',
-    eng: 'Changping Factory',
-    desc: '常平廠區專屬生產與進度追蹤',
-    color: 'from-emerald-600 to-teal-600',
-    icon: (
-      <svg className="w-8 h-8 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3.055 11H5a2 2 0 012 2v1a2 2 0 002 2 2 2 0 012 2v2.945M8 3.935V5.5A2.5 2.5 0 0010.5 8h.5a2 2 0 012 2 2 2 0 104 0 2 2 0 012-2h1.064M15 20.488V18a2 2 0 012-2h3.064M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
-    )
-  },
-]
+// 卡片內容與配色統一取自 config/productionSections，與點進去之後的排程看板共用同一組
+// 主色與圖示（原本這裡自帶一份重複的定義，兩邊會各自漂移）
+const CATEGORIES = PRODUCTION_SECTIONS.map(s => ({
+  id: s.id,
+  name: `${s.name}產程`,
+  eng: s.eng,
+  desc: s.desc,
+  color: s.gradient,
+  icon: (
+    <svg className="w-8 h-8 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d={s.iconPath} />
+    </svg>
+  ),
+}))
 
 export default function DashboardMenuPage() {
   return (
