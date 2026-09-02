@@ -3,6 +3,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Link from 'next/link'
 import SoOrderModal from '../../components/SoOrderModal'
+import PoOrderModal from '../../components/PoOrderModal'
+import PrintDiagramGallery from '../../components/PrintDiagramGallery'
 import {
   DUE_THRESHOLDS,
   PAYMENT_PCTS,
@@ -40,12 +42,12 @@ function SoCell({ so, asset, onOpenOrder, onOpenFiles }: {
 }) {
   if (!so) return <>—</>
   return (
-    <span className="inline-flex items-center gap-1 max-w-full">
+    <span className="inline-flex items-start gap-1 max-w-full">
       <button
         type="button"
         onClick={() => onOpenOrder(so)}
-        title="查看訂單詳情"
-        className="truncate hover:underline hover:text-sky-300"
+        title="查看訂單詳情＋示意圖"
+        className="text-left break-all leading-tight hover:underline hover:text-sky-300"
       >{so}</button>
       {asset && asset.count > 0 && (
         <button
@@ -59,40 +61,8 @@ function SoCell({ so, asset, onOpenOrder, onOpenFiles }: {
   )
 }
 
-/**
- * 示意圖預覽視窗——只放示意圖，別的不放（Snow 2026-09-02）。
- * 縮圖走 argo-tool（bardshop-argo.com，HTTPS）：它有現成的 NAS 示意圖 API 與縮圖端點，
- * HTTPS→HTTPS 沒有 Mixed Content 問題，所以能直接 <img> 內嵌；圖不落地雲端，
- * 傳輸走 Cloudflare Tunnel 加密通道（與現場列印示意圖同一條路）。
- */
+/** 示意圖快速預覽視窗（📷 徽章）：內容為共用縮圖牆 PrintDiagramGallery */
 function PrintAssetsModal({ so, onClose }: { so: string; onClose: () => void }) {
-  const [preview, setPreview] = useState<{
-    argoBase: string; token: string
-    groups: { item_name: string | null; files: { filename: string; so_folder_name: string; ext: string | null }[] }[]
-  } | null>(null)
-  const [previewErr, setPreviewErr] = useState('')
-  const [previewLoading, setPreviewLoading] = useState(true)
-
-  useEffect(() => {
-    let alive = true
-    setPreviewLoading(true)
-    setPreviewErr('')
-    fetch(`/api/purchasing/print-preview?so=${encodeURIComponent(so)}`)
-      .then((res) => res.json())
-      .then((json: { success?: boolean; argoBase?: string; token?: string; groups?: never[]; error?: string }) => {
-        if (!alive) return
-        if (!json.success) throw new Error(json.error || '查詢失敗')
-        setPreview({ argoBase: json.argoBase!, token: json.token!, groups: json.groups ?? [] })
-      })
-      .catch((e: unknown) => { if (alive) setPreviewErr(e instanceof Error ? e.message : '查詢失敗') })
-      .finally(() => { if (alive) setPreviewLoading(false) })
-    return () => { alive = false }
-  }, [so])
-
-  const thumbUrl = (f: { filename: string; so_folder_name: string }, dim: number) =>
-    `${preview!.argoBase}/api/nas/diagram_thumbnail?so_folder=${encodeURIComponent(f.so_folder_name)}`
-    + `&filename=${encodeURIComponent(f.filename)}&max_dim=${dim}&token=${encodeURIComponent(preview!.token)}`
-
   return (
     <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4" onClick={onClose}>
       <div
@@ -106,37 +76,8 @@ function PrintAssetsModal({ so, onClose }: { so: string; onClose: () => void }) 
           </div>
           <button type="button" onClick={onClose} className="text-slate-400 hover:text-white text-xl leading-none px-1">×</button>
         </div>
-
         <div className="overflow-y-auto px-5 py-4">
-          {previewLoading && <p className="text-sm text-slate-500 py-8 text-center">向 ARGO 工具站查詢示意圖中…</p>}
-          {!previewLoading && previewErr && (
-            <p className="text-sm text-amber-300/90 py-4 text-center">⚠ {previewErr}</p>
-          )}
-          {!previewLoading && !previewErr && preview && preview.groups.length === 0 && (
-            <p className="text-sm text-slate-500 py-4 text-center">NAS 上還沒有這張單的示意圖。</p>
-          )}
-          {!previewLoading && !previewErr && preview && preview.groups.map((gp) => (
-            <div key={gp.item_name ?? ''} className="mb-4">
-              {gp.item_name && <p className="text-xs text-slate-400 mb-2">{gp.item_name}</p>}
-              <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
-                {gp.files.map((f) => (
-                  <a
-                    key={`${f.so_folder_name}|${f.filename}`}
-                    href={thumbUrl(f, 1600)}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    title={`${f.filename}（點開大圖）`}
-                    className="block rounded-lg border border-slate-700 bg-slate-950 overflow-hidden hover:border-sky-600"
-                  >
-                    {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img src={thumbUrl(f, 360)} alt={f.filename} loading="lazy"
-                      className="w-full h-44 object-contain bg-black/30" />
-                    <div className="px-2 py-1.5 text-[11px] text-slate-400 truncate">{f.filename}</div>
-                  </a>
-                ))}
-              </div>
-            </div>
-          ))}
+          <PrintDiagramGallery so={so} />
         </div>
       </div>
     </div>
@@ -322,6 +263,7 @@ export default function PurchasingPage() {
   const [soModalId, setSoModalId] = useState<string | null>(null)
   const [printAssets, setPrintAssets] = useState<Record<string, PrintAssetGroup>>({})
   const [printFocus, setPrintFocus] = useState<string | null>(null)
+  const [poModalId, setPoModalId] = useState<string | null>(null)   // 請購/採購單明細
   /** 已查過索引的 SO（含查無者），避免重複打 API */
   const queriedSoRef = useRef<Set<string>>(new Set())
 
@@ -1105,7 +1047,7 @@ export default function PurchasingPage() {
                           </span>
                         )}
                       </td>
-                      <td className="px-2 py-2 font-mono text-sky-400/90 whitespace-nowrap overflow-hidden text-ellipsis">
+                      <td className="px-2 py-2 font-mono text-sky-400/90">
                         <SoCell
                           so={l.so_no}
                           asset={l.so_no ? printAssets[l.so_no.trim().toUpperCase()] : undefined}
@@ -1113,8 +1055,13 @@ export default function PurchasingPage() {
                           onOpenFiles={setPrintFocus}
                         />
                       </td>
-                      <td className="px-2 py-2 font-mono text-violet-300/90 whitespace-nowrap overflow-hidden text-ellipsis">
-                        {l.pr_no ? `${l.pr_no}${l.pr_sub ? `-${l.pr_sub}` : ''}` : '—'}
+                      <td className="px-2 py-2 font-mono text-violet-300/90">
+                        {l.pr_no ? (
+                          <button type="button" onClick={() => setPoModalId(l.pr_no!)} title="查看請購單明細"
+                            className="text-left break-all leading-tight hover:underline hover:text-violet-100">
+                            {`${l.pr_no}${l.pr_sub ? `-${l.pr_sub}` : ''}`}
+                          </button>
+                        ) : '—'}
                       </td>
                       <td className="px-2 py-2 overflow-hidden">{renderProgressCell(l)}</td>
                       <td className="px-2 py-2 overflow-hidden"><ReceiveCell l={l} /></td>
@@ -1286,7 +1233,7 @@ export default function PurchasingPage() {
                             {l.unit ? <span className="text-slate-500 ml-1">{l.unit}</span> : null}
                           </td>
                           <td className="px-2 py-2 text-slate-300 whitespace-nowrap">{fmt(l.due_date)}</td>
-                          <td className="px-2 py-2 font-mono text-sky-400/90 whitespace-nowrap">
+                          <td className="px-2 py-2 font-mono text-sky-400/90">
                             <SoCell
                               so={l.so_no}
                               asset={l.so_no ? printAssets[l.so_no.trim().toUpperCase()] : undefined}
@@ -1294,7 +1241,14 @@ export default function PurchasingPage() {
                               onOpenFiles={setPrintFocus}
                             />
                           </td>
-                          <td className="px-2 py-2 font-mono text-violet-300/90 whitespace-nowrap">{l.pr_no ? `${l.pr_no}${l.pr_sub ? `-${l.pr_sub}` : ''}` : '—'}</td>
+                          <td className="px-2 py-2 font-mono text-violet-300/90">
+                            {l.pr_no ? (
+                              <button type="button" onClick={() => setPoModalId(l.pr_no!)} title="查看請購單明細"
+                                className="text-left break-all leading-tight hover:underline hover:text-violet-100">
+                                {`${l.pr_no}${l.pr_sub ? `-${l.pr_sub}` : ''}`}
+                              </button>
+                            ) : '—'}
+                          </td>
                           <td className="px-2 py-2 whitespace-nowrap">
                             {(() => {
                               const m = milestoneOf(l)
@@ -1321,7 +1275,20 @@ export default function PurchasingPage() {
       )}
 
       {/* 訂單詳情（現成元件，與出單表同一顆） */}
-      {soModalId && <SoOrderModal projectId={soModalId} onClose={() => setSoModalId(null)} />}
+      {/* 訂單詳情＋示意圖（Snow 2026-09-02：點單號一次看到兩者） */}
+      {soModalId && (
+        <SoOrderModal
+          projectId={soModalId}
+          onClose={() => setSoModalId(null)}
+          extraContent={(
+            <div>
+              <p className="text-sm font-semibold text-white mb-3">示意圖</p>
+              <PrintDiagramGallery so={soModalId} />
+            </div>
+          )}
+        />
+      )}
+      {poModalId && <PoOrderModal docNo={poModalId} onClose={() => setPoModalId(null)} />}
       {/* 示意圖路徑清單 */}
       {printFocus && <PrintAssetsModal so={printFocus} onClose={() => setPrintFocus(null)} />}
     </main>
