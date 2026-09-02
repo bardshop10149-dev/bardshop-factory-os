@@ -244,6 +244,14 @@ const PRESERVE_IF_EMPTY = [
  * 把外部 PATCH（批備料、採購比對等）已經寫入的狀態洗掉。
  * 抽自 app/api/argoerp/daily-order-sheet/route.ts 的 POST handler，供該路由與
  * 美編出單表 16:00 轉入排程共用。
+ *
+ * 【2026-09-02 修法】已透過改單專區更正過（corrected）或手動轉換過廠區
+ * （factory_changed）的既有列，若 incoming row 的 row_key 跟它不同（代表 incoming
+ * 是還沒看到這次更正、來自舊瀏覽器分頁快取狀態的資料——例如更正後、有人在還沒重新整理
+ * 的分頁上按了「一鍵全同步」/「採購比對」/「轉換廠區」，整批 POST 回來的還是更正前的
+ * factory/row_key），整列以既有（已更正）列為準、忽略 incoming，避免更正被悄悄蓋掉
+ * 又查無痕跡（原本的 PRESERVE_IF_EMPTY 只在特定欄位「為空」時才保留，對 factory 這種
+ * incoming 已經有值、但值是舊的欄位完全沒有防護）。
  */
 export function mergeIncomingRowsWithExisting(
   existingRows: Array<Record<string, unknown>>,
@@ -278,6 +286,12 @@ export function mergeIncomingRowsWithExisting(
       }
     }
     if (!ex) return row
+
+    // 已更正過的列，若 incoming 帶的是不同 row_key（=更正前的舊身分），整列以既有為準
+    if ((ex.corrected === true || ex.factory_changed === true) && ex.row_key !== row.row_key) {
+      return ex
+    }
+
     const out = { ...row }
     for (const field of PRESERVE_IF_EMPTY) {
       if ((out[field] === null || out[field] === undefined || out[field] === '') && ex[field] != null && ex[field] !== '') {
