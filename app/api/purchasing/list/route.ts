@@ -53,6 +53,10 @@ export async function GET(request: NextRequest) {
         srcNo: params.get('srcNo'),
         sortDue: sortRaw === 'asc' || sortRaw === 'desc' ? sortRaw : null,
         sortOrder: sortOrderRaw === 'asc' || sortOrderRaw === 'desc' ? sortOrderRaw : null,
+        shipped: (() => {
+          const v = params.get('shipped')
+          return v === 'yes' || v === 'no' ? v : 'all'
+        })(),
       }
       const { lines, total } = await loadPoPage(supabase, p, timings)
       return NextResponse.json({ success: true, lines, total, page: p.page, pageSize: p.pageSize, timings })
