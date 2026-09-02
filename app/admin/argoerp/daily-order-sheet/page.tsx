@@ -3397,9 +3397,36 @@ export default function DailyOrderSheetPage() {
         sheetRows.map(r => (r.order_number || '').trim().toUpperCase()).filter(Boolean)
       )].sort((a, b) => b.length - a.length) // 長的優先，避免短單號誤命中長單號的一部分
 
+      // 該訂單在本出單表上實際存在的序號——項號一律要用這份清單驗證，不能盲目解析數字。
+      // 【2026-09-02】檔名如「…SO260828017#312色極彩掛軸.pdf」時，項號 #3 後面緊接產品名
+      // 「12色…」，單純用 /#(\d+)/ 會貪婪讀成 312，與真實序號 3 永遠對不上而靜默跳過。
+      const lineNosByOrder = new Map<string, Set<number>>()
+      for (const r of sheetRows) {
+        const on = (r.order_number || '').trim().toUpperCase()
+        const ln = parseInt((r.line_no_input || r.match_line_no || '').trim(), 10)
+        if (!on || !Number.isFinite(ln)) continue
+        if (!lineNosByOrder.has(on)) lineNosByOrder.set(on, new Set())
+        lineNosByOrder.get(on)!.add(ln)
+      }
+      /**
+       * 從一串數字裡解析出「這張訂單上真實存在的序號」：
+       * 由長到短逐一嘗試前綴，取第一個能對到出單表序號的（"312" 在序號為 3、4 時解析成 3）。
+       * 都對不到時回 null，寧可略過也不要配到錯的列。
+       */
+      const resolveItemNo = (digits: string, orderNumber: string): number | null => {
+        const known = lineNosByOrder.get(orderNumber)
+        if (!known || known.size === 0) return null
+        for (let len = digits.length; len >= 1; len--) {
+          const n = parseInt(digits.slice(0, len), 10)
+          if (Number.isFinite(n) && known.has(n)) return n
+        }
+        return null
+      }
+
       // 診斷用計數：使用者要知道「沒抓到的原因」，逐項統計被跳過的理由
-      const skip = { notImage: 0, notSketchName: 0, noOrder: 0, noItemFolder: 0, noPrintFolder: 0, inDesignFolder: 0 }
+      const skip = { notImage: 0, notSketchName: 0, noOrder: 0, noItemFolder: 0, noPrintFolder: 0, inDesignFolder: 0, itemNoNotOnSheet: 0 }
       const unmatchedOrderSamples = new Set<string>()
+      const unmatchedItemSamples = new Set<string>()
 
       const filesByKey = new Map<string, File[]>()
       const allFiles = Array.from(files)
@@ -3436,20 +3463,31 @@ export default function DailyOrderSheetPage() {
         //       「印刷/【商品示意圖】SO260828017#3_….pdf」
         //       —— 2026-09-02 使用者回報 SO260828017 在 RO 資料夾找得到卻沒比對出來，
         //       原因就是這種擺法被判成「缺 #項號 資料夾」而整批跳過。
-        let itemNumber: number | null = null
+        // 兩個來源抓到的數字串，一律交給 resolveItemNo 用出單表上的真實序號驗證，
+        // 避免「#3」後面緊接產品名數字（如 #312色…）被讀成 312。
+        let itemDigits: string | null = null
         for (let i = orderIdx + 1; i < segments.length - 1; i++) {
           const m = segments[i].match(ITEM_FOLDER_PATTERN)
-          if (m) { itemNumber = parseInt(m[1], 10); break }
+          if (m) { itemDigits = m[1]; break }
         }
-        if (itemNumber === null) {
+        if (itemDigits === null) {
           // 優先取「訂單號緊接 #項號」（最明確）；退而求其次取檔名裡任一個 #數字
           const upperName = fileName.toUpperCase()
           const tight = upperName.match(new RegExp(`${orderNumber.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*#\\s*0*(\\d+)`))
           const loose = tight ? null : fileName.match(/#\s*0*(\d+)/)
           const m = tight ?? loose
-          if (m) itemNumber = parseInt(m[1], 10)
+          if (m) itemDigits = m[1]
         }
-        if (itemNumber === null) { skip.noItemFolder++; continue }
+        if (itemDigits === null) { skip.noItemFolder++; continue }
+
+        const itemNumber = resolveItemNo(itemDigits, orderNumber)
+        if (itemNumber === null) {
+          // 有找到數字但對不到這張訂單在出單表上的任何序號——多半是命名不符預期，
+          // 記下來讓使用者知道是「項號對不上」而不是「沒有這個檔案」
+          skip.itemNoNotOnSheet++
+          if (unmatchedItemSamples.size < 5) unmatchedItemSamples.add(`${orderNumber}#${itemDigits}`)
+          continue
+        }
 
         // 品項資料夾跟檔案之間必須經過「印刷」，且不能經過「美編」。
         // 用 includes 而非完全相等，容忍「3.印刷」「印刷檔」這類命名變化
@@ -3473,6 +3511,7 @@ export default function DailyOrderSheetPage() {
       if (skip.notSketchName > 0) diagParts.push(`檔名沒有「商品示意圖」${skip.notSketchName} 個`)
       if (skip.noOrder > 0) diagParts.push(`路徑找不到本出單表的訂單號 ${skip.noOrder} 個`)
       if (skip.noItemFolder > 0) diagParts.push(`資料夾與檔名都找不到 #項號 ${skip.noItemFolder} 個`)
+      if (skip.itemNoNotOnSheet > 0) diagParts.push(`項號對不到出單表序號 ${skip.itemNoNotOnSheet} 個${unmatchedItemSamples.size > 0 ? `（如 ${[...unmatchedItemSamples].slice(0, 3).join('、')}）` : ''}`)
       if (skip.noPrintFolder > 0) diagParts.push(`不在「印刷」資料夾下 ${skip.noPrintFolder} 個`)
       if (skip.inDesignFolder > 0) diagParts.push(`在「美編」資料夾下（依規則排除）${skip.inDesignFolder} 個`)
       const diagText = diagParts.length > 0 ? `｜略過原因：${diagParts.join('、')}` : ''
