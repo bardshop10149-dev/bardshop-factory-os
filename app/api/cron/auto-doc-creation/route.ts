@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { getSupabaseAdminClient, formatSupabaseAdminError } from '@/lib/supabaseAdmin'
 import { argoConfigured, argoQuery, argoImport } from '@/lib/argoQuery'
 
-// 每天 17:10（台北時間）自動轉單：當天出單表的委外列→請購單（IFAF105）、
+// 每天 17:01（台北時間）自動轉單：當天出單表的委外列→請購單（IFAF105）、
 // 常平列→採購單（IFAF024）。邏輯完整搬自兩個手動頁面（order-batch-export-pr /
 // order-batch-export-c），表頭全部用頁面的固定預設值；設計決策（2026-08-24 與使用者確認）：
 //   * 常平採購單價一律 0

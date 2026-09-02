@@ -23,7 +23,7 @@
     },
     {
       "path": "/api/cron/auto-doc-creation",
-      "schedule": "10 9 * * *"
+      "schedule": "1 9 * * *"
     },
     {
       "path": "/api/cron/sara-wip-sync",
@@ -35,7 +35,7 @@
     },
     {
       "path": "/api/cron/sara-process-gen",
-      "schedule": "50 9 * * *"
+      "schedule": "5 9 * * *"
     },
     {
       "path": "/api/cron/line-daily-po-pr",

@@ -823,7 +823,7 @@ export default function ProcessGenPage() {
     })
   }, [singleRows, moNumber, quantity, itemCode])
 
-  // ── 自動轉換待處理清單（每日 17:50 排程跳過的列，導覽列徽章數字的明細）──
+  // ── 自動轉換待處理清單（每日 17:05 排程跳過的列，導覽列徽章數字的明細）──
 
   interface PendingItem {
     sheet_date: string; order_number: string; item_code: string; item_spec: string
@@ -869,7 +869,7 @@ export default function ProcessGenPage() {
 
       <div>
         <h1 className="text-xl font-bold text-emerald-300">SARA 工序格式產生器</h1>
-        <p className="text-xs text-slate-400 mt-0.5">由每日出單表 CSV 查詢途程，自動產出塔台 SARA_101 匯入格式・每日 17:50 自動轉換當日出單表</p>
+        <p className="text-xs text-slate-400 mt-0.5">由每日出單表 CSV 查詢途程，自動產出塔台 SARA_101 匯入格式・每日 17:05 自動轉換當日出單表</p>
       </div>
 
       {/* ── 交期優先度規則（Priority Level）── */}
@@ -924,7 +924,7 @@ export default function ProcessGenPage() {
           )}
           {prioMsg && <span className={`text-[11px] ${prioMsg.startsWith('✅') ? 'text-emerald-400' : 'text-red-400'}`}>{prioMsg}</span>}
         </div>
-        <p className="text-[10px] text-slate-600 mt-1.5">依「交期距今天數」自動填入 SARA 的 Priority Level（1-99，越大越優先）；手動產生與每日 17:50 自動轉換都套用此規則，超出最大天數的不填由塔台自行排程。</p>
+        <p className="text-[10px] text-slate-600 mt-1.5">依「交期距今天數」自動填入 SARA 的 Priority Level（1-99，越大越優先）；手動產生與每日 17:05 自動轉換都套用此規則，超出最大天數的不填由塔台自行排程。</p>
       </div>
 
       {/* ── 自動轉換待處理清單（導覽列紅色數字的明細）── */}
