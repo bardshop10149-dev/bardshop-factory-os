@@ -3327,6 +3327,8 @@ export default function DailyOrderSheetPage() {
   const [sketchBulkPhase, setSketchBulkPhase] = useState<'picking' | 'scanning' | 'uploading'>('picking')
   const [sketchBulkProgress, setSketchBulkProgress] = useState({ done: 0, total: 0 })
   const sketchPickerWatchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // 保存最近一次比對的診斷資訊，讓成功訊息也能一併說明「哪些檔案被略過、為什麼」
+  const sketchDiagRef = useRef<{ skip: Record<string, number>; diagText: string; hintText: string } | null>(null)
 
   const clearSketchPickerWatchdog = useCallback(() => {
     if (sketchPickerWatchdogRef.current) {
@@ -3385,8 +3387,19 @@ export default function DailyOrderSheetPage() {
     setSketchMsg(`📂 已取得資料夾內容，共 ${files.length} 個檔案，開始掃描…`)
     try {
       const IMAGE_OR_PDF = /\.(jpe?g|png|gif|webp|bmp|pdf)$/i
-      const ORDER_PATTERN = /SO\d+/i
       const ITEM_FOLDER_PATTERN = /^#0*(\d+)/ // 品項資料夾以 #項號 開頭，如「#1透明拼板壓克力立牌…」
+
+      // 【2026-09-02 修正】原本用 /SO\d+/ 從路徑抓訂單號，但這個規則要求 SO 後面直接接數字，
+      // 因此 SOB…／SOA…（SO 後面是字母）這類單號完全比對不到，檔案被靜默跳過——
+      // 實測近 60 天出單表 1,862 個單號中有 525 個（28.2%）踩到，SOB 佔 490 個。
+      // 改為「直接拿本出單表上的訂單號去路徑裡找」，不再猜單號格式，任何前綴都能正確辨識。
+      const sheetOrderNumbers = [...new Set(
+        sheetRows.map(r => (r.order_number || '').trim().toUpperCase()).filter(Boolean)
+      )].sort((a, b) => b.length - a.length) // 長的優先，避免短單號誤命中長單號的一部分
+
+      // 診斷用計數：使用者要知道「沒抓到的原因」，逐項統計被跳過的理由
+      const skip = { notImage: 0, notSketchName: 0, noOrder: 0, noItemFolder: 0, noPrintFolder: 0, inDesignFolder: 0 }
+      const unmatchedOrderSamples = new Set<string>()
 
       const filesByKey = new Map<string, File[]>()
       const allFiles = Array.from(files)
@@ -3397,15 +3410,25 @@ export default function DailyOrderSheetPage() {
         const relPath = (file as unknown as { webkitRelativePath?: string }).webkitRelativePath || file.name
         const segments = relPath.split('/')
         const fileName = segments[segments.length - 1]
-        if (!IMAGE_OR_PDF.test(fileName)) continue
-        if (!fileName.includes('商品示意圖')) continue
+        if (!IMAGE_OR_PDF.test(fileName)) { skip.notImage++; continue }
+        if (!fileName.includes('商品示意圖')) { skip.notSketchName++; continue }
 
-        // 找訂單資料夾（含 SO 單號的路徑片段）
-        const orderIdx = segments.findIndex(seg => ORDER_PATTERN.test(seg))
-        if (orderIdx === -1) continue
-        const orderMatch = segments[orderIdx].match(ORDER_PATTERN)
-        if (!orderMatch) continue
-        const orderNumber = orderMatch[0].toUpperCase()
+        // 找訂單資料夾：路徑片段裡出現本出單表任一訂單號即算命中
+        const upperSegments = segments.map(s => s.toUpperCase())
+        let orderNumber: string | null = null
+        let orderIdx = -1
+        for (let i = 0; i < upperSegments.length - 1 && orderNumber === null; i++) {
+          for (const on of sheetOrderNumbers) {
+            if (upperSegments[i].includes(on)) { orderNumber = on; orderIdx = i; break }
+          }
+        }
+        if (orderNumber === null) {
+          skip.noOrder++
+          // 記錄看起來像單號、但不在本出單表上的路徑片段，供使用者判斷是不是選錯資料夾/日期
+          const guess = segments.find(s => /^[A-Z]{2,3}\d{6,}/i.test(s))
+          if (guess && unmatchedOrderSamples.size < 5) unmatchedOrderSamples.add(guess)
+          continue
+        }
 
         // 找訂單資料夾之後、以 #項號 開頭的品項資料夾
         let itemNumber: number | null = null
@@ -3413,12 +3436,14 @@ export default function DailyOrderSheetPage() {
           const m = segments[i].match(ITEM_FOLDER_PATTERN)
           if (m) { itemNumber = parseInt(m[1], 10); break }
         }
-        if (itemNumber === null) continue
+        if (itemNumber === null) { skip.noItemFolder++; continue }
 
-        // 品項資料夾跟檔案之間必須經過「印刷」，且不能經過「美編」
+        // 品項資料夾跟檔案之間必須經過「印刷」，且不能經過「美編」。
+        // 用 includes 而非完全相等，容忍「3.印刷」「印刷檔」這類命名變化
+        //（原本要求資料夾名稱完全等於「印刷」，稍有命名差異就整批漏掉）。
         const middleSegments = segments.slice(orderIdx + 1, segments.length - 1)
-        if (!middleSegments.includes('印刷')) continue
-        if (middleSegments.includes('美編')) continue
+        if (middleSegments.some(s => s.includes('美編'))) { skip.inDesignFolder++; continue }
+        if (!middleSegments.some(s => s.includes('印刷'))) { skip.noPrintFolder++; continue }
 
         const key = `${orderNumber}#${itemNumber}`
         const arr = filesByKey.get(key) ?? []
@@ -3429,8 +3454,22 @@ export default function DailyOrderSheetPage() {
         // 讓出主執行緒一個 tick，讓按鈕上的掃描進度數字有機會重繪，避免大資料夾時畫面看起來凍結
         await new Promise(resolve => setTimeout(resolve, 0))
       }
+
+      // 掃描結果診斷：把「為什麼沒抓到」講清楚，而不是只回一句沒找到
+      const diagParts: string[] = []
+      if (skip.notSketchName > 0) diagParts.push(`檔名沒有「商品示意圖」${skip.notSketchName} 個`)
+      if (skip.noOrder > 0) diagParts.push(`路徑找不到本出單表的訂單號 ${skip.noOrder} 個`)
+      if (skip.noItemFolder > 0) diagParts.push(`缺 #項號 資料夾 ${skip.noItemFolder} 個`)
+      if (skip.noPrintFolder > 0) diagParts.push(`不在「印刷」資料夾下 ${skip.noPrintFolder} 個`)
+      if (skip.inDesignFolder > 0) diagParts.push(`在「美編」資料夾下（依規則排除）${skip.inDesignFolder} 個`)
+      const diagText = diagParts.length > 0 ? `｜略過原因：${diagParts.join('、')}` : ''
+      const hintText = unmatchedOrderSamples.size > 0
+        ? `｜資料夾內出現但不在本日出單表的單號範例：${[...unmatchedOrderSamples].slice(0, 3).join('、')}`
+        : ''
+      sketchDiagRef.current = { skip, diagText, hintText }
+
       if (filesByKey.size === 0) {
-        setSketchMsg('❌ 這個資料夾裡沒有找到符合「訂單資料夾 / #項號資料夾 / 印刷 / 商品示意圖⋯」結構的檔案')
+        setSketchMsg(`❌ 沒有找到符合「訂單資料夾 / #項號資料夾 / 印刷 / 檔名含商品示意圖」的檔案（掃描 ${allFiles.length} 個檔案）${diagText}${hintText}`)
         return
       }
 
@@ -3441,7 +3480,17 @@ export default function DailyOrderSheetPage() {
         return filesByKey.has(`${r.order_number.toUpperCase()}#${parseInt(lineNo, 10)}`)
       })
       if (targets.length === 0) {
-        setSketchMsg('ℹ️ 沒有可自動比對的列（可能都已經有示意圖，或這份出單表沒有符合的訂單）')
+        // 分辨兩種完全不同的「沒有可比對」情況，讓使用者知道該不該再處理
+        const alreadyHave = sheetRows.filter(r => {
+          const ln = r.match_line_no || r.line_no_input || ''
+          return r.order_number && ln && getSketchUrls(r).length > 0
+            && filesByKey.has(`${r.order_number.toUpperCase()}#${parseInt(ln, 10)}`)
+        }).length
+        setSketchMsg(
+          alreadyHave > 0
+            ? `ℹ️ 資料夾裡找到 ${filesByKey.size} 組示意圖，但對應的 ${alreadyHave} 列都已經有圖了（不覆蓋既有結果）${diagText}`
+            : `ℹ️ 資料夾裡找到 ${filesByKey.size} 組示意圖，但都不屬於本日出單表上的訂單${diagText}${hintText}`
+        )
         return
       }
 
@@ -3473,15 +3522,25 @@ export default function DailyOrderSheetPage() {
             : r
         )
         setSheetRows(next)
-        const res = await fetch('/api/argoerp/daily-order-sheet', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ sheet_date: selectedDate, raw_text: currentRawText, rows: next }),
+        // 只送這次真的有比對到圖的列（差異寫入，不整份覆蓋）
+        autoSave.queue({
+          updates: [...urlsByRowKey.entries()].map(([rowKey, urls]) => ({
+            row_key: rowKey, sketch_urls: urls, sketch_url: urls[0],
+          })),
         })
-        const j = await res.json()
-        if (!res.ok || !j.success) throw new Error(j.error || `HTTP ${res.status}`)
+        const ok = await autoSave.flushNow()
+        if (!ok) throw new Error('圖片已上傳，但寫回出單表失敗，請點「重試儲存」')
         const totalImgs = Array.from(urlsByRowKey.values()).reduce((s, a) => s + a.length, 0)
-        setSketchMsg(`✅ 已自動比對 ${urlsByRowKey.size} / ${targets.length} 筆列（共 ${totalImgs} 張示意圖）`)
+        // 沒抓到的列一併列出來，讓使用者知道還有哪幾筆要人工處理（而不是只看到一個成功數字）
+        const stillMissing = next.filter(r => {
+          if (getSketchUrls(r).length > 0) return false
+          const ln = r.match_line_no || r.line_no_input || ''
+          return !!(r.order_number && ln)
+        })
+        const missingText = stillMissing.length > 0
+          ? `｜仍無示意圖 ${stillMissing.length} 筆：${stillMissing.slice(0, 5).map(r => `${r.order_number}#${r.match_line_no || r.line_no_input}`).join('、')}${stillMissing.length > 5 ? ' 等' : ''}`
+          : ''
+        setSketchMsg(`✅ 已比對 ${urlsByRowKey.size} 筆列、共 ${totalImgs} 張圖${missingText}${diagText}`)
       } else {
         setSketchMsg('❌ 全部上傳失敗，請檢查網路後重試')
       }
@@ -3491,7 +3550,7 @@ export default function DailyOrderSheetPage() {
       setSketchBulkMatching(false)
       setTimeout(() => setSketchMsg(''), 6000)
     }
-  }, [sheetRows, selectedDate, currentRawText, uploadSketchFile, getSketchUrls, clearSketchPickerWatchdog])
+  }, [sheetRows, uploadSketchFile, getSketchUrls, clearSketchPickerWatchdog, autoSave])
 
   const handleChangeFactory = useCallback((idx: number, factory: 'T' | 'C' | 'O') => {
     setSheetRows(prev => prev.map((r, i) => {

@@ -146,6 +146,37 @@ function planClock(ts: string | null): string {
 
 const DOW_ZH = ['日', '一', '二', '三', '四', '五', '六'] as const
 
+// ── 排程卡片：高度依實際工時等比例呈現 ──────────────────────────────
+// 原本所有卡片一樣高，導致 15 分鐘的工序和 9.5 小時的工序長得一模一樣——
+// 排程看板卻看不出時間長短，整面只剩一堆同樣的方塊。改為以工時換算高度後，
+// 「哪台機被佔滿、哪裡有空檔」可以一眼看出來。
+const PX_PER_HOUR = 26          // 每小時對應的高度
+const MIN_CARD_PX = 44          // 最短卡片仍要放得下一行時間＋一行單號
+const MAX_CARD_PX = 260         // 跨夜長工序的高度上限，避免單張卡片撐爆整欄
+
+/** 兩個 'YYYY-MM-DD HH:mm' 之間的分鐘數；無法解析時回 null */
+function planDurationMin(start: string | null, end: string | null): number | null {
+  if (!start || !end) return null
+  const s = Date.parse(start.replace(' ', 'T') + ':00Z')
+  const e = Date.parse(end.replace(' ', 'T') + ':00Z')
+  if (!Number.isFinite(s) || !Number.isFinite(e)) return null
+  const min = (e - s) / 60000
+  return min > 0 ? min : null
+}
+
+/** 依工時算卡片高度（px），並回傳是否為「短到只能顯示精簡內容」的卡片 */
+function cardMetrics(start: string | null, end: string | null) {
+  const min = planDurationMin(start, end)
+  if (min == null) return { height: MIN_CARD_PX, compact: true, durationText: '' }
+  const raw = (min / 60) * PX_PER_HOUR
+  const height = Math.max(MIN_CARD_PX, Math.min(MAX_CARD_PX, raw))
+  const h = Math.floor(min / 60)
+  const m = Math.round(min % 60)
+  const durationText = h > 0 ? (m > 0 ? `${h}h${m}m` : `${h}h`) : `${m}m`
+  // 高度不足以完整顯示 4 行資訊時，只顯示時間＋製令號
+  return { height, compact: height < 76, durationText }
+}
+
 export default function SaraProductionBoard({ sectionId, sectionName }: { sectionId: string, sectionName: string }) {
   const boardWorkcenters = useMemo(() => SECTION_WORKCENTERS[sectionId] ?? [], [sectionId])
   const [activeRows, setActiveRows] = useState<WipRow[]>([])
@@ -471,24 +502,62 @@ export default function SaraProductionBoard({ sectionId, sectionName }: { sectio
                         ) : rows.map(r => {
                           const { machine, operator } = splitResource(r.resource_names)
                           const running = r.is_running === true || r.system_status === 'running'
+                          const { height, compact, durationText } = cardMetrics(r.plan_start_time, r.plan_end_time)
+                          const where = schedMode === 'machine'
+                            ? (MACHINE_TO_GROUP.has(machine) ? machine : (r.workcenter_name || ''))
+                            : machine
                           return (
-                            <div key={r.jid} className={`p-1.5 rounded-lg border text-[10px] ${running ? 'bg-yellow-950/30 border-yellow-700/50' : 'bg-slate-900 border-slate-800'}`}>
-                              <div className="flex items-center justify-between gap-1 mb-0.5">
-                                <span className="font-mono text-slate-400">{planClock(r.plan_start_time)}–{planClock(r.plan_end_time)}</span>
-                                {running && <span className="relative flex h-1.5 w-1.5 shrink-0"><span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-yellow-400 opacity-75"></span><span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-yellow-400"></span></span>}
-                              </div>
-                              <div className="font-mono font-bold text-cyan-300 truncate" title={r.mo_nbr ?? undefined}>{r.mo_nbr || '—'}</div>
-                              <div className="text-white font-semibold truncate" title={r.product_name ?? undefined}>{r.product_name || '—'}</div>
-                              <div className="text-slate-400 truncate">{r.job_name || '—'}</div>
-                              <div className="flex items-center justify-between gap-1 mt-0.5 text-slate-500">
-                                <span className="truncate">
-                                  {schedMode === 'machine'
-                                    ? (MACHINE_TO_GROUP.has(machine) ? machine : (r.workcenter_name || ''))
-                                    : machine}
+                            <div
+                              key={r.jid}
+                              style={{ height: `${height}px` }}
+                              title={`${planClock(r.plan_start_time)}–${planClock(r.plan_end_time)}${durationText ? `（${durationText}）` : ''}\n${r.mo_nbr ?? ''}\n${r.product_name ?? ''}\n${r.job_name ?? ''}`}
+                              className={`relative pl-2 pr-2 py-1.5 rounded-md border overflow-hidden flex flex-col ${
+                                running
+                                  ? 'bg-amber-950/40 border-amber-700/60'
+                                  : 'bg-slate-900/70 border-slate-800 hover:border-slate-600'
+                              } transition-colors`}
+                            >
+                              {/* 左側色條：進行中用琥珀色，其餘用低飽和的靛色，避免整面高飽和刺眼 */}
+                              <span className={`absolute left-0 top-0 bottom-0 w-[3px] rounded-l-md ${running ? 'bg-amber-400' : 'bg-indigo-500/50'}`} />
+                              {/* 第一行：時間（主）＋工時長度（次），右側進行中指示 */}
+                              <div className="flex items-baseline gap-1.5 shrink-0">
+                                <span className="font-mono text-[11px] text-slate-200 font-semibold tabular-nums">
+                                  {planClock(r.plan_start_time)}
                                 </span>
-                                <span className="text-emerald-300 font-mono shrink-0">{r.qty != null ? r.qty.toLocaleString() : '—'}</span>
+                                {durationText && <span className="font-mono text-[9px] text-slate-500">{durationText}</span>}
+                                {running && (
+                                  <span className="relative flex h-1.5 w-1.5 shrink-0 ml-auto">
+                                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75" />
+                                    <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-amber-400" />
+                                  </span>
+                                )}
                               </div>
-                              {operator && <div className="text-slate-500 truncate">👤 {operator}</div>}
+                              {/* 第二行：品號（真正的主角，最大最亮） */}
+                              <div className="text-[11px] leading-tight font-semibold text-slate-100 truncate shrink-0">
+                                {r.product_name || r.mo_nbr || '—'}
+                              </div>
+                              {!compact && (
+                                <>
+                                  {/* 第三行：製令號（次要，字級小、色調沉） */}
+                                  <div className="font-mono text-[9px] text-slate-500 truncate shrink-0">
+                                    {r.mo_nbr || '—'}
+                                  </div>
+                                  {/* 底部：工序／機台在左，數量獨立靠右並加單位，避免和機台編號誤讀成一組 */}
+                                  <div className="mt-auto flex items-end justify-between gap-1 pt-0.5 shrink-0">
+                                    <span className="text-[9px] text-slate-500 truncate">
+                                      {[r.job_name, where].filter(Boolean).join('・')}
+                                    </span>
+                                    {r.qty != null && (
+                                      <span className="text-[9px] font-mono text-slate-400 shrink-0">
+                                        {r.qty.toLocaleString()}<span className="text-slate-600 ml-0.5">件</span>
+                                      </span>
+                                    )}
+                                  </div>
+                                  {operator && height > 110 && (
+                                    <div className="text-[9px] text-slate-600 truncate shrink-0">{operator}</div>
+                                  )}
+                                </>
+                              )}
                             </div>
                           )
                         })}
