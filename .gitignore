@@ -45,3 +45,6 @@ next-env.d.ts
 
 # one-off debug/probe scripts (never commit — may contain secrets)
 _tmp_*
+
+# 本機開發工具設定（launch.json 等為個人環境，不入版控）
+.claude/

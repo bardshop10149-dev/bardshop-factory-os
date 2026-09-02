@@ -110,3 +110,10 @@ body {
     color: #000 !important;
   }
 }
+
+/* 深色主題：原生 date input 的小日曆圖示預設黑色，深底上幾乎看不見 → 反白。
+   invert(0.75) 而非 1：全白太刺眼，調成接近其他 slate-300 圖示的亮度。 */
+input[type="date"]::-webkit-calendar-picker-indicator {
+  filter: invert(0.75);
+  cursor: pointer;
+}

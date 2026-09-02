@@ -21,6 +21,9 @@ interface Props {
   onClose: () => void
 }
 
+/** 請購單號前綴：MPO(委外)、MP+數字、PR 皆屬請購；其餘（PO/POC…）視為採購單 */
+const isPrDoc = (docNo: string) => /^(MPO|MP\d|PR)/.test(docNo.toUpperCase())
+
 export default function PoOrderModal({ docNo, onClose }: Props) {
   const [lines, setLines] = useState<PoLine[]>([])
   const [loading, setLoading] = useState(false)
@@ -39,7 +42,7 @@ export default function PoOrderModal({ docNo, onClose }: Props) {
       .then(({ data, error: err }) => {
         setLoading(false)
         if (err) { setError(err.message); return }
-        const label = docNo.toUpperCase().startsWith('MPO') ? '請購單' : '採購單'
+        const label = isPrDoc(docNo) ? '請購單' : '採購單'
         if (!data || data.length === 0) { setError(`查無${label}明細`); return }
         setLines(data as PoLine[])
       })
@@ -54,7 +57,7 @@ export default function PoOrderModal({ docNo, onClose }: Props) {
   if (!docNo) return null
 
   const first = lines[0]
-  const isPr = docNo.toUpperCase().startsWith('MPO')
+  const isPr = isPrDoc(docNo)
   const typeLabel = isPr ? '請購單' : '採購單'
   const vendor = first?.extra?.['TPN_PARTNER_ID'] as string | undefined
   const currency = first?.extra?.['CURRENCY'] as string | undefined
