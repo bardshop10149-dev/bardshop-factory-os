@@ -42,6 +42,10 @@
       "schedule": "40 9 * * *"
     },
     {
+      "path": "/api/cron/sara-buffer-check",
+      "schedule": "45 9 * * *"
+    },
+    {
       "path": "/api/cron/line-daily-po-pr",
       "schedule": "0 10 * * *"
     },
