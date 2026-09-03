@@ -290,7 +290,10 @@ function SketchCard({ url, label }: { url: string; label: string }) {
       <div style={{ fontSize: '12px', color: '#888', marginBottom: '4px' }}>示意圖 — {label}</div>
       <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden' }}>
         {/* eslint-disable-next-line @next/next/no-img-element -- blob/dataURL 本機圖片，非遠端資源，不適用 next/image */}
-        <img src={url} alt={label} style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }} />
+        {/* maxHeight 用絕對長度（mm）而非 100%：列印時外層 flex 容器的高度不是確定值，
+            百分比高度會算不出來而退回 auto，圖片就以原始尺寸撐出紙張、被裁掉只印出一部分。
+            265mm = A4 高 297mm 扣掉卡片上下留白與上方標題行後的可用高度。 */}
+        <img src={url} alt={label} style={{ maxWidth: '100%', maxHeight: '265mm', objectFit: 'contain' }} />
       </div>
     </div>
   )
@@ -851,6 +854,21 @@ function MoPrintContent() {
           }
           /* 示意圖頁：只去掉陰影，不動顏色 */
           .sketch-card { box-shadow: none !important; }
+          /* 示意圖頁絕對不可被切開跨頁——上面 .mo-card 的 break-inside:auto 是為了讓單據
+             的長表格能流到下一頁，但套在圖片上就會把圖從中間切斷、只印出一半
+             （2026-09-03 使用者回報）。這裡明確覆寫成不允許斷開。 */
+          .sketch-card {
+            break-inside: avoid !important;
+            page-break-inside: avoid !important;
+          }
+          /* 圖片本身也不可被切開 */
+          .sketch-card img {
+            break-inside: avoid !important;
+            page-break-inside: avoid !important;
+            max-height: 265mm !important;
+            max-width: 100% !important;
+            object-fit: contain !important;
+          }
           .mo-card:not(.sketch-card) th,
           .mo-card:not(.sketch-card) td,
           .mo-card:not(.sketch-card) tr,
