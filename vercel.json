@@ -38,6 +38,10 @@
       "schedule": "5 9 * * *"
     },
     {
+      "path": "/api/cron/sara-process-gen",
+      "schedule": "40 9 * * *"
+    },
+    {
       "path": "/api/cron/line-daily-po-pr",
       "schedule": "0 10 * * *"
     },
