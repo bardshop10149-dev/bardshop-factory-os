@@ -45,6 +45,39 @@ const REPLY_CONFIG: Record<string, { label: string; class: string; icon: ReactNo
 
 const DEFAULT_ITEM: ProductItem = { item_code: '', item_name: '', quantity: '' }
 
+/**
+ * 由「已儲存的詢問單」產生 LINE 通知訊息。
+ * 原本只有剛送出時才用表單當下的值組一次訊息，離開頁面後就再也拿不到——
+ * 改成純函式吃 record，讓列表上每一筆隨時都能重新產生並複製（2026-09-03 業務端需求）。
+ */
+function buildNotifyMessage(r: Inquiry): string {
+  const items = r.items ?? []
+  const itemLines = items.length > 0
+    ? items.map(it => `　・${it.item_name || it.item_code || '—'}　x${it.quantity || '-'}`).join('\n')
+    : '　・—'
+  const statusText = r.planner_reply === 'approved' ? '🟢 已同意'
+    : r.planner_reply === 'rejected' ? '🔴 已拒絕'
+    : r.planner_reply === 'completed' ? '🟣 已完成'
+    : '🟡 待回覆'
+  return [
+    '📋 【產期詢問/預留單】',
+    '',
+    `📅 填單日期：${r.inquiry_date || '-'}`,
+    `👤 承辦業務：${r.salesperson || '-'}`,
+    `🏢 客戶名稱：${r.customer_name || '-'}`,
+    `🔢 訂單編號：${r.order_no || '-'}`,
+    `📦 品項：\n${itemLines}`,
+    `📅 預計發單日：${r.planned_order_date || '-'}`,
+    `📅 希望交期(寄出日期)：${r.expected_date || '-'}`,
+    `💬 備註：${r.remark || '-'}`,
+    '',
+    `🏢 部門：${r.department || '-'}`,
+    `👤 填單人：${r.author_name}`,
+    `📌 狀態：${statusText}`,
+    `🕐 建立時間：${new Date(r.created_at).toLocaleString('zh-TW', { timeZone: 'Asia/Taipei' })}`,
+  ].join('\n')
+}
+
 const inputCls = 'w-full bg-[#08101c] border border-[#1e2a3f] rounded-[10px] px-4 py-3.5 text-[14px] leading-relaxed text-[#e7edf5] placeholder-[#445064] focus:outline-none focus:border-amber-500/70 transition-colors'
 const labelCls = 'block text-[11px] font-bold uppercase tracking-wider text-[#5f7290] mb-2.5'
 
@@ -57,6 +90,32 @@ export default function ScheduleInquiryPage() {
   const [currentUser, setCurrentUser] = useState<{ real_name: string; department: string; email: string } | null>(null)
   const [notifyPreview, setNotifyPreview] = useState<string | null>(null)
   const [copied, setCopied] = useState(false)
+  // 列表展開／逐筆複製：離開頁面後仍要看得到完整內容、也能重新複製通知訊息
+  const [expandedIds, setExpandedIds] = useState<Set<number>>(new Set())
+  const [copiedId, setCopiedId] = useState<number | null>(null)
+
+  const toggleExpand = (id: number) => setExpandedIds(prev => {
+    const next = new Set(prev)
+    if (next.has(id)) next.delete(id); else next.add(id)
+    return next
+  })
+
+  const copyRecordMessage = async (record: Inquiry) => {
+    const text = buildNotifyMessage(record)
+    try {
+      await navigator.clipboard.writeText(text)
+    } catch {
+      // 非安全來源或瀏覽器不支援時的退路
+      const ta = document.createElement('textarea')
+      ta.value = text
+      document.body.appendChild(ta)
+      ta.select()
+      document.execCommand('copy')
+      document.body.removeChild(ta)
+    }
+    setCopiedId(record.id)
+    setTimeout(() => setCopiedId(prev => (prev === record.id ? null : prev)), 2000)
+  }
 
   // 表單欄位
   const [formDate, setFormDate] = useState(() => new Date().toISOString().slice(0, 10))
@@ -204,26 +263,24 @@ export default function ScheduleInquiryPage() {
         return
       }
 
-      const now = new Date().toLocaleString('zh-TW', { timeZone: 'Asia/Taipei' })
-      const itemLines = cleanItems.map(it => `　・${it.item_name || it.item_code || '—'}　x${it.quantity || '-'}`).join('\n')
-      const lines = [
-        '📋 【產期詢問/預留單】',
-        '',
-        `📅 填單日期：${formDate}`,
-        `👤 承辦業務：${formSalesperson.trim() || '-'}`,
-        `🏢 客戶名稱：${formCustomer.trim()}`,
-        `🔢 訂單編號：${formOrderNo.trim() || '-'}`,
-        `📦 品項：\n${itemLines}`,
-        `📅 預計發單日：${formPlannedOrderDate || '-'}`,
-        `📅 希望交期(寄出日期)：${formExpectedDate || '-'}`,
-        `💬 備註：${formRemark.trim() || '-'}`,
-        '',
-        `🏢 部門：${currentUser.department}`,
-        `👤 填單人：${currentUser.real_name}`,
-        `📌 狀態：🟡 待回覆`,
-        `🕐 建立時間：${now}`,
-      ]
-      setNotifyPreview(lines.join('\n'))
+      // 用與列表相同的產生器組訊息，確保「送出後預覽」與「事後從列表複製」格式一致
+      setNotifyPreview(buildNotifyMessage({
+        id: -1,
+        inquiry_date: formDate,
+        customer_name: formCustomer.trim(),
+        order_no: formOrderNo.trim(),
+        salesperson: formSalesperson.trim(),
+        items: cleanItems,
+        planned_order_date: formPlannedOrderDate,
+        expected_date: formExpectedDate,
+        remark: formRemark.trim(),
+        planner_reply: null,
+        author_name: currentUser.real_name,
+        author_email: currentUser.email,
+        department: currentUser.department,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      }))
 
       resetForm()
       fetchRecords()
@@ -555,12 +612,25 @@ export default function ScheduleInquiryPage() {
               const replyInfo = REPLY_CONFIG[record.planner_reply ?? 'pending']
               const items = record.items || []
               const itemsSummary = items.map(it => `${it.item_name || it.item_code || '—'}x${it.quantity || '-'}`).join('、')
+              const expanded = expandedIds.has(record.id)
               return (
+                <div key={record.id} className="bg-[#0b1220] border border-[#1c2739] rounded-[12px] overflow-hidden">
                 <div
-                  key={record.id}
-                  className="bg-[#0b1220] border border-[#1c2739] rounded-[12px] px-4 py-2.5 flex items-center gap-3 min-w-0"
+                  className="px-4 py-2.5 flex items-center gap-3 min-w-0"
                   title={record.remark ? `備註：${record.remark}` : undefined}
                 >
+                  {/* 展開/收合 */}
+                  <button
+                    onClick={() => toggleExpand(record.id)}
+                    aria-expanded={expanded}
+                    title={expanded ? '收合詳細資訊' : '展開詳細資訊'}
+                    className="shrink-0 w-5 h-5 flex items-center justify-center rounded text-[#5f7290] hover:text-white hover:bg-[#1c2739] transition-colors"
+                  >
+                    <svg className={`w-3.5 h-3.5 transition-transform ${expanded ? 'rotate-90' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
+                    </svg>
+                  </button>
+
                   {/* 狀態 */}
                   <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-bold border shrink-0 ${replyInfo.class}`}>
                     <span className="w-[11px] h-[11px]">{replyInfo.icon}</span>
@@ -608,6 +678,90 @@ export default function ScheduleInquiryPage() {
                   <span className="text-[11px] text-[#5f7290] shrink-0 whitespace-nowrap hidden lg:inline">
                     {record.author_name}・{new Date(record.created_at).toLocaleString('zh-TW', { month: '2-digit', day: '2-digit' })}
                   </span>
+
+                  {/* 複製通知訊息（不必展開也能直接複製） */}
+                  <button
+                    onClick={() => void copyRecordMessage(record)}
+                    title="複製此筆的通知訊息，可直接貼到 LINE 群組"
+                    className={`shrink-0 px-2 py-1 rounded-[6px] text-[11px] font-bold border transition-colors ${
+                      copiedId === record.id
+                        ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-400'
+                        : 'bg-[#101a2c] border-[#1c2739] text-[#7f93b3] hover:text-white hover:border-[#334a6b]'
+                    }`}
+                  >
+                    {copiedId === record.id ? '✅ 已複製' : '📋 複製'}
+                  </button>
+                </div>
+
+                {/* 展開後的詳細資訊 */}
+                {expanded && (
+                  <div className="border-t border-[#1c2739] bg-[#080e18] px-4 py-4">
+                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-x-6 gap-y-3 mb-4">
+                      {[
+                        ['填單日期', record.inquiry_date || '—'],
+                        ['承辦業務', record.salesperson || '—'],
+                        ['客戶名稱', record.customer_name || '—'],
+                        ['訂單編號', record.order_no || '（待補）'],
+                        ['預計發單日', record.planned_order_date || '—'],
+                        ['希望交期（寄出日期）', record.expected_date || '—'],
+                        ['填單人／部門', `${record.author_name}${record.department ? `／${record.department}` : ''}`],
+                        ['建立時間', new Date(record.created_at).toLocaleString('zh-TW', { timeZone: 'Asia/Taipei', hour12: false })],
+                      ].map(([label, value]) => (
+                        <div key={label} className="min-w-0">
+                          <div className="text-[10px] font-mono uppercase tracking-wider text-[#5f7290] mb-0.5">{label}</div>
+                          <div className="text-[13px] text-[#e7edf5] break-words">{value}</div>
+                        </div>
+                      ))}
+                    </div>
+
+                    <div className="mb-4">
+                      <div className="text-[10px] font-mono uppercase tracking-wider text-[#5f7290] mb-1.5">品項（{items.length}）</div>
+                      {items.length === 0 ? (
+                        <div className="text-[13px] text-[#5f7290]">—</div>
+                      ) : (
+                        <div className="rounded-[8px] border border-[#1c2739] overflow-hidden">
+                          <table className="w-full text-[12.5px]">
+                            <thead className="bg-[#101a2c] text-[#7f93b3]">
+                              <tr>
+                                <th className="text-left px-3 py-1.5 font-semibold w-40">品項編碼</th>
+                                <th className="text-left px-3 py-1.5 font-semibold">品名／規格</th>
+                                <th className="text-right px-3 py-1.5 font-semibold w-24">數量</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {items.map((it, i) => (
+                                <tr key={i} className="border-t border-[#1c2739]">
+                                  <td className="px-3 py-1.5 font-mono text-[#b7c4da] align-top">{it.item_code || '—'}</td>
+                                  <td className="px-3 py-1.5 text-[#e7edf5] break-words">{it.item_name || '—'}</td>
+                                  <td className="px-3 py-1.5 text-right font-mono text-[#e7edf5]">{it.quantity || '—'}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
+                    </div>
+
+                    <div>
+                      <div className="text-[10px] font-mono uppercase tracking-wider text-[#5f7290] mb-0.5">備註</div>
+                      <div className="text-[13px] text-[#e7edf5] whitespace-pre-wrap break-words">{record.remark || '—'}</div>
+                    </div>
+
+                    <div className="flex items-center gap-2 mt-4 pt-3 border-t border-[#1c2739]">
+                      <button
+                        onClick={() => void copyRecordMessage(record)}
+                        className={`px-3 py-1.5 rounded-[8px] text-xs font-bold border transition-colors ${
+                          copiedId === record.id
+                            ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-400'
+                            : 'bg-amber-500/15 border-amber-500/40 text-amber-400 hover:bg-amber-500/25'
+                        }`}
+                      >
+                        {copiedId === record.id ? '✅ 已複製！可貼到 LINE 群組' : '📋 複製通知訊息'}
+                      </button>
+                      <span className="text-[11px] text-[#5f7290]">複製後可直接貼到 LINE 群組通知相關人員</span>
+                    </div>
+                  </div>
+                )}
                 </div>
               )
             })}
