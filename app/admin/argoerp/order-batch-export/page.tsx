@@ -1089,28 +1089,60 @@ export default function OrderBatchExportPage() {
       if (!isSuccess) {
         const errorStr = typeof result.error === 'string' ? result.error : ''
 
-        // 製令單號已存在 ARGO（前次已成功上傳但 Supabase 補存失敗）
-        // → 不需重新上傳 ARGO，直接以 upsert 補存到總表即可
+        // ARGO 回報「製令單號已存在」——注意這是「整批的錯誤訊息」，通常只代表批次裡
+        // 「有某幾筆」重複，不代表整批都已存在。
+        //
+        // 【2026-09-03 修正】原本只要看到這個字串，就把整批 filteredRows 全部標記成
+        // 「已匯入製令」並移出清單。實際案例：38 筆裡只有 1 筆重複，ARGO 仍建立了其餘 37 筆，
+        // 但畫面顯示「38 筆已存在於 ERP（跳過重複上傳）」，語意與事實不符；更危險的是若 ARGO
+        // 整批拒絕、一筆都沒建立，這段一樣會把 38 筆全部標記成已匯入 → 這些單再也不會被上傳，
+        // 直接變成漏單且無人察覺。
+        //
+        // 改為逐筆向 ERP 求證：先觸發一次製令增量同步（讓剛剛可能已建立的製令進到鏡像表），
+        // 再查 erp_mo_lines 確認哪些製令號真的存在，只有確認存在的才標記完成；
+        // 查無的一律留在清單中並明確告知，讓使用者可以重試，不會靜默漏掉。
         if (errorStr.includes('製令單號已存在')) {
-          const nowStr = new Date().toLocaleString('zh-TW')
-          const records = buildSummaryRecords(filteredRows, nowStr, filteredMatch)
           try {
-            await saveRecordsToSummaryDbUpsert(records)
-            try { saveRecordsToSummaryLocal(records) } catch {}
-            const importedKeys = new Set(filteredRows.map(createSourceRowKey))
-            setSourceRows(prev => prev.filter(r => !importedKeys.has(createSourceRowKey(r))))
-            setSelectedRows(new Set())
-            if (loadedFromSheetDate) {
-              updateSheetRowStatuses(loadedFromSheetDate, filteredRows, '已匯入製令',
-                records.map(r => r.mo_number))
+            // 先同步，避免剛建立的製令還沒進鏡像表而被誤判成「不存在」
+            await fetch('/api/argoerp', {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ action: 'sync_mo', incrementalMinutes: 30 }),
+            }).catch(() => {})
+
+            const allRecords = buildSummaryRecords(filteredRows, new Date().toLocaleString('zh-TW'), filteredMatch)
+            const moNos = [...new Set(allRecords.map(r => r.mo_number).filter(Boolean))]
+            const { data: erpRows } = await supabase
+              .from('erp_mo_lines').select('project_id').in('project_id', moNos.length ? moNos : ['__none__'])
+            const confirmed = new Set((erpRows ?? []).map(r => r.project_id as string))
+
+            const okRecords = allRecords.filter(r => confirmed.has(r.mo_number))
+            const okRows = filteredRows.filter((_, i) => confirmed.has(allRecords[i]?.mo_number))
+            const failedRows = filteredRows.filter((_, i) => !confirmed.has(allRecords[i]?.mo_number))
+            const failedMoNos = allRecords.filter(r => !confirmed.has(r.mo_number)).map(r => r.mo_number)
+
+            if (okRecords.length > 0) {
+              await saveRecordsToSummaryDbUpsert(okRecords)
+              try { saveRecordsToSummaryLocal(okRecords) } catch {}
+              const importedKeys = new Set(okRows.map(createSourceRowKey))
+              setSourceRows(prev => prev.filter(r => !importedKeys.has(createSourceRowKey(r))))
+              if (loadedFromSheetDate) {
+                updateSheetRowStatuses(loadedFromSheetDate, okRows, '已匯入製令', okRecords.map(r => r.mo_number))
+              }
             }
-            const warningMsg = `⚠️ ${factoryLabel(factory)} ${records.length} 筆製令已存在於 ERP（跳過重複上傳），已補存至製令總表`
-            setSaveMsg(warningMsg)
-            alert(warningMsg)
-            setTimeout(() => setSaveMsg(''), 6000)
+            setSelectedRows(new Set())
+
+            const msg = failedRows.length === 0
+              ? `✅ ${factoryLabel(factory)} ${okRecords.length} 筆製令已確認存在於 ERP，已補存至製令總表`
+              : `⚠️ ${factoryLabel(factory)}：${okRecords.length} 筆已確認寫入 ERP 並補存總表；`
+                + `另有 ${failedRows.length} 筆在 ERP 查無，仍保留在清單中請重新匯入：\n`
+                + failedMoNos.slice(0, 8).join('\n')
+                + (failedMoNos.length > 8 ? `\n…等共 ${failedMoNos.length} 筆` : '')
+            setSaveMsg(msg)
+            alert(msg)
+            setTimeout(() => setSaveMsg(''), 8000)
           } catch (saveErr) {
             const sm = saveErr instanceof Error ? saveErr.message : '未知錯誤'
-            alert(`⚠️ 製令已在 ERP，但補存總表（Supabase）失敗：${sm}\n${filteredRows.length} 筆保留在清單中，請稍後重試`)
+            alert(`⚠️ 向 ERP 求證製令是否已建立時失敗：${sm}\n${filteredRows.length} 筆全數保留在清單中，請稍後重試（未做任何標記，不會漏單）`)
           }
           return
         }
