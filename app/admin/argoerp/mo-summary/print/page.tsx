@@ -287,12 +287,12 @@ function SketchCard({ url, label }: { url: string; label: string }) {
         display: 'flex', flexDirection: 'column', minHeight: 'calc(297mm - 8mm)',
       }}
     >
-      <div style={{ fontSize: '12px', color: '#888', marginBottom: '4px' }}>示意圖 — {label}</div>
+      <div className="sketch-card-label" style={{ fontSize: '12px', color: '#888', marginBottom: '4px' }}>示意圖 — {label}</div>
       <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden' }}>
         {/* eslint-disable-next-line @next/next/no-img-element -- blob/dataURL 本機圖片，非遠端資源，不適用 next/image */}
         {/* maxHeight 用絕對長度（mm）而非 100%：列印時外層 flex 容器的高度不是確定值，
             百分比高度會算不出來而退回 auto，圖片就以原始尺寸撐出紙張、被裁掉只印出一部分。
-            265mm = A4 高 297mm 扣掉卡片上下留白與上方標題行後的可用高度。 */}
+            實際列印時的尺寸由下方 @media print 的 .sketch-card img 決定（鋪滿整頁）。 */}
         <img src={url} alt={label} style={{ maxWidth: '100%', maxHeight: '265mm', objectFit: 'contain' }} />
       </div>
     </div>
@@ -861,12 +861,28 @@ function MoPrintContent() {
             break-inside: avoid !important;
             page-break-inside: avoid !important;
           }
-          /* 圖片本身也不可被切開 */
+          /* 示意圖本身就是照一整張 A4 設計的，列印時應該鋪滿整頁，不要再被卡片的左右留白
+             （原本各 12mm）縮小——那會讓圖只印到約 88% 大小、四周多一圈空白。
+             @page 已設 margin 4mm 0，所以可用範圍是 210mm × 289mm，這裡把卡片留白歸零，
+             標題縮到最小，讓圖片能吃滿整頁（維持原比例，不變形）。 */
+          .sketch-card {
+            padding: 0 !important;
+            min-height: 289mm !important;
+            justify-content: center !important;
+          }
+          .sketch-card-label {
+            font-size: 8px !important;
+            margin: 0 0 1mm 2mm !important;
+            color: #999 !important;
+          }
+          /* 圖片本身也不可被切開；以絕對長度限制在單頁可用範圍內 */
           .sketch-card img {
             break-inside: avoid !important;
             page-break-inside: avoid !important;
-            max-height: 265mm !important;
-            max-width: 100% !important;
+            max-height: 284mm !important;
+            max-width: 210mm !important;
+            width: auto !important;
+            height: auto !important;
             object-fit: contain !important;
           }
           .mo-card:not(.sketch-card) th,
