@@ -100,6 +100,32 @@ export default function ScheduleInquiryPage() {
     return next
   })
 
+  // 刪除詢問單：不可復原，採二次確認（第二次要求輸入客戶名稱，避免連按兩次就誤刪）
+  const [deletingId, setDeletingId] = useState<number | null>(null)
+
+  const handleDelete = async (record: Inquiry) => {
+    const label = `${record.customer_name || '（未填客戶）'}${record.order_no ? `／${record.order_no}` : ''}`
+    if (!window.confirm(`確定要刪除這筆詢問單嗎？\n\n${label}\n填單人：${record.author_name}\n\n此操作無法復原。`)) return
+    const typed = window.prompt(`再次確認：請輸入客戶名稱「${record.customer_name || ''}」以確認刪除`)
+    if (typed === null) return
+    if (typed.trim() !== (record.customer_name || '').trim()) {
+      alert('輸入的客戶名稱不符，已取消刪除。')
+      return
+    }
+    setDeletingId(record.id)
+    try {
+      const res = await fetch(`/api/production/schedule-confirm?id=${record.id}`, { method: 'DELETE' })
+      const json = await res.json().catch(() => null)
+      if (!res.ok || !json?.success) throw new Error(json?.error || `HTTP ${res.status}`)
+      setRecords(prev => prev.filter(r => r.id !== record.id))
+      setExpandedIds(prev => { const n = new Set(prev); n.delete(record.id); return n })
+    } catch (e) {
+      alert(`刪除失敗：${e instanceof Error ? e.message : String(e)}`)
+    } finally {
+      setDeletingId(null)
+    }
+  }
+
   const copyRecordMessage = async (record: Inquiry) => {
     const text = buildNotifyMessage(record)
     try {
@@ -759,6 +785,18 @@ export default function ScheduleInquiryPage() {
                         {copiedId === record.id ? '✅ 已複製！可貼到 LINE 群組' : '📋 複製通知訊息'}
                       </button>
                       <span className="text-[11px] text-[#5f7290]">複製後可直接貼到 LINE 群組通知相關人員</span>
+
+                      {/* 刪除：僅填單本人可見（伺服器端另有把關，管理員/生管也可刪） */}
+                      {isAuthor(record) && (
+                        <button
+                          onClick={() => void handleDelete(record)}
+                          disabled={deletingId === record.id}
+                          title="刪除這筆詢問單（需二次確認，無法復原）"
+                          className="ml-auto px-3 py-1.5 rounded-[8px] text-xs font-bold border border-rose-500/40 bg-rose-500/10 text-rose-400 hover:bg-rose-500/20 disabled:opacity-50 transition-colors"
+                        >
+                          {deletingId === record.id ? '刪除中…' : '🗑 刪除此單'}
+                        </button>
+                      )}
                     </div>
                   </div>
                 )}

@@ -182,6 +182,27 @@ export async function DELETE(request: NextRequest) {
     }
 
     const supabase = getSupabaseAdminClient()
+
+    // 權限：只有「填單本人」或管理員／生管可以刪除。
+    // 原本這支只擋登入（guardAuth），任何登入者都能刪掉別人的詢問單——刪除不可復原，
+    // 這裡補上擁有者檢查（2026-09-04 新增刪除按鈕時一併修正）。
+    const { data: target, error: findErr } = await supabase
+      .from(TABLE).select('id, author_email, customer_name').eq('id', id).maybeSingle()
+    if (findErr) {
+      return NextResponse.json({ success: false, error: formatSupabaseAdminError(findErr.message) }, { status: 500 })
+    }
+    if (!target) {
+      return NextResponse.json({ success: false, error: '找不到這筆詢問單（可能已被刪除）' }, { status: 404 })
+    }
+    const isOwner = !!guard.member.email && guard.member.email === target.author_email
+    const canManage = guard.member.isAdmin || guard.member.permissions.includes('production_admin')
+    if (!isOwner && !canManage) {
+      return NextResponse.json(
+        { success: false, error: '只有填單人本人或生產管理可以刪除這筆詢問單' },
+        { status: 403 }
+      )
+    }
+
     const { error } = await supabase.from(TABLE).delete().eq('id', id)
 
     if (error) {
@@ -191,7 +212,7 @@ export async function DELETE(request: NextRequest) {
       )
     }
 
-    return NextResponse.json({ success: true })
+    return NextResponse.json({ success: true, deleted_id: id })
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)
     return NextResponse.json({ success: false, error: formatSupabaseAdminError(msg) }, { status: 500 })
