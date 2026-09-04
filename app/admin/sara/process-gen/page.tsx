@@ -818,7 +818,7 @@ export default function ProcessGenPage() {
             </button>
           </div>
           <p className="text-[11px] text-slate-400">
-            處理方式：點「貼上製程」直接把該筆的製程貼進來、產生工序列並加入交換區（會自動移除）；或至「途程列表」為品項設定正確途程（明天排程會自動補送）、或在下方載入該日出單表手動產生；處理完成後點「已處理」移除。
+            處理方式：點「貼上途程」貼入途程名稱，自動帶出製程、產生工序列並加入交換區（會自動移除，可同時存成該品號的途程）；或至「途程列表」為品項設定正確途程（明天排程會自動補送）、或在下方載入該日出單表手動產生；處理完成後點「已處理」移除。
           </p>
           <div className="overflow-x-auto">
             <table className="w-full text-xs">
@@ -856,7 +856,7 @@ export default function ProcessGenPage() {
                               ? 'bg-emerald-800/60 border-emerald-600 text-emerald-200'
                               : 'bg-slate-800 border-slate-700 text-slate-300 hover:bg-emerald-900/50 hover:text-emerald-300 hover:border-emerald-700'}`}
                           >
-                            📋 貼上製程
+                            📋 貼上途程
                           </button>
                           <button
                             onClick={() => void dismissPending([key])}

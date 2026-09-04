@@ -1,11 +1,12 @@
 'use client'
 
-// 自動轉換待處理列的「貼上製程」面板
+// 自動轉換待處理列的「貼上途程」面板
 //
 // 每日 17:05 自動轉換跳過的列（無途程／不符自動規則），原本只能到「途程列表」替品號建途程、
-// 或重新載入該日出單表手動處理。這裡讓生管直接把製程貼進來（每行一道製程名稱，或從
-// 單品查詢／Excel 複製的表格），對照 operation_times 補上站點與標準工時，產生 SARA 工序列
-// 後一鍵加入交換區，並同時把這筆從待處理清單移除。
+// 或重新載入該日出單表手動處理。這裡讓生管直接把途程名稱（route_id）貼進來，系統自動從
+// route_operations 帶出該途程的製程、對照 operation_times 補站點與標準工時，產生 SARA 工序列
+// 後一鍵加入交換區並把這筆從待處理清單移除；可同時把「品號 ↔ 途程」寫進 item_routes，
+// 之後同品號再出單就會被每日排程自動套用，不用再人工處理。
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { supabase } from '../../../../lib/supabaseClient'
@@ -23,49 +24,10 @@ export interface PendingItemLike {
   reason: string
 }
 
-interface OpInfo { station: string; std: number }
-interface ParsedOp { seq: number; op_name: string; station: string; std: number; known: boolean }
+interface RouteOption { route_id: string; op_count: number }
+interface RouteOp { seq: number; op_name: string; station: string; std: number; hasTime: boolean }
 
 const FACTORY_LABEL: Record<string, string> = { T: '台北', C: '常平', O: '委外' }
-
-/** 製程名稱比對用的正規化：去空白、全形符號轉半形、忽略大小寫 */
-function normOp(s: string): string {
-  return s.replace(/\s+/g, '')
-    .replace(/／/g, '/').replace(/（/g, '(').replace(/）/g, ')').replace(/＋/g, '+')
-    .toLowerCase()
-}
-
-/**
- * 把貼上的文字拆成製程名稱清單。支援：
- *  - 每行一道製程（可帶前導編號：「1. 印刷」「10 裁切」「(3) 包裝」）
- *  - 單行用 → / -> / 、 / , / ／ 串起來：「印刷→裁切→包裝」
- *  - Tab 分隔的表格（單品查詢複製、Excel 貼上）：自動跳過標題列，每列取對得上
- *    operation_times 的那一格；對不上就取最長的非數字欄位
- */
-export function parseProcessText(text: string, ops: Map<string, OpInfo>): string[] {
-  const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean)
-  if (lines.length === 0) return []
-  // 注意不能用「/」當分隔：製程名稱本身常含斜線（QC檢驗/入庫、委外/7天回）
-  const SEP = /->|→|＞|>|、|，|,/
-  if (lines.length === 1 && !lines[0].includes('\t') && SEP.test(lines[0]) && !ops.has(normOp(lines[0]))) {
-    return lines[0].split(SEP).map(s => s.trim()).filter(Boolean)
-  }
-  const out: string[] = []
-  for (const line of lines) {
-    if (line.includes('\t')) {
-      if (/job_name|製程名稱|manufacturing_order_number|工序/i.test(line) && !ops.has(normOp(line))) continue
-      const cells = line.split('\t').map(c => c.trim()).filter(Boolean)
-      const known = cells.find(c => ops.has(normOp(c)))
-      const fallback = cells.filter(c => !/^[\d.,]+$/.test(c)).sort((a, b) => b.length - a.length)[0]
-      const pick = known ?? fallback
-      if (pick) out.push(pick)
-      continue
-    }
-    const stripped = line.replace(/^[(（]?\d+[)）.、:：\s]+/, '').trim()
-    if (stripped) out.push(stripped)
-  }
-  return out
-}
 
 export default function PendingPastePanel({
   item, prioFor, onDone, onClose,
@@ -75,31 +37,37 @@ export default function PendingPastePanel({
   onDone: () => void
   onClose: () => void
 }) {
-  const [ops, setOps] = useState<Map<string, OpInfo>>(new Map())
-  const [opsLoading, setOpsLoading] = useState(true)
+  const [routeOptions, setRouteOptions] = useState<RouteOption[]>([])
+  const [routeInput, setRouteInput] = useState('')
+  const [existingRoute, setExistingRoute] = useState<string | null>(null)   // item_routes 既有對應
+  const [saveMapping, setSaveMapping] = useState(true)
+
   const [sheetRow, setSheetRow] = useState<InputRow | null>(null)
   const [rowLoading, setRowLoading] = useState(true)
   const [rowError, setRowError] = useState('')
   const [moNumber, setMoNumber] = useState('')
-  const [text, setText] = useState('')
+
+  const [ops, setOps] = useState<RouteOp[]>([])
+  const [opsLoading, setOpsLoading] = useState(false)
+  const [opsError, setOpsError] = useState('')
   const [appending, setAppending] = useState(false)
   const [msg, setMsg] = useState('')
 
-  // 製程對照表（operation_times 全表約數百列，一次載入本機比對即可）
+  // 途程清單（供 datalist 挑選／貼上後比對）＋此品號既有的 item_routes 對應
   useEffect(() => {
     void (async () => {
       try {
-        const { data } = await supabase.from('operation_times').select('op_name,station,std_time_min')
-        const m = new Map<string, OpInfo>()
-        for (const r of (data ?? []) as { op_name: string; station: string | null; std_time_min: number | null }[]) {
-          m.set(normOp(r.op_name), { station: r.station ?? '', std: Number(r.std_time_min ?? 0) })
-        }
-        setOps(m)
-      } finally {
-        setOpsLoading(false)
-      }
+        const res = await fetch('/api/production/item-routes', { cache: 'no-store' })
+        const j = await res.json() as { success: boolean; routes?: RouteOption[] }
+        if (j.success && Array.isArray(j.routes)) setRouteOptions(j.routes)
+      } catch { /* 清單載入失敗仍可手動輸入 */ }
+      const { data } = await supabase.from('item_routes').select('route_id').eq('item_code', item.item_code).limit(1).maybeSingle()
+      const existing = (data?.route_id as string | undefined) ?? null
+      setExistingRoute(existing)
+      // 既有對應但被判定異常（廠區不符）而進待處理的，預設先帶出原途程方便比對
+      if (existing) { setRouteInput(existing); setSaveMapping(false) }
     })()
-  }, [])
+  }, [item.item_code])
 
   // 從該日出單表把同一筆列帶出來（工單號、交期、盤數、客戶、機台都在出單表上）
   useEffect(() => {
@@ -114,9 +82,7 @@ export default function PendingPastePanel({
           ?? sameLine.find(r => r.quantity === item.quantity)
           ?? sameLine[0]
           ?? null
-        if (!hit) {
-          setRowError(`在 ${item.sheet_date} 出單表找不到 ${item.order_number} / ${item.item_code}，工單號需手動填寫`)
-        }
+        if (!hit) setRowError(`在 ${item.sheet_date} 出單表找不到 ${item.order_number} / ${item.item_code}，工單號需手動填寫`)
         setSheetRow(hit)
         setMoNumber(hit?.mo_number ?? '')
       } catch (e) {
@@ -127,18 +93,52 @@ export default function PendingPastePanel({
     })()
   }, [item.sheet_date, item.order_number, item.item_code, item.line_seq, item.quantity])
 
-  const parsed: ParsedOp[] = useMemo(() => {
-    return parseProcessText(text, ops).map((name, i) => {
-      const info = ops.get(normOp(name))
-      return { seq: i + 1, op_name: name, station: info?.station ?? '', std: info?.std ?? 0, known: !!info }
-    })
-  }, [text, ops])
+  const routeId = routeInput.trim()
+  const routeKnown = useMemo(() => routeOptions.some(r => r.route_id === routeId), [routeOptions, routeId])
 
-  const unknownOps = parsed.filter(p => !p.known).map(p => p.op_name)
+  // 途程名稱一對上就自動帶出製程（貼上或從清單挑選都會觸發）
+  useEffect(() => {
+    if (!routeId) { setOps([]); setOpsError(''); return }
+    let cancelled = false
+    void (async () => {
+      setOpsLoading(true)
+      setOpsError('')
+      try {
+        type RoRow = { sequence: number; op_name: string }
+        const { data: roData } = await supabase
+          .from('route_operations').select('sequence,op_name').eq('route_id', routeId).order('sequence')
+        const rows = (roData ?? []) as RoRow[]
+        if (cancelled) return
+        if (rows.length === 0) {
+          setOps([])
+          setOpsError(routeKnown ? `途程「${routeId}」在 route_operations 沒有工序資料` : `找不到途程「${routeId}」，請確認名稱（可從清單挑選）`)
+          return
+        }
+        type OtRow = { op_name: string; station: string | null; std_time_min: number | null }
+        const { data: otData } = await supabase
+          .from('operation_times').select('op_name,station,std_time_min').in('op_name', rows.map(r => r.op_name))
+        if (cancelled) return
+        const otMap = new Map<string, { station: string; std: number }>(
+          ((otData ?? []) as OtRow[]).map(r => [r.op_name, { station: r.station ?? '', std: Number(r.std_time_min ?? 0) }])
+        )
+        setOps(rows.map(r => {
+          const ot = otMap.get(r.op_name)
+          return { seq: r.sequence, op_name: r.op_name, station: ot?.station ?? '', std: ot?.std ?? 0, hasTime: !!ot }
+        }))
+      } catch (e) {
+        if (!cancelled) { setOps([]); setOpsError(e instanceof Error ? e.message : String(e)) }
+      } finally {
+        if (!cancelled) setOpsLoading(false)
+      }
+    })()
+    return () => { cancelled = true }
+  }, [routeId, routeKnown])
+
+  const missingTimes = ops.filter(o => !o.hasTime).map(o => o.op_name)
 
   // 產生 SARA 工序列（與 process-gen 手動套用途程同一套規則）
   const saraRows: SaraRow[] = useMemo(() => {
-    if (parsed.length === 0) return []
+    if (ops.length === 0) return []
     const base: InputRow = sheetRow ?? {
       order_number: item.order_number, item_code: item.item_code, item_spec: item.item_spec,
       quantity: item.quantity, due: '', pan_count: 0, line_seq: item.line_seq || undefined,
@@ -146,7 +146,7 @@ export default function PendingPastePanel({
     }
     const mo = moNumber.trim() || base.order_number
     const today = fmtToday()
-    return parsed.map(op => {
+    return ops.map(op => {
       const jobQty = (base.pan_count > 0 && !isPackagingStation(op.station)) ? base.pan_count : base.quantity
       return {
         order_number: base.order_number, mfg_order_number: mo,
@@ -163,11 +163,11 @@ export default function PendingPastePanel({
         factory: base.factory,
       }
     })
-  }, [parsed, sheetRow, item, moNumber, prioFor])
+  }, [ops, sheetRow, item, moNumber, prioFor])
 
   const handleAppend = useCallback(async () => {
     if (saraRows.length === 0) return
-    if (unknownOps.length > 0 && !confirm(`有 ${unknownOps.length} 道製程在 operation_times 查無資料（站點/工時會是空白）：${unknownOps.slice(0, 5).join('、')}\n\n仍要加入交換區嗎？`)) return
+    if (missingTimes.length > 0 && !confirm(`有 ${missingTimes.length} 道製程在 operation_times 查無生產時間（工時會是 0）：${missingTimes.slice(0, 5).join('、')}\n\n仍要加入交換區嗎？`)) return
     if (!moNumber.trim() && !confirm(`未填工單號，將以訂單號 ${item.order_number} 當工單號送出，確定？`)) return
     setAppending(true)
     setMsg('')
@@ -179,25 +179,44 @@ export default function PendingPastePanel({
       })
       const j = await res.json() as { success: boolean; count?: number; error?: string }
       if (!res.ok || !j.success) throw new Error(j.error || `HTTP ${res.status}`)
+
+      // 同時把品號↔途程寫進 item_routes（僅在此品號尚無對應時；失敗不影響已送出的工序列）
+      let mappingNote = ''
+      if (saveMapping && !existingRoute) {
+        try {
+          const r2 = await fetch('/api/production/item-routes', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ item_code: item.item_code, item_name: item.item_spec, route_id: routeId }),
+          })
+          const j2 = await r2.json() as { success: boolean; error?: string }
+          mappingNote = j2.success ? '，並已存成此品號的途程' : `（途程對應未存：${j2.error ?? `HTTP ${r2.status}`}）`
+        } catch (e) {
+          mappingNote = `（途程對應未存：${e instanceof Error ? e.message : String(e)}）`
+        }
+      }
+
       // 已送進交換區 → 從待處理清單移除（不再二次確認，避免打斷流程）
       await fetch('/api/sara/process-gen-pending', {
         method: 'DELETE',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ keys: [`${item.order_number}||${item.item_code}||${item.line_seq}`] }),
       })
-      setMsg(`✅ 已加入交換區 ${saraRows.length} 列（累積 ${j.count} 列），此筆已從待處理移除`)
+      setMsg(`✅ 已加入交換區 ${saraRows.length} 列（累積 ${j.count} 列）${mappingNote}，此筆已從待處理移除`)
       onDone()
     } catch (e) {
       setMsg(`❌ ${e instanceof Error ? e.message : String(e)}`)
     } finally {
       setAppending(false)
     }
-  }, [saraRows, unknownOps, moNumber, item, onDone])
+  }, [saraRows, missingTimes, moNumber, item, routeId, saveMapping, existingRoute, onDone])
+
+  const datalistId = `pending-route-options-${item.order_number}-${item.item_code}-${item.line_seq}`.replace(/[^\w-]/g, '_')
 
   return (
     <div className="rounded-lg border border-emerald-800/50 bg-slate-900/80 p-3 space-y-2">
       <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-slate-400">
-        <span>📋 貼上製程 — <span className="font-mono text-cyan-300">{item.order_number}{item.line_seq ? ` #${item.line_seq}` : ''}</span></span>
+        <span>📋 貼上途程 — <span className="font-mono text-cyan-300">{item.order_number}{item.line_seq ? ` #${item.line_seq}` : ''}</span></span>
         <span className="font-mono text-purple-300">{item.item_code}</span>
         <span>{FACTORY_LABEL[item.factory] ?? item.factory}</span>
         <span>數量 <span className="font-mono text-emerald-300">{sheetRow?.quantity ?? item.quantity}</span></span>
@@ -215,17 +234,32 @@ export default function PendingPastePanel({
         {rowError && <span className="text-amber-400">⚠ {rowError}</span>}
       </div>
 
-      <textarea
-        value={text}
-        onChange={e => setText(e.target.value)}
-        rows={5}
-        placeholder={'每行貼一道製程名稱（需與工序總表 operation_times 的製程名稱一致），例：\nUV印刷\n雷射切割\n包裝\n也可以貼「印刷→裁切→包裝」或從單品查詢／Excel 複製的表格'}
-        className="w-full px-3 py-2 rounded bg-slate-950 border border-slate-700 text-xs font-mono text-slate-200 focus:outline-none focus:border-emerald-600/60"
-      />
+      <datalist id={datalistId}>
+        {routeOptions.map(r => <option key={r.route_id} value={r.route_id}>{`${r.op_count} 道製程`}</option>)}
+      </datalist>
+      <div className="flex flex-wrap items-center gap-2">
+        <input
+          list={datalistId}
+          value={routeInput}
+          onChange={e => setRouteInput(e.target.value)}
+          placeholder="貼上或選擇途程名稱，例：常平一般壓克力製程"
+          autoFocus
+          className={`flex-1 min-w-[280px] px-3 py-1.5 rounded bg-slate-950 border text-xs text-slate-200 focus:outline-none focus:border-emerald-600/60 ${routeId && !routeKnown && !opsLoading && ops.length === 0 ? 'border-amber-600/60' : 'border-slate-700'}`}
+        />
+        {opsLoading && <span className="text-[11px] text-slate-500">帶入製程中…</span>}
+        {existingRoute && (
+          <span className="text-[11px] text-slate-500">此品號目前途程：<span className="text-slate-300">{existingRoute}</span>（要改請至工序總表更新頁）</span>
+        )}
+        {!existingRoute && (
+          <label className="flex items-center gap-1 text-[11px] text-slate-400 cursor-pointer">
+            <input type="checkbox" checked={saveMapping} onChange={e => setSaveMapping(e.target.checked)} className="accent-emerald-500" />
+            同時存成此品號的途程（之後自動轉換直接套用）
+          </label>
+        )}
+      </div>
+      {opsError && <div className="text-[11px] text-amber-400">⚠ {opsError}</div>}
 
-      {opsLoading && <div className="text-[11px] text-slate-500">載入工序總表中…</div>}
-
-      {parsed.length > 0 && (
+      {saraRows.length > 0 && (
         <div className="overflow-x-auto rounded border border-slate-800">
           <table className="w-full text-[11px]">
             <thead className="bg-slate-950 text-slate-500">
@@ -240,7 +274,7 @@ export default function PendingPastePanel({
             </thead>
             <tbody>
               {saraRows.map((r, i) => (
-                <tr key={i} className={`border-t border-slate-800/60 ${parsed[i].known ? 'text-slate-300' : 'text-amber-300 bg-amber-950/30'}`}>
+                <tr key={i} className={`border-t border-slate-800/60 ${ops[i].hasTime ? 'text-slate-300' : 'text-amber-300 bg-amber-950/30'}`}>
                   <td className="px-2 py-1 text-center font-mono">{r.job_seq}</td>
                   <td className="px-2 py-1 whitespace-nowrap">{r.workcenter || <span className="text-amber-400">（查無）</span>}</td>
                   <td className="px-2 py-1">{r.job_name}</td>
@@ -254,16 +288,16 @@ export default function PendingPastePanel({
         </div>
       )}
 
-      {unknownOps.length > 0 && (
+      {missingTimes.length > 0 && (
         <div className="text-[11px] text-amber-300">
-          ⚠ {unknownOps.length} 道製程在工序總表查無資料（站點/工時空白，SARA 匯入需要站點）：{unknownOps.slice(0, 6).join('、')}{unknownOps.length > 6 ? '…' : ''}
+          ⚠ {missingTimes.length} 道製程在工序總表查無生產時間（站點/工時空白）：{missingTimes.slice(0, 6).join('、')}{missingTimes.length > 6 ? '…' : ''}
         </div>
       )}
 
       <div className="flex items-center gap-2 flex-wrap">
         <button
           onClick={() => void handleAppend()}
-          disabled={appending || saraRows.length === 0 || rowLoading}
+          disabled={appending || saraRows.length === 0 || rowLoading || opsLoading}
           className="px-3 py-1.5 rounded text-xs bg-emerald-700 hover:bg-emerald-600 text-white font-bold disabled:opacity-40"
         >
           {appending ? '加入中…' : `➕ 加入交換區並標記已處理（${saraRows.length} 列）`}
