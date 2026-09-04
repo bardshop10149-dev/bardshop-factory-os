@@ -288,7 +288,7 @@ function SketchCard({ url, label }: { url: string; label: string }) {
       }}
     >
       <div className="sketch-card-label" style={{ fontSize: '12px', color: '#888', marginBottom: '4px' }}>示意圖 — {label}</div>
-      <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden' }}>
+      <div className="sketch-card-body" style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden' }}>
         {/* eslint-disable-next-line @next/next/no-img-element -- blob/dataURL 本機圖片，非遠端資源，不適用 next/image */}
         {/* maxHeight 用絕對長度（mm）而非 100%：列印時外層 flex 容器的高度不是確定值，
             百分比高度會算不出來而退回 auto，圖片就以原始尺寸撐出紙張、被裁掉只印出一部分。
@@ -578,6 +578,8 @@ function MoPrintContent() {
   const [customerCodeMap, setCustomerCodeMap] = useState<Map<string, string>>(new Map()) // cname → partner_id
   const [exportingWord, setExportingWord] = useState(false)
   const [visibleCount, setVisibleCount] = useState(0)
+  // 列印範圍：製令/採購/請購單、示意圖、或兩者都印（預設）
+  const [printMode, setPrintMode] = useState<'both' | 'mo' | 'sketch'>('both')
   const [loading, setLoading] = useState(true)
   const [error, setError]     = useState<string | null>(null)
 
@@ -693,8 +695,8 @@ function MoPrintContent() {
     return () => window.clearTimeout(timer)
   }, [visibleCount, records.length])
 
-  const handlePrintClick = useCallback(async () => {
-    if (sketchLoading || resolvingSketchUrls) {
+  const handlePrintClick = useCallback(async (mode: 'both' | 'mo' | 'sketch') => {
+    if (mode !== 'mo' && (sketchLoading || resolvingSketchUrls)) {
       alert('示意圖還在轉檔中，請稍候轉檔完成再列印，避免漏印示意圖。')
       return
     }
@@ -702,6 +704,9 @@ function MoPrintContent() {
       setVisibleCount(records.length)
       await new Promise<void>(resolve => window.setTimeout(resolve, 80))
     }
+    setPrintMode(mode)
+    // 等 React 把 data-print-mode 寫進 DOM 後再觸發列印，否則列印範圍 CSS 可能還沒生效。
+    await new Promise<void>(resolve => window.setTimeout(resolve, 30))
     window.print()
   }, [visibleCount, records.length, sketchLoading, resolvingSketchUrls])
 
@@ -837,6 +842,15 @@ function MoPrintContent() {
         @media print {
           .mo-toolbar { display: none !important; }
           .no-print { display: none !important; }
+          /* 列印範圍：工具列的「列印製令／列印示意圖／示意圖+製令」三個按鈕會在按下時
+             把 data-print-mode 寫到 .mo-pages-wrapper 上，這裡依模式隱藏不要列印的部分。
+             預設（未設定或 both）兩者都印，維持原本行為。 */
+          .mo-pages-wrapper[data-print-mode="mo"] .sketch-card {
+            display: none !important;
+          }
+          .mo-pages-wrapper[data-print-mode="sketch"] .mo-card:not(.sketch-card) {
+            display: none !important;
+          }
           /* 灰階只套在「單據頁」（製令/採購/請購），示意圖頁保留原色。
              注意：CSS filter 套在祖先層之後，子層無法再還原成彩色，所以絕對不能像原本那樣
              對 html 整頁套 grayscale——那會連示意圖一起變黑白，即使印表機設定彩色也救不回來。
@@ -856,10 +870,20 @@ function MoPrintContent() {
           .sketch-card { box-shadow: none !important; }
           /* 示意圖頁絕對不可被切開跨頁——上面 .mo-card 的 break-inside:auto 是為了讓單據
              的長表格能流到下一頁，但套在圖片上就會把圖從中間切斷、只印出一半
-             （2026-09-03 使用者回報）。這裡明確覆寫成不允許斷開。 */
+             （2026-09-03 使用者回報）。這裡明確覆寫成不允許斷開。
+             注意：break-inside:avoid 在 Chrome 對 display:flex 容器不可靠（已知相容性問題），
+             加了也常常沒用、圖還是會被從中間切開只印出上半部（2026-09-04 使用者再次回報）。
+             所以下面把 .sketch-card 及其內層容器在列印時都強制改回 display:block，
+             改用 text-align:center 置中取代 flex 置中，徹底避開 flex 分頁的問題。 */
           .sketch-card {
             break-inside: avoid !important;
             page-break-inside: avoid !important;
+            display: block !important;
+            text-align: center !important;
+          }
+          .sketch-card-body {
+            display: block !important;
+            overflow: visible !important;
           }
           /* 示意圖本身就是照一整張 A4 設計的，列印時應該鋪滿整頁，不要再被卡片的左右留白
              （原本各 12mm）縮小——那會讓圖只印到約 88% 大小、四周多一圈空白。
@@ -868,7 +892,6 @@ function MoPrintContent() {
           .sketch-card {
             padding: 0 !important;
             min-height: 289mm !important;
-            justify-content: center !important;
           }
           .sketch-card-label {
             font-size: 8px !important;
@@ -1001,21 +1024,43 @@ function MoPrintContent() {
           >
             {exportingWord ? '產生中...' : '📄 下載 Word'}
           </button>
-          <button
-            onClick={() => void handlePrintClick()}
-            style={{
-              padding: '8px 22px', background: '#0891b2', borderRadius: '6px',
-              cursor: 'pointer', color: 'white', fontSize: '13px',
-              fontWeight: 700, border: 'none',
-            }}
-          >
-            🖨 列印 / 下載 PDF
-          </button>
+          <div style={{ display: 'flex', gap: '4px', border: '1px solid #334155', borderRadius: '6px', overflow: 'hidden' }}>
+            <button
+              onClick={() => void handlePrintClick('mo')}
+              title="只印製令 / 採購單 / 請購單，不印示意圖"
+              style={{
+                padding: '8px 14px', background: '#0e7490', cursor: 'pointer', color: 'white', fontSize: '13px',
+                fontWeight: 700, border: 'none',
+              }}
+            >
+              🖨 列印製令
+            </button>
+            <button
+              onClick={() => void handlePrintClick('sketch')}
+              title="只印示意圖，不印製令 / 採購單 / 請購單"
+              style={{
+                padding: '8px 14px', background: '#0e7490', cursor: 'pointer', color: 'white', fontSize: '13px',
+                fontWeight: 700, border: 'none', borderLeft: '1px solid #164e63', borderRight: '1px solid #164e63',
+              }}
+            >
+              🖨 列印示意圖
+            </button>
+            <button
+              onClick={() => void handlePrintClick('both')}
+              title="示意圖 + 製令 / 採購單 / 請購單全部印出（預設）"
+              style={{
+                padding: '8px 14px', background: '#0891b2', cursor: 'pointer', color: 'white', fontSize: '13px',
+                fontWeight: 700, border: 'none',
+              }}
+            >
+              🖨 示意圖+製令
+            </button>
+          </div>
         </div>
       </div>
 
       {/* ── 頁面容器 ───────────────────────────────────────── */}
-      <div className="mo-pages-wrapper" style={{ background: '#64748b', padding: '24px 16px', minHeight: '100vh' }}>
+      <div className="mo-pages-wrapper" data-print-mode={printMode} style={{ background: '#64748b', padding: '24px 16px', minHeight: '100vh' }}>
         {visibleRecords.map((mo, idx) => {
           // 示意圖穿插：優先用每日出單表該列已經存好的示意圖（sketch_urls，人工核對過或自動比對過的
           // 結果，一經設定所有人都看得到，不用每次列印都重選資料夾，PDF 已在上面的 effect 轉成
