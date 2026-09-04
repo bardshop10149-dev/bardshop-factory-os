@@ -707,6 +707,12 @@ function MoPrintContent() {
     setPrintMode(mode)
     // 等 React 把 data-print-mode 寫進 DOM 後再觸發列印，否則列印範圍 CSS 可能還沒生效。
     await new Promise<void>(resolve => window.setTimeout(resolve, 30))
+    if (mode !== 'mo') {
+      // 確保每張示意圖都已完整解碼再送印。Chrome 列印時若圖片還沒解碼完，印出來會是
+      // 上半部正常、下半部一整塊灰（JPEG）或空白（PNG）——2026-09-04 使用者拍照回報。
+      const imgs = Array.from(document.querySelectorAll<HTMLImageElement>('.sketch-card img'))
+      await Promise.all(imgs.map(img => img.decode().catch(() => undefined)))
+    }
     window.print()
   }, [visibleCount, records.length, sketchLoading, resolvingSketchUrls])
 
