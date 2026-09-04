@@ -30,9 +30,11 @@ interface Props {
   /** true：按下時即時回 ARGO 撈最新明細（規格/備註/包裝/表頭備註），撈不到才退回同步表。
    *  用於「當天新單／剛更新的單」同步表可能還沒更新的情境（如出單表➜委外請購）。 */
   liveRefresh?: boolean
+  /** 附加在明細下方的自訂內容（如採購專區塞示意圖縮圖牆）；不影響既有頁面 */
+  extraContent?: React.ReactNode
 }
 
-export default function SoOrderModal({ projectId, onClose, liveRefresh = false }: Props) {
+export default function SoOrderModal({ projectId, onClose, liveRefresh = false, extraContent }: Props) {
   const [meta, setMeta] = useState<SoOrderMeta | null>(null)
   const [lines, setLines] = useState<SoLine[]>([])
   const [loading, setLoading] = useState(false)
@@ -267,6 +269,13 @@ export default function SoOrderModal({ projectId, onClose, liveRefresh = false }
                   </div>
                 </div>
               ))}
+            </div>
+          )}
+
+          {/* 呼叫端附加內容（如示意圖縮圖牆）——放在明細之後、同一個捲動區內 */}
+          {extraContent && (
+            <div className="mt-5 border-t border-slate-800 pt-4">
+              {extraContent}
             </div>
           )}
         </div>

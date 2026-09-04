@@ -1,24 +1,14 @@
 'use client'
 
-import { useState, useCallback, useRef } from 'react'
+import { Fragment, useState, useCallback, useEffect, useRef } from 'react'
 import { supabase } from '../../../../lib/supabaseClient'
 import { buildSaraRow, type SaraRow } from '../../../../lib/sara/buildSaraRow'
+import { DEFAULT_PRIORITY_RULES, computePriorityFromDue, type PriorityRule } from '../../../../lib/sara/priorityRules'
+import { calcEst, fmtToday, isPackagingStation, isPrintStation2F6F, loadSheetInputRows, type InputRow } from './sheetRows'
+import PendingPastePanel from './PendingPastePanel'
 
 // ── 型別 ─────────────────────────────────────────────────────────
-
-interface InputRow {
-  order_number: string
-  item_code: string
-  item_spec: string
-  quantity: number
-  due: string
-  pan_count: number
-  mo_number?: string            // 製令單號（MOT...）/ 採購單號（POC...）/ 請購單號（POO...）
-  line_seq?: string             // 銷售訂單序號（match_line_no）；C/O 廠 fallback 為採購單行號
-  customer?: string             // 客戶名稱
-  factory?: 'T' | 'C' | 'O'   // 廠區：T=台北 C=常平 O=委外（僅預覽，不匯出）
-  assigned_machine?: string    // 分配機台（台北廠印刷站2F/6F 才填入）
-}
+// InputRow 與工時計算規則（calcEst 等）已抽到 ./sheetRows.ts，與待處理「貼上製程」面板共用
 
 interface SingleRow {
   job_sequence: number
@@ -76,25 +66,6 @@ function detectCols(header: string[]): Record<string, number> {
 
 // ── 輔助函式 ─────────────────────────────────────────────────────
 
-const isPackagingStation  = (s: string) => s.includes('包裝站')
-const isTransitStation    = (s: string) => s.includes('轉運')
-// 只有這兩個站點需要填入分配機台（台北廠才有）
-const isPrintStation2F6F  = (s: string) => s === '印刷站2F' || s === '印刷站6F'
-
-// 工時計算：轉運站固定qty=1；計算結果不足10分鐘時補至10分鐘（std_time有值時）
-function calcEst(std: number, qty: number, panCount: number, station: string): number {
-  if (std === 0) return 0
-  const isPacking = isPackagingStation(station)
-  const isTransit = isTransitStation(station)
-  const effQty    = isTransit ? 1 : (panCount > 0 && !isPacking) ? panCount : qty
-  return Math.max(10, Math.round(std * effQty * 10) / 10)
-}
-
-function fmtToday(): string {
-  const d = new Date()
-  return `${d.getFullYear()}/${String(d.getMonth() + 1).padStart(2, '0')}/${String(d.getDate()).padStart(2, '0')}`
-}
-
 function escCsv(v: string | number): string {
   const s = String(v ?? '')
   return /[,"\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s
@@ -112,6 +83,63 @@ const FACTORY_BADGE: Record<string, string> = {
 export default function ProcessGenPage() {
   const fileRef = useRef<HTMLInputElement>(null)
   const [activeTab, setActiveTab] = useState<'batch' | 'single'>('batch')
+
+  // ── 交期優先度規則（Priority Level 1-99；手動與每日自動轉換共用同一份，存 app_settings）──
+  const [priorityRules, setPriorityRules] = useState<PriorityRule[]>(DEFAULT_PRIORITY_RULES)
+  const priorityRulesRef = useRef<PriorityRule[]>(DEFAULT_PRIORITY_RULES)
+  const [prioEditing, setPrioEditing] = useState(false)
+  const [prioDraft, setPrioDraft] = useState<{ max_days: string; priority: string }[]>([])
+  const [prioSaving, setPrioSaving] = useState(false)
+  const [prioMsg, setPrioMsg] = useState('')
+
+  useEffect(() => {
+    void (async () => {
+      try {
+        const res = await fetch('/api/sara/priority-rules', { cache: 'no-store' })
+        const j = await res.json() as { success: boolean; rules?: PriorityRule[] }
+        if (j.success && Array.isArray(j.rules)) {
+          setPriorityRules(j.rules)
+          priorityRulesRef.current = j.rules
+        }
+      } catch { /* 載入失敗沿用預設規則 */ }
+    })()
+  }, [])
+
+  /** 供各產生路徑呼叫：依交期算 Priority Level（讀 ref，callback 不需把規則放進依賴） */
+  const prioFor = (due: string) => computePriorityFromDue(due, priorityRulesRef.current)
+
+  const startPrioEdit = () => {
+    setPrioDraft(priorityRules.map(r => ({ max_days: String(r.max_days), priority: String(r.priority) })))
+    setPrioEditing(true)
+    setPrioMsg('')
+  }
+
+  const savePrioRules = async () => {
+    const rules = prioDraft
+      .map(d => ({ max_days: Number(d.max_days), priority: Number(d.priority) }))
+      .filter(r => Number.isFinite(r.max_days) && r.max_days >= 0 && Number.isInteger(r.priority) && r.priority >= 1 && r.priority <= 99)
+      .sort((a, b) => a.max_days - b.max_days)
+    if (rules.length === 0) { setPrioMsg('❌ 至少要有一條有效規則（天數 ≥0、優先度 1-99）'); return }
+    setPrioSaving(true)
+    try {
+      const res = await fetch('/api/sara/priority-rules', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ rules }),
+      })
+      const j = await res.json() as { success: boolean; rules?: PriorityRule[]; error?: string }
+      if (!res.ok || !j.success) throw new Error(j.error || `HTTP ${res.status}`)
+      setPriorityRules(j.rules ?? rules)
+      priorityRulesRef.current = j.rules ?? rules
+      setPrioEditing(false)
+      setPrioMsg('✅ 已儲存，之後的手動與每日自動轉換都會套用')
+      setTimeout(() => setPrioMsg(''), 4000)
+    } catch (e) {
+      setPrioMsg(`❌ 儲存失敗：${e instanceof Error ? e.message : String(e)}`)
+    } finally {
+      setPrioSaving(false)
+    }
+  }
 
   // Batch state
   const [dataSource, setDataSource]   = useState<'csv' | 'sheet'>('sheet')
@@ -209,109 +237,11 @@ export default function ProcessGenPage() {
     setConfirmWarns([])
     setFlaggedItems(new Set())
     try {
-      const res = await fetch(`/api/argoerp/daily-order-sheet?date=${sheetDate}`, { cache: 'no-store' })
-      const json = await res.json() as { success: boolean; sheet?: { rows?: Record<string, unknown>[] } }
-      if (!json.success || !json.sheet?.rows?.length) {
-        setSheetLoadError(`找不到 ${sheetDate} 的出單資料，請確認日期正確`)
-        return
-      }
-      const parsed: InputRow[] = []
-      for (const r of json.sheet.rows) {
-        const order = String(r.order_number ?? '').trim()
-        const item  = String(r.item_code   ?? '').trim()
-        if (!order || !item) continue
-        const qty  = parseFloat(String(r.quantity   ?? '').replace(/,/g, '')) || 0
-        if (qty <= 0) continue
-        const pan  = parseFloat(String(r.plate_count ?? '').replace(/,/g, '')) || 0
-        const factory = (['T', 'C', 'O'].includes(String(r.factory ?? ''))) ? String(r.factory) as 'T'|'C'|'O' : undefined
-        // 依廠區選擇對應單號：台北=製令號MOT / 常平=採購單號POC / 委外=請購單號MPO
-        // 常平/委外常見同一張採購/請購單裡集合多筆銷售單序號（同品項編碼也可能重複開在
-        // 同一張單上），製令號本身天生就帶行號（如 MOT26082700201/202）能唯一識別到行，
-        // 但採購/請購單號是整張單共用、不分行——若原樣送給 SARA，Manufacturing Order
-        // Number 加 Product Name 會完全相同，SARA 那邊只會留下最後處理的一筆、其餘消失。
-        // 因此常平/委外一律加上「-行號」（po_sub_no/pr_sub_no，ARGO 採購/請購單上的實際
-        // 行號）組成唯一識別，格式跟製令號本身帶行號的精神一致。
-        const poSubNo = String(r.po_sub_no ?? '').trim()
-        const prSubNo = String(r.pr_sub_no ?? '').trim()
-        const poNumber = String(r.po_number ?? '').trim()
-        const prNumber = String(r.pr_number ?? '').trim()
-        const refNumber =
-          factory === 'C' ? (poNumber ? `${poNumber}${poSubNo ? `-${poSubNo}` : ''}` : undefined) :
-          factory === 'O' ? (prNumber ? `${prNumber}${prSubNo ? `-${prSubNo}` : ''}` : undefined) :
-                            String(r.mo_number ?? '').trim() || undefined
-        parsed.push({
-          order_number: order,
-          item_code:    item,
-          item_spec:    String(r.item_name ?? r.note ?? '').trim(),
-          quantity:     qty,
-          due:          String(r.delivery_date ?? '').trim(),
-          pan_count:    pan,
-          mo_number:    refNumber,
-          // 銷售訂單序號（match_line_no = SO 項次，所有廠別通用）
-          line_seq:     String(r.match_line_no ?? '').trim() || undefined,
-          customer:     String(r.customer  ?? '').trim() || undefined,
-          factory,
-          // 分配機台：優先取 mo-machine-assign 結果（machine），其次為原始欄位（assigned_machine）
-          assigned_machine: String(r.machine ?? r.assigned_machine ?? '').trim() || undefined,
-        })
-      }
+      // 解析與機台/序號補查邏輯在 ./sheetRows.ts（與待處理「貼上製程」面板共用）
+      const parsed = await loadSheetInputRows(sheetDate)
       if (!parsed.length) {
-        setSheetLoadError(`${sheetDate} 出單表無有效品項資料`)
+        setSheetLoadError(`找不到 ${sheetDate} 的出單資料或無有效品項，請確認日期正確`)
         return
-      }
-
-      // ── 從 argoerp_mo_machine_assign 補充台北廠製令機台（優先於 row.machine）────
-      // row.machine 只有在每日出單表點「儲存機台分配」後才會寫入 JSON；
-      // argoerp_mo_machine_assign 表才是最新且最準確的機台來源。
-      const tMoNums = [...new Set(
-        parsed.filter(r => r.factory === 'T' && r.mo_number).map(r => r.mo_number!)
-      )]
-      if (tMoNums.length > 0) {
-        const { data: machineRows } = await supabase
-          .from('argoerp_mo_machine_assign')
-          .select('mo_number, machine')
-          .in('mo_number', tMoNums)
-        if (machineRows?.length) {
-          const moMachineMap = new Map<string, string>(
-            (machineRows as { mo_number: string; machine: string }[])
-              .filter(m => m.machine)
-              .map(m => [m.mo_number, m.machine])
-          )
-          for (const r of parsed) {
-            if (r.factory === 'T' && r.mo_number) {
-              const fromTable = moMachineMap.get(r.mo_number)
-              if (fromTable) r.assigned_machine = fromTable
-            }
-          }
-        }
-      }
-
-      // ── 從 erp_pj_sync 查詢 C/O 廠列的請購/採購單序號（lot_number 用）────
-      // r.mo_number 現在是「單號-行號」的組合（見上方 refNumber），這裡查 erp_pj_sync
-      // 要用不含行號的裸單號；行號本身只有一個 doc+item 對到多筆時才會不準，用
-      // doc_no+item_code+sub_no 三者一起比對才能正確對回同一筆採購行，而不是隨便取第一筆。
-      const bareDocNo = (mo: string) => mo.replace(/-\d+$/, '')
-      const coRows = parsed.filter(r => (r.factory === 'C' || r.factory === 'O') && r.mo_number)
-      if (coRows.length > 0) {
-        const docNos = [...new Set(coRows.map(r => bareDocNo(r.mo_number!)))]
-        const { data: syncRows } = await supabase
-          .from('erp_pj_sync')
-          .select('doc_no, sub_no, item_code')
-          .in('doc_no', docNos)
-          .in('doc_type', ['採購單號', '請購單號'])
-        if (syncRows?.length) {
-          // key = doc_no|item_code|sub_no（sub_no 本身就取自 mo_number 的行號，三者一起比對
-          // 才能正確對回同一筆採購行，避免同一張單同一品項多行時互相覆蓋）
-          const syncSet = new Set(syncRows.map(sr => `${sr.doc_no}|${sr.item_code ?? ''}|${sr.sub_no ?? ''}`))
-          for (const r of parsed) {
-            if ((r.factory === 'C' || r.factory === 'O') && r.mo_number && !r.line_seq) {
-              // 僅在 match_line_no 未能提供序號時，才以採購單行號作為 fallback
-              const doc = bareDocNo(r.mo_number)
-              const subNo = r.mo_number.slice(doc.length + 1) // 去掉 "doc-" 前綴後剩下的行號
-              if (subNo && syncSet.has(`${doc}|${r.item_code}|${subNo}`)) r.line_seq = subNo
-            }
-          }
-        }
       }
 
       setInputRows(parsed)
@@ -422,7 +352,7 @@ export default function ProcessGenPage() {
             product_name: row.item_code, product_desc: row.item_spec,
             lot_number: row.line_seq || row.order_number,
             prod_qty: row.quantity, due: row.due,
-            priority: '', earliest_start: today,
+            priority: prioFor(row.due), earliest_start: today,
             job_seq: '', workcenter: '', job_name: '', job_qty: row.quantity,
             outsourcing: '', est_time: 0, time_unit: '分鐘', bom: '', mat_req_qty: '',
             customer: row.customer,
@@ -440,7 +370,7 @@ export default function ProcessGenPage() {
             product_name: row.item_code, product_desc: row.item_spec,
             lot_number: row.line_seq || row.order_number,
             prod_qty: row.quantity, due: row.due,
-            priority: '', earliest_start: today,
+            priority: prioFor(row.due), earliest_start: today,
             job_seq: '', workcenter: '', job_name: '', job_qty: row.quantity,
             outsourcing: '', est_time: 0, time_unit: '分鐘', bom: '', mat_req_qty: '',
             customer: row.customer,
@@ -461,7 +391,7 @@ export default function ProcessGenPage() {
             product_name: row.item_code, product_desc: row.item_spec,
             lot_number: row.line_seq || row.order_number,
             prod_qty: row.quantity, due: row.due,
-            priority: '', earliest_start: today,
+            priority: prioFor(row.due), earliest_start: today,
             job_seq: op.sequence, workcenter: station, job_name: op.op_name,
             job_qty: jobQty, outsourcing: '', est_time: est, time_unit: '分鐘',
             bom: '', mat_req_qty: '',
@@ -532,7 +462,7 @@ export default function ProcessGenPage() {
         product_name: orig.item_code, product_desc: orig.item_spec,
         lot_number: orig.line_seq || orig.order_number,
         prod_qty: orig.quantity, due: orig.due,
-        priority: '', earliest_start: today,
+        priority: prioFor(orig.due), earliest_start: today,
         job_seq: '', workcenter: '', job_name: '', job_qty: orig.quantity,
         outsourcing: '', est_time: 0, time_unit: '分鐘', bom: '', mat_req_qty: '',
         customer: orig.customer, factory: orig.factory, _noRoute: true,
@@ -578,7 +508,7 @@ export default function ProcessGenPage() {
         product_name: orig.item_code, product_desc: orig.item_spec,
         lot_number: orig.line_seq || orig.order_number,
         prod_qty: orig.quantity, due: orig.due,
-        priority: '', earliest_start: today,
+        priority: prioFor(orig.due), earliest_start: today,
         job_seq: '', workcenter: '', job_name: '', job_qty: orig.quantity,
         outsourcing: '', est_time: 0, time_unit: '分鐘', bom: '', mat_req_qty: '',
         customer: orig.customer, factory: orig.factory, _noRoute: true,
@@ -630,7 +560,7 @@ export default function ProcessGenPage() {
           product_name: row.item_code, product_desc: row.item_spec,
           lot_number: row.line_seq || row.order_number,
           prod_qty: row.quantity, due: row.due,
-          priority: '', earliest_start: today,
+          priority: prioFor(row.due), earliest_start: today,
           job_seq: op.sequence, workcenter: station, job_name: op.op_name,
           job_qty: jobQty, outsourcing: '', est_time: est, time_unit: '分鐘',
           bom: '', mat_req_qty: '',
@@ -765,6 +695,43 @@ export default function ProcessGenPage() {
     })
   }, [singleRows, moNumber, quantity, itemCode])
 
+  // ── 自動轉換待處理清單（每日 17:05 排程跳過的列，導覽列徽章數字的明細）──
+
+  interface PendingItem {
+    sheet_date: string; order_number: string; item_code: string; item_spec: string
+    factory: string; quantity: number; line_seq: string; reason: string; created_at: string
+  }
+  const [pendingItems, setPendingItems] = useState<PendingItem[]>([])
+  const [pendingBusy, setPendingBusy] = useState(false)
+  // 目前展開「貼上製程」面板的待處理列（key = order||item||line_seq），一次只展開一列
+  const [pasteOpenKey, setPasteOpenKey] = useState<string | null>(null)
+  const pendingKey = (it: PendingItem) => `${it.order_number}||${it.item_code}||${it.line_seq}`
+
+  const fetchPending = useCallback(async () => {
+    try {
+      const res = await fetch('/api/sara/process-gen-pending', { cache: 'no-store' })
+      const j = await res.json() as { success: boolean; items?: PendingItem[] }
+      if (j.success) setPendingItems(j.items ?? [])
+    } catch { /* 非關鍵路徑 */ }
+  }, [])
+  useEffect(() => { void fetchPending() }, [fetchPending])
+
+  const dismissPending = useCallback(async (keys: string[] | null) => {
+    if (!confirm(keys ? '確定移除這筆待處理項？（已處理完成才移除，移除後導覽列數字同步減少）' : '確定清空全部待處理項？')) return
+    setPendingBusy(true)
+    try {
+      const res = await fetch('/api/sara/process-gen-pending', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(keys ? { keys } : {}),
+      })
+      const j = await res.json()
+      if (j.success) await fetchPending()
+    } finally {
+      setPendingBusy(false)
+    }
+  }, [fetchPending])
+
   // ── 統計 ──────────────────────────────────────────────────────
 
   const successCount = saraRows.filter(r => !r._noRoute).length
@@ -777,8 +744,149 @@ export default function ProcessGenPage() {
 
       <div>
         <h1 className="text-xl font-bold text-emerald-300">SARA 工序格式產生器</h1>
-        <p className="text-xs text-slate-400 mt-0.5">由每日出單表 CSV 查詢途程，自動產出塔台 SARA_101 匯入格式</p>
+        <p className="text-xs text-slate-400 mt-0.5">由每日出單表 CSV 查詢途程，自動產出塔台 SARA_101 匯入格式・每日 17:05 自動轉換當日出單表</p>
       </div>
+
+      {/* ── 交期優先度規則（Priority Level）── */}
+      <div className="bg-slate-900 border border-slate-800 rounded-xl px-4 py-3">
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+          <span className="text-xs font-bold text-emerald-300 whitespace-nowrap">⚡ 交期優先度（Priority Level）</span>
+          {!prioEditing ? (
+            <>
+              <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
+                {priorityRules.map((r, i) => {
+                  const prevMax = i === 0 ? -1 : priorityRules[i - 1].max_days
+                  const range = r.max_days - prevMax === 1 ? `${r.max_days} 天` : `${prevMax + 1}~${r.max_days} 天`
+                  return (
+                    <span key={i} className="px-2 py-0.5 rounded bg-slate-800 border border-slate-700 text-slate-300 font-mono whitespace-nowrap">
+                      {i === 0 ? `≤${r.max_days} 天` : range} → <span className="text-amber-300 font-bold">{r.priority}</span>
+                    </span>
+                  )
+                })}
+                <span className="px-2 py-0.5 rounded bg-slate-800/50 border border-slate-800 text-slate-500 font-mono whitespace-nowrap">
+                  &gt;{priorityRules[priorityRules.length - 1]?.max_days ?? 0} 天 → 不填
+                </span>
+              </div>
+              <button onClick={startPrioEdit} className="px-3 py-1 rounded text-xs bg-slate-800 border border-slate-700 text-slate-300 hover:text-emerald-300 hover:border-emerald-700 transition-colors">
+                ✏️ 編輯規則
+              </button>
+            </>
+          ) : (
+            <div className="flex flex-wrap items-center gap-2">
+              {prioDraft.map((d, i) => (
+                <span key={i} className="flex items-center gap-1 px-2 py-1 rounded bg-slate-800 border border-slate-700 text-[11px]">
+                  <span className="text-slate-500">≤</span>
+                  <input
+                    value={d.max_days}
+                    onChange={e => setPrioDraft(prev => prev.map((x, xi) => xi === i ? { ...x, max_days: e.target.value } : x))}
+                    className="w-10 bg-slate-950 border border-slate-700 rounded px-1 py-0.5 text-center text-slate-200 font-mono"
+                  />
+                  <span className="text-slate-500">天 →</span>
+                  <input
+                    value={d.priority}
+                    onChange={e => setPrioDraft(prev => prev.map((x, xi) => xi === i ? { ...x, priority: e.target.value } : x))}
+                    className="w-10 bg-slate-950 border border-slate-700 rounded px-1 py-0.5 text-center text-amber-300 font-mono"
+                  />
+                  <button onClick={() => setPrioDraft(prev => prev.filter((_, xi) => xi !== i))} className="text-slate-600 hover:text-red-400 ml-0.5">✕</button>
+                </span>
+              ))}
+              <button onClick={() => setPrioDraft(prev => [...prev, { max_days: '', priority: '' }])} className="px-2 py-1 rounded text-[11px] bg-slate-800 border border-slate-700 text-slate-400 hover:text-white">＋ 加一級</button>
+              <button onClick={() => void savePrioRules()} disabled={prioSaving} className="px-3 py-1 rounded text-xs bg-emerald-700 hover:bg-emerald-600 text-white font-bold disabled:opacity-50">
+                {prioSaving ? '儲存中…' : '儲存'}
+              </button>
+              <button onClick={() => setPrioEditing(false)} disabled={prioSaving} className="px-2 py-1 rounded text-xs bg-slate-800 border border-slate-700 text-slate-400 hover:text-white">取消</button>
+            </div>
+          )}
+          {prioMsg && <span className={`text-[11px] ${prioMsg.startsWith('✅') ? 'text-emerald-400' : 'text-red-400'}`}>{prioMsg}</span>}
+        </div>
+        <p className="text-[10px] text-slate-600 mt-1.5">依「交期距今天數」自動填入 SARA 的 Priority Level（1-99，越大越優先）；手動產生與每日 17:05 自動轉換都套用此規則，超出最大天數的不填由塔台自行排程。</p>
+      </div>
+
+      {/* ── 自動轉換待處理清單（導覽列紅色數字的明細）── */}
+      {pendingItems.length > 0 && (
+        <div className="bg-red-950/30 border border-red-700/50 rounded-xl p-4 space-y-2">
+          <div className="flex items-center justify-between gap-2">
+            <h2 className="text-sm font-bold text-red-300">
+              🔔 自動轉換待處理（{pendingItems.length} 筆）——每日排程跳過、需人工處理的列
+            </h2>
+            <button
+              onClick={() => void dismissPending(null)}
+              disabled={pendingBusy}
+              className="px-2.5 py-1 rounded text-[11px] bg-slate-800 border border-slate-700 text-slate-400 hover:text-red-300 hover:border-red-700 disabled:opacity-50"
+            >
+              全部清除
+            </button>
+          </div>
+          <p className="text-[11px] text-slate-400">
+            處理方式：點「貼上途程」貼入途程名稱，自動帶出製程、產生工序列並加入交換區（會自動移除，可同時存成該品號的途程）；或至「途程列表」為品項設定正確途程（明天排程會自動補送）、或在下方載入該日出單表手動產生；處理完成後點「已處理」移除。
+          </p>
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead className="text-slate-400">
+                <tr className="border-b border-red-900/40">
+                  <th className="px-2 py-1.5 text-left whitespace-nowrap">出單日</th>
+                  <th className="px-2 py-1.5 text-left whitespace-nowrap">訂單/序號</th>
+                  <th className="px-2 py-1.5 text-left whitespace-nowrap">品項編碼</th>
+                  <th className="px-2 py-1.5 text-left">品名規格</th>
+                  <th className="px-2 py-1.5 text-center whitespace-nowrap">廠別</th>
+                  <th className="px-2 py-1.5 text-right whitespace-nowrap">數量</th>
+                  <th className="px-2 py-1.5 text-left">原因</th>
+                  <th className="px-2 py-1.5"></th>
+                </tr>
+              </thead>
+              <tbody>
+                {pendingItems.map((it, i) => {
+                  const key = pendingKey(it)
+                  const open = pasteOpenKey === key
+                  return (
+                    <Fragment key={`${key}-${i}`}>
+                      <tr className={`border-b border-red-900/20 ${open ? 'bg-slate-900/60' : ''}`}>
+                        <td className="px-2 py-1.5 font-mono text-slate-400 whitespace-nowrap">{it.sheet_date}</td>
+                        <td className="px-2 py-1.5 font-mono text-cyan-300 whitespace-nowrap">{it.order_number}{it.line_seq ? ` #${it.line_seq}` : ''}</td>
+                        <td className="px-2 py-1.5 font-mono text-purple-300 whitespace-nowrap">{it.item_code}</td>
+                        <td className="px-2 py-1.5 text-slate-300 max-w-[260px] truncate" title={it.item_spec}>{it.item_spec}</td>
+                        <td className="px-2 py-1.5 text-center text-slate-400">{FACTORY_LABEL[it.factory] ?? it.factory}</td>
+                        <td className="px-2 py-1.5 text-right font-mono text-emerald-300">{it.quantity}</td>
+                        <td className="px-2 py-1.5 text-amber-300/90 max-w-[280px] truncate" title={it.reason}>{it.reason}</td>
+                        <td className="px-2 py-1.5 whitespace-nowrap space-x-1">
+                          <button
+                            onClick={() => setPasteOpenKey(open ? null : key)}
+                            disabled={pendingBusy}
+                            className={`px-2 py-0.5 rounded text-[10px] border disabled:opacity-50 ${open
+                              ? 'bg-emerald-800/60 border-emerald-600 text-emerald-200'
+                              : 'bg-slate-800 border-slate-700 text-slate-300 hover:bg-emerald-900/50 hover:text-emerald-300 hover:border-emerald-700'}`}
+                          >
+                            📋 貼上途程
+                          </button>
+                          <button
+                            onClick={() => void dismissPending([key])}
+                            disabled={pendingBusy}
+                            className="px-2 py-0.5 rounded text-[10px] bg-slate-800 border border-slate-700 text-slate-300 hover:bg-emerald-900/50 hover:text-emerald-300 hover:border-emerald-700 disabled:opacity-50"
+                          >
+                            ✓ 已處理
+                          </button>
+                        </td>
+                      </tr>
+                      {open && (
+                        <tr className="border-b border-red-900/20">
+                          <td colSpan={8} className="px-2 pb-3 pt-1">
+                            <PendingPastePanel
+                              item={it}
+                              prioFor={prioFor}
+                              onDone={() => { setPasteOpenKey(null); void fetchPending() }}
+                              onClose={() => setPasteOpenKey(null)}
+                            />
+                          </td>
+                        </tr>
+                      )}
+                    </Fragment>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
 
       {/* ── Tabs ── */}
       <div className="flex gap-1 bg-slate-900 p-1 rounded-lg w-fit border border-slate-800">

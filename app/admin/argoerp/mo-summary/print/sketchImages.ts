@@ -105,21 +105,83 @@ async function renderPdfUrlPages(url: string): Promise<string[]> {
   return renderPdfBufferPages(await res.arrayBuffer())
 }
 
+// ── 統一縮圖：把示意圖壓到列印夠用的解析度 ──────────────────────────────
+//
+// 設計部交來的示意圖多半是 A4 @300dpi（2481×3508，解碼後一張就要 35MB）。Chrome 列印時
+// 要把整批頁面的圖一次解碼進記憶體，一疊幾十張製令連同示意圖一起印，圖片記憶體會爆掉，
+// 結果就是圖只解碼到一半就被送去印：JPEG 沒解碼到的部分印出來是一整塊灰色、PNG 則是
+// 空白（2026-09-04 使用者拍照回報：上半部正常、下半部整塊灰）。
+//
+// 示意圖是給生產線對照用的，長邊 2000px（A4 直式約 180dpi）已足夠清楚讀字，記憶體只剩
+// 原本 1/4；同時統一轉成 JPEG，讓 PNG 也一併縮小。原圖若本來就比上限小則只轉格式不放大。
+const MAX_PRINT_EDGE = 2000
+const PRINT_JPEG_QUALITY = 0.9
+
+function loadImageElement(src: string): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const img = new Image()
+    img.onload = () => resolve(img)
+    img.onerror = () => reject(new Error(`圖片載入失敗：${src.slice(0, 80)}`))
+    img.src = src
+  })
+}
+
+/** 把任一可載入的圖片網址（blob/data/同源 URL）縮到列印上限並轉成 JPEG dataURL */
+async function normalizeForPrint(src: string): Promise<string> {
+  const img = await loadImageElement(src)
+  const w = img.naturalWidth
+  const h = img.naturalHeight
+  if (!w || !h) return src
+  const ratio = Math.min(1, MAX_PRINT_EDGE / Math.max(w, h))
+  const canvas = document.createElement('canvas')
+  canvas.width = Math.round(w * ratio)
+  canvas.height = Math.round(h * ratio)
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return src
+  // 轉 JPEG 沒有透明色版，先鋪白底以免 PNG 透明區變黑
+  ctx.fillStyle = '#fff'
+  ctx.fillRect(0, 0, canvas.width, canvas.height)
+  ctx.drawImage(img, 0, 0, canvas.width, canvas.height)
+  return canvas.toDataURL('image/jpeg', PRINT_JPEG_QUALITY)
+}
+
+/** 本機 File → 縮圖後的 JPEG dataURL（blob URL 用完即釋放，不留在記憶體） */
+async function normalizeFileForPrint(file: File): Promise<string> {
+  const blobUrl = URL.createObjectURL(file)
+  try {
+    return await normalizeForPrint(blobUrl)
+  } finally {
+    URL.revokeObjectURL(blobUrl)
+  }
+}
+
+/** 遠端圖片網址 → 先抓成 blob（避開 canvas 跨域污染）再縮圖 */
+async function normalizeUrlForPrint(url: string): Promise<string> {
+  const res = await fetch(url)
+  if (!res.ok) throw new Error(`HTTP ${res.status}`)
+  const blobUrl = URL.createObjectURL(await res.blob())
+  try {
+    return await normalizeForPrint(blobUrl)
+  } finally {
+    URL.revokeObjectURL(blobUrl)
+  }
+}
+
 /**
  * 把比對到的示意圖檔案（可能混合圖片與 PDF）全部轉成可直接 <img> 顯示的網址清單。
- * 圖片直接轉 blob URL（快、不佔記憶體轉檔）；PDF 逐頁轉成 PNG dataURL。
+ * 圖片與 PDF 頁面都統一縮到列印上限並轉成 JPEG dataURL（見上方 normalizeForPrint 說明）。
  */
 export async function resolveSketchImages(matches: MatchedSketch[]): Promise<string[]> {
   const urls: string[] = []
   for (const m of matches) {
-    if (PDF_EXT.test(m.file.name)) {
-      try {
-        urls.push(...await renderPdfPages(m.file))
-      } catch (e) {
-        console.error(`示意圖 PDF 轉圖失敗（${m.file.name}）：`, e)
+    try {
+      if (PDF_EXT.test(m.file.name)) {
+        for (const pageUrl of await renderPdfPages(m.file)) urls.push(await normalizeForPrint(pageUrl))
+      } else {
+        urls.push(await normalizeFileForPrint(m.file))
       }
-    } else {
-      urls.push(URL.createObjectURL(m.file))
+    } catch (e) {
+      console.error(`示意圖轉圖失敗（${m.file.name}）：`, e)
     }
   }
   return urls
@@ -133,14 +195,16 @@ export async function resolveSketchImages(matches: MatchedSketch[]): Promise<str
 export async function resolveSketchUrls(urls: string[]): Promise<string[]> {
   const out: string[] = []
   for (const url of urls) {
-    if (PDF_EXT.test(url)) {
-      try {
-        out.push(...await renderPdfUrlPages(url))
-      } catch (e) {
-        console.error(`示意圖 PDF 轉圖失敗（${url}）：`, e)
+    try {
+      if (PDF_EXT.test(url)) {
+        for (const pageUrl of await renderPdfUrlPages(url)) out.push(await normalizeForPrint(pageUrl))
+      } else {
+        out.push(await normalizeUrlForPrint(url))
       }
-    } else {
-      out.push(url)
+    } catch (e) {
+      // 縮圖失敗（例如網址失效）時退回原網址，至少不要漏印
+      console.error(`示意圖轉圖失敗（${url}）：`, e)
+      if (!PDF_EXT.test(url)) out.push(url)
     }
   }
   return out

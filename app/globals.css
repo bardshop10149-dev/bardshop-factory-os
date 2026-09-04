@@ -65,7 +65,15 @@ body {
 }
 
 @media print {
-  html {
+  /* 全站列印預設黑白。
+     ⚠️ 灰階「不可」套在 html/body：CSS filter 套在祖先層之後，子層再怎麼設定都無法還原
+     成彩色，會導致「單據黑白、示意圖彩色」這種需求完全做不到。因此改為只把圖像類元素
+     轉灰階，並提供 .print-keep-color 讓需要保留原色的區塊豁免（例如列印製令/採購/請購單
+     時附帶的商品示意圖頁）。搭配印表機設定彩色列印即可：單據仍是黑白、示意圖是彩色。 */
+  img,
+  svg,
+  canvas,
+  video {
     -webkit-filter: grayscale(100%) !important;
     filter: grayscale(100%) !important;
   }
@@ -80,9 +88,32 @@ body {
     box-shadow: none !important;
   }
 
+  /* 保留原色的區塊：圖像不轉灰階、文字與底色不被強制成黑白 */
+  .print-keep-color img,
+  .print-keep-color svg,
+  .print-keep-color canvas,
+  .print-keep-color video,
+  img.print-keep-color {
+    -webkit-filter: none !important;
+    filter: none !important;
+  }
+  .print-keep-color,
+  .print-keep-color * {
+    color: revert-layer !important;
+    background: revert-layer !important;
+    border-color: revert-layer !important;
+  }
+
   html,
   body {
     background: #fff !important;
     color: #000 !important;
   }
+}
+
+/* 深色主題：原生 date input 的小日曆圖示預設黑色，深底上幾乎看不見 → 反白。
+   invert(0.75) 而非 1：全白太刺眼，調成接近其他 slate-300 圖示的亮度。 */
+input[type="date"]::-webkit-calendar-picker-indicator {
+  filter: invert(0.75);
+  cursor: pointer;
 }

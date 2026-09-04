@@ -2,6 +2,9 @@
 // 注意：PublicPoLine 為跨區（如業務查詢）可見形狀 —— 絕不可加入供應商 / 付款欄位。
 
 export const SHIP_METHODS = ['順豐', '空運', '海特快', '一般海運'] as const
+
+/** 常平出貨資訊在 po_line_tracking.note 裡的管理行前綴（changping-ship/import 寫入） */
+export const CP_SHIP_NOTE_TAG = '【常平出貨】'
 export type ShipMethod = typeof SHIP_METHODS[number]
 
 export const PAYMENT_PCTS = [0, 30, 50, 70, 100] as const
@@ -11,12 +14,15 @@ export type PaymentPct = typeof PAYMENT_PCTS[number]
 export type Progress = '未發單' | '已發單' | '已出貨' | '已到倉'
 
 /** 入庫量是否已滿足採購量（已到倉的判定依據） */
-export function arrivedFull(t: { qty: number | null; received_qty: number | null }): boolean {
-  return t.received_qty != null && t.qty != null && t.qty > 0 && t.received_qty >= t.qty
+export function arrivedFull(t: { qty: number | null; received_qty: number | null; reject_qty?: number | null }): boolean {
+  if (t.received_qty == null || t.qty == null || t.qty <= 0) return false
+  // 驗退的部分廠商不會再補，到貨＋退貨湊滿訂購量就算結束
+  // （例：訂 5、到貨 4、退貨 1 → 已完成，不是「部分入庫」）
+  return t.received_qty + (t.reject_qty ?? 0) >= t.qty
 }
 
 /** 目前抵達的最高里程碑（跨區單一標籤用）：已到倉 > 已出貨 > 已發單 > 未發單 */
-export function milestoneOf(t: { sent_at: string | null; shipped_at: string | null; qty: number | null; received_qty: number | null }): Progress {
+export function milestoneOf(t: { sent_at: string | null; shipped_at: string | null; qty: number | null; received_qty: number | null; reject_qty?: number | null }): Progress {
   if (arrivedFull(t)) return '已到倉'
   if (t.shipped_at) return '已出貨'
   if (t.sent_at) return '已發單'
@@ -35,6 +41,8 @@ export interface PoTrackingLine {
   qty: number | null
   unit: string | null
   received_qty: number | null         // 已入庫量（ARGO 進貨入庫後回寫的 ACTUAL_QTY）
+  reject_qty: number | null           // 驗退量（REJECT_QTY）。退掉的不會再補，
+                                      // 故「到貨＋退貨＝訂購」即代表這一行已處理完畢
   po_status: string | null            // ARGO HOLD_STATUS（OPEN…）
   order_date: string | null           // 下單日（YYYY-MM-DD）
   due_date: string | null             // 交期（YYYY-MM-DD，同步時已倒推 2 工作日）
@@ -83,6 +91,8 @@ export interface PublicPoLine {
   progress: Progress
   ship_method: ShipMethod | null
   expected_ship_date: string | null
+  /** 常平出貨備註：只擷取 note 裡的【常平出貨】管理行（採購內部手打備註不外流） */
+  cp_ship_note: string | null
 }
 
 /** 各式 ARGO 文字日期（YYYYMMDD / YYYY/MM/DD / YYYY-MM-DD…）→ YYYY-MM-DD */

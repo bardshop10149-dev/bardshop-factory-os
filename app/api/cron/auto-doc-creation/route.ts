@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { getSupabaseAdminClient, formatSupabaseAdminError } from '@/lib/supabaseAdmin'
 import { argoConfigured, argoQuery, argoImport } from '@/lib/argoQuery'
 
-// 每天 17:10（台北時間）自動轉單：當天出單表的委外列→請購單（IFAF105）、
+// 每天 17:01（台北時間）自動轉單：當天出單表的委外列→請購單（IFAF105）、
 // 常平列→採購單（IFAF024）。邏輯完整搬自兩個手動頁面（order-batch-export-pr /
 // order-batch-export-c），表頭全部用頁面的固定預設值；設計決策（2026-08-24 與使用者確認）：
 //   * 常平採購單價一律 0
@@ -222,9 +222,15 @@ async function runPrCreation(sb: Sb, sheetDate: string, allRows: SheetRowRec[]):
       const rowKey = str(src.row_key)
       if (!rowKey) { noRowKey.push(`${str(src.order_number)}/${str(src.item_code)}`); continue }
       const hasMatchedPo = src.po_status === 'matched' && !!src.po_number
+      // pr_sub_no 必須一併回寫：上面送 ARGO 時已用 LINE_NO = i+1 指定行號，同一張請購單
+      // 會涵蓋多張訂單的多個品項，只記單號而不記行號的話，下游（SARA 工序轉換）組出的
+      // 工單號會是不帶後綴的「MPO…」，同一張請購單的所有品項在塔台裡全部擠成同一個工單號、
+      // 無法分辨是哪一筆（2026-09-04 使用者回報）。常平採購單路徑本來就有寫 po_sub_no
+      // （見下方 IFAF024 段落），這裡是漏寫。
+      const prSubNo = String(i + 1)
       updates.push(hasMatchedPo
-        ? { row_key: rowKey, mo_number: src.po_number, pr_number: applyId, po_number: src.po_number, po_status: 'matched' }
-        : { row_key: rowKey, mo_number: applyId, pr_number: applyId, po_status: null })
+        ? { row_key: rowKey, mo_number: src.po_number, pr_number: applyId, pr_sub_no: prSubNo, po_number: src.po_number, po_status: 'matched' }
+        : { row_key: rowKey, mo_number: applyId, pr_number: applyId, pr_sub_no: prSubNo, po_status: null })
     }
     if (updates.length > 0) await patchSheetRows(sb, sheetDate, updates)
 

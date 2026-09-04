@@ -26,92 +26,6 @@ interface WipRecord {
   site_label?: string | null
 }
 
-// ===== CSV 解析 =====
-function parseWipCsv(text: string): WipRecord[] {
-  const lines = text.split(/\r?\n/).filter(l => l.trim())
-  if (lines.length < 3) return []   // 至少需要英文 header + 中文 header + 1 筆資料
-
-  const headers = splitCsvLine(lines[0])
-  const colIdx = (names: string[]): number => {
-    for (const n of names) {
-      const i = headers.indexOf(n)
-      if (i !== -1) return i
-    }
-    return -1
-  }
-
-  const COL = {
-    id_list:             colIdx(['id_list']),
-    work_order:          colIdx(['work_order']),
-    mo_nbr:              colIdx(['mo_nbr']),
-    product_name:        colIdx(['product_name']),
-    product_subname:     colIdx(['product_subname']),
-    product_description: colIdx(['product_description']),
-    lot_nbr:             colIdx(['lot_nbr']),
-    doc_nbr:             colIdx(['doc_nbr']),
-    workcenter_name:     colIdx(['workcenter_name']),
-    job_name:            colIdx(['job_name']),
-    job_sequence:        colIdx(['job_sequence']),
-    status:              colIdx(['status']),
-    source_type:         colIdx(['source_type']),
-    wip_qty:             colIdx(['wip_qty']),
-    real_start_time:     colIdx(['real_start_time']),
-    real_end_time:       colIdx(['real_end_time']),
-    report_resources:    colIdx(['report_resources']),
-    username:            colIdx(['username']),
-  }
-
-  const records: WipRecord[] = []
-  // 第 2 行是中文標頭，跳過；從第 3 行開始是資料
-  for (let i = 2; i < lines.length; i++) {
-    const cells = splitCsvLine(lines[i])
-    const g = (col: number): string => (col >= 0 && col < cells.length ? cells[col].trim() : '')
-    const workOrder = g(COL.work_order)
-    if (!workOrder) continue
-
-    records.push({
-      id_list:             g(COL.id_list),
-      work_order:          workOrder,
-      mo_nbr:              g(COL.mo_nbr),
-      product_name:        g(COL.product_name),
-      product_subname:     g(COL.product_subname),
-      product_description: g(COL.product_description),
-      lot_nbr:             g(COL.lot_nbr),
-      doc_nbr:             g(COL.doc_nbr),
-      workcenter_name:     g(COL.workcenter_name),
-      job_name:            g(COL.job_name),
-      job_sequence:        g(COL.job_sequence) ? parseInt(g(COL.job_sequence), 10) : null,
-      status:              g(COL.status),
-      source_type:         g(COL.source_type),
-      wip_qty:             g(COL.wip_qty) !== '' ? parseFloat(g(COL.wip_qty)) : null,
-      real_start_time:     g(COL.real_start_time) || null,
-      real_end_time:       g(COL.real_end_time) || null,
-      report_resources:    g(COL.report_resources),
-      username:            g(COL.username),
-    })
-  }
-  return records
-}
-
-function splitCsvLine(line: string): string[] {
-  const result: string[] = []
-  let cur = ''
-  let inQuote = false
-  for (let i = 0; i < line.length; i++) {
-    const ch = line[i]
-    if (ch === '"') {
-      if (inQuote && line[i + 1] === '"') { cur += '"'; i++ }
-      else inQuote = !inQuote
-    } else if (ch === ',' && !inQuote) {
-      result.push(cur); cur = ''
-    } else {
-      cur += ch
-    }
-  }
-  result.push(cur)
-  return result
-}
-
 const STATUS_LABEL: Record<string, string> = {
   finished: '完成',
   running:  '進行中',
@@ -191,14 +105,7 @@ interface ArgoMachineOutputRow {
 
 // ===== 主元件 =====
 export default function SaraWipRecordsPage() {
-  const [tab, setTab] = useState<'upload' | 'view' | 'daily' | 'argo-daily'>('view')
-
-  // --- 上傳狀態 ---
-  const [file, setFile] = useState<File | null>(null)
-  const [preview, setPreview] = useState<WipRecord[]>([])
-  const [importing, setImporting] = useState(false)
-  const [importMsg, setImportMsg] = useState('')
-  const [importSiteLabel, setImportSiteLabel] = useState<SiteLabel>('台北')
+  const [tab, setTab] = useState<'view' | 'daily' | 'argo-daily'>('view')
 
   // --- 瀏覽狀態 ---
   const [records, setRecords] = useState<WipRecord[]>([])
@@ -229,77 +136,6 @@ export default function SaraWipRecordsPage() {
   const [argoUnassignedCount, setArgoUnassignedCount] = useState(0)
   const [argoTotalMoCount, setArgoTotalMoCount] = useState(0)
   const [argoError, setArgoError] = useState('')
-
-  // --- 解析 CSV ---
-  const handleFileChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
-    const f = e.target.files?.[0] ?? null
-    setFile(f)
-    setImportMsg('')
-    if (!f) { setPreview([]); return }
-    const reader = new FileReader()
-    reader.onload = (ev) => {
-      const text = ev.target?.result as string
-      const rows = parseWipCsv(text)
-      setPreview(rows)
-    }
-    reader.readAsText(f, 'utf-8')
-  }, [])
-
-  // --- 匯入到 Supabase ---
-  const handleImport = useCallback(async () => {
-    if (preview.length === 0) return
-    setImporting(true)
-    setImportMsg('')
-    try {
-      // 以 work_order 去重（CSV 可能含重複行，後者覆蓋前者）
-      const seen = new Map<string, typeof preview[0]>()
-      for (const r of preview) seen.set(r.work_order, r)
-      const deduped = Array.from(seen.values())
-
-      const payload = deduped.map(r => ({
-        id_list:             r.id_list || null,
-        work_order:          r.work_order,
-        mo_nbr:              r.mo_nbr || null,
-        product_name:        r.product_name || null,
-        product_subname:     r.product_subname || null,
-        product_description: r.product_description || null,
-        lot_nbr:             r.lot_nbr || null,
-        doc_nbr:             r.doc_nbr || null,
-        workcenter_name:     r.workcenter_name || null,
-        job_name:            r.job_name || null,
-        job_sequence:        r.job_sequence,
-        status:              r.status || null,
-        source_type:         r.source_type || null,
-        wip_qty:             r.wip_qty,
-        real_start_time:     r.real_start_time || null,
-        real_end_time:       r.real_end_time || null,
-        report_resources:    r.report_resources || null,
-        username:            r.username || null,
-        site_label:          importSiteLabel,
-      }))
-
-      const CHUNK = 200
-      let upserted = 0
-      for (let i = 0; i < payload.length; i += CHUNK) {
-        const chunk = payload.slice(i, i + CHUNK)
-        const { error } = await supabase
-          .from('sara_wip_records')
-          .upsert(chunk, { onConflict: 'work_order' })
-        if (error) throw new Error(error.message ?? error.details ?? JSON.stringify(error))
-        upserted += chunk.length
-      }
-
-      setImportMsg(`✅ 匯入完成：共 ${upserted} 筆（去重後，重複的已更新）`)
-      setFile(null)
-      setPreview([])
-      if (tab === 'view') void fetchRecords()
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : (e as { message?: string })?.message ?? JSON.stringify(e)
-      setImportMsg(`❌ 匯入失敗：${msg}`)
-    } finally {
-      setImporting(false)
-    }
-  }, [preview, tab, importSiteLabel])
 
   // --- 讀取紀錄 ---
   const fetchRecords = useCallback(async () => {
@@ -426,13 +262,13 @@ export default function SaraWipRecordsPage() {
         <div className="flex items-center gap-3">
           <div>
             <h1 className="text-xl font-bold text-white">塔台報工紀錄</h1>
-            <p className="text-slate-400 text-sm mt-0.5">從 SARA 系統匯出的 CSV 定期更新・預設顯示印刷站2F</p>
+            <p className="text-slate-400 text-sm mt-0.5">每日自動同步塔台報工（台北時間 09/12/15/18/21 點）・本系統自有資料庫永久保存（塔台端僅保留 6 個月）・預設顯示印刷站2F</p>
           </div>
         </div>
 
         {/* 分頁標籤 */}
         <div className="flex gap-1 border-b border-slate-800">
-          {([['view', '📋 瀏覽紀錄'], ['daily', '📊 各機台日報(SARA)'], ['argo-daily', '🎯 各機台日報(ARGO繳庫)'], ['upload', '📤 匯入 CSV']] as const).map(([key, label]) => (
+          {([['view', '📋 瀏覽紀錄'], ['daily', '📊 各機台日報(SARA)'], ['argo-daily', '🎯 各機台日報(ARGO繳庫)']] as const).map(([key, label]) => (
             <button
               key={key}
               onClick={() => {
@@ -447,101 +283,6 @@ export default function SaraWipRecordsPage() {
             </button>
           ))}
         </div>
-
-        {/* ===== 匯入 CSV ===== */}
-        {tab === 'upload' && (
-          <div className="space-y-4">
-            <div className="bg-slate-900 border border-slate-700 rounded-xl p-5 space-y-4">
-              <h2 className="text-base font-semibold text-slate-200">上傳 SARA 報工 CSV</h2>
-              <p className="text-slate-400 text-sm">
-                從 SARA 系統匯出 <span className="font-mono text-amber-300">wip_record__*.csv</span>，
-                以 <span className="text-cyan-300">work_order</span> 作為唯一鍵，重複匯入會自動更新。
-              </p>
-              <div className="flex items-center gap-3">
-                <label className="text-sm text-slate-400 whitespace-nowrap">廠區標籤</label>
-                {SITE_OPTIONS.map(s => (
-                  <button
-                    key={s}
-                    onClick={() => setImportSiteLabel(s)}
-                    className={`px-3 py-1 rounded-full text-xs font-semibold transition-all ${
-                      importSiteLabel === s
-                        ? SITE_BADGE[s] + ' ring-2 ring-offset-1 ring-offset-slate-900 ring-current'
-                        : 'bg-slate-800 text-slate-400 hover:text-slate-200'
-                    }`}
-                  >
-                    {s}
-                  </button>
-                ))}
-                <span className="text-slate-500 text-xs">此次匯入的所有紀錄將標記為「{importSiteLabel}」</span>
-              </div>
-              <input
-                type="file"
-                accept=".csv"
-                onChange={handleFileChange}
-                className="block text-sm text-slate-400 file:mr-3 file:px-3 file:py-1.5 file:rounded file:bg-slate-700 file:border-slate-600 file:text-slate-200 file:text-sm hover:file:bg-slate-600 cursor-pointer"
-              />
-
-              {preview.length > 0 && (
-                <div className="space-y-3">
-                  <div className="flex items-center gap-3">
-                    <span className="text-slate-300 text-sm">解析到 <span className="font-mono text-cyan-300">{preview.length}</span> 筆資料</span>
-                    <span className={`px-2.5 py-0.5 rounded-full text-xs font-semibold ${SITE_BADGE[importSiteLabel]}`}>{importSiteLabel}</span>
-                    <button
-                      onClick={() => void handleImport()}
-                      disabled={importing}
-                      className="px-4 py-1.5 rounded-lg bg-emerald-700 hover:bg-emerald-600 disabled:opacity-40 text-white text-sm font-medium transition-colors"
-                    >
-                      {importing ? '匯入中…' : '確認匯入'}
-                    </button>
-                  </div>
-
-                  {/* 預覽前 10 筆 */}
-                  <div className="overflow-x-auto rounded-lg border border-slate-700">
-                    <table className="w-full text-xs">
-                      <thead className="bg-slate-800 text-slate-300">
-                        <tr>
-                          <th className="px-3 py-2 text-left whitespace-nowrap">{refLabel(importSiteLabel)}</th>
-                          <th className="px-3 py-2 text-left whitespace-nowrap">來源單號</th>
-                          <th className="px-3 py-2 text-left whitespace-nowrap">站點</th>
-                          <th className="px-3 py-2 text-left whitespace-nowrap">製程</th>
-                          <th className="px-3 py-2 text-right whitespace-nowrap">數量</th>
-                          <th className="px-3 py-2 text-left whitespace-nowrap">狀態</th>
-                          <th className="px-3 py-2 text-left whitespace-nowrap">報工結束</th>
-                          <th className="px-3 py-2 text-left whitespace-nowrap">人員</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {preview.slice(0, 10).map((r, i) => (
-                          <tr key={i} className={`border-t border-slate-800 ${i % 2 === 0 ? '' : 'bg-slate-800/30'}`}>
-                            <td className="px-3 py-1.5 font-mono text-cyan-300">{r.mo_nbr}</td>
-                            <td className="px-3 py-1.5 font-mono text-amber-300/80">{r.doc_nbr}</td>
-                            <td className="px-3 py-1.5 text-slate-300">{r.workcenter_name}</td>
-                            <td className="px-3 py-1.5 text-slate-300">{r.job_name}</td>
-                            <td className="px-3 py-1.5 text-right font-mono text-emerald-300">{r.wip_qty ?? '—'}</td>
-                            <td className="px-3 py-1.5">
-                              <span className={STATUS_COLOR[r.status] ?? 'text-slate-400'}>{STATUS_LABEL[r.status] ?? r.status}</span>
-                            </td>
-                            <td className="px-3 py-1.5 text-slate-400 whitespace-nowrap">{r.real_end_time?.slice(0, 16) ?? '—'}</td>
-                            <td className="px-3 py-1.5 text-slate-400">{r.username}</td>
-                          </tr>
-                        ))}
-                        {preview.length > 10 && (
-                          <tr>
-                            <td colSpan={8} className="px-3 py-2 text-center text-slate-500 text-xs">…共 {preview.length} 筆，僅顯示前 10 筆預覽</td>
-                          </tr>
-                        )}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-              )}
-
-              {importMsg && (
-                <p className={`text-sm ${importMsg.startsWith('✅') ? 'text-emerald-400' : 'text-red-400'}`}>{importMsg}</p>
-              )}
-            </div>
-          </div>
-        )}
 
         {/* ===== 瀏覽紀錄 ===== */}
         {tab === 'view' && (
@@ -621,7 +362,7 @@ export default function SaraWipRecordsPage() {
             ) : records.length === 0 ? (
               <div className="py-16 text-center space-y-2">
                 <p className="text-slate-400 text-sm">目前無符合條件的報工紀錄</p>
-                <p className="text-slate-500 text-xs">請先至「匯入 CSV」分頁上傳報工資料，或調整篩選條件</p>
+                <p className="text-slate-500 text-xs">目前無符合的報工資料，請調整篩選條件（資料每日自動同步）</p>
               </div>
             ) : (
               <div className="overflow-x-auto rounded-xl border border-slate-700">
@@ -732,12 +473,12 @@ export default function SaraWipRecordsPage() {
             </div>
 
             <p className="text-slate-500 text-xs">
-              只計算狀態為「完成」的報工，同一台機台不論由誰報工都算在一起。資料來源是「匯入 CSV」上傳的報工快照，不是即時資料。
+              只計算狀態為「完成」的報工，同一台機台不論由誰報工都算在一起。資料來源是每日自動同步的塔台報工紀錄（台北時間 09/12/15/18/21 點更新）。
             </p>
 
             {dailyLatestDate && dailyLatestDate < dailyDate && (
               <div className="px-3 py-2 rounded-lg bg-amber-900/30 border border-amber-700/40 text-amber-300 text-xs">
-                ⚠ 資料庫目前最新的報工紀錄只到 {dailyLatestDate}，比你選的日期舊——請先到「匯入 CSV」上傳更新的報工資料，這份日報才會準確。
+                ⚠ 資料庫目前最新的報工紀錄只到 {dailyLatestDate}，比你選的日期舊——自動同步可能尚未執行到該日，稍後再查看，這份日報才會準確。
               </div>
             )}
 

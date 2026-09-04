@@ -5,7 +5,7 @@
 // 顯示所有相關單據（完整欄位）→ 多選改單類型（日期/數量/品項編碼/生產廠區）→ 預覽 → 套用
 // → （若牽涉廠區切換）重新轉單 → 同步至 SARA 交換區。每次套用都會寫入 order_change_log。
 
-import { useCallback, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   getImportConfig,
   toErpPayload,
@@ -14,6 +14,7 @@ import {
   type SoMatchResult,
 } from '../../../../lib/argoerp/moExportShared'
 import { buildSaraRow, type SaraRow } from '../../../../lib/sara/buildSaraRow'
+import { DEFAULT_PRIORITY_RULES, computePriorityFromDue, type PriorityRule } from '../../../../lib/sara/priorityRules'
 
 // ── 型別 ──────────────────────────────────────────────────────────────────
 
@@ -101,6 +102,18 @@ interface Props {
 }
 
 export default function ChangeOrderPanel({ onApplied }: Props) {
+  // 交期優先度規則（與 process-gen / 每日自動轉換共用，見 /api/sara/priority-rules）
+  const prioRulesRef = useRef<PriorityRule[]>(DEFAULT_PRIORITY_RULES)
+  useEffect(() => {
+    void (async () => {
+      try {
+        const res = await fetch('/api/sara/priority-rules', { cache: 'no-store' })
+        const j = await res.json() as { success: boolean; rules?: PriorityRule[] }
+        if (j.success && Array.isArray(j.rules)) prioRulesRef.current = j.rules
+      } catch { /* 載入失敗沿用預設規則 */ }
+    })()
+  }, [])
+
   // 查詢
   const [orderNumberInput, setOrderNumberInput] = useState('')
   const [queriedOrderNumber, setQueriedOrderNumber] = useState('')
@@ -346,7 +359,7 @@ export default function ChangeOrderPanel({ onApplied }: Props) {
         lot_number: selectedLineNo,
         prod_qty: Number(String(src.quantity ?? '0').replace(/,/g, '')) || 0,
         due: src.delivery_date ?? '',
-        priority: '',
+        priority: computePriorityFromDue(src.delivery_date ?? '', prioRulesRef.current),
         earliest_start: '',
         job_seq: '',
         workcenter: '',

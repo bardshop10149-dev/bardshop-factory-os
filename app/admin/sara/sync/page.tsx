@@ -324,7 +324,7 @@ function StructuredPreview({ action, data }: { action: string; data: unknown }) 
 const ACTIONS: { key: string; label: string; desc: string; needsBody?: boolean; syncAction?: string }[] = [
   { key: 'ping',       label: '🔌 測試連線（取 api_key）', desc: 'POST /api/data_export/temp_token' },
   { key: 'order',      label: '📋 工單列表',             desc: '/data/order',     syncAction: 'sync_order' },
-  { key: 'report',     label: '📝 報工列表',             desc: '/data/report（支援多路徑 fallback）',    syncAction: 'sync_report' },
+  { key: 'report',     label: '📝 報工列表',             desc: '/data/wip（同步入庫至塔台報工紀錄頁）',    syncAction: 'sync_wip_records' },
   { key: 'workcenter', label: '🏭 站點列表',             desc: '/data/workcenter', syncAction: 'sync_workcenter' },
   { key: 'jlb',        label: '⚙️ 製程列表',             desc: '/data/jlb',        syncAction: 'sync_jlb' },
   { key: 'resource',   label: '🔧 資源列表',             desc: '/data/resource (含 events / job_name)', syncAction: 'sync_resource' },

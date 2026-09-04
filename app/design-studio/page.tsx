@@ -4,6 +4,20 @@ import Link from 'next/link'
 
 const SECTIONS = [
   {
+    href: '/design-studio/daily-sheet',
+    label: '每日出單表',
+    sublabel: 'Daily Order Sheet',
+    desc: '直接在系統內填寫每日出單表，每天 16:00 自動轉入生管出單表，取代貼 Excel。',
+    tag: 'DAILY SHEET',
+    color: 'amber',
+    icon: (
+      <svg className="w-10 h-10" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5}
+          d="M9 17v-2m3 2v-4m3 4v-6M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
+      </svg>
+    ),
+  },
+  {
     href: '/design-studio/crm-cross',
     label: '美編比對',
     sublabel: 'CRM × 訂單交叉比對',
@@ -47,6 +61,15 @@ const SECTIONS = [
 ]
 
 const colorMap: Record<string, { border: string; hover: string; shadow: string; tag: string; icon: string; btn: string; text: string }> = {
+  amber: {
+    border: 'border-slate-700 hover:border-amber-500',
+    hover: 'hover:shadow-[0_0_30px_rgba(245,158,11,0.15)] hover:bg-slate-800/60',
+    shadow: '',
+    tag: 'bg-amber-500/10 border-amber-500/20 text-amber-400',
+    icon: 'group-hover:bg-amber-900/50 group-hover:text-amber-400',
+    btn: 'group-hover:bg-amber-600 group-hover:border-amber-600 group-hover:text-white border-slate-600 text-slate-300',
+    text: 'group-hover:text-amber-400',
+  },
   pink: {
     border: 'border-slate-700 hover:border-pink-500',
     hover: 'hover:shadow-[0_0_30px_rgba(236,72,153,0.15)] hover:bg-slate-800/60',

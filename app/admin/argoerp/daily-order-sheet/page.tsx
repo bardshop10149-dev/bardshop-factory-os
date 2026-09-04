@@ -6,10 +6,16 @@ import SoOrderModal from '../../../../components/SoOrderModal'
 import PoOrderModal from '../../../../components/PoOrderModal'
 import MoRouteModal from '../../../../components/MoRouteModal'
 import ChangeOrderPanel from './ChangeOrderPanel'
+import { useSheetAutoSave, diffRows } from './useSheetAutoSave'
 import {
   createRowKey,
   detectFactory,
   clearStaleDocsOnFactoryChange,
+  computeFactoryAlert,
+  computeDueDateAlert,
+  parseDeliveryDate,
+  countWorkingDaysFrom,
+  DUE_THRESHOLD_DEFAULTS,
   type SourceRow,
   type MatchStatus,
   type SheetRow,
@@ -314,46 +320,9 @@ const STATUS_LABELS: Record<string, { label: string; cls: string }> = {
   '已匯入採單': { label: '已匯入採單', cls: 'bg-orange-900/50 text-orange-300 border-orange-700/50' },
 }
 
-// ── 交期檢查工具函式 ──────────────────────────────────────────────────────────
-
-/** 解析日期字串（支援 YYYY/M/D、YYYY-MM-DD、YYYYMMDD），回傳 Date 或 null */
-function parseDeliveryDate(s: string): Date | null {
-  const t = (s ?? '').trim()
-  if (!t) return null
-  let y: number, m: number, d: number
-  if (/^\d{8}$/.test(t)) {
-    y = +t.slice(0, 4); m = +t.slice(4, 6); d = +t.slice(6, 8)
-  } else {
-    const parts = t.slice(0, 10).split(/[\/\-]/)
-    if (parts.length < 3) return null
-    y = +parts[0]; m = +parts[1]; d = +parts[2]
-  }
-  if (!y || !m || !d) return null
-  const dt = new Date(y, m - 1, d)
-  return isNaN(dt.getTime()) ? null : dt
-}
-
-/**
- * 從「出單表日期」（day 0）開始，計算到 to 有幾個工作天（週一～週五）。
- * from 本身是 day 0，所以從 from+1 起算。
- * 如果 to <= from，回傳 0。
- */
-function countWorkingDaysFrom(from: Date, to: Date): number {
-  const start = new Date(from)
-  start.setHours(0, 0, 0, 0)
-  const end = new Date(to)
-  end.setHours(0, 0, 0, 0)
-  if (end <= start) return 0
-  let count = 0
-  const cur = new Date(start)
-  cur.setDate(cur.getDate() + 1) // day 1
-  while (cur <= end) {
-    const dow = cur.getDay()
-    if (dow !== 0 && dow !== 6) count++
-    cur.setDate(cur.getDate() + 1)
-  }
-  return count
-}
+// parseDeliveryDate / countWorkingDaysFrom / computeDueDateAlert 已抽至
+// lib/argoerp/dailyOrderSheetShared.ts 共用（見上方 import），供美編出單表 16:00
+// 轉入排程沿用同一套交期警示判斷邏輯。
 
 const FACTORY_LABEL_ZH: Record<string, string> = { T: '台北', C: '常平', O: '委外' }
 
@@ -368,34 +337,7 @@ interface DueDateAnomaly {
   reason: string
 }
 
-/**
- * 交期警示（首次匯入警示功能）：以出單日（day 0）計算到交期的工作天數，
- * 不足該廠別設定的天數即觸發警示。跟既有「交期檢查」Modal（handleDueDateCheck）
- * 共用同一套判斷基準，差別只在這裡是匯入當下就標記在列上、可個別點擊取消。
- */
-function computeDueDateAlert(
-  row: { factory: string; delivery_date: string },
-  sheetDateObj: Date,
-  thresholds: Record<string, number>,
-): boolean {
-  const threshold = thresholds[row.factory]
-  if (threshold === undefined) return false
-  if (!row.delivery_date) return false
-  const dueDate = parseDeliveryDate(row.delivery_date)
-  if (!dueDate) return false
-  return countWorkingDaysFrom(sheetDateObj, dueDate) < threshold
-}
-
-/**
- * 廠區警示（首次匯入警示功能）：委外(O)廠列的品項編碼／料號規定要以 C 開頭，
- * 不是的話代表廠區可能填錯，需要人工確認。空品號（如「改單/示意圖」列）不計。
- */
-function computeFactoryAlert(row: { factory: string; item_code: string }): boolean {
-  if (row.factory !== 'O') return false
-  const code = (row.item_code ?? '').trim().toUpperCase()
-  if (!code) return false
-  return !code.startsWith('C')
-}
+// computeDueDateAlert / computeFactoryAlert 已抽至 lib/argoerp/dailyOrderSheetShared.ts 共用（見上方 import）
 
 type OutsourcePrefix = 'MOT' | 'POC' | 'POO' | 'MPO'
 
@@ -423,6 +365,15 @@ function getOutsourcePrefixStyles(prefix: OutsourcePrefix | null): { rowBg: stri
   }
 }
 
+// 退單移到美編出單表時，只帶原始編輯欄位（SourceRow 的欄位），排除生管端才有的
+// 製令/採購/請購/比對/機台等狀態——這幾筆重新回到美編手上等於是全新的一筆
+const SOURCE_ROW_KEYS_FOR_RETURN = [
+  'order_number', 'line_no_input', 'doc_type', 'receiver', 'is_sample', 'has_material',
+  'designer', 'customer', 'line_nickname', 'handler', 'issuer', 'item_code', 'item_name',
+  'note', 'packing', 'quantity', 'delivery_date', 'plate_count', 'upload_ro', 'order_status',
+  'pm_note', 'assigned_machine',
+] as const
+
 // ===== 頁面元件 =====
 export default function DailyOrderSheetPage() {
   const [selectedDate, setSelectedDate] = useState('')
@@ -438,6 +389,10 @@ export default function DailyOrderSheetPage() {
   const [loading, setLoading] = useState(false)
   const [saving, setSaving] = useState(false)
   const [saveMsg, setSaveMsg] = useState('')
+  const [moreMenuOpen, setMoreMenuOpen] = useState(false)
+  // 自動儲存：任何列的改動都排進佇列、1 秒後自動以「差異寫入」送出，
+  // 使用者不需要再判斷「這個動作要不要按儲存」（見 useSheetAutoSave 檔頭說明）
+  const autoSave = useSheetAutoSave(selectedDate)
   // 多人協作偵測：記錄目前這份出單表載入時的 updated_at，後台定期輪詢比對，
   // 發現被別的電腦改過就跳提示（不自動覆蓋畫面上可能還沒存檔的編輯內容）
   const [loadedUpdatedAt, setLoadedUpdatedAt] = useState<string | null>(null)
@@ -485,11 +440,18 @@ export default function DailyOrderSheetPage() {
   const [globalSearching, setGlobalSearching] = useState(false)
   const [globalResults, setGlobalResults] = useState<{ sheet_date: string; rows: SheetRow[] }[] | null>(null)
   const [sampleRefInputs, setSampleRefInputs] = useState<Record<string, string>>({})
-  const [legacyModal, setLegacyModal] = useState<{ query: string; rows: LegacyReceiptRow[]; saraWipRows: SaraWipRow[]; loading: boolean } | null>(null)
+  // factoryInfo：追加單號在出單表歷史上的廠區分布（T/C/O 各幾筆、對應的製令/採購/請購單號），
+  // 供彈窗頂端顯示「此單為常平/委外生產」的醒目提示
+  const [legacyModal, setLegacyModal] = useState<{
+    query: string
+    rows: LegacyReceiptRow[]
+    saraWipRows: SaraWipRow[]
+    factoryInfo: { factory: string; count: number; docs: string[] }[]
+    loading: boolean
+  } | null>(null)
   const [dueDateModal, setDueDateModal] = useState<DueDateAnomaly[] | null>(null)
   const [dueDateCopied, setDueDateCopied] = useState(false)
-  // ---- 交期閾值設定（從 Supabase app_settings 載入）----
-  const DUE_THRESHOLD_DEFAULTS: Record<string, number> = { T: 4, C: 5, O: 5 }
+  // ---- 交期閾值設定（從 Supabase app_settings 載入；預設值 DUE_THRESHOLD_DEFAULTS 見上方 import）----
   const [dueDateThresholds, setDueDateThresholds] = useState<Record<string, number>>(DUE_THRESHOLD_DEFAULTS)
   const [dueDateThresholdsLoaded, setDueDateThresholdsLoaded] = useState(false)
   const [showThresholdModal, setShowThresholdModal] = useState(false)
@@ -589,8 +551,8 @@ export default function DailyOrderSheetPage() {
   const handleLegacyLookup = useCallback(async (orderNo: string) => {
     const q = orderNo.trim()
     if (!q) return
-    setLegacyModal({ query: q, rows: [], saraWipRows: [], loading: true })
-    const [legacyRes, saraWipRes] = await Promise.all([
+    setLegacyModal({ query: q, rows: [], saraWipRows: [], factoryInfo: [], loading: true })
+    const [legacyRes, saraWipRes, sheetRes] = await Promise.all([
       supabase
         .from('legacy_inventory_receipts')
         .select('entry_no, entry_date, order_number, source_location, handler_name, item_name, good_qty')
@@ -600,14 +562,50 @@ export default function DailyOrderSheetPage() {
       supabase
         .from('sara_wip_records')
         .select('work_order, mo_nbr, doc_nbr, product_name, product_subname, product_description, workcenter_name, job_name, job_sequence, status, wip_qty, real_end_time, report_resources, username')
-        .eq('workcenter_name', '印刷站2F')
+        // 不限站點：打樣/追加單的報工可能發生在任何站（織品類在印刷站6F、
+        // 包裝站等），原本寫死只查印刷站2F 導致其他品類一律查無資料
         .or(`mo_nbr.eq.${q},doc_nbr.eq.${q}`)
         .order('real_end_time', { ascending: false }),
+      // 追加單號的廠區判斷：回查出單表歷史，看這張單當時是台北/常平/委外哪個廠生產、
+      // 對應到哪些製令/採購/請購單號，供彈窗頂端顯示醒目提示
+      fetch(`/api/argoerp/daily-order-sheet?search=${encodeURIComponent(q)}`, { cache: 'no-store' })
+        .then(r => r.json()).catch(() => null),
     ])
+
+    const factoryAgg = new Map<string, { count: number; docs: Set<string> }>()
+    const sheetResults = (sheetRes as { success?: boolean; results?: { rows: Record<string, unknown>[] }[] } | null)
+    for (const sheet of sheetResults?.results ?? []) {
+      for (const r of sheet.rows ?? []) {
+        if (String(r.order_number ?? '') !== q) continue
+        const f = String(r.factory ?? '')
+        if (!['T', 'C', 'O'].includes(f)) continue
+        if (!factoryAgg.has(f)) factoryAgg.set(f, { count: 0, docs: new Set() })
+        const agg = factoryAgg.get(f)!
+        agg.count++
+        const doc = f === 'C' ? String(r.po_number ?? '').trim()
+          : f === 'O' ? String(r.pr_number ?? '').trim()
+          : String(r.mo_number ?? '').trim()
+        if (doc) agg.docs.add(doc)
+      }
+    }
+
+    // 出單表歷史查不到（例如更早期的單）時，退而用報工紀錄的站點推斷廠區
+    const wipRows = saraWipRes.error || !saraWipRes.data ? [] : (saraWipRes.data as SaraWipRow[])
+    if (factoryAgg.size === 0) {
+      for (const w of wipRows) {
+        const wc = w.workcenter_name ?? ''
+        const f = wc.includes('常平') ? 'C' : (wc.includes('轉運') || wc.includes('委外')) ? 'O' : null
+        if (!f) continue
+        if (!factoryAgg.has(f)) factoryAgg.set(f, { count: 0, docs: new Set() })
+        factoryAgg.get(f)!.count++
+      }
+    }
+
     setLegacyModal({
       query: q,
       rows: legacyRes.error || !legacyRes.data ? [] : (legacyRes.data as LegacyReceiptRow[]),
-      saraWipRows: saraWipRes.error || !saraWipRes.data ? [] : (saraWipRes.data as SaraWipRow[]),
+      saraWipRows: wipRows,
+      factoryInfo: [...factoryAgg.entries()].map(([factory, v]) => ({ factory, count: v.count, docs: [...v.docs] })),
       loading: false,
     })
   }, [])
@@ -741,6 +739,9 @@ export default function DailyOrderSheetPage() {
                 if (stored.due_date_alert_dismissed !== undefined) base.due_date_alert_dismissed = stored.due_date_alert_dismissed
                 if (stored.factory_alert            !== undefined) base.factory_alert            = stored.factory_alert
                 if (stored.factory_alert_dismissed  !== undefined) base.factory_alert_dismissed  = stored.factory_alert_dismissed
+                if (stored.duplicate_alert          !== undefined) base.duplicate_alert          = stored.duplicate_alert
+                if (stored.duplicate_alert_dismissed !== undefined) base.duplicate_alert_dismissed = stored.duplicate_alert_dismissed
+                if (stored.duplicate_alert_dates    !== undefined) base.duplicate_alert_dates    = stored.duplicate_alert_dates
                 if (stored.sketch_url               !== undefined) base.sketch_url               = stored.sketch_url
                 if (stored.sketch_urls              !== undefined) base.sketch_urls              = stored.sketch_urls
               } else {
@@ -939,10 +940,27 @@ export default function DailyOrderSheetPage() {
       .catch(() => {})
   }, [sheetRows])
 
+  // 機台分配改為即時自動儲存：改下拉選單當下就排進佇列，不用再按「儲存機台分配」。
+  // 兩個目的地都要更新——出單表列上的 machine 欄（自動儲存佇列），以及
+  // argoerp_mo_machine_assign 表（製令層級的分配，供其他頁面查詢）。
   const setMoMachine = useCallback((moNumber: string, machine: string) => {
     setMoMachines(prev => ({ ...prev, [moNumber]: machine }))
-    setMachineChanged(true)
-  }, [])
+    // 同一張製令可能對應出單表上多列，全部一起更新
+    const affected = sheetRows.filter(r => r.mo_number === moNumber)
+    if (affected.length > 0) {
+      autoSave.queue({ updates: affected.map(r => ({ row_key: r.row_key, machine })) })
+    }
+    fetch('/api/argoerp/mo-machine-assign', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ assignments: [{ mo_number: moNumber, machine }] }),
+    }).catch(() => { /* 出單表列上的 machine 已存，此表失敗不阻斷 */ })
+  }, [sheetRows, autoSave])
+
+  const setRowMachine = useCallback((rowKey: string, machine: string) => {
+    setRowMachines(prev => ({ ...prev, [rowKey]: machine }))
+    autoSave.queue({ updates: [{ row_key: rowKey, machine }] })
+  }, [autoSave])
 
   // ---- 儲存機台分配：PATCH 到 Supabase + mo-machine-assign，然後重新讀回 ----
   const handleSaveMachines = useCallback(async () => {
@@ -1001,31 +1019,56 @@ export default function DailyOrderSheetPage() {
   }, [sheetRows, selectedDate, moMachines, rowMachines])
 
   // ---- 解析貼上資料 ----
-  const handleParse = useCallback(() => {
+  const handleParse = useCallback(async () => {
     setParseError('')
     setParseWarnings([])
     if (!rawText.trim()) { setParseError('請先貼上資料'); return }
     const { rows, error, duplicateWarnings } = parseSourceRows(rawText, selectedDate)
     if (error) { setParseError(error); return }
 
+    // 重複發單偵測：查詢「訂單號+序號」在其他日期的出單表是否已經出現過（排除今天自己這份，
+    // 重新貼今天的資料不算重複）。偵測失敗不影響貼上功能本身，靜默略過即可。
+    const crossDateDupMap = new Map<string, string[]>()
+    try {
+      const dupRes = await fetch('/api/argoerp/daily-order-sheet?dup_index=1', { cache: 'no-store' })
+      const dupJson = await dupRes.json() as { success: boolean; index?: { order_number: string; line: string; sheet_date: string }[] }
+      if (dupJson.success && Array.isArray(dupJson.index)) {
+        for (const entry of dupJson.index) {
+          if (entry.sheet_date === selectedDate) continue
+          const key = `${entry.order_number}|${entry.line}`
+          const arr = crossDateDupMap.get(key) ?? []
+          if (!arr.includes(entry.sheet_date)) arr.push(entry.sheet_date)
+          crossDateDupMap.set(key, arr)
+        }
+      }
+    } catch {
+      // 略過，不阻擋貼上
+    }
+
     // 首次匯入警示：以出單日（selectedDate）為第0天，只在這一列「第一次出現」時判斷一次，
     // 之後重新解析/載入同一列時原樣保留（見下方合併邏輯），不會重複觸發或蓋掉已取消的警示
     const sheetDateObjForAlert = new Date(selectedDate)
     sheetDateObjForAlert.setHours(0, 0, 0, 0)
 
-    const sheetRowsNew: SheetRow[] = rows.map(r => ({
-      ...r,
-      row_key: createRowKey(r),
-      mo_status: null,
-      // 若原始資料已填入序號（B欄），直接預填 match_line_no，無需比對
-      ...(r.line_no_input
-        ? { match_line_no: r.line_no_input, match_status: 'matched' as MatchStatus, match_reason: '原始資料直接填入' }
-        : {}),
-      due_date_alert: computeDueDateAlert(r, sheetDateObjForAlert, dueDateThresholds),
-      due_date_alert_dismissed: false,
-      factory_alert: computeFactoryAlert(r),
-      factory_alert_dismissed: false,
-    }))
+    const sheetRowsNew: SheetRow[] = rows.map(r => {
+      const dupDates = r.line_no_input ? crossDateDupMap.get(`${r.order_number}|${r.line_no_input}`) : undefined
+      return {
+        ...r,
+        row_key: createRowKey(r),
+        mo_status: null,
+        // 若原始資料已填入序號（B欄），直接預填 match_line_no，無需比對
+        ...(r.line_no_input
+          ? { match_line_no: r.line_no_input, match_status: 'matched' as MatchStatus, match_reason: '原始資料直接填入' }
+          : {}),
+        due_date_alert: computeDueDateAlert(r, sheetDateObjForAlert, dueDateThresholds),
+        due_date_alert_dismissed: false,
+        factory_alert: computeFactoryAlert(r),
+        factory_alert_dismissed: false,
+        duplicate_alert: !!(dupDates && dupDates.length > 0),
+        duplicate_alert_dismissed: false,
+        duplicate_alert_dates: dupDates,
+      }
+    })
 
     // 保留已有狀態（相同 row_key 的保留舊狀態）
     // 使用複合鍵避免同 row_key 但不同序號的列互相覆蓋（如同一工單同品號有多筆）
@@ -1101,6 +1144,9 @@ export default function DailyOrderSheetPage() {
           due_date_alert_dismissed:  old.due_date_alert_dismissed,
           factory_alert:             old.factory_alert,
           factory_alert_dismissed:   old.factory_alert_dismissed,
+          duplicate_alert:           old.duplicate_alert,
+          duplicate_alert_dismissed: old.duplicate_alert_dismissed,
+          duplicate_alert_dates:     old.duplicate_alert_dates,
           sketch_url:                old.sketch_url,
           sketch_urls:               old.sketch_urls,
         }
@@ -1134,6 +1180,9 @@ export default function DailyOrderSheetPage() {
         due_date_alert_dismissed:  old.due_date_alert_dismissed,
         factory_alert:             old.factory_alert,
         factory_alert_dismissed:   old.factory_alert_dismissed,
+        duplicate_alert:           old.duplicate_alert,
+        duplicate_alert_dismissed: old.duplicate_alert_dismissed,
+        duplicate_alert_dates:     old.duplicate_alert_dates,
         sketch_url:                old.sketch_url,
         sketch_urls:               old.sketch_urls,
       }
@@ -1146,6 +1195,15 @@ export default function DailyOrderSheetPage() {
     setParseError('')
     if (duplicateWarnings.length > 0) {
       setParseWarnings(duplicateWarnings)
+    }
+    // 用 alert() 強制提示，而非放在貼上區塊裡的橫幅——貼上區塊解析成功後會立刻收合
+    // （showPasteArea 變 false），橫幅會跟著一起消失、使用者根本看不到；alert() 才能
+    // 保證解析當下一定會被看到。表格裡每一列仍會留著可取消的「⚠ 重複發單」徽章供事後追蹤。
+    const freshCrossDateDupWarnings = merged
+      .filter(r => r.duplicate_alert && !r.duplicate_alert_dismissed && r.duplicate_alert_dates?.length)
+      .map(r => `・${r.order_number} 序號 ${r.line_no_input || r.match_line_no} 已於 ${r.duplicate_alert_dates!.join('、')} 的出單表出現過`)
+    if (freshCrossDateDupWarnings.length > 0) {
+      alert(`⚠️ 疑似重複發單（${freshCrossDateDupWarnings.length} 筆）：\n\n${freshCrossDateDupWarnings.join('\n')}\n\n請確認是否為誤重複貼上/發單。表格中對應列已標示紅色警示徽章，可點擊取消。`)
     }
     // 解析後立即存回 DB，確保所有轉單頁面都能取到最新出單表（不依賴後續採購比對才觸發）
     setSaving(true)
@@ -1993,8 +2051,26 @@ export default function DailyOrderSheetPage() {
       return
     }
     setSyncingPo(true)
-    setSaveMsg('')
+    setSaveMsg('🔄 正在向 ARGO 同步最新採購/請購單…')
     try {
+      // 【根除誤配】比對前先強制全量重新同步 erp_pj_sync（sync_po/sync_pr 皆不帶
+      // incrementalMinutes → 全量對帳，含刪除偵測）。
+      // 根因：erp_pj_sync 的增量同步（每 5 分鐘）只會新增/更新，「絕不刪除」——
+      // 一張採購單在 ARGO 被結案/整張刪除後，若沒有殘留任何近期異動可觸發增量更新，
+      // 舊的 OPEN 幽靈列會一直留著，直到每天 4 次的全量對帳（間隔可達 6 小時）才會被清除。
+      // 這段期間比對邏輯可能誤配到這張已經不存在的舊單。改為每次比對前都强制全量同步，
+      // 讓比對時使用的候選池必為當下最新狀態，而不是仰賴排程時機。
+      // 實測全量 sync_po ≈9-10 秒、sync_pr ≈4-5 秒（並行約 10 秒），對「比對」這種低頻手動
+      // 操作可接受；任一失敗不中斷比對（退回目前快取資料），只在結果訊息附註提醒。
+      const syncResults = await Promise.allSettled([
+        fetch('/api/argoerp', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'sync_po' }) })
+          .then(r => r.json()),
+        fetch('/api/argoerp', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'sync_pr' }) })
+          .then(r => r.json()),
+      ])
+      const syncFailed = syncResults.some(r => r.status === 'rejected' || (r.status === 'fulfilled' && r.value?.status !== 'ok'))
+
+      setSaveMsg('🔍 正在比對採購/請購單…')
       // 從 DB 拉最新 rows 只為取 po_confirmed（人工確認），基底保持 sheetRows（目前解析狀態）
       // 不可用 DB rows 整批替換，否則用戶剛貼入解析的新資料會被舊 DB rows 覆蓋
       const latestRes = await fetch(`/api/argoerp/daily-order-sheet?date=${selectedDate}`, { cache: 'no-store' })
@@ -2065,17 +2141,24 @@ export default function DailyOrderSheetPage() {
 
       setSheetRows(next)
 
-      // 立即儲存
-      const res = await fetch('/api/argoerp/daily-order-sheet', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sheet_date: selectedDate, raw_text: currentRawText, rows: next }),
-      })
-      const json = await res.json()
-      if (!res.ok || !json.success) throw new Error(json.error || `HTTP ${res.status}`)
-      // 用 server 合併後的 rows 更新 UI，確保外部 PATCH（批備料等）不被 stale state 覆蓋
-      const savedNext: SheetRow[] = Array.isArray(json.sheet?.rows) ? (json.sheet.rows as SheetRow[]) : next
-      setSheetRows(savedNext)
+      // 立即儲存——只送比對後真正變動的欄位（不整份覆蓋），伺服器回傳合併後的完整 rows
+      const delta = diffRows(
+        sheetRows as unknown as Record<string, unknown>[],
+        next as unknown as Record<string, unknown>[],
+      )
+      let savedNext: SheetRow[] = next
+      if (delta.updates || delta.replace) {
+        const res = await fetch('/api/argoerp/daily-order-sheet', {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sheet_date: selectedDate, ...delta }),
+        })
+        const json = await res.json()
+        if (!res.ok || !json.success) throw new Error(json.error || `HTTP ${res.status}`)
+        // 用 server 合併後的 rows 更新 UI，確保外部 PATCH（批備料等）不被 stale state 覆蓋
+        if (Array.isArray(json.rows)) savedNext = json.rows as SheetRow[]
+        setSheetRows(savedNext)
+      }
       const cMatched = savedNext.filter(r => r.factory === 'C' && r.po_status === 'matched').length
       const cNoMatch = savedNext.filter(r => r.factory === 'C' && r.po_status === 'no_match').length
       const oMatched = savedNext.filter(r => r.factory === 'O' && r.po_status === 'matched').length
@@ -2084,7 +2167,8 @@ export default function DailyOrderSheetPage() {
       const parts: string[] = []
       if (cRows.length > 0) parts.push(`常平 ${cMatched}/${cRows.length}${cNoMatch > 0 ? `（未配 ${cNoMatch}）` : ''}`)
       if (oRows.length > 0) parts.push(`委外 ${oMatched}/${oRows.length}${oNoMatch > 0 ? `（未配 ${oNoMatch}）` : ''}${oPrMatched > 0 ? `、請購 ${oPrMatched}` : ''}`)
-      setSaveMsg(`✅ 採購單比對完成：${parts.join('　')}`)
+      const syncWarn = syncFailed ? '　⚠️ ARGO 同步未完全成功，本次以現有快取比對（結果可能非最新，建議稍後重新比對）' : ''
+      setSaveMsg(`✅ 採購單比對完成：${parts.join('　')}${syncWarn}`)
       setTimeout(() => setSaveMsg(''), 6000)
     } catch (e) {
       setSaveMsg(`❌ 採購單比對失敗：${e instanceof Error ? e.message : String(e)}`)
@@ -2561,6 +2645,14 @@ export default function DailyOrderSheetPage() {
         ? await fetchClaimedDocMaps(selectedDate)
         : { po: new Map<string, string>(), pr: new Map<string, string>() }
       if (hasCRows || hasORows) {
+        setSaveMsg('🔄 全同步進行中：向 ARGO 同步最新採購/請購單…')
+        // 【根除誤配】比對前強制全量重新同步（見 runPoMatch 同段註解：erp_pj_sync 的增量
+        // 同步絕不刪除，PO 在 ARGO 結案/刪除後若無殘留異動可觸發增量更新，舊 OPEN 幽靈列
+        // 會留到下次全量對帳（間隔可達 6 小時）才清除，此段時間可能誤配到已不存在的舊單）
+        await Promise.allSettled([
+          fetch('/api/argoerp', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'sync_po' }) }),
+          fetch('/api/argoerp', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'sync_pr' }) }),
+        ])
         setSaveMsg('⏳ 全同步進行中：比對採購單…')
         type AllSyncCandidate = { doc_no: string; sub_no: string; item_code: string | null; qty: number; status: string | null; start_date: string | null; extra: Record<string, unknown> | null; _used: boolean }
 
@@ -3087,78 +3179,33 @@ export default function DailyOrderSheetPage() {
 
   // ---- 切換廠別 ----
   // ---- 標記/取消 無須採購（O廠列）----
-  const handleConfirmQtyMismatch = useCallback(async (rowKey: string, confirm: boolean) => {
-    const next: SheetRow[] = sheetRows.map(r => {
-      if ((r.row_key || '') !== rowKey) return r
-      if (confirm) return { ...r, po_status: 'matched' as const, po_qty_erp: null, po_confirmed: true }
-      return { ...r, po_status: 'no_match' as const, po_number: null, po_sub_no: null, po_qty_erp: null, po_confirmed: false }
-    })
-    setSheetRows(next)
-    setSaving(true)
-    try {
-      const res = await fetch('/api/argoerp/daily-order-sheet', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sheet_date: selectedDate, raw_text: currentRawText, rows: next }),
-      })
-      const json = await res.json()
-      if (!res.ok || !json.success) throw new Error(json.error || `HTTP ${res.status}`)
-      setSaveMsg(confirm ? '✅ 已確認採購單配對' : '✅ 已取消配對')
-      setTimeout(() => setSaveMsg(''), 2000)
-    } catch (e) {
-      setSaveMsg(`❌ 儲存失敗：${e}`)
-    } finally {
-      setSaving(false)
-    }
-  }, [sheetRows, selectedDate, currentRawText])
+  const handleConfirmQtyMismatch = useCallback((rowKey: string, confirm: boolean) => {
+    const patch: Record<string, unknown> = confirm
+      ? { po_status: 'matched', po_qty_erp: null, po_confirmed: true }
+      : { po_status: 'no_match', po_number: null, po_sub_no: null, po_qty_erp: null, po_confirmed: false }
+    setSheetRows(prev => prev.map(r => (r.row_key || '') === rowKey ? { ...r, ...patch } as SheetRow : r))
+    autoSave.queue({ updates: [{ row_key: rowKey, ...patch }] })
+  }, [autoSave])
 
-  const handleToggleNoPo = useCallback(async (rowKey: string) => {
-    const next: SheetRow[] = sheetRows.map(r => {
-      if ((r.row_key || '') !== rowKey) return r
-      const newStatus = r.po_status === 'no_po' ? null : 'no_po' as const
-      return { ...r, po_status: newStatus, po_number: newStatus === 'no_po' ? null : r.po_number, po_sub_no: newStatus === 'no_po' ? null : r.po_sub_no }
-    })
-    setSheetRows(next)
-    setSaving(true)
-    try {
-      const res = await fetch('/api/argoerp/daily-order-sheet', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sheet_date: selectedDate, raw_text: currentRawText, rows: next }),
-      })
-      const json = await res.json()
-      if (!res.ok || !json.success) throw new Error(json.error || `HTTP ${res.status}`)
-      setSaveMsg('✅ 已更新')
-      setTimeout(() => setSaveMsg(''), 2000)
-    } catch (e) {
-      setSaveMsg(`❌ 儲存失敗：${e}`)
-    } finally {
-      setSaving(false)
+  const handleToggleNoPo = useCallback((rowKey: string) => {
+    const target = sheetRows.find(r => (r.row_key || '') === rowKey)
+    if (!target) return
+    const newStatus = target.po_status === 'no_po' ? null : 'no_po' as const
+    const patch: Record<string, unknown> = {
+      po_status: newStatus,
+      po_number: newStatus === 'no_po' ? null : target.po_number,
+      po_sub_no: newStatus === 'no_po' ? null : target.po_sub_no,
     }
-  }, [sheetRows, selectedDate, currentRawText])
+    setSheetRows(prev => prev.map(r => (r.row_key || '') === rowKey ? { ...r, ...patch } as SheetRow : r))
+    autoSave.queue({ updates: [{ row_key: rowKey, ...patch }] })
+  }, [sheetRows, autoSave])
 
-  // 取消首次匯入警示（交期/廠區）：僅標記為已取消，警示紀錄本身保留供追溯
-  const handleDismissAlert = useCallback(async (rowKey: string, kind: 'due_date' | 'factory') => {
-    const field = kind === 'due_date' ? 'due_date_alert_dismissed' : 'factory_alert_dismissed'
-    const next: SheetRow[] = sheetRows.map(r => (r.row_key || '') === rowKey ? { ...r, [field]: true } : r)
-    setSheetRows(next)
-    setSaving(true)
-    try {
-      const res = await fetch('/api/argoerp/daily-order-sheet', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sheet_date: selectedDate, raw_text: currentRawText, rows: next }),
-      })
-      const json = await res.json()
-      if (!res.ok || !json.success) throw new Error(json.error || `HTTP ${res.status}`)
-      setSaveMsg('✅ 已取消警示')
-      setTimeout(() => setSaveMsg(''), 2000)
-    } catch (e) {
-      setSaveMsg(`❌ 儲存失敗：${e}`)
-    } finally {
-      setSaving(false)
-    }
-  }, [sheetRows, selectedDate, currentRawText])
+  // 取消首次匯入警示（交期/廠區/重複發單）：僅標記為已取消，警示紀錄本身保留供追溯
+  const handleDismissAlert = useCallback((rowKey: string, kind: 'due_date' | 'factory' | 'duplicate') => {
+    const field = kind === 'due_date' ? 'due_date_alert_dismissed' : kind === 'factory' ? 'factory_alert_dismissed' : 'duplicate_alert_dismissed'
+    setSheetRows(prev => prev.map(r => (r.row_key || '') === rowKey ? { ...r, [field]: true } : r))
+    autoSave.queue({ updates: [{ row_key: rowKey, [field]: true }] })
+  }, [autoSave])
 
   // ── 示意圖：每列一個按鈕，可預設自動比對填入，也可手動選檔（每列可存多張，可切換瀏覽） ──
   const [sketchModalRowKey, setSketchModalRowKey] = useState<string | null>(null)
@@ -3280,6 +3327,8 @@ export default function DailyOrderSheetPage() {
   const [sketchBulkPhase, setSketchBulkPhase] = useState<'picking' | 'scanning' | 'uploading'>('picking')
   const [sketchBulkProgress, setSketchBulkProgress] = useState({ done: 0, total: 0 })
   const sketchPickerWatchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // 保存最近一次比對的診斷資訊，讓成功訊息也能一併說明「哪些檔案被略過、為什麼」
+  const sketchDiagRef = useRef<{ skip: Record<string, number>; diagText: string; hintText: string } | null>(null)
 
   const clearSketchPickerWatchdog = useCallback(() => {
     if (sketchPickerWatchdogRef.current) {
@@ -3338,8 +3387,46 @@ export default function DailyOrderSheetPage() {
     setSketchMsg(`📂 已取得資料夾內容，共 ${files.length} 個檔案，開始掃描…`)
     try {
       const IMAGE_OR_PDF = /\.(jpe?g|png|gif|webp|bmp|pdf)$/i
-      const ORDER_PATTERN = /SO\d+/i
       const ITEM_FOLDER_PATTERN = /^#0*(\d+)/ // 品項資料夾以 #項號 開頭，如「#1透明拼板壓克力立牌…」
+
+      // 【2026-09-02 修正】原本用 /SO\d+/ 從路徑抓訂單號，但這個規則要求 SO 後面直接接數字，
+      // 因此 SOB…／SOA…（SO 後面是字母）這類單號完全比對不到，檔案被靜默跳過——
+      // 實測近 60 天出單表 1,862 個單號中有 525 個（28.2%）踩到，SOB 佔 490 個。
+      // 改為「直接拿本出單表上的訂單號去路徑裡找」，不再猜單號格式，任何前綴都能正確辨識。
+      const sheetOrderNumbers = [...new Set(
+        sheetRows.map(r => (r.order_number || '').trim().toUpperCase()).filter(Boolean)
+      )].sort((a, b) => b.length - a.length) // 長的優先，避免短單號誤命中長單號的一部分
+
+      // 該訂單在本出單表上實際存在的序號——項號一律要用這份清單驗證，不能盲目解析數字。
+      // 【2026-09-02】檔名如「…SO260828017#312色極彩掛軸.pdf」時，項號 #3 後面緊接產品名
+      // 「12色…」，單純用 /#(\d+)/ 會貪婪讀成 312，與真實序號 3 永遠對不上而靜默跳過。
+      const lineNosByOrder = new Map<string, Set<number>>()
+      for (const r of sheetRows) {
+        const on = (r.order_number || '').trim().toUpperCase()
+        const ln = parseInt((r.line_no_input || r.match_line_no || '').trim(), 10)
+        if (!on || !Number.isFinite(ln)) continue
+        if (!lineNosByOrder.has(on)) lineNosByOrder.set(on, new Set())
+        lineNosByOrder.get(on)!.add(ln)
+      }
+      /**
+       * 從一串數字裡解析出「這張訂單上真實存在的序號」：
+       * 由長到短逐一嘗試前綴，取第一個能對到出單表序號的（"312" 在序號為 3、4 時解析成 3）。
+       * 都對不到時回 null，寧可略過也不要配到錯的列。
+       */
+      const resolveItemNo = (digits: string, orderNumber: string): number | null => {
+        const known = lineNosByOrder.get(orderNumber)
+        if (!known || known.size === 0) return null
+        for (let len = digits.length; len >= 1; len--) {
+          const n = parseInt(digits.slice(0, len), 10)
+          if (Number.isFinite(n) && known.has(n)) return n
+        }
+        return null
+      }
+
+      // 診斷用計數：使用者要知道「沒抓到的原因」，逐項統計被跳過的理由
+      const skip = { notImage: 0, notSketchName: 0, noOrder: 0, noItemFolder: 0, noPrintFolder: 0, inDesignFolder: 0, itemNoNotOnSheet: 0 }
+      const unmatchedOrderSamples = new Set<string>()
+      const unmatchedItemSamples = new Set<string>()
 
       const filesByKey = new Map<string, File[]>()
       const allFiles = Array.from(files)
@@ -3350,28 +3437,64 @@ export default function DailyOrderSheetPage() {
         const relPath = (file as unknown as { webkitRelativePath?: string }).webkitRelativePath || file.name
         const segments = relPath.split('/')
         const fileName = segments[segments.length - 1]
-        if (!IMAGE_OR_PDF.test(fileName)) continue
-        if (!fileName.includes('商品示意圖')) continue
+        if (!IMAGE_OR_PDF.test(fileName)) { skip.notImage++; continue }
+        if (!fileName.includes('商品示意圖')) { skip.notSketchName++; continue }
 
-        // 找訂單資料夾（含 SO 單號的路徑片段）
-        const orderIdx = segments.findIndex(seg => ORDER_PATTERN.test(seg))
-        if (orderIdx === -1) continue
-        const orderMatch = segments[orderIdx].match(ORDER_PATTERN)
-        if (!orderMatch) continue
-        const orderNumber = orderMatch[0].toUpperCase()
+        // 找訂單資料夾：路徑片段裡出現本出單表任一訂單號即算命中
+        const upperSegments = segments.map(s => s.toUpperCase())
+        let orderNumber: string | null = null
+        let orderIdx = -1
+        for (let i = 0; i < upperSegments.length - 1 && orderNumber === null; i++) {
+          for (const on of sheetOrderNumbers) {
+            if (upperSegments[i].includes(on)) { orderNumber = on; orderIdx = i; break }
+          }
+        }
+        if (orderNumber === null) {
+          skip.noOrder++
+          // 記錄看起來像單號、但不在本出單表上的路徑片段，供使用者判斷是不是選錯資料夾/日期
+          const guess = segments.find(s => /^[A-Z]{2,3}\d{6,}/i.test(s))
+          if (guess && unmatchedOrderSamples.size < 5) unmatchedOrderSamples.add(guess)
+          continue
+        }
 
-        // 找訂單資料夾之後、以 #項號 開頭的品項資料夾
-        let itemNumber: number | null = null
+        // 取項號：兩種實際存在的擺法都要支援
+        //   (a) 訂單資料夾之後有「#項號…」的品項資料夾（原本只支援這種）
+        //   (b) 沒有品項資料夾，項號直接寫在檔名裡，如
+        //       「印刷/【商品示意圖】SO260828017#3_….pdf」
+        //       —— 2026-09-02 使用者回報 SO260828017 在 RO 資料夾找得到卻沒比對出來，
+        //       原因就是這種擺法被判成「缺 #項號 資料夾」而整批跳過。
+        // 兩個來源抓到的數字串，一律交給 resolveItemNo 用出單表上的真實序號驗證，
+        // 避免「#3」後面緊接產品名數字（如 #312色…）被讀成 312。
+        let itemDigits: string | null = null
         for (let i = orderIdx + 1; i < segments.length - 1; i++) {
           const m = segments[i].match(ITEM_FOLDER_PATTERN)
-          if (m) { itemNumber = parseInt(m[1], 10); break }
+          if (m) { itemDigits = m[1]; break }
         }
-        if (itemNumber === null) continue
+        if (itemDigits === null) {
+          // 優先取「訂單號緊接 #項號」（最明確）；退而求其次取檔名裡任一個 #數字
+          const upperName = fileName.toUpperCase()
+          const tight = upperName.match(new RegExp(`${orderNumber.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*#\\s*0*(\\d+)`))
+          const loose = tight ? null : fileName.match(/#\s*0*(\d+)/)
+          const m = tight ?? loose
+          if (m) itemDigits = m[1]
+        }
+        if (itemDigits === null) { skip.noItemFolder++; continue }
 
-        // 品項資料夾跟檔案之間必須經過「印刷」，且不能經過「美編」
+        const itemNumber = resolveItemNo(itemDigits, orderNumber)
+        if (itemNumber === null) {
+          // 有找到數字但對不到這張訂單在出單表上的任何序號——多半是命名不符預期，
+          // 記下來讓使用者知道是「項號對不上」而不是「沒有這個檔案」
+          skip.itemNoNotOnSheet++
+          if (unmatchedItemSamples.size < 5) unmatchedItemSamples.add(`${orderNumber}#${itemDigits}`)
+          continue
+        }
+
+        // 品項資料夾跟檔案之間必須經過「印刷」，且不能經過「美編」。
+        // 用 includes 而非完全相等，容忍「3.印刷」「印刷檔」這類命名變化
+        //（原本要求資料夾名稱完全等於「印刷」，稍有命名差異就整批漏掉）。
         const middleSegments = segments.slice(orderIdx + 1, segments.length - 1)
-        if (!middleSegments.includes('印刷')) continue
-        if (middleSegments.includes('美編')) continue
+        if (middleSegments.some(s => s.includes('美編'))) { skip.inDesignFolder++; continue }
+        if (!middleSegments.some(s => s.includes('印刷'))) { skip.noPrintFolder++; continue }
 
         const key = `${orderNumber}#${itemNumber}`
         const arr = filesByKey.get(key) ?? []
@@ -3382,8 +3505,23 @@ export default function DailyOrderSheetPage() {
         // 讓出主執行緒一個 tick，讓按鈕上的掃描進度數字有機會重繪，避免大資料夾時畫面看起來凍結
         await new Promise(resolve => setTimeout(resolve, 0))
       }
+
+      // 掃描結果診斷：把「為什麼沒抓到」講清楚，而不是只回一句沒找到
+      const diagParts: string[] = []
+      if (skip.notSketchName > 0) diagParts.push(`檔名沒有「商品示意圖」${skip.notSketchName} 個`)
+      if (skip.noOrder > 0) diagParts.push(`路徑找不到本出單表的訂單號 ${skip.noOrder} 個`)
+      if (skip.noItemFolder > 0) diagParts.push(`資料夾與檔名都找不到 #項號 ${skip.noItemFolder} 個`)
+      if (skip.itemNoNotOnSheet > 0) diagParts.push(`項號對不到出單表序號 ${skip.itemNoNotOnSheet} 個${unmatchedItemSamples.size > 0 ? `（如 ${[...unmatchedItemSamples].slice(0, 3).join('、')}）` : ''}`)
+      if (skip.noPrintFolder > 0) diagParts.push(`不在「印刷」資料夾下 ${skip.noPrintFolder} 個`)
+      if (skip.inDesignFolder > 0) diagParts.push(`在「美編」資料夾下（依規則排除）${skip.inDesignFolder} 個`)
+      const diagText = diagParts.length > 0 ? `｜略過原因：${diagParts.join('、')}` : ''
+      const hintText = unmatchedOrderSamples.size > 0
+        ? `｜資料夾內出現但不在本日出單表的單號範例：${[...unmatchedOrderSamples].slice(0, 3).join('、')}`
+        : ''
+      sketchDiagRef.current = { skip, diagText, hintText }
+
       if (filesByKey.size === 0) {
-        setSketchMsg('❌ 這個資料夾裡沒有找到符合「訂單資料夾 / #項號資料夾 / 印刷 / 商品示意圖⋯」結構的檔案')
+        setSketchMsg(`❌ 沒有找到符合「訂單資料夾 / #項號資料夾 / 印刷 / 檔名含商品示意圖」的檔案（掃描 ${allFiles.length} 個檔案）${diagText}${hintText}`)
         return
       }
 
@@ -3394,7 +3532,17 @@ export default function DailyOrderSheetPage() {
         return filesByKey.has(`${r.order_number.toUpperCase()}#${parseInt(lineNo, 10)}`)
       })
       if (targets.length === 0) {
-        setSketchMsg('ℹ️ 沒有可自動比對的列（可能都已經有示意圖，或這份出單表沒有符合的訂單）')
+        // 分辨兩種完全不同的「沒有可比對」情況，讓使用者知道該不該再處理
+        const alreadyHave = sheetRows.filter(r => {
+          const ln = r.match_line_no || r.line_no_input || ''
+          return r.order_number && ln && getSketchUrls(r).length > 0
+            && filesByKey.has(`${r.order_number.toUpperCase()}#${parseInt(ln, 10)}`)
+        }).length
+        setSketchMsg(
+          alreadyHave > 0
+            ? `ℹ️ 資料夾裡找到 ${filesByKey.size} 組示意圖，但對應的 ${alreadyHave} 列都已經有圖了（不覆蓋既有結果）${diagText}`
+            : `ℹ️ 資料夾裡找到 ${filesByKey.size} 組示意圖，但都不屬於本日出單表上的訂單${diagText}${hintText}`
+        )
         return
       }
 
@@ -3426,15 +3574,25 @@ export default function DailyOrderSheetPage() {
             : r
         )
         setSheetRows(next)
-        const res = await fetch('/api/argoerp/daily-order-sheet', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ sheet_date: selectedDate, raw_text: currentRawText, rows: next }),
+        // 只送這次真的有比對到圖的列（差異寫入，不整份覆蓋）
+        autoSave.queue({
+          updates: [...urlsByRowKey.entries()].map(([rowKey, urls]) => ({
+            row_key: rowKey, sketch_urls: urls, sketch_url: urls[0],
+          })),
         })
-        const j = await res.json()
-        if (!res.ok || !j.success) throw new Error(j.error || `HTTP ${res.status}`)
+        const ok = await autoSave.flushNow()
+        if (!ok) throw new Error('圖片已上傳，但寫回出單表失敗，請點「重試儲存」')
         const totalImgs = Array.from(urlsByRowKey.values()).reduce((s, a) => s + a.length, 0)
-        setSketchMsg(`✅ 已自動比對 ${urlsByRowKey.size} / ${targets.length} 筆列（共 ${totalImgs} 張示意圖）`)
+        // 沒抓到的列一併列出來，讓使用者知道還有哪幾筆要人工處理（而不是只看到一個成功數字）
+        const stillMissing = next.filter(r => {
+          if (getSketchUrls(r).length > 0) return false
+          const ln = r.match_line_no || r.line_no_input || ''
+          return !!(r.order_number && ln)
+        })
+        const missingText = stillMissing.length > 0
+          ? `｜仍無示意圖 ${stillMissing.length} 筆：${stillMissing.slice(0, 5).map(r => `${r.order_number}#${r.match_line_no || r.line_no_input}`).join('、')}${stillMissing.length > 5 ? ' 等' : ''}`
+          : ''
+        setSketchMsg(`✅ 已比對 ${urlsByRowKey.size} 筆列、共 ${totalImgs} 張圖${missingText}${diagText}`)
       } else {
         setSketchMsg('❌ 全部上傳失敗，請檢查網路後重試')
       }
@@ -3444,7 +3602,7 @@ export default function DailyOrderSheetPage() {
       setSketchBulkMatching(false)
       setTimeout(() => setSketchMsg(''), 6000)
     }
-  }, [sheetRows, selectedDate, currentRawText, uploadSketchFile, getSketchUrls, clearSketchPickerWatchdog])
+  }, [sheetRows, uploadSketchFile, getSketchUrls, clearSketchPickerWatchdog, autoSave])
 
   const handleChangeFactory = useCallback((idx: number, factory: 'T' | 'C' | 'O') => {
     setSheetRows(prev => prev.map((r, i) => {
@@ -3456,34 +3614,85 @@ export default function DailyOrderSheetPage() {
   }, [])
 
   // ---- 批次轉換廠區（選取的列）----
-  const handleBatchChangeFactory = useCallback(async (targetFactory: 'T' | 'C') => {
+  const handleBatchChangeFactory = useCallback((targetFactory: 'T' | 'C') => {
+    // 只針對「真正被轉換的那幾列」送出整列取代（row_key 會變，故用 replace 而非 updates），
+    // 不再整份 rows 覆蓋——避免別人/自己舊分頁的操作被這次轉換連帶蓋掉，反之亦然。
+    const changes: Array<{ match_row_key: string; row: Record<string, unknown> }> = []
     const next: SheetRow[] = sheetRows.map((r, i) => {
       const sk = r.row_key || String(i)
       if (!selectedKeys.has(sk)) return r
       if (r.factory === targetFactory) return r
-      return { ...clearStaleDocsOnFactoryChange(r), factory: targetFactory, factory_changed: true, row_key: createRowKey({ ...r, factory: targetFactory }) }
+      const converted: SheetRow = {
+        ...clearStaleDocsOnFactoryChange(r),
+        factory: targetFactory,
+        factory_changed: true,
+        row_key: createRowKey({ ...r, factory: targetFactory }),
+      }
+      changes.push({ match_row_key: r.row_key, row: converted as unknown as Record<string, unknown> })
+      return converted
     })
     setSheetRows(next)
     setConvertFactoryModalOpen(false)
+    const label = targetFactory === 'C' ? '常平' : '台北'
+    const count = changes.length
     setSelectedKeys(new Set())
+    if (count === 0) {
+      setSaveMsg(`ℹ️ 勾選的列已經都是「${label}」，無需轉換`)
+      setTimeout(() => setSaveMsg(''), 4000)
+      return
+    }
+    autoSave.queue({ replace: changes })
+    setSaveMsg(`✅ 已轉換 ${count} 筆廠區為「${label}」`)
+    setTimeout(() => setSaveMsg(''), 4000)
+  }, [sheetRows, selectedKeys, autoSave])
+
+  // ---- 退單：把勾選的列移到「美編天地」隔一天的每日出單表，並從本日出單表移除 ----
+  // 用途：出單表已經匯入生管，但發現這幾筆資料需要美編重新確認/修正，退回去讓美編
+  // 隔天重新處理，會再透過每天 16:00 的排程轉回來（見 /api/cron/design-sheet-transfer）
+  const handleMoveToNextDaySheet = useCallback(async () => {
+    if (selectedKeys.size === 0) return
+    // 用 UTC 解析/運算日期字串，避免瀏覽器在 UTC+8 時區下 setDate()+toISOString() 少算一天
+    // （new Date('YYYY-MM-DDT00:00:00') 以本地時區解讀，toISOString() 轉回 UTC 會往前跨到前一天）
+    const nextDay = (() => {
+      const d = new Date(selectedDate + 'T00:00:00Z')
+      d.setUTCDate(d.getUTCDate() + 1)
+      return d.toISOString().slice(0, 10)
+    })()
+    if (!confirm(`確定要把勾選的 ${selectedKeys.size} 筆移到美編天地 ${nextDay} 的每日出單表嗎？\n（這幾筆會從今天的出單表移除，隔天 16:00 排程會重新轉回來）`)) return
+
+    const toMove = sheetRows.filter((r, i) => selectedKeys.has(r.row_key || String(i)))
+    const remaining = sheetRows.filter((r, i) => !selectedKeys.has(r.row_key || String(i)))
+    const designRows = toMove.map(r => {
+      const out: Record<string, string> = {}
+      for (const k of SOURCE_ROW_KEYS_FOR_RETURN) out[k] = (r as unknown as Record<string, string>)[k] ?? ''
+      return out
+    })
+
     setSaving(true)
     try {
-      const res = await fetch('/api/argoerp/daily-order-sheet', {
+      // 先確保美編端確實收到，成功後才從生管出單表移除，避免中途失敗造成資料兩邊都不在
+      const sendRes = await fetch('/api/design/daily-sheet', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sheet_date: selectedDate, raw_text: currentRawText, rows: next }),
+        body: JSON.stringify({ target_date: nextDay, rows: designRows }),
       })
-      const json = await res.json()
-      if (!res.ok || !json.success) throw new Error(json.error || `HTTP ${res.status}`)
-      const label = targetFactory === 'C' ? '常平' : '台北'
-      setSaveMsg(`✅ 已轉換 ${selectedKeys.size} 筆廠區為「${label}」（已自動儲存）`)
-      setTimeout(() => setSaveMsg(''), 4000)
+      const sendJson = await sendRes.json()
+      if (!sendRes.ok || !sendJson.success) throw new Error(sendJson.error || `HTTP ${sendRes.status}`)
+
+      setSheetRows(remaining)
+      setSelectedKeys(new Set())
+      // 只送「刪除這幾個 row_key」，不整份覆蓋
+      autoSave.queue({ remove: toMove.map(r => r.row_key) })
+      const ok = await autoSave.flushNow()
+      if (!ok) throw new Error('已送至美編出單表，但從本日出單表移除時儲存失敗，請點「重試儲存」')
+      setSaveMsg(`✅ 已將 ${toMove.length} 筆移到美編天地 ${nextDay} 出單表`)
+      setTimeout(() => setSaveMsg(''), 5000)
     } catch (e) {
-      setSaveMsg(`❌ 廠區轉換儲存失敗：${e instanceof Error ? e.message : String(e)}`)
+      setSaveMsg(`❌ 退單失敗：${e instanceof Error ? e.message : String(e)}`)
     } finally {
       setSaving(false)
     }
-  }, [sheetRows, selectedKeys, selectedDate, currentRawText])
+  }, [sheetRows, selectedKeys, selectedDate, autoSave])
 
   const factoryBadge = (f: 'T' | 'C' | 'O', docType?: string) => {
     if ((docType ?? '').includes('集單'))
@@ -3566,22 +3775,7 @@ export default function DailyOrderSheetPage() {
                 className="px-3 py-2 rounded-lg bg-slate-800 border border-slate-700 text-white text-sm focus:outline-none focus:border-cyan-500"
               />
             </div>
-            {/* 全日期批次比對 + 漏單檢測 — 跨所有日期，不需選取特定日 */}
-            {availableSheets.length > 0 && (
-              <>
-                <button
-                  onClick={() => void runBatchRecentSync()}
-                  disabled={batchSyncing || exportingMissing}
-                  className="px-4 py-2 rounded-lg bg-violet-900/60 border border-violet-700/50 hover:bg-violet-800 disabled:bg-slate-700 disabled:text-slate-500 disabled:border-slate-600 text-violet-200 text-sm font-medium transition-colors flex items-center gap-1.5"
-                  title="對近七天的出單表、以及超過七天但仍有未比對完成之常平/委外/請購項目的舊出單表，重新執行序號比對 + MO + 採購單比對，並寫回資料庫"
-                >
-                  <svg className="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
-                  </svg>
-                  {batchSyncing ? (batchProgress ? `同步中 ${batchProgress}` : '同步中…') : '⚡ 一鍵全同步(七日內+未完成舊單)'}
-                </button>
-              </>
-            )}
+            {/* 跨日期的批次比對已移入下方「⋯ 更多」選單，工具列只留每天會用到的操作 */}
             {hasData && (
               <>
                 <button
@@ -3592,26 +3786,55 @@ export default function DailyOrderSheetPage() {
                 >
                   {syncingAll ? '全同步中…' : '⚡ 一鍵全同步'}
                 </button>
-                <button
-                  onClick={handleDueDateCheck}
-                  className="px-4 py-2 rounded-lg bg-rose-700 hover:bg-rose-600 text-white text-sm font-medium transition-colors"
-                  title="檢查目前出單表各廠別訂單是否滿足工作天數要求"
-                >
-                  📅 交期檢查
-                </button>
-                <button
-                  onClick={() => {
-                    const init: Record<string, string> = {}
-                    for (const [k, v] of Object.entries(dueDateThresholds)) init[k] = String(v)
-                    setThresholdInput(init)
-                    setThresholdMsg('')
-                    setShowThresholdModal(true)
-                  }}
-                  className="px-3 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-300 text-sm font-medium transition-colors"
-                  title="設定各廠別交期檢查工作天數"
-                >
-                  ⚙️
-                </button>
+                {/* 低頻操作收進「更多」選單，讓工具列只留每天真的會用到的按鈕 */}
+                <div className="relative">
+                  <button
+                    onClick={() => setMoreMenuOpen(v => !v)}
+                    className="px-4 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-200 text-sm font-medium transition-colors"
+                  >
+                    ⋯ 更多
+                  </button>
+                  {moreMenuOpen && (
+                    <>
+                      <div className="fixed inset-0 z-30" onClick={() => setMoreMenuOpen(false)} />
+                      <div className="absolute right-0 top-full mt-1 z-40 w-56 bg-slate-900 border border-slate-700 rounded-lg shadow-2xl overflow-hidden">
+                        <button
+                          onClick={() => { setMoreMenuOpen(false); handleDueDateCheck() }}
+                          className="w-full text-left px-4 py-2.5 text-sm text-slate-200 hover:bg-slate-800 transition-colors"
+                        >
+                          📅 交期檢查
+                        </button>
+                        <button
+                          onClick={() => {
+                            setMoreMenuOpen(false)
+                            const init: Record<string, string> = {}
+                            for (const [k, v] of Object.entries(dueDateThresholds)) init[k] = String(v)
+                            setThresholdInput(init)
+                            setThresholdMsg('')
+                            setShowThresholdModal(true)
+                          }}
+                          className="w-full text-left px-4 py-2.5 text-sm text-slate-200 hover:bg-slate-800 transition-colors"
+                        >
+                          ⚙️ 交期天數設定
+                        </button>
+                        <button
+                          onClick={() => { setMoreMenuOpen(false); handleExportSheetCsv() }}
+                          disabled={exportingSheetCsv}
+                          className="w-full text-left px-4 py-2.5 text-sm text-slate-200 hover:bg-slate-800 disabled:opacity-50 transition-colors"
+                        >
+                          {exportingSheetCsv ? '匯出中…' : '📤 匯出 CSV'}
+                        </button>
+                        <button
+                          onClick={() => { setMoreMenuOpen(false); void runBatchRecentSync() }}
+                          disabled={batchSyncing}
+                          className="w-full text-left px-4 py-2.5 text-sm text-slate-200 hover:bg-slate-800 disabled:opacity-50 border-t border-slate-800 transition-colors"
+                        >
+                          {batchSyncing ? `同步中 ${batchProgress}` : '⚡ 全同步（近七天＋未完成舊單）'}
+                        </button>
+                      </div>
+                    </>
+                  )}
+                </div>
                 <input
                   ref={sketchFolderInputRef}
                   type="file"
@@ -3633,33 +3856,29 @@ export default function DailyOrderSheetPage() {
                     : '📁 自動比對示意圖'}
                 </button>
                 {sketchMsg && <span className="text-xs text-slate-300">{sketchMsg}</span>}
-                <button
-                  onClick={() => void handleSaveMachines()}
-                  disabled={savingMachine || !machineChanged}
-                  className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
-                    machineChanged
-                      ? 'bg-yellow-600 hover:bg-yellow-500 text-white'
-                      : 'bg-slate-700 text-slate-500 border border-slate-600'
-                  } disabled:cursor-not-allowed`}
-                  title="將目前所有機台選擇儲存至 Supabase，並重新讀回確認"
-                >
-                  {savingMachine ? '儲存中…' : `🖥 儲存機台分配${machineChanged ? ' *' : ''}`}
-                </button>
-                <button
-                  onClick={handleExportSheetCsv}
-                  disabled={exportingSheetCsv}
-                  className="px-4 py-2 rounded-lg bg-indigo-700 hover:bg-indigo-600 disabled:bg-slate-700 text-white text-sm font-medium transition-colors"
-                  title="匯出目前日期的出單資料為 CSV"
-                >
-                  {exportingSheetCsv ? '匯出中…' : `📤 匯出 CSV（${selectedDate || '當日'}）`}
-                </button>
-                <button
-                  onClick={handleSave}
-                  disabled={saving}
-                  className="px-4 py-2 rounded-lg bg-emerald-700 hover:bg-emerald-600 disabled:bg-slate-700 text-white text-sm font-medium transition-colors"
-                >
-                  {saving ? '儲存中…' : `💾 更新儲存 (${sheetRows.length} 筆)`}
-                </button>
+                {/* 自動儲存狀態列——取代原本的「💾 更新儲存」與「🖥 儲存機台分配」兩顆按鈕。
+                    任何改動都會自動存，這裡只負責如實顯示目前狀態；失敗時提供重試。 */}
+                <span className={`px-3 py-2 rounded-lg text-sm font-medium select-none ${
+                  autoSave.status === 'error' ? 'bg-red-900/40 text-red-300 border border-red-700/60'
+                  : autoSave.status === 'saving' || autoSave.status === 'pending' ? 'text-amber-300'
+                  : autoSave.status === 'saved' ? 'text-emerald-400'
+                  : 'text-slate-500'
+                }`}>
+                  {autoSave.status === 'error' ? '⚠ 儲存失敗'
+                    : autoSave.status === 'saving' ? '儲存中…'
+                    : autoSave.status === 'pending' ? '● 有未儲存的變更'
+                    : autoSave.status === 'saved' ? '✓ 已儲存'
+                    : '✓ 全部變更已儲存'}
+                </span>
+                {autoSave.status === 'error' && (
+                  <button
+                    onClick={() => void autoSave.flushNow()}
+                    className="px-3 py-2 rounded-lg bg-red-700 hover:bg-red-600 text-white text-sm font-medium transition-colors"
+                    title={autoSave.errorMsg}
+                  >
+                    重試儲存
+                  </button>
+                )}
                 <button
                   onClick={() => setConvertFactoryModalOpen(true)}
                   disabled={selectedKeys.size === 0}
@@ -3675,6 +3894,14 @@ export default function DailyOrderSheetPage() {
                 >
                   <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2zm8-12V5a2 2 0 00-2-2H9a2 2 0 00-2 2v4h10z" /></svg>
                   列印{selectedKeys.size > 0 ? ` (${selectedKeys.size})` : ''}
+                </button>
+                <button
+                  onClick={() => void handleMoveToNextDaySheet()}
+                  disabled={selectedKeys.size === 0 || saving}
+                  className="px-4 py-2 rounded-lg bg-rose-800 hover:bg-rose-700 disabled:bg-slate-700 disabled:text-slate-500 text-white text-sm font-medium transition-colors"
+                  title="退單：移到美編天地隔一天的每日出單表，隔天 16:00 排程會重新轉回來"
+                >
+                  ↩️ 移到隔日出單表{selectedKeys.size > 0 ? ` (${selectedKeys.size})` : ''}
                 </button>
               </>
             )}
@@ -4103,7 +4330,8 @@ export default function DailyOrderSheetPage() {
                         // 首次匯入警示（交期／廠區）：只要有一個未取消，整列標紅底，優先權最高
                         const showDueDateAlert = !!row.due_date_alert && !row.due_date_alert_dismissed
                         const showFactoryAlert = !!row.factory_alert && !row.factory_alert_dismissed
-                        const hasActiveAlert = showDueDateAlert || showFactoryAlert
+                        const showDuplicateAlert = !!row.duplicate_alert && !row.duplicate_alert_dismissed
+                        const hasActiveAlert = showDueDateAlert || showFactoryAlert || showDuplicateAlert
                         return (
                           <tr
                             key={`${row.row_key || 'row'}::${idx}`}
@@ -4168,7 +4396,7 @@ export default function DailyOrderSheetPage() {
                                 </div>
                               )}
                               {/* 首次匯入警示 badge：點擊取消警示（整列紅底同時解除） */}
-                              {(showDueDateAlert || showFactoryAlert) && (
+                              {(showDueDateAlert || showFactoryAlert || showDuplicateAlert) && (
                                 <div className="mt-0.5 flex gap-1 flex-wrap">
                                   {showDueDateAlert && (
                                     <button
@@ -4183,6 +4411,13 @@ export default function DailyOrderSheetPage() {
                                       title="委外(O)廠列的品項編碼未以 C 開頭，點擊取消此警示"
                                       className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-red-600 text-white border border-red-400/60 hover:bg-red-500 transition-colors"
                                     >⚠ 廠區</button>
+                                  )}
+                                  {showDuplicateAlert && (
+                                    <button
+                                      onClick={() => void handleDismissAlert(sk, 'duplicate')}
+                                      title={`同一個訂單號＋序號已於${row.duplicate_alert_dates?.length ? `${row.duplicate_alert_dates.join('、')} ` : ''}的出單表出現過，疑似重複發單，點擊取消此警示`}
+                                      className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-red-600 text-white border border-red-400/60 hover:bg-red-500 transition-colors"
+                                    >⚠ 重複發單</button>
                                   )}
                                 </div>
                               )}
@@ -4407,11 +4642,7 @@ export default function DailyOrderSheetPage() {
                               ) : (
                                 <select
                                   value={rowMachines[row.row_key] || ''}
-                                  onChange={e => {
-                                    const machine = e.target.value
-                                    setRowMachines(prev => ({ ...prev, [row.row_key]: machine }))
-                                    setMachineChanged(true)
-                                  }}
+                                  onChange={e => setRowMachine(row.row_key, e.target.value)}
                                   className="bg-slate-800 border border-slate-600 text-slate-200 text-xs rounded px-2 py-1 focus:outline-none focus:border-cyan-500 min-w-[90px]"
                                 >
                                   <option value="">— —</option>
@@ -4882,9 +5113,33 @@ export default function DailyOrderSheetPage() {
           <div className="bg-slate-900 border border-slate-700 rounded-xl shadow-2xl w-full max-w-4xl max-h-[85vh] flex flex-col" onClick={e => e.stopPropagation()}>
             {/* Header */}
             <div className="px-5 py-4 border-b border-slate-700 flex items-center justify-between shrink-0">
-              <div>
+              <div className="min-w-0">
                 <h2 className="text-white font-semibold">入庫比對</h2>
                 <p className="text-slate-400 text-sm mt-0.5">訂貨單號：<span className="font-mono text-amber-300">{legacyModal.query}</span></p>
+                {/* 廠區判斷：這張追加單當時是哪個廠生產的（常平/委外會特別標示對應單號） */}
+                {legacyModal.factoryInfo.length > 0 && (
+                  <div className="flex flex-wrap items-center gap-1.5 mt-1.5">
+                    {legacyModal.factoryInfo.map(fi => {
+                      const style = fi.factory === 'C'
+                        ? 'bg-orange-900/50 text-orange-300 border-orange-600/50'
+                        : fi.factory === 'O'
+                        ? 'bg-violet-900/50 text-violet-300 border-violet-600/50'
+                        : 'bg-sky-900/50 text-sky-300 border-sky-600/50'
+                      const label = fi.factory === 'C' ? '🟠 常平生產' : fi.factory === 'O' ? '🟣 委外生產' : '🔵 台北生產'
+                      const docLabel = fi.factory === 'C' ? '採購單' : fi.factory === 'O' ? '請購單' : '製令'
+                      return (
+                        <span key={fi.factory} className={`px-2 py-0.5 rounded-full border text-[11px] font-bold ${style}`}>
+                          {label}{fi.count > 0 ? ` ${fi.count} 筆` : ''}
+                          {fi.docs.length > 0 && (
+                            <span className="font-mono font-normal ml-1">
+                              {docLabel} {fi.docs.slice(0, 3).join('、')}{fi.docs.length > 3 ? '…' : ''}
+                            </span>
+                          )}
+                        </span>
+                      )
+                    })}
+                  </div>
+                )}
               </div>
               <button onClick={() => setLegacyModal(null)} className="text-slate-500 hover:text-white transition-colors text-xl leading-none">✕</button>
             </div>
@@ -4935,17 +5190,17 @@ export default function DailyOrderSheetPage() {
                     )}
                   </div>
 
-                  {/* ── 塔台報工紀錄（印刷站2F）── */}
+                  {/* ── 塔台報工紀錄（全站點）── */}
                   <div>
                     <div className="px-4 py-2 bg-slate-800/50 text-xs font-semibold text-slate-300 uppercase tracking-wide">
-                      塔台報工紀錄（印刷站2F）
+                      塔台報工紀錄
                       {legacyModal.saraWipRows.length > 0 && (
                         <span className="ml-2 font-normal text-slate-400 normal-case">共 {legacyModal.saraWipRows.length} 筆</span>
                       )}
                     </div>
                     {legacyModal.saraWipRows.length === 0 ? (
                       <div className="py-6 text-center space-y-1">
-                        <p className="text-slate-500 text-xs">未找到印刷站2F報工紀錄</p>
+                        <p className="text-slate-500 text-xs">未找到報工紀錄</p>
                       </div>
                     ) : (
                       <table className="w-full text-xs">

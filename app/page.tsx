@@ -228,18 +228,21 @@ export default function HomePage() {
       const seen = new Set<string>();
       const allRows: { product_code: string; product_name: string }[] = [];
       let from = 0;
+      // 資料來源用 ERP 同步的銷售訂單明細（品號＋中文品名），以 ERP 為準
+      //（系統內人工維護的 bom 表已淘汰）
       while (true) {
         const { data, error } = await supabase
-          .from('bom')
-          .select('product_code, product_name')
-          .order('product_code', { ascending: true })
+          .from('erp_so_lines')
+          .select('mbp_part, description')
+          .order('mbp_part', { ascending: true })
           .range(from, from + PAGE - 1);
         if (error) throw new Error(error.message);
-        const chunk = (data ?? []) as { product_code: string; product_name: string }[];
+        const chunk = (data ?? []) as { mbp_part: string | null; description: string | null }[];
         for (const row of chunk) {
-          if (!seen.has(row.product_code)) {
-            seen.add(row.product_code);
-            allRows.push(row);
+          const code = (row.mbp_part ?? '').trim();
+          if (code && !seen.has(code)) {
+            seen.add(code);
+            allRows.push({ product_code: code, product_name: (row.description ?? '').trim() });
           }
         }
         if (chunk.length < PAGE) break;
@@ -989,6 +992,19 @@ export default function HomePage() {
                 <span className="px-3 py-1 rounded border border-slate-600 text-slate-500 text-xs font-mono bg-slate-800">🔧 維修中</span>
               </div>
 
+              {/* 未生產異常回報（捷徑 → 尚未生產的異常回報單） */}
+              <div
+                className="bg-amber-500/10 border border-amber-400 rounded-xl p-5 cursor-pointer hover:bg-amber-500/20 transition-all flex items-center gap-4"
+                onClick={() => { setShowInfoModal(false); router.push('/qa/report-sales-design'); }}
+              >
+                <div className="text-3xl">🚨</div>
+                <div className="flex-1">
+                  <div className="text-amber-300 font-bold text-lg mb-1">未生產異常回報</div>
+                  <div className="text-xs text-red-400 font-semibold">尚未生產</div>
+                </div>
+                <span className="px-3 py-1 rounded border border-amber-500 text-amber-300 text-xs font-mono bg-amber-900/30">前往 →</span>
+              </div>
+
               {/* 產期詢問/預留 */}
               <div
                 className="bg-amber-500/10 border border-amber-400 rounded-xl p-5 cursor-pointer hover:bg-amber-500/20 transition-all flex items-center gap-4"
@@ -1066,7 +1082,7 @@ export default function HomePage() {
       {/* --- QA Modal --- */}
       {showQaModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-fade-in">
-          <div className="bg-slate-900 border border-teal-700 rounded-2xl w-full max-w-md shadow-2xl overflow-hidden relative">
+          <div className="bg-slate-900 border border-teal-700 rounded-2xl w-full max-w-2xl shadow-2xl overflow-hidden relative">
             <div className="bg-teal-800 p-4 flex justify-between items-center border-b border-teal-700">
               <h3 className="text-white font-bold flex items-center gap-2">
                 <span className="w-2 h-6 bg-teal-400 rounded-full"></span>
@@ -1080,10 +1096,18 @@ export default function HomePage() {
               <div className="flex gap-4">
                 <div
                   className="flex-1 bg-teal-700/20 border border-teal-600 rounded-xl p-4 cursor-pointer hover:bg-teal-700/40 transition-all text-center"
+                  onClick={() => { setShowQaModal(false); router.push('/qa/report-sales-design'); }}
+                >
+                  <div className="mb-2 text-teal-400 font-bold text-lg">未生產異常回報</div>
+                  <div className="text-xs text-red-400 font-semibold mb-2">尚未生產</div>
+                  <span className="px-3 py-1 rounded border border-teal-600 text-teal-300 text-xs font-mono bg-teal-900/30">前往建立</span>
+                </div>
+                <div
+                  className="flex-1 bg-teal-700/20 border border-teal-600 rounded-xl p-4 cursor-pointer hover:bg-teal-700/40 transition-all text-center"
                   onClick={() => { setShowQaModal(false); router.push('/qa/report'); }}
                 >
-                  <div className="mb-2 text-teal-400 font-bold text-lg">建立異常單</div>
-                  <div className="text-xs text-slate-300 mb-2">負責建立新的異常單</div>
+                  <div className="mb-2 text-teal-400 font-bold text-lg">生產中異常回報</div>
+                  <div className="text-xs text-slate-300 mb-2">生產中</div>
                   <span className="px-3 py-1 rounded border border-teal-600 text-teal-300 text-xs font-mono bg-teal-900/30">前往建立</span>
                 </div>
                 <div

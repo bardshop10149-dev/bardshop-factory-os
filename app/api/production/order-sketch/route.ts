@@ -4,7 +4,9 @@ import { guardAuth } from '@/lib/requireAuth'
 
 export const dynamic = 'force-dynamic'
 
-export const BUCKET = 'order-sketch-images'
+// route 檔只能匯出 HTTP method 與路由設定；此常數僅本檔使用，不可 export
+// （export 會讓 next build --webpack 型別驗證失敗，同 exchange-csv 前例）
+const BUCKET = 'order-sketch-images'
 const ALLOWED_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/bmp', 'application/pdf'])
 const MAX_SIZE = 20 * 1024 * 1024 // 20MB，示意圖多為掃描檔/photo，PDF 也可能較大
 

@@ -52,7 +52,11 @@ export async function GET(request: NextRequest) {
         cp: cpRaw === 'only' || cpRaw === 'exclude' ? cpRaw : 'all',
         srcNo: params.get('srcNo'),
         sortDue: sortRaw === 'asc' || sortRaw === 'desc' ? sortRaw : null,
-        sortOrderDate: sortOrderRaw === 'asc' || sortOrderRaw === 'desc' ? sortOrderRaw : null,
+        sortOrder: sortOrderRaw === 'asc' || sortOrderRaw === 'desc' ? sortOrderRaw : null,
+        shipped: (() => {
+          const v = params.get('shipped')
+          return v === 'yes' || v === 'no' ? v : 'all'
+        })(),
       }
       const { lines, total } = await loadPoPage(supabase, p, timings)
       return NextResponse.json({ success: true, lines, total, page: p.page, pageSize: p.pageSize, timings })

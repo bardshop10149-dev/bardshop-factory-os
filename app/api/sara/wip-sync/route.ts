@@ -103,7 +103,17 @@ async function pull() {
   }
 }
 
-export async function GET() {
+export async function GET(request: NextRequest) {
+  // Vercel Cron 以 GET 呼叫並自動帶 `Authorization: Bearer <CRON_SECRET>`——帶了有效
+  // secret 就直接執行完整同步（跟 POST 相同），供 vercel.json 排程用；
+  // 否則維持原本行為：登入者的唯讀預覽。
+  const bearer = (request.headers.get('Authorization') ?? '').replace(/^Bearer\s+/i, '').trim()
+  const cronSecret = process.env.CRON_SECRET ?? ''
+  const webhookSecret = process.env.WEBHOOK_SECRET ?? ''
+  if (bearer && ((!!cronSecret && bearer === cronSecret) || (!!webhookSecret && bearer === webhookSecret))) {
+    return runSync()
+  }
+
   const guard = await guardAuth()
   if (!guard.ok) return guard.res
   try {
@@ -134,7 +144,10 @@ export async function POST(request: NextRequest) {
     const guard = await guardAuth()
     if (!guard.ok) return guard.res
   }
+  return runSync()
+}
 
+async function runSync() {
   const started = Date.now()
   try {
     const { syncedAt, lotRows, wipRows } = await pull()

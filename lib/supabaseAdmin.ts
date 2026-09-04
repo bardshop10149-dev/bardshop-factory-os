@@ -14,6 +14,24 @@ function decodeJwtPayload(token: string): Record<string, unknown> | null {
   }
 }
 
+/**
+ * 把任意丟出的錯誤物件轉成可讀字串。
+ * Supabase（PostgREST）的 error 是「純物件」而非 Error 實例——`String(e)` 會變成
+ * "[object Object]" 完全看不出原因（2026-09-01 使用者回報「機台儲存失敗：[object Object]」），
+ * 這裡明確抽出 message/code/details/hint 組合成可讀訊息。
+ */
+export function describeError(e: unknown): string {
+  if (e instanceof Error) return formatSupabaseAdminError(e.message)
+  if (typeof e === 'string') return e
+  if (e && typeof e === 'object') {
+    const o = e as { message?: string; details?: string; hint?: string; code?: string }
+    const parts = [o.message, o.code && `code=${o.code}`, o.details, o.hint].filter(Boolean)
+    if (parts.length > 0) return formatSupabaseAdminError(parts.join('｜'))
+    try { return JSON.stringify(e) } catch { return String(e) }
+  }
+  return String(e)
+}
+
 export function formatSupabaseAdminError(message: string) {
   const normalized = message.toLowerCase()
 

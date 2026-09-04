@@ -23,7 +23,35 @@
     },
     {
       "path": "/api/cron/auto-doc-creation",
-      "schedule": "10 9 * * *"
+      "schedule": "1 9 * * *"
+    },
+    {
+      "path": "/api/cron/sara-wip-sync",
+      "schedule": "0 1,4,7,10,13 * * *"
+    },
+    {
+      "path": "/api/sara/wip-sync",
+      "schedule": "0,30 0-13 * * *"
+    },
+    {
+      "path": "/api/cron/sara-process-gen",
+      "schedule": "5 9 * * *"
+    },
+    {
+      "path": "/api/cron/sara-process-gen",
+      "schedule": "40 9 * * *"
+    },
+    {
+      "path": "/api/cron/sara-buffer-check",
+      "schedule": "45 9 * * *"
+    },
+    {
+      "path": "/api/cron/line-daily-po-pr",
+      "schedule": "0 10 * * *"
+    },
+    {
+      "path": "/api/cron/sync/full-orders",
+      "schedule": "0 1-11 * * 1-5"
     }
   ]
 }

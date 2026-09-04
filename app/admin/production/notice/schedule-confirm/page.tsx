@@ -22,10 +22,14 @@ interface Inquiry {
   department: string | null
   created_at: string
   updated_at: string
+  // 軟刪除欄位：業務端刪除後資料仍保留，生管端看得到並以紅底標示
+  deleted_at?: string | null
+  deleted_by?: string | null
+  deleted_by_name?: string | null
 }
 
 type ActiveTab = 'records' | 'create' | 'settings'
-type ReplyFilter = 'all' | 'pending' | 'approved' | 'rejected' | 'completed'
+type ReplyFilter = 'all' | 'pending' | 'approved' | 'rejected' | 'completed' | 'deleted'
 
 interface FormState {
   inquiry_date: string
@@ -90,7 +94,8 @@ export default function ScheduleInquiryPage() {
   const fetchRecords = useCallback(async () => {
     setLoading(true)
     try {
-      const res = await fetch('/api/production/schedule-confirm')
+      // include_deleted=1：連同業務端已刪除的一起撈，生管端要看得到紀錄
+      const res = await fetch('/api/production/schedule-confirm?include_deleted=1')
       const json = await res.json()
       if (json?.success) setRecords((json.records as Inquiry[]) || [])
     } catch {
@@ -231,7 +236,12 @@ export default function ScheduleInquiryPage() {
     return aDate < bDate ? -1 : aDate > bDate ? 1 : 0
   })
 
+  // 已刪除的單不該混在「待回覆／同意／拒絕」等待辦狀態裡（生管不需要再處理），
+  // 但仍保留在「全部」與專屬的「已刪除」分頁中供追溯
   const filtered = sortedRecords.filter(r => {
+    const deleted = !!r.deleted_at
+    if (filter === 'deleted')   return deleted
+    if (deleted && filter !== 'all') return false
     if (filter === 'pending')   return !r.planner_reply
     if (filter === 'approved')  return r.planner_reply === 'approved'
     if (filter === 'rejected')  return r.planner_reply === 'rejected'
@@ -295,12 +305,14 @@ export default function ScheduleInquiryPage() {
   const renderRecords = () => (
     <div className="space-y-5">
       <div className="flex items-center gap-2 flex-wrap">
-        {([['all','全部'],['pending','待回覆'],['approved','同意'],['rejected','拒絕'],['completed','已完成']] as [ReplyFilter,string][]).map(([key,label]) => {
+        {([['all','全部'],['pending','待回覆'],['approved','同意'],['rejected','拒絕'],['completed','已完成'],['deleted','已刪除']] as [ReplyFilter,string][]).map(([key,label]) => {
+          const live = records.filter(r => !r.deleted_at)
           const count = key === 'all' ? records.length
-            : key === 'pending'   ? records.filter(r => !r.planner_reply).length
-            : key === 'approved'  ? records.filter(r => r.planner_reply === 'approved').length
-            : key === 'rejected'  ? records.filter(r => r.planner_reply === 'rejected').length
-            : records.filter(r => r.planner_reply === 'completed').length
+            : key === 'deleted'   ? records.filter(r => !!r.deleted_at).length
+            : key === 'pending'   ? live.filter(r => !r.planner_reply).length
+            : key === 'approved'  ? live.filter(r => r.planner_reply === 'approved').length
+            : key === 'rejected'  ? live.filter(r => r.planner_reply === 'rejected').length
+            : live.filter(r => r.planner_reply === 'completed').length
           const active = filter === key
           return (
             <button
@@ -330,13 +342,26 @@ export default function ScheduleInquiryPage() {
           {filtered.map(rec => {
             const items = rec.items || []
             const isCompleted = rec.planner_reply === 'completed'
+            // 業務端已刪除：資料仍保留給生管追溯，用紅底＋紅框明顯區分
+            const isDeleted = !!rec.deleted_at
             return (
-              <div key={rec.id} className={`bg-[#0b1220] border rounded-[18px] px-6 py-5 flex flex-col gap-4 transition-opacity ${
-                isCompleted ? 'border-[#151f30] opacity-50 hover:opacity-80' : 'border-[#1c2739]'
+              <div key={rec.id} className={`border rounded-[18px] px-6 py-5 flex flex-col gap-4 transition-opacity ${
+                isDeleted ? 'bg-rose-950/30 border-rose-800/60'
+                : isCompleted ? 'bg-[#0b1220] border-[#151f30] opacity-50 hover:opacity-80'
+                : 'bg-[#0b1220] border-[#1c2739]'
               }`}>
+                {isDeleted && (
+                  <div className="flex items-center gap-2 -mt-1 text-[12px] text-rose-300">
+                    <span className="px-2 py-0.5 rounded-full bg-rose-500/20 border border-rose-500/40 font-bold">🗑 已被業務刪除</span>
+                    <span className="text-rose-400/80">
+                      {rec.deleted_by_name || rec.deleted_by || '—'}
+                      {rec.deleted_at && `・${new Date(rec.deleted_at).toLocaleString('zh-TW', { timeZone: 'Asia/Taipei', hour12: false })}`}
+                    </span>
+                  </div>
+                )}
                 <div className="flex items-start justify-between gap-4">
                   <div className="flex items-center gap-2.5 flex-wrap">
-                    <span className="text-[17px] font-bold text-[#f3f6fb]">{rec.customer_name || '—'}</span>
+                    <span className={`text-[17px] font-bold ${isDeleted ? 'text-rose-200 line-through' : 'text-[#f3f6fb]'}`}>{rec.customer_name || '—'}</span>
                     {rec.order_no && (
                       <span className="font-mono text-xs text-[#7f93b3] bg-[#101a2c] border border-[#1c2739] rounded-[7px] px-2.5 py-1">{rec.order_no}</span>
                     )}
