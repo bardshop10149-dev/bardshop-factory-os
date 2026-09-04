@@ -7,7 +7,7 @@ export const dynamic = 'force-dynamic'
 const TABLE = 'schedule_inquiries'
 
 const SELECT_COLUMNS =
-  'id,inquiry_date,customer_name,order_no,salesperson,items,planned_order_date,expected_date,remark,planner_reply,author_name,author_email,department,created_at,updated_at'
+  'id,inquiry_date,customer_name,order_no,salesperson,items,planned_order_date,expected_date,remark,planner_reply,author_name,author_email,department,created_at,updated_at,deleted_at,deleted_by,deleted_by_name'
 
 // 允許前端寫入/更新的欄位白名單。
 // 注意：author_name / author_email 刻意不在此清單中——一律由伺服器依登入身分帶入，
@@ -44,10 +44,12 @@ export async function GET(request: NextRequest) {
     const supabase = getSupabaseAdminClient()
 
     if (request.nextUrl.searchParams.get('count') === 'pending') {
+      // 待回覆數（導覽列徽章）：已刪除的不算，否則業務刪掉後生管的紅點還一直掛著
       const { count, error } = await supabase
         .from(TABLE)
         .select('id', { count: 'exact', head: true })
         .is('planner_reply', null)
+        .is('deleted_at', null)
 
       if (error) {
         return NextResponse.json(
@@ -58,10 +60,16 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ success: true, count: count ?? 0 })
     }
 
-    const { data, error } = await supabase
+    // ?include_deleted=1 —— 生管端專用：連同已刪除的一起回傳（畫面以紅底標示），
+    // 讓業務刪掉的需求仍有跡可循。業務端不帶此參數，已刪除的就不會出現在他們的清單。
+    const includeDeleted = request.nextUrl.searchParams.get('include_deleted') === '1'
+    let query = supabase
       .from(TABLE)
       .select(SELECT_COLUMNS)
       .order('created_at', { ascending: false })
+    if (!includeDeleted) query = query.is('deleted_at', null)
+
+    const { data, error } = await query
 
     if (error) {
       return NextResponse.json(
@@ -187,12 +195,15 @@ export async function DELETE(request: NextRequest) {
     // 原本這支只擋登入（guardAuth），任何登入者都能刪掉別人的詢問單——刪除不可復原，
     // 這裡補上擁有者檢查（2026-09-04 新增刪除按鈕時一併修正）。
     const { data: target, error: findErr } = await supabase
-      .from(TABLE).select('id, author_email, customer_name').eq('id', id).maybeSingle()
+      .from(TABLE).select('id, author_email, customer_name, deleted_at').eq('id', id).maybeSingle()
     if (findErr) {
       return NextResponse.json({ success: false, error: formatSupabaseAdminError(findErr.message) }, { status: 500 })
     }
     if (!target) {
-      return NextResponse.json({ success: false, error: '找不到這筆詢問單（可能已被刪除）' }, { status: 404 })
+      return NextResponse.json({ success: false, error: '找不到這筆詢問單' }, { status: 404 })
+    }
+    if (target.deleted_at) {
+      return NextResponse.json({ success: false, error: '這筆詢問單已經被刪除過了' }, { status: 409 })
     }
     const isOwner = !!guard.member.email && guard.member.email === target.author_email
     const canManage = guard.member.isAdmin || guard.member.permissions.includes('production_admin')
@@ -203,7 +214,18 @@ export async function DELETE(request: NextRequest) {
       )
     }
 
-    const { error } = await supabase.from(TABLE).delete().eq('id', id)
+    // 軟刪除：不真的移除資料列，只標記刪除時間與刪除人。
+    // 業務端查詢會過濾掉已刪除的（看起來就是刪掉了），生管端則仍看得到並以紅底標示，
+    // 避免業務刪除後生管完全不知道曾經有過這筆需求（2026-09-04 需求）。
+    const { error } = await supabase
+      .from(TABLE)
+      .update({
+        deleted_at: new Date().toISOString(),
+        deleted_by: guard.member.email,
+        deleted_by_name: guard.member.realName ?? guard.member.email,
+      })
+      .eq('id', id)
+      .is('deleted_at', null)   // 併發保護：已被別人刪除時不覆蓋原本的刪除人
 
     if (error) {
       return NextResponse.json(

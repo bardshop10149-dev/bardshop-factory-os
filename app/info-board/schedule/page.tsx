@@ -105,7 +105,11 @@ export default function ScheduleInquiryPage() {
 
   const handleDelete = async (record: Inquiry) => {
     const label = `${record.customer_name || '（未填客戶）'}${record.order_no ? `／${record.order_no}` : ''}`
-    if (!window.confirm(`確定要刪除這筆詢問單嗎？\n\n${label}\n填單人：${record.author_name}\n\n此操作無法復原。`)) return
+    if (!window.confirm(
+      `確定要刪除這筆詢問單嗎？\n\n${label}\n填單人：${record.author_name}\n\n`
+      + `刪除後這筆會從你的清單消失，但生產管理端仍會保留紀錄（以紅色標示為「已被業務刪除」）。\n`
+      + `此操作無法自行復原。`
+    )) return
     const typed = window.prompt(`再次確認：請輸入客戶名稱「${record.customer_name || ''}」以確認刪除`)
     if (typed === null) return
     if (typed.trim() !== (record.customer_name || '').trim()) {
