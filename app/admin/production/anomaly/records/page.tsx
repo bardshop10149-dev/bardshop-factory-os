@@ -141,6 +141,8 @@ export default function QaRecordsPage() {
   const [editingId, setEditingId] = useState<number | null>(null)
   const [editForm, setEditForm] = useState<CreateFormState>(DEFAULT_CREATE_FORM)
   const [savingEdit, setSavingEdit] = useState(false)
+  const [editOrderQty, setEditOrderQty] = useState<number | null>(null)
+  const [editOrderQtyLoading, setEditOrderQtyLoading] = useState(false)
   const [deletingId, setDeletingId] = useState<number | null>(null)
   const [options, setOptions] = useState<OptionState>(DEFAULT_OPTIONS)
   const [selectedDepartment, setSelectedDepartment] = useState('')
@@ -324,6 +326,36 @@ export default function QaRecordsPage() {
     document.body.style.overflow = anyModalOpen ? 'hidden' : ''
     return () => { document.body.style.overflow = '' }
   }, [creating, editingId])
+
+  // 編輯視窗：依相關單號自動帶出訂單數量（唯讀對照，供填異常數量參考）
+  // 訂單量＝品號對得上的行加總 order_qty_oru；對不上退回全行加總；查無回 null
+  useEffect(() => {
+    if (editingId === null) { setEditOrderQty(null); return }
+    const orderNo = editForm.orderNumber.trim()
+    if (!orderNo) { setEditOrderQty(null); return }
+    let cancelled = false
+    setEditOrderQtyLoading(true)
+    void (async () => {
+      try {
+        const { data } = await supabase
+          .from('erp_so_lines')
+          .select('mbp_part, order_qty_oru')
+          .eq('project_id', orderNo)
+        if (cancelled) return
+        const rows = (data || []) as { mbp_part: string | null; order_qty_oru: number | null }[]
+        const code = editForm.itemCode.trim()
+        const matched = code ? rows.filter((l) => (l.mbp_part || '').trim() === code) : []
+        const pool = matched.length > 0 ? matched : rows
+        const qtys = pool.map((l) => l.order_qty_oru).filter((q): q is number => q != null)
+        setEditOrderQty(qtys.length > 0 ? qtys.reduce((s, q) => s + q, 0) : null)
+      } catch {
+        if (!cancelled) setEditOrderQty(null)
+      } finally {
+        if (!cancelled) setEditOrderQtyLoading(false)
+      }
+    })()
+    return () => { cancelled = true }
+  }, [editingId, editForm.orderNumber, editForm.itemCode])
 
   const pendingReports = reports.filter((report) => report.status === 'pending')
   const completedReports = reports.filter((report) => report.status !== 'pending')
@@ -1324,6 +1356,17 @@ export default function QaRecordsPage() {
                   placeholder="缺失導致損失數量"
                   className="mt-1 w-full bg-slate-950 border border-slate-700 rounded px-3 py-2 text-white placeholder:text-slate-500"
                 />
+              </div>
+
+              <div>
+                <label className="text-xs text-slate-400">訂單數量（自動帶出）</label>
+                <div className="mt-1 w-full bg-slate-950/60 border border-slate-700 rounded px-3 py-2" style={{ height: '42px', display: 'flex', alignItems: 'center' }}>
+                  {editOrderQtyLoading
+                    ? <span className="text-slate-500 text-sm">查詢中…</span>
+                    : editOrderQty != null
+                      ? <span className="font-bold text-cyan-300">{editOrderQty}</span>
+                      : <span className="text-slate-500 text-sm">查無訂單數量</span>}
+                </div>
               </div>
 
               <div>
