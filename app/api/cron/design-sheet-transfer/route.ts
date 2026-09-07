@@ -5,6 +5,7 @@ import {
   mergeIncomingRowsWithExisting, computeSheetCounts, DUE_THRESHOLD_DEFAULTS,
   type SourceRow, type SheetRow, type MatchStatus,
 } from '@/lib/argoerp/dailyOrderSheetShared'
+import { recordSheetHistory } from '@/lib/argoerp/sheetHistory'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -146,6 +147,14 @@ async function run(request: NextRequest) {
       last_action: 'design_transfer',
     }, { onConflict: 'sheet_date' })
     if (upErr) throw new Error(upErr.message)
+
+    await recordSheetHistory(sb, {
+      sheet_date: date, action: 'cron:design-transfer',
+      actor: { email: 'system', name: '美編出單表自動轉入' },
+      before: existingRows, after: mergedRows,
+      raw_text_changed: true,
+      note: `轉入 ${transferredRows.length} 列，保留既有 ${keptExisting.length} 列`,
+    })
 
     await sb.from(TABLE_DESIGN).update({ transferred_at: new Date().toISOString() }).eq('sheet_date', date)
 

@@ -7,6 +7,7 @@ import PoOrderModal from '../../../../components/PoOrderModal'
 import MoRouteModal from '../../../../components/MoRouteModal'
 import ChangeOrderPanel from './ChangeOrderPanel'
 import { useSheetAutoSave, diffRows } from './useSheetAutoSave'
+import SheetHistoryPanel from './SheetHistoryPanel'
 import {
   createRowKey,
   detectFactory,
@@ -461,6 +462,8 @@ export default function DailyOrderSheetPage() {
 
   // ---- 轉換廠區 ----
   const [convertFactoryModalOpen, setConvertFactoryModalOpen] = useState(false)
+  // ---- 修改歷程面板（daily_order_sheet_history）----
+  const [showHistory, setShowHistory] = useState(false)
 
   // 快速查詢集合：含未確認改單的 project_id（供出單表列 badge 使用，僅限目前選取日期；詳細頁面請至「改單檢測」頁）
   const [soChangesUnconfirmedSet, setSoChangesUnconfirmedSet] = useState<Set<string>>(new Set())
@@ -4011,9 +4014,22 @@ export default function DailyOrderSheetPage() {
                     ))}
                   </select>
                 )}
+                <button
+                  onClick={() => setShowHistory(v => !v)}
+                  title="這一天出單表每次儲存／重貼／修改是誰、何時、改了什麼（廠區異動特別標示）"
+                  className={`ml-auto px-3 py-1.5 rounded-lg text-xs font-medium transition-colors border ${
+                    showHistory ? 'bg-amber-700 text-white border-amber-600' : 'bg-slate-900 text-amber-300 border-amber-800/60 hover:bg-slate-800'
+                  }`}
+                >
+                  🕘 修改歷程
+                </button>
               </div>
             )
           })()}
+
+          {showHistory && selectedDate && (
+            <SheetHistoryPanel sheetDate={selectedDate} onClose={() => setShowHistory(false)} />
+          )}
 
           {/* 跨日期搜尋結果 */}
           {(globalResults !== null) && (

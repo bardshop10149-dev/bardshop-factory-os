@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getSupabaseAdminClient, formatSupabaseAdminError } from '@/lib/supabaseAdmin'
 import { argoConfigured, argoQuery, argoImport } from '@/lib/argoQuery'
+import { recordSheetHistory } from '@/lib/argoerp/sheetHistory'
 
 // 每天 17:01（台北時間）自動轉單：當天出單表的委外列→請購單（IFAF105）、
 // 常平列→採購單（IFAF024）。邏輯完整搬自兩個手動頁面（order-batch-export-pr /
@@ -120,6 +121,13 @@ async function patchSheetRows(
     })
     .eq('sheet_date', sheetDate)
   if (updateError) throw updateError
+  // 排程只回寫單號，正常不會動廠區/數量；仍記一筆讓歷程看得到「這時間點被排程蓋過 updated_by」
+  await recordSheetHistory(sb, {
+    sheet_date: sheetDate, action: 'cron:auto-doc',
+    actor: { email: 'auto-doc-creation', name: '自動轉單排程' },
+    before: currentRows as unknown as Record<string, unknown>[], after: updatedRows as unknown as Record<string, unknown>[],
+    note: `回寫 ${updates.length} 列單號`,
+  })
 }
 
 async function logRun(sb: Sb, id: number | null, patch: Record<string, unknown>): Promise<void> {

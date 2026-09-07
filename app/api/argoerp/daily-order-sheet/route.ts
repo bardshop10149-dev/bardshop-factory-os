@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { getSupabaseAdminClient, describeError } from '@/lib/supabaseAdmin'
 import { guardAuth, guardPermission } from '@/lib/requireAuth'
 import { computeSheetCounts, mergeIncomingRowsWithExisting } from '@/lib/argoerp/dailyOrderSheetShared'
+import { recordSheetHistory } from '@/lib/argoerp/sheetHistory'
 
 export const dynamic = 'force-dynamic'
 
@@ -124,7 +125,7 @@ export async function POST(request: NextRequest) {
     // 讀取現有 rows，以保留由外部 PATCH（如集單同步）寫入但本次 POST 未帶上的 mo_number / mo_status
     const { data: existing } = await supabase
       .from(TABLE)
-      .select('rows')
+      .select('rows, raw_text')
       .eq('sheet_date', sheet_date)
       .maybeSingle()
     const existingRows = Array.isArray(existing?.rows) ? (existing!.rows as Record<string, unknown>[]) : []
@@ -145,6 +146,15 @@ export async function POST(request: NextRequest) {
       .select()
       .single()
     if (error) throw error
+
+    // 修改歷程：整張表儲存/重貼是最容易「無聲改掉廠區」的路徑，一律記錄
+    await recordSheetHistory(supabase, {
+      sheet_date, action: 'save',
+      actor: { email: guard.member.email, name: guard.member.realName },
+      before: existingRows, after: mergedRows,
+      raw_text_changed: existing != null && String(existing.raw_text ?? '') !== raw_text,
+      note: existing == null ? '首次建立' : undefined,
+    })
     return NextResponse.json({ success: true, sheet: data })
   } catch (e) {
     const msg = describeError(e)
@@ -192,13 +202,15 @@ export async function PATCH(request: NextRequest) {
     // delta 語意（依 row_key 定位）本身可重放，重試不會產生重複或錯亂。
     const MAX_ATTEMPTS = 10
     let rows: Record<string, unknown>[] = []
+    let beforeRows: Record<string, unknown>[] = []
+    let rawTextBefore: string | null = null
     let committed = false
     let lastConflictError: string | null = null
 
     for (let attempt = 0; attempt < MAX_ATTEMPTS && !committed; attempt++) {
       const { data: existing, error: fetchError } = await supabase
         .from(TABLE)
-        .select('rows, updated_at')
+        .select('rows, updated_at, raw_text')
         .eq('sheet_date', sheet_date)
         .single()
       if (fetchError && fetchError.code === 'PGRST116') {
@@ -207,8 +219,9 @@ export async function PATCH(request: NextRequest) {
       if (fetchError) throw fetchError
 
       const readUpdatedAt = existing.updated_at as string
-      rows = Array.isArray(existing.rows) ? existing.rows as Record<string, unknown>[] : []
-      rows = applyDelta(rows, { updates, replace, add, remove, replace_all })
+      rawTextBefore = (existing.raw_text as string | null) ?? null
+      beforeRows = Array.isArray(existing.rows) ? existing.rows as Record<string, unknown>[] : []
+      rows = applyDelta(beforeRows, { updates, replace, add, remove, replace_all })
 
       const { data: written, error: updateError } = await supabase
         .from(TABLE)
@@ -243,6 +256,22 @@ export async function PATCH(request: NextRequest) {
         { status: 409 }
       )
     }
+
+    // 修改歷程：局部修改也記（誰在何時動了哪幾列），replace_all 等同重貼整張表
+    const patchKinds = [
+      updates?.length ? `updates:${updates.length}` : '',
+      replace?.length ? `replace:${replace.length}` : '',
+      add?.length ? `add:${add.length}` : '',
+      remove?.length ? `remove:${remove.length}` : '',
+      Array.isArray(replace_all) ? `replace_all:${replace_all.length}` : '',
+    ].filter(Boolean).join(' ')
+    await recordSheetHistory(supabase, {
+      sheet_date, action: Array.isArray(replace_all) ? 'save' : 'patch',
+      actor: { email: guard.member.email, name: guard.member.realName },
+      before: beforeRows, after: rows,
+      raw_text_changed: typeof raw_text === 'string' && raw_text !== (rawTextBefore ?? ''),
+      note: patchKinds || undefined,
+    })
 
     return NextResponse.json({
       success: true,

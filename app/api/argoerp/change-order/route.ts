@@ -6,6 +6,7 @@ import {
   clearStaleDocsOnFactoryChange,
   type SheetRow,
 } from '@/lib/argoerp/dailyOrderSheetShared'
+import { recordSheetHistory } from '@/lib/argoerp/sheetHistory'
 
 export const dynamic = 'force-dynamic'
 
@@ -182,6 +183,13 @@ export async function POST(request: NextRequest) {
         })
         .eq('sheet_date', sheet.sheet_date)
       if (updateErr) throw updateErr
+
+      await recordSheetHistory(supabase, {
+        sheet_date: sheet.sheet_date, action: 'change_order',
+        actor: { email: guard.member.email, name: guard.member.realName },
+        before: rowsArr as unknown as Record<string, unknown>[], after: newRows as unknown as Record<string, unknown>[],
+        note: `改單專區 ${orderNumber} #${lineNo}：${changedFields.join('、')}${body.note ? `（${body.note}）` : ''}`,
+      })
     }
 
     if (!anyMatched) {
