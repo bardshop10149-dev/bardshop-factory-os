@@ -675,7 +675,7 @@ export default function PurchasingPage() {
       value={l.expected_ship_date ?? ''}
       disabled={savingKeys.has(lineKey(l))}
       onChange={e => void updateLine(l, { expected_ship_date: e.target.value || null })}
-      className="rounded bg-slate-900 border border-slate-700 px-1.5 py-1 text-[11px] text-slate-300 focus:outline-none focus:border-cyan-600 w-[125px]"
+      className="rounded bg-slate-900 border border-slate-700 px-1.5 py-1 text-[11px] text-slate-300 focus:outline-none focus:border-cyan-600 w-[125px] [color-scheme:dark]"
     />
   )
 
@@ -840,7 +840,7 @@ export default function PurchasingPage() {
                     value={filters[fromKey]}
                     onChange={setF(fromKey)}
                     placeholder="起"
-                    className="flex-1 rounded bg-slate-900 border border-slate-700 px-2 py-1.5 text-xs text-white placeholder-slate-700 focus:outline-none focus:border-cyan-600 font-mono"
+                    className="flex-1 rounded bg-slate-900 border border-slate-700 px-2 py-1.5 text-xs text-white placeholder-slate-700 focus:outline-none focus:border-cyan-600 font-mono [color-scheme:dark]"
                   />
                   <span className="text-slate-600 text-xs">~</span>
                   <input
@@ -848,7 +848,7 @@ export default function PurchasingPage() {
                     value={filters[toKey]}
                     onChange={setF(toKey)}
                     placeholder="迄"
-                    className="flex-1 rounded bg-slate-900 border border-slate-700 px-2 py-1.5 text-xs text-white placeholder-slate-700 focus:outline-none focus:border-cyan-600 font-mono"
+                    className="flex-1 rounded bg-slate-900 border border-slate-700 px-2 py-1.5 text-xs text-white placeholder-slate-700 focus:outline-none focus:border-cyan-600 font-mono [color-scheme:dark]"
                   />
                 </div>
               </div>
