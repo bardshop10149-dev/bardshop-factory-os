@@ -38,6 +38,10 @@
       "schedule": "30 9 * * *"
     },
     {
+      "path": "/api/cron/sara-process-gen",
+      "schedule": "40 9 * * *"
+    },
+    {
       "path": "/api/cron/sara-buffer-check",
       "schedule": "45 9 * * *"
     },
