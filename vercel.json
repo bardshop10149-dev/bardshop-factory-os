@@ -35,11 +35,7 @@
     },
     {
       "path": "/api/cron/sara-process-gen",
-      "schedule": "15 9 * * *"
-    },
-    {
-      "path": "/api/cron/sara-process-gen",
-      "schedule": "40 9 * * *"
+      "schedule": "30 9 * * *"
     },
     {
       "path": "/api/cron/sara-buffer-check",
