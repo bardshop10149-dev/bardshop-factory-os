@@ -3,8 +3,6 @@ import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import MigrationBanner from '../components/MigrationBanner';
 import SessionKeeper from '../components/SessionKeeper';
-// import TaskFloatingWidget from '../components/TaskFloatingWidget'; // 🔥 1. 引入元件
-
 const geistSans = Geist({
   variable: "--font-geist-sans",
   subsets: ["latin"],
@@ -37,8 +35,6 @@ export default function RootLayout({
           : children
         }
 
-        {/* <TaskFloatingWidget /> */}
-        
       </body>
     </html>
   );

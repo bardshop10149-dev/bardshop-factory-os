@@ -16,6 +16,5 @@ export default function DynamicSectionPage() {
   }
 
   // 2026-08-31 起六個產線排程看板改以塔台（SARA）資料為準、唯讀呈現
-  // （原人工拖曳排程元件 ProductionScheduler 保留於 components/，需要時可切回）
   return <SaraProductionBoard sectionId={sectionId} sectionName={sectionInfo.name} />
 }
