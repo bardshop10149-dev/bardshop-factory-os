@@ -1017,16 +1017,6 @@ export default function HomePage() {
                 </div>
                 <span className="px-3 py-1 rounded border border-amber-500 text-amber-300 text-xs font-mono bg-amber-900/30">前往 →</span>
               </div>
-
-              {/* 維修中 — 常平訂單 */}
-              <div className="bg-slate-800/40 border border-slate-700 rounded-xl p-5 flex items-center gap-4 opacity-50 cursor-not-allowed select-none">
-                <div className="text-3xl grayscale">📦</div>
-                <div className="flex-1">
-                  <div className="text-slate-400 font-bold text-lg mb-1">常平訂單</div>
-                  <div className="text-xs text-slate-500">常平訂單處理與追蹤</div>
-                </div>
-                <span className="px-3 py-1 rounded border border-slate-600 text-slate-500 text-xs font-mono bg-slate-800">🔧 維修中</span>
-              </div>
             </div>
           </div>
         </div>
