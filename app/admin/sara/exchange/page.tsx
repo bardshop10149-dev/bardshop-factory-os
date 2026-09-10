@@ -178,37 +178,92 @@ export default function SaraExchangePage() {
   // ── 依訂單號查詢/刪除 CSV buffer 內的列 ──
   const [orderSearch, setOrderSearch] = useState('')
   const [orderDeleting, setOrderDeleting] = useState(false)
+  // 勾選的列（存 csvRows 的原始索引）
+  const [selectedIdx, setSelectedIdx] = useState<Set<number>>(new Set())
+  const [bulkDeleting, setBulkDeleting] = useState(false)
   const orderQuery = orderSearch.trim().toLowerCase()
   // 第 0 欄 = Order Number；用「包含」比對方便輸入部分單號就能找到
   const matchedOrderRows = useMemo(() => orderQuery
     ? csvRows.map((r, idx) => ({ row: r, idx })).filter(({ row }) => (row[0] ?? '').toLowerCase().includes(orderQuery))
     : [], [orderQuery, csvRows])
 
-  // 單獨刪除指定某一行（依 csvRows 的原始索引，跟批次刪除共用同一套存回邏輯）
+  // 只保留仍在目前查詢結果內的勾選（換查詢條件或資料重載後，失效的勾選自動清掉）
+  useEffect(() => {
+    setSelectedIdx(prev => {
+      if (prev.size === 0) return prev
+      const valid = new Set(matchedOrderRows.map(({ idx }) => idx))
+      const next = new Set([...prev].filter(i => valid.has(i)))
+      return next.size === prev.size ? prev : next
+    })
+  }, [matchedOrderRows])
+
+  const toggleRowSelect = useCallback((idx: number) => {
+    setSelectedIdx(prev => {
+      const next = new Set(prev)
+      if (next.has(idx)) next.delete(idx); else next.add(idx)
+      return next
+    })
+  }, [])
+
+  const allMatchedSelected = matchedOrderRows.length > 0 && matchedOrderRows.every(({ idx }) => selectedIdx.has(idx))
+  const toggleSelectAllMatched = useCallback(() => {
+    setSelectedIdx(prev => {
+      const all = matchedOrderRows.length > 0 && matchedOrderRows.every(({ idx }) => prev.has(idx))
+      const next = new Set(prev)
+      for (const { idx } of matchedOrderRows) { if (all) next.delete(idx); else next.add(idx) }
+      return next
+    })
+  }, [matchedOrderRows])
+
+  // 依 csvRows 的原始索引刪除若干列（單列／勾選／整批共用同一套存回邏輯）
+  const deleteRowsByIdx = useCallback(async (idxSet: Set<number>) => {
+    if (idxSet.size === 0) return
+    const kept = csvRows.filter((_, i) => !idxSet.has(i))
+    const res = await fetch('/api/sara/exchange-csv', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ rows: kept, append: false }),
+    })
+    const j = await res.json() as { success: boolean; count?: number; error?: string }
+    if (!j.success) throw new Error(j.error)
+    setCsvMsg(`✅ 已刪除 ${idxSet.size} 列（剩 ${j.count} 列）`)
+    setSelectedIdx(new Set())
+    await loadCsvBuffer()
+    setTimeout(() => setCsvMsg(''), 5000)
+  }, [csvRows, loadCsvBuffer])
+
+  // 單獨刪除指定某一行
   const [deletingRowIdx, setDeletingRowIdx] = useState<number | null>(null)
   const handleDeleteSingleOrderRow = useCallback(async (idx: number) => {
     const row = csvRows[idx]
     if (!row) return
-    if (!confirm(`確定刪除這一列？\n訂單號：${row[0]}\n工單編號：${row[1]}\n品號：${row[2]}`)) return
+    if (!confirm(`確定刪除這一列？
+訂單號：${row[0]}
+工單編號：${row[1]}
+品號：${row[2]}`)) return
     setDeletingRowIdx(idx)
     setCsvMsg('')
     try {
-      const kept = csvRows.filter((_, i) => i !== idx)
-      const res = await fetch('/api/sara/exchange-csv', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ rows: kept, append: false }),
-      })
-      const j = await res.json() as { success: boolean; count?: number; error?: string }
-      if (!j.success) throw new Error(j.error)
-      setCsvMsg(`✅ 已刪除 1 列（剩 ${j.count} 列）`)
-      await loadCsvBuffer()
-      setTimeout(() => setCsvMsg(''), 5000)
+      await deleteRowsByIdx(new Set([idx]))
     } catch (e) {
       setCsvMsg(`❌ ${e instanceof Error ? e.message : String(e)}`)
     } finally { setDeletingRowIdx(null) }
-  }, [csvRows, loadCsvBuffer])
+  }, [csvRows, deleteRowsByIdx])
 
+  // 刪除勾選的列
+  const handleDeleteSelectedRows = useCallback(async () => {
+    if (selectedIdx.size === 0) return
+    if (!confirm(`確定刪除勾選的 ${selectedIdx.size} 列資料？`)) return
+    setBulkDeleting(true)
+    setCsvMsg('')
+    try {
+      await deleteRowsByIdx(new Set(selectedIdx))
+    } catch (e) {
+      setCsvMsg(`❌ ${e instanceof Error ? e.message : String(e)}`)
+    } finally { setBulkDeleting(false) }
+  }, [selectedIdx, deleteRowsByIdx])
+
+  // 刪除目前查詢結果的全部列
   const handleDeleteOrderRows = useCallback(async () => {
     if (matchedOrderRows.length === 0) return
     const orderNos = [...new Set(matchedOrderRows.map(({ row }) => row[0]))]
@@ -216,23 +271,12 @@ export default function SaraExchangePage() {
     setOrderDeleting(true)
     setCsvMsg('')
     try {
-      const matchedIdx = new Set(matchedOrderRows.map(({ idx }) => idx))
-      const kept = csvRows.filter((_, idx) => !matchedIdx.has(idx))
-      const res = await fetch('/api/sara/exchange-csv', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ rows: kept, append: false }),
-      })
-      const j = await res.json() as { success: boolean; count?: number; error?: string }
-      if (!j.success) throw new Error(j.error)
-      setCsvMsg(`✅ 已刪除 ${matchedOrderRows.length} 列（剩 ${j.count} 列）`)
+      await deleteRowsByIdx(new Set(matchedOrderRows.map(({ idx }) => idx)))
       setOrderSearch('')
-      await loadCsvBuffer()
-      setTimeout(() => setCsvMsg(''), 5000)
     } catch (e) {
       setCsvMsg(`❌ ${e instanceof Error ? e.message : String(e)}`)
     } finally { setOrderDeleting(false) }
-  }, [matchedOrderRows, csvRows, loadCsvBuffer])
+  }, [matchedOrderRows, deleteRowsByIdx])
 
   // ── 清空 CSV buffer ──
   const handleCsvClear = useCallback(async () => {
@@ -515,6 +559,15 @@ export default function SaraExchangePage() {
                     符合 <span className={`font-mono font-semibold ${matchedOrderRows.length > 0 ? 'text-emerald-300' : 'text-slate-500'}`}>{matchedOrderRows.length}</span> 列
                   </span>
                 )}
+                {selectedIdx.size > 0 && (
+                  <button
+                    onClick={() => void handleDeleteSelectedRows()}
+                    disabled={bulkDeleting}
+                    className="px-3 py-1.5 rounded-lg bg-red-600/80 border border-red-500/60 text-white text-xs font-semibold hover:bg-red-600 disabled:opacity-50 transition-colors whitespace-nowrap"
+                  >
+                    {bulkDeleting ? '刪除中…' : `🗑 刪除勾選的 ${selectedIdx.size} 列`}
+                  </button>
+                )}
                 {matchedOrderRows.length > 0 && (
                   <button
                     onClick={() => void handleDeleteOrderRows()}
@@ -530,6 +583,16 @@ export default function SaraExchangePage() {
                   <table className="w-full text-[11px]">
                     <thead className="bg-slate-900 sticky top-0">
                       <tr className="text-slate-500">
+                        <th className="px-2 py-1.5 text-center w-8">
+                          <input
+                            type="checkbox"
+                            checked={allMatchedSelected}
+                            ref={el => { if (el) el.indeterminate = !allMatchedSelected && matchedOrderRows.some(({ idx }) => selectedIdx.has(idx)) }}
+                            onChange={toggleSelectAllMatched}
+                            title="全選／取消全選目前查詢結果"
+                            className="accent-red-500 cursor-pointer"
+                          />
+                        </th>
                         <th className="px-2 py-1.5 text-left whitespace-nowrap">訂單號</th>
                         <th className="px-2 py-1.5 text-left whitespace-nowrap">工單編號</th>
                         <th className="px-2 py-1.5 text-left whitespace-nowrap">品號</th>
@@ -543,7 +606,15 @@ export default function SaraExchangePage() {
                     </thead>
                     <tbody>
                       {matchedOrderRows.map(({ row, idx }) => (
-                        <tr key={idx} className="border-t border-slate-800/60 text-slate-300">
+                        <tr key={idx} className={`border-t border-slate-800/60 text-slate-300 ${selectedIdx.has(idx) ? 'bg-red-950/30' : ''}`}>
+                          <td className="px-2 py-1 text-center">
+                            <input
+                              type="checkbox"
+                              checked={selectedIdx.has(idx)}
+                              onChange={() => toggleRowSelect(idx)}
+                              className="accent-red-500 cursor-pointer"
+                            />
+                          </td>
                           <td className="px-2 py-1 font-mono text-cyan-300 whitespace-nowrap">{row[0]}</td>
                           <td className="px-2 py-1 font-mono whitespace-nowrap">{row[1]}</td>
                           <td className="px-2 py-1 font-mono whitespace-nowrap">{row[2]}</td>
