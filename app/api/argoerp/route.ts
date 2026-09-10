@@ -354,7 +354,7 @@ export async function POST(request: NextRequest) {
   try {
     const body = await request.json()
     const { action, data, interfaceId } = body as {
-      action: 'import' | 'query' | 'query_so_detail' | 'sync_inventory' | 'sync_customer' | 'sync_vendor' | 'fetch_po_pdl_links' | 'explore_so_columns' | 'explore_bom_structure' | 'test_so_detail' | 'test_po_detail' | 'sync_so' | 'sync_mo' | 'sync_pj' | 'sync_po' | 'sync_pr' | 'sync_bom_units' | 'sync_bom_structure' | 'sync_material_prep'
+      action: 'import' | 'query' | 'query_so_detail' | 'sync_inventory' | 'sync_customer' | 'sync_vendor' | 'fetch_po_pdl_links' | 'explore_bom_structure' | 'sync_so' | 'sync_mo' | 'sync_pj' | 'sync_po' | 'sync_pr' | 'sync_bom_units' | 'sync_bom_structure' | 'sync_material_prep'
       data?: Record<string, unknown>[]
       interfaceId?: string
     }
@@ -775,101 +775,6 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ status: 'ok', columns, sample_rows: sampleRows })
     }
 
-    if (action === 'explore_so_columns') {
-      // ── 探索 PJ_PROJECT 和 PJ_PROJECTDETAIL 全部欄位 ──────
-      // PJ_PROJECT：取 1 筆 SO
-      const headerSparam = JSON.stringify({
-        APIKEY1: keys.APIKEY1, APIKEY2: keys.APIKEY2, APIKEY3: keys.APIKEY3,
-        SEGMENT, TABLE: 'PJ_PROJECT', SHOWNULLCOLUMN: 'Y',
-        PJT_TYPE: "= 'SO'", ROWNUM: '<= 1',
-      })
-      const headerRes = await fetch(`${API_BASE}/S_QUERY`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sparam: headerSparam }),
-      })
-      const { parsed: ph } = await readApiResponse(headerRes)
-      const headerRow = findObjectRows(ph)[0] ?? {}
-
-      // PJ_PROJECTDETAIL：取 PROJECT_ID RO26033104 的 1 筆明細
-      const detailSparam = JSON.stringify({
-        APIKEY1: keys.APIKEY1, APIKEY2: keys.APIKEY2, APIKEY3: keys.APIKEY3,
-        SEGMENT, TABLE: 'PJ_PROJECTDETAIL', SHOWNULLCOLUMN: 'Y',
-        PJT_PROJECT_ID: "= 'RO26033104'", ROWNUM: '<= 1',
-      })
-      const detailRes = await fetch(`${API_BASE}/S_QUERY`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sparam: detailSparam }),
-      })
-      const { parsed: pd } = await readApiResponse(detailRes)
-      const detailRow = findObjectRows(pd)[0] ?? {}
-
-      return NextResponse.json({
-        status: 'ok',
-        pj_project_columns: Object.keys(headerRow),
-        pj_project_sample: headerRow,
-        pj_projectdetail_columns: Object.keys(detailRow),
-        pj_projectdetail_sample: detailRow,
-      })
-    }
-
-    if (action === 'test_so_detail') {
-      // ── SO 明細查詢測試 (PJ_PROJECT JOIN PJ_PROJECTDETAIL) ──
-      const { projectId } = body as { projectId?: string }
-      const sparam: Record<string, string> = {
-        APIKEY1: keys.APIKEY1,
-        APIKEY2: keys.APIKEY2,
-        APIKEY3: keys.APIKEY3,
-        SEGMENT,
-        TABLE: 'PJ_PROJECT,PJ_PROJECTDETAIL',
-        SHOWCOLUMNTIME: 'Y',
-        SHOWNULLCOLUMN: 'Y',
-        CUSTOMCOLUMN: [
-          'PJ_PROJECT.PROJECT_ID',
-          'PJ_PROJECT.SALES_ID',
-          'PJ_PROJECT.TPN_PARTNER_ID',
-          'PJ_PROJECT.CURRENCY',
-          'PJ_PROJECT.EXCHANGE_RATE',
-          'PJ_PROJECT.SEG_SEGMENT_NO_DEPARTMENT',
-          'PJ_PROJECT.SALES_CATEGORY',
-          'PJ_PROJECT.BEGIN_DATE',
-          'PJ_PROJECT.HOLD_STATUS',
-          'PJ_PROJECTDETAIL.LINE_NO',
-          'PJ_PROJECTDETAIL.MBP_PART',
-          'PJ_PROJECTDETAIL.MBP_VER',
-          'PJ_PROJECTDETAIL.DUEDATE',
-          'PJ_PROJECTDETAIL.ORDER_QTY_ORU',
-          'PJ_PROJECTDETAIL.UNIT_OF_MEASURE_ORU',
-          'PJ_PROJECTDETAIL.UNIT_PRICE_ORU',
-          'PJ_PROJECTDETAIL.GRADE',
-          'PJ_PROJECT.CREATE_DATE',
-          'PJ_PROJECT.UPDATE_DATE',
-        ].join(','),
-        'PJ_PROJECT.PROJECT_ID': '=PJ_PROJECTDETAIL.PJT_PROJECT_ID',
-      }
-      if (projectId?.trim()) {
-        sparam['PROJECT_ID'] = `='${projectId.trim()}'`
-      } else {
-        sparam['PJ_PROJECT.PJT_TYPE'] = "= 'SO'"
-        sparam['ROWNUM'] = '<= 5'
-      }
-
-      const res = await fetch(`${API_BASE}/S_QUERY`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sparam: JSON.stringify(sparam) }),
-      })
-      const { parsed, rawText } = await readApiResponse(res)
-      const rows = findObjectRows(parsed)
-      return NextResponse.json({
-        status: res.ok ? 'ok' : 'error',
-        httpStatus: res.status,
-        rowCount: rows.length,
-        sampleRow: rows[0] ?? null,
-        allRows: rows,
-        rawText: rawText.slice(0, 3000),
-      })
-    }
-
     if (action === 'sync_so') {
       // 增量：先取近 N 分鐘有異動的單號（表頭 ∪ 表身）。表頭改也要連該單所有表身重抓，
       // 否則表身列裡的表頭欄位（客戶/狀態/地址…）不會更新。
@@ -1107,42 +1012,6 @@ export async function POST(request: NextRequest) {
       })
     }
 
-
-    if (action === 'test_po_detail') {
-      // ── 採購單明細診斷查詢 ──────────────────────────────────
-      // 分三種方式查詢，回傳原始結果以診斷欄位結構
-      const { projectId } = body as { projectId?: string }
-      const pid = (projectId ?? '').trim()
-
-      // 查1: 直接查 PJ_PROJECTDETAIL（指定 PO 單號 或 ROWNUM<=5）
-      const q1 = JSON.stringify({
-        APIKEY1: keys.APIKEY1, APIKEY2: keys.APIKEY2, APIKEY3: keys.APIKEY3,
-        SEGMENT, TABLE: 'PJ_PROJECTDETAIL', SHOWNULLCOLUMN: 'Y',
-        ...(pid ? { PJT_PROJECT_ID: `= '${pid}'` } : { ROWNUM: '<= 5' }),
-      })
-      const r1 = await fetch(`${API_BASE}/S_QUERY`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sparam: q1 }) })
-      const { parsed: p1, rawText: raw1 } = await readApiResponse(r1)
-      const rows1 = findObjectRows(p1)
-
-      // 查2: JOIN PJ_PROJECT+PJ_PROJECTDETAIL，PJT_TYPE=PO，ROWNUM<=5
-      const q2 = JSON.stringify({
-        APIKEY1: keys.APIKEY1, APIKEY2: keys.APIKEY2, APIKEY3: keys.APIKEY3,
-        SEGMENT, TABLE: 'PJ_PROJECT,PJ_PROJECTDETAIL', SHOWNULLCOLUMN: 'Y',
-        'PJ_PROJECT.PROJECT_ID': '=PJ_PROJECTDETAIL.PJT_PROJECT_ID',
-        'PJ_PROJECT.PJT_TYPE': "= 'PO'",
-        ROWNUM: '<= 5',
-      })
-      const r2 = await fetch(`${API_BASE}/S_QUERY`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sparam: q2 }) })
-      const { parsed: p2, rawText: raw2 } = await readApiResponse(r2)
-      const rows2 = findObjectRows(p2)
-
-      return NextResponse.json({
-        status: 'ok',
-        q1_direct: { rowCount: rows1.length, columns: Object.keys(rows1[0] ?? {}), sample: rows1[0] ?? null, rawText: raw1.slice(0, 2000) },
-        q2_join:   { rowCount: rows2.length, columns: Object.keys(rows2[0] ?? {}), sample: rows2[0] ?? null, rawText: raw2.slice(0, 2000) },
-      })
-    }
-
     if (action === 'sync_po') {
       // ── 採購單同步（與 sync_so 同模式：兩段式，JS 端 JOIN）──────────────
       // 注意：使用 CUSTOMCOLUMN（不加表格前綴）+ 各表獨立查，與 sync_so 完全相同模式
@@ -1309,7 +1178,6 @@ export async function POST(request: NextRequest) {
         unchanged: poRecon.unchanged,
       })
     }
-
 
     if (action === 'sync_pr') {
       // 增量：請購查詢有多段 fallback、聯表加 IN 易觸發 ORA-00918，且全量很輕（約 4 千筆/0.8 秒），

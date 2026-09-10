@@ -1,7 +1,7 @@
 // 共用的「出單表列 → ArgoERP 製令/採購單匯出格式」轉換邏輯。
 //
 // 這份邏輯原本各自嵌在 app/admin/argoerp/order-batch-export/page.tsx（台北廠製令）
-// 跟 app/admin/argoerp/_shared/FactoryOrderExportPage.tsx（常平/委外採購單）裡，兩邊
+// 跟 daily-order-sheet/ChangeOrderPanel.tsx（原 _shared/FactoryOrderExportPage.tsx 為零引用半成品，2026-09-10 移除）（常平/委外採購單）裡，兩邊
 // 完全複製貼上、綁死在各自元件的 state 上，其他頁面沒辦法呼叫。這裡抽成純函式，
 // 兩個原本的頁面改成 import 這裡的版本（純搬移，行為不變），改單專區之類需要重新
 // 轉單的新功能也走這裡，不再產生第三份複製。
