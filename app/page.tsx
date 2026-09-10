@@ -1074,6 +1074,19 @@ export default function HomePage() {
                   {downloadingProducts ? '下載中...' : '下載 →'}
                 </span>
               </button>
+              <button
+                onClick={() => { setShowProductDevModal(false); router.push('/product-dev/item-request'); }}
+                className="bg-green-700/20 border border-green-600 rounded-xl p-5 cursor-pointer hover:bg-green-700/40 transition-all flex items-center gap-4 w-full text-left"
+              >
+                <div className="text-3xl">🆕</div>
+                <div className="flex-1">
+                  <div className="text-green-400 font-bold text-lg mb-1">申請新品項編碼</div>
+                  <div className="text-xs text-slate-300">填寫建檔資料，可引用類似品項帶入 ERP 設定</div>
+                </div>
+                <span className="px-3 py-1 rounded border border-green-600 text-green-300 text-xs font-mono bg-green-900/30">
+                  前往申請 →
+                </span>
+              </button>
             </div>
           </div>
         </div>
