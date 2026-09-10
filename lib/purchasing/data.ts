@@ -89,6 +89,7 @@ async function fetchAllOpenPoRows(supabase: SupabaseAdmin, range?: { orderFrom?:
       // 舊資料尚無 CLOSE_FLAG，故 null 視為未結案；不能寫 not.eq.Y，否則 null 會一起被濾掉。
       .or('extra->>CLOSE_FLAG.is.null,extra->>CLOSE_FLAG.neq.Y')
     if (status !== 'ALL') q = q.eq('status', status)
+    else q = q.neq('status', 'VOID').neq('qty', 0)   // ALL 不含作廢單/取消行(同 loadPoPage)
     if (from) q = q.gte('start_date', from)
     if (to) q = q.lte('start_date', to)
     return q.order('doc_no', { ascending: true }).order('sub_no', { ascending: true })
@@ -521,7 +522,14 @@ export async function loadPoPage(supabase: SupabaseAdmin, p: PageParams, timings
       .or('extra->>CLOSE_FLAG.is.null,extra->>CLOSE_FLAG.neq.Y')
     // ALL = 不過濾單據狀態(OPEN/CLOSE/VOID 全看,Snow 2026-08-30)
     const pageStatus = (p.poStatus || 'OPEN').toUpperCase()
-    if (pageStatus !== 'ALL') q = q.eq('status', pageStatus)
+    if (pageStatus !== 'ALL') {
+      q = q.eq('status', pageStatus)
+    } else {
+      // ALL = 活單全看,但作廢單(表頭 VOID)與取消行(單行數量改 0)不顯示(Snow 2026-09-10):
+      // ARGO 兩種「取消」長得不同——整張作廢是表頭狀態,單行取消是數量歸零、狀態仍 OPEN,要各擋一次。
+      // 要看作廢單請用 VOID 快篩。
+      q = q.neq('status', 'VOID').neq('qty', 0)
+    }
     const oFrom = toSlashDate(p.orderFrom), oTo = toSlashDate(p.orderTo)
     if (oFrom) q = q.gte('start_date', oFrom)
     if (oTo) q = q.lte('start_date', oTo)
