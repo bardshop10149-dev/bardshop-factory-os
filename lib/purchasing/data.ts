@@ -85,9 +85,11 @@ async function fetchAllOpenPoRows(supabase: SupabaseAdmin, range?: { orderFrom?:
       .from('erp_pj_sync')
       .select(PO_SELECT, withCount ? { count: 'exact' } : undefined)
       .eq('doc_type', '採購單號')
-      // 排除單身已結案的行（表頭可能還 OPEN，但採購已個別勾結案）。
-      // 舊資料尚無 CLOSE_FLAG，故 null 視為未結案；不能寫 not.eq.Y，否則 null 會一起被濾掉。
-      .or('extra->>CLOSE_FLAG.is.null,extra->>CLOSE_FLAG.neq.Y')
+      // 註（Snow 2026-09-11 更正）：這裡曾無條件排除「單身已結案（CLOSE_FLAG=Y）」的行，
+      // 那是把「應顯示為已完成」誤解成「整列不顯示」。後果是連輸入完整單號搜尋都查不到
+      // （例：PO260902011 到貨 4000/4000 且已結案，OPEN/CLOSE/ALL 三種狀態都撈不出來），
+      // 且 3117 行 OPEN 單憑空消失。已完成的單靠「入庫欄狀態＋排除已全部到倉」表達即可，
+      // 不該在資料層直接抹掉。真正要排除的是作廢單（表頭 VOID）與取消行（數量 0）。
     if (status !== 'ALL') q = q.eq('status', status)
     if (from) q = q.gte('start_date', from)
     if (to) q = q.lte('start_date', to)
@@ -421,6 +423,7 @@ export async function loadPoTrackingLines(supabase: SupabaseAdmin, opts: LoadOpt
         const v = Number(r.reject_qty)
         return r.reject_qty != null && r.reject_qty !== '' && Number.isFinite(v) ? v : null
       })(),
+      closed: String(r.close_flag ?? '').trim().toUpperCase() === 'Y',
       po_status: r.status,
       order_date: normalizeDateText(r.start_date),
       due_date: dueDate,
@@ -516,9 +519,11 @@ export async function loadPoPage(supabase: SupabaseAdmin, p: PageParams, timings
       .from('erp_pj_sync')
       .select(select, { count: 'exact' })
       .eq('doc_type', '採購單號')
-      // 排除單身已結案的行（表頭可能還 OPEN，但採購已個別勾結案）。
-      // 舊資料尚無 CLOSE_FLAG，故 null 視為未結案；不能寫 not.eq.Y，否則 null 會一起被濾掉。
-      .or('extra->>CLOSE_FLAG.is.null,extra->>CLOSE_FLAG.neq.Y')
+      // 註（Snow 2026-09-11 更正）：這裡曾無條件排除「單身已結案（CLOSE_FLAG=Y）」的行，
+      // 那是把「應顯示為已完成」誤解成「整列不顯示」。後果是連輸入完整單號搜尋都查不到
+      // （例：PO260902011 到貨 4000/4000 且已結案，OPEN/CLOSE/ALL 三種狀態都撈不出來），
+      // 且 3117 行 OPEN 單憑空消失。已完成的單靠「入庫欄狀態＋排除已全部到倉」表達即可，
+      // 不該在資料層直接抹掉。真正要排除的是作廢單（表頭 VOID）與取消行（數量 0）。
     // ALL = 不過濾單據狀態(OPEN/CLOSE/VOID 全看,Snow 2026-08-30)
     const pageStatus = (p.poStatus || 'OPEN').toUpperCase()
     if (pageStatus !== 'ALL') q = q.eq('status', pageStatus)
@@ -689,6 +694,7 @@ export async function loadPoPage(supabase: SupabaseAdmin, p: PageParams, timings
         const v = Number(r.reject_qty)
         return r.reject_qty != null && r.reject_qty !== '' && Number.isFinite(v) ? v : null
       })(),
+      closed: String(r.close_flag ?? '').trim().toUpperCase() === 'Y',
       po_status: r.status,
       order_date: normalizeDateText(r.start_date),
       due_date: dueDate,

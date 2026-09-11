@@ -43,6 +43,9 @@ export interface PoTrackingLine {
   received_qty: number | null         // 已入庫量（ARGO 進貨入庫後回寫的 ACTUAL_QTY）
   reject_qty: number | null           // 驗退量（REJECT_QTY）。退掉的不會再補，
                                       // 故「到貨＋退貨＝訂購」即代表這一行已處理完畢
+  closed: boolean                     // 採購在 ARGO 勾了「結案」（單身 CLOSE_FLAG=Y）。
+                                      // 僅供畫面標示，不作為過濾條件——2026-09-11 已移除
+                                      // 「已結案就不顯示」的錯誤設計
   po_status: string | null            // ARGO HOLD_STATUS（OPEN…）
   order_date: string | null           // 下單日（YYYY-MM-DD）
   due_date: string | null             // 交期（YYYY-MM-DD，同步時已倒推 2 工作日）
@@ -121,7 +124,7 @@ export function daysUntil(dueDate: string | null, todayIso: string): number | nu
 }
 
 /** 依未出貨明細計算到期提醒統計（已出貨或已到倉不計入） */
-export function computeDueCounts(lines: Pick<PoTrackingLine, 'shipped_at' | 'due_days' | 'qty' | 'received_qty'>[]): DueCounts {
+export function computeDueCounts(lines: Pick<PoTrackingLine, 'shipped_at' | 'due_days' | 'qty' | 'received_qty' | 'reject_qty'>[]): DueCounts {
   const counts: DueCounts = { due2: 0, due5: 0, due10: 0, total: 0 }
   for (const l of lines) {
     if (l.shipped_at || arrivedFull(l) || l.due_days == null || l.due_days > 10) continue
