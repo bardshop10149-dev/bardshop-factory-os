@@ -137,7 +137,16 @@ function ReceiveCell({ l }: { l: PoTrackingLine }) {
           退{rejected.toLocaleString()}
         </span>
       )}
-      <span className={`block w-fit mt-0.5 text-[10px] px-1.5 py-0.5 rounded font-semibold border ${cls}`}>{label}</span>
+      <span className="flex flex-wrap items-center gap-1 mt-0.5">
+        <span className={`w-fit text-[10px] px-1.5 py-0.5 rounded font-semibold border ${cls}`}>{label}</span>
+        {/* 採購已在 ARGO 勾結案：標示出來即可，不再像先前那樣整列藏起來 */}
+        {l.closed && (
+          <span
+            title="採購已在 ARGO 勾選「結案」，此行不需再追蹤"
+            className="w-fit text-[10px] px-1.5 py-0.5 rounded font-semibold border bg-slate-800 text-slate-400 border-slate-600"
+          >已結案</span>
+        )}
+      </span>
     </div>
   )
 }
@@ -1041,7 +1050,9 @@ export default function PurchasingPage() {
                         bucket === 'yellow' ? 'text-yellow-300' : 'text-emerald-400'
                       }`}>
                         {fmt(l.due_date)}
-                        {!l.shipped_at && l.due_days != null && l.due_days <= 10 && (
+                        {/* 用 bucket 判斷而非自己重列條件：bucket 非 null ⇔ 未出貨且未到齊且 10 天內。
+                            先前漏了「已到齊」這關，才會出現「已全數入庫 + 逾期 57 天」的矛盾顯示。 */}
+                        {bucket && l.due_days != null && (
                           <span className="block text-[10px] font-normal opacity-80">
                             {l.due_days < 0 ? `逾期 ${-l.due_days} 天` : l.due_days === 0 ? '今天到期' : `剩 ${l.due_days} 天`}
                           </span>
