@@ -3474,9 +3474,12 @@ export default function DailyOrderSheetPage() {
           if (m) { itemDigits = m[1]; break }
         }
         if (itemDigits === null) {
-          // 優先取「訂單號緊接 #項號」（最明確）；退而求其次取檔名裡任一個 #數字
+          // 優先取「訂單號緊接 #項號」（最明確）；退而求其次取檔名裡任一個 #數字。
+          // 單號與 # 之間允許底線／點／連字號——設計部的新命名是
+          //「【商品示意圖】SO260910017_#1A.pdf」，原本只容忍空白，這種檔名會掉到
+          // 下面比較不精確的 loose 分支（2026-09-11 使用者回報）。
           const upperName = fileName.toUpperCase()
-          const tight = upperName.match(new RegExp(`${orderNumber.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*#\\s*0*(\\d+)`))
+          const tight = upperName.match(new RegExp(`${orderNumber.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[\\s_.-]*#\\s*0*(\\d+)`))
           const loose = tight ? null : fileName.match(/#\s*0*(\d+)/)
           const m = tight ?? loose
           if (m) itemDigits = m[1]
