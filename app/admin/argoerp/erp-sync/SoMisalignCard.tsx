@@ -1,6 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
+import { csvCellQuoted } from '@/lib/core/csv'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 工單對位體檢（唯讀顯示）
@@ -127,7 +128,7 @@ export default function SoMisalignCard({ initialSearch = '' }: Props) {
       r.running.map((x) => `${x.station}/${x.job}(${x.status})`).join(' '), r.notify,
     ])
     const csv = [head, ...body]
-      .map((line) => line.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(','))
+      .map((line) => line.map(csvCellQuoted).join(','))
       .join('\r\n')
     const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8' })
     const url = URL.createObjectURL(blob)

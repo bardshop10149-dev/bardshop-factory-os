@@ -3,6 +3,8 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
 import { supabase } from '../../lib/supabaseClient'
+import { csvCellQuoted } from '@/lib/core/csv'
+import { todayLocalYmd } from '@/lib/core/date'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -70,14 +72,6 @@ interface MaterialGroup {
   has_argo_lines: boolean  // has data from erp_material_prep_lines
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Helpers
-// ─────────────────────────────────────────────────────────────────────────────
-function todayStr() {
-  const d = new Date()
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
-}
-
 function fmtDateLabel(s: string) {
   const parts = s.split('-')
   if (parts.length !== 3) return s
@@ -118,7 +112,7 @@ function exportCsv(groups: MaterialGroup[], date: string, issuedSet: Set<string>
   }
   const label = mode === 'issued' ? '已發料' : mode === 'pending' ? '未發料' : '全部'
   const csv = [header, ...rows]
-    .map(r => r.map(v => `"${String(v).replace(/"/g, '""')}"`).join(','))
+    .map(r => r.map(csvCellQuoted).join(','))
     .join('\n')
   const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' })
   const url = URL.createObjectURL(blob)
@@ -134,7 +128,7 @@ function exportCsv(groups: MaterialGroup[], date: string, issuedSet: Set<string>
 // ─────────────────────────────────────────────────────────────────────────────
 export default function MaterialIssuePage() {
   const [sheets, setSheets]               = useState<SheetMeta[]>([])
-  const [selectedDate, setSelectedDate]   = useState(todayStr())
+  const [selectedDate, setSelectedDate]   = useState(todayLocalYmd())
   const [sheetRows, setSheetRows]         = useState<SheetRow[]>([])
   const [groups, setGroups]               = useState<MaterialGroup[]>([])
   const [missingMos, setMissingMos]       = useState<MoDetail[]>([])   // MOs with no ARGO lines
@@ -167,7 +161,7 @@ export default function MaterialIssuePage() {
         if (j.success) {
           const list: SheetMeta[] = j.sheets ?? []
           setSheets(list)
-          if (list.length > 0 && !list.find(s => s.sheet_date === todayStr())) {
+          if (list.length > 0 && !list.find(s => s.sheet_date === todayLocalYmd())) {
             setSelectedDate(list[0].sheet_date)
           }
         }

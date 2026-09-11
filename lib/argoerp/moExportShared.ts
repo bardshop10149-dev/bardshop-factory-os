@@ -1,3 +1,4 @@
+import { formatYmdSlash } from '@/lib/core/date'
 // 共用的「出單表列 → ArgoERP 製令/採購單匯出格式」轉換邏輯。
 //
 // 這份邏輯原本各自嵌在 app/admin/argoerp/order-batch-export/page.tsx（台北廠製令）
@@ -126,9 +127,8 @@ export const ERP_FIELD_CODE_MAP: Record<string, string> = {
 }
 
 // ==================== 工具函式 ====================
-export function formatDate(d: Date): string {
-  return `${d.getFullYear()}/${String(d.getMonth() + 1).padStart(2, '0')}/${String(d.getDate()).padStart(2, '0')}`
-}
+// 已統一到 lib/core/date；保留 formatDate 這個名字給既有呼叫端
+export const formatDate = formatYmdSlash
 
 // 以 byte 長度截斷字串（UTF-8）——中文一字 3 bytes、英數 1 byte
 export function truncateByByteLength(text: string, maxBytes: number): string {

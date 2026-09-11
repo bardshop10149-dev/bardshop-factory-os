@@ -21,6 +21,8 @@ import {
   type MatchStatus,
   type SheetRow,
 } from '../../../../lib/argoerp/dailyOrderSheetShared'
+import { csvCellQuoted, downloadCsv } from '@/lib/core/csv'
+import { todayLocalYmd } from '@/lib/core/date'
 
 // ===== 舊系統入庫紀錄比對 =====
 interface LegacyReceiptRow {
@@ -74,12 +76,6 @@ interface PjRecord {
   remark: string | null
   extra: Record<string, unknown> | null
   synced_at: string
-}
-
-// ===== 工具函式 =====
-function todayStr(): string {
-  const d = new Date()
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
 }
 
 // 數量欄位安全轉數字：空白／格式錯誤回傳 null（視為「無法判讀」），
@@ -294,26 +290,6 @@ function encodeTsvCell(v: string): string {
 
 function rowsToTsv(rows: string[][]): string {
   return rows.map(r => r.map(c => encodeTsvCell(c ?? '')).join('\t')).join('\n')
-}
-
-function toCsvCell(v: unknown): string {
-  return `"${String(v ?? '').replace(/"/g, '""')}"`
-}
-
-function downloadCsv(fileName: string, headers: string[], rows: unknown[][]): void {
-  const bom = '\uFEFF'
-  const csvContent = bom + [
-    headers.map(toCsvCell).join(','),
-    ...rows.map(r => r.map(toCsvCell).join(',')),
-  ].join('\n')
-
-  const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' })
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = fileName
-  a.click()
-  URL.revokeObjectURL(url)
 }
 
 const STATUS_LABELS: Record<string, { label: string; cls: string }> = {
@@ -864,7 +840,7 @@ export default function DailyOrderSheetPage() {
   // 當日期清單載入後，若尚未選日期，自動選今天或最近一筆
   useEffect(() => {
     if (selectedDate || availableSheets.length === 0) return
-    const today = todayStr()
+    const today = todayLocalYmd()
     const hasToday = availableSheets.some(s => s.sheet_date === today)
     setSelectedDate(hasToday ? today : availableSheets[0].sheet_date)
   }, [availableSheets, selectedDate])
@@ -2289,7 +2265,7 @@ export default function DailyOrderSheetPage() {
           : (rowMachines[r.row_key] ?? r.machine ?? r.assigned_machine ?? '')),
       ])
 
-      const datePart = selectedDate || todayStr()
+      const datePart = selectedDate || todayLocalYmd()
       downloadCsv(`每日出單表_${datePart}.csv`, headers, rows)
       setSaveMsg(`✅ 已匯出 CSV：${datePart}（${sheetRows.length} 筆）`)
       setTimeout(() => setSaveMsg(''), 4000)
@@ -2355,7 +2331,7 @@ export default function DailyOrderSheetPage() {
       const bom = '\uFEFF'
       const csvContent = bom + [
         headers.map(h => `"${h}"`).join(','),
-        ...csvRows.map(r => r.map(v => `"${String(v ?? '').replace(/"/g, '""')}"`).join(',')),
+        ...csvRows.map(r => r.map(csvCellQuoted).join(',')),
       ].join('\n')
 
       const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' })

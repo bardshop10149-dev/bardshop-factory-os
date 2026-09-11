@@ -11,6 +11,8 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import * as XLSX from 'xlsx'
 import { supabase } from '../../../../lib/supabaseClient'
+import { csvCell } from '@/lib/core/csv'
+import { formatYmdSlash } from '@/lib/core/date'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -77,10 +79,6 @@ const ERP_KEYS = [
 
 const DEF_EDIT: LineEdit = { mbp_ver: '1', uom: 'PCS', unit_price: '0', lot_no: '', remark2: '', so_line_no: '', packing: '' }
 
-function fmtDate(d: Date) {
-  return `${d.getFullYear()}/${String(d.getMonth() + 1).padStart(2, '0')}/${String(d.getDate()).padStart(2, '0')}`
-}
-
 function pocPrefixToday() {
   const d = new Date()
   return `POC${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`
@@ -116,7 +114,7 @@ async function fetchNextPocNo(): Promise<string> {
 
 function makeDefaultHeader(): PoHeader {
   return {
-    project_id: '', modify_ver: '1', begin_date: fmtDate(new Date()),
+    project_id: '', modify_ver: '1', begin_date: formatYmdSlash(new Date()),
     hold_status: 'UNSIGNED', tpn_partner_id: 'C01510', department: 'M1100',
     sales_id: '10149', po_type: 'GENERAL', payment_term: 'PM30',
     payment_mode: 'T', currency: 'CNY', exchange_rate: '4', tax_rate: '0',
@@ -168,7 +166,7 @@ export default function PoBatchExportCPage() {
         // 單號＝傳入時自動取號、開單日期＝一律帶當天，兩者都不還原 localStorage 舊值
         // （委外請購頁曾因日期停在舊值，ARGO 單開立日錯置成 6/25）
         merged.project_id = ''
-        merged.begin_date = fmtDate(new Date())
+        merged.begin_date = formatYmdSlash(new Date())
         setHeader(merged)
       }
     } catch {}
@@ -295,8 +293,7 @@ export default function PoBatchExportCPage() {
       XLSX.writeFile(wb, `${fn}.xlsx`)
     } else {
       const lines = [[...ERP_KEYS].join(','), ...dataRows.map(row =>
-        row.map(v => (v.includes(',') || v.includes('"') || v.includes('\n'))
-          ? `"${v.replace(/"/g, '""')}"` : v).join(','),
+        row.map(v => csvCell(v)).join(','),
       )]
       const blob = new Blob(['\uFEFF' + lines.join('\n')], { type: 'text/csv;charset=utf-8;' })
       const url = URL.createObjectURL(blob)

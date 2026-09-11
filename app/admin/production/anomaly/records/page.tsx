@@ -4,6 +4,7 @@ import Link from 'next/link'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { QRCodeSVG } from 'qrcode.react'
 import { supabase } from '../../../../../lib/supabaseClient'
+import { todayIsoDateInput } from '@/lib/core/date'
 
 interface AnomalyReport {
   id: number
@@ -91,8 +92,6 @@ const DEFAULT_OPTIONS: OptionState = {
   dispositions: ['重工', '報廢', '讓步接收', '退貨', '隔離', '待判定'],
 }
 
-const getTodayDateInput = () => new Date().toISOString().slice(0, 10)
-
 // 以本地時區組 yyyy-MM-dd（避免 toISOString 的 UTC 換日位移）
 const toLocalDateInput = (d: Date) =>
   `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
@@ -108,7 +107,7 @@ const parseDisp = (val: unknown): Record<string, string> => {
 }
 
 const DEFAULT_CREATE_FORM: CreateFormState = {
-  createdDate: getTodayDateInput(),
+  createdDate: todayIsoDateInput(),
   orderNumber: '',
   itemCode: '',
   itemName: '',
@@ -365,7 +364,7 @@ export default function QaRecordsPage() {
   const openEditModal = (report: AnomalyReport) => {
     setEditingId(report.id)
     setEditForm({
-      createdDate: report.created_at ? new Date(report.created_at).toISOString().slice(0, 10) : getTodayDateInput(),
+      createdDate: report.created_at ? new Date(report.created_at).toISOString().slice(0, 10) : todayIsoDateInput(),
       orderNumber: report.order_number || '',
       itemCode: report.item_code || '',
       itemName: report.item_name || '',
@@ -396,7 +395,7 @@ export default function QaRecordsPage() {
   }
 
   const openCreateModal = () => {
-    setCreateForm({ ...DEFAULT_CREATE_FORM, createdDate: getTodayDateInput() })
+    setCreateForm({ ...DEFAULT_CREATE_FORM, createdDate: todayIsoDateInput() })
     setCreating(true)
   }
 

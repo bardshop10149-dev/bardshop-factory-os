@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { supabase } from '../../../../lib/supabaseClient'
 import SingleOrderConvert from './SingleOrderConvert'
+import { csvCell } from '@/lib/core/csv'
 
 const CSV_H1 = 'Order Number,Manufacturing Order Number,Product Name,Product Description,Lot Number,Production Quantity,Due,Priority Level,Earliest Start Time,Job Sequence,Workcenter,Job Name,Job Quantity,Out Sourcing,Est. Time,Time Unit,BOM Components,Material Required Quantity,customer_id,assigned_machine,Rule,Parameter 1'
 const CSV_H2 = '訂單編號,(必填)工單編號,(必填)品號,規格,生產批號,(必填)生產需求數量,(必填)需求日,排程優先等級(1-99),最早可開始時間,(必填)工序,(必填)站點,(必填)製程名稱,製程數量,製程委外,(必填)預估工時,工時單位,BOM元件品號,物料需求數量,客戶名稱,分配機台,規則,參數1'
@@ -28,11 +29,6 @@ function parseCSVRows(text: string): string[][] {
     if (cells.length > 1 || cells[0]) result.push(cells)
   }
   return result
-}
-
-function escCsv(v: string | number): string {
-  const s = String(v ?? '')
-  return /[,"\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s
 }
 
 interface ExchangeRow {
@@ -167,7 +163,7 @@ export default function SaraExchangePage() {
   // ── 下載 CSV buffer ──
   const handleCsvDownload = useCallback(() => {
     if (csvRows.length === 0) return
-    const lines = [CSV_H1, CSV_H2, ...csvRows.map(r => r.map(escCsv).join(','))].join('\r\n')
+    const lines = [CSV_H1, CSV_H2, ...csvRows.map(r => r.map(csvCell).join(','))].join('\r\n')
     const blob = new Blob(['\uFEFF' + lines], { type: 'text/csv;charset=utf-8;' })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a'); a.href = url

@@ -3,6 +3,7 @@
 import { useMemo, useState, useCallback } from 'react'
 import Link from 'next/link'
 import * as XLSX from 'xlsx-js-style'
+import { csvCell } from '@/lib/core/csv'
 
 // ============================================================
 // CRM × 訂單明細交叉比對
@@ -238,11 +239,7 @@ export default function CrmCrossPage() {
     } else {
       const csvLines = [headers.join(',')]
       dataRows.forEach(cells => {
-        csvLines.push(cells.map(v => {
-          const s = String(v ?? '')
-          if (s.includes(',') || s.includes('\n') || s.includes('"')) return `"${s.replace(/"/g, '""')}"`
-          return s
-        }).join(','))
+        csvLines.push(cells.map(v => csvCell(v)).join(','))
       })
       const blob = new Blob(['\uFEFF' + csvLines.join('\n')], { type: 'text/csv;charset=utf-8;' })
       const url = URL.createObjectURL(blob)

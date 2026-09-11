@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { supabase } from '../../../../lib/supabaseClient'
 import SoOrderModal from '../../../../components/SoOrderModal'
 import { classifyBomPrefix } from '../../../../lib/bomPrefixRules'
+import { todayLocalYmd } from '@/lib/core/date'
 
 // ============================================================
 // 型別
@@ -111,14 +112,6 @@ interface SheetMeta {
   row_count: number
   pending_count?: number
   updated_at: string
-}
-
-// ============================================================
-// 工具
-// ============================================================
-function todayStr(): string {
-  const d = new Date()
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
 }
 
 function formatQty(value: number): string {
@@ -471,7 +464,7 @@ export default function MaterialPrepPage() {
         // 沒有的話退而求其次選最新一筆（sheets 依日期新到舊排序）。
         // 用函式式更新讀 prev，避免把 selectedDate 放進依賴陣列造成每次切換日期都重抓清單。
         if (sheets.length > 0) {
-          const today = todayStr()
+          const today = todayLocalYmd()
           const defaultDate = sheets.some(s => s.sheet_date === today) ? today : sheets[0].sheet_date
           setSelectedDate(prev => prev || defaultDate)
         }

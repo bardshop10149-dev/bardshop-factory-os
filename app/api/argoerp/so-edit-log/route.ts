@@ -3,6 +3,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { getSupabaseAdminClient, formatSupabaseAdminError } from '@/lib/supabaseAdmin'
 import { guardAuth } from '@/lib/requireAuth'
 import { matchMoToOrder } from '@/lib/moLineMatch'
+import { chunk } from '@/lib/core/array'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 業務訂單修改 LOG（唯讀）
@@ -124,12 +125,6 @@ async function argoQuery(
   if (!res.ok) return []
   const data = await res.json() as { RESULT?: unknown }
   return Array.isArray(data.RESULT) ? data.RESULT as Record<string, unknown>[] : []
-}
-
-function chunk<T>(arr: T[], size: number): T[][] {
-  const out: T[][] = []
-  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size))
-  return out
 }
 
 const inClause = (ids: string[]) => `IN (${ids.map((i) => `'${String(i).replace(/'/g, "''")}'`).join(',')})`

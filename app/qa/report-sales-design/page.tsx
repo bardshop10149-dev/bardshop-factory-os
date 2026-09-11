@@ -17,6 +17,7 @@
 import Link from 'next/link'
 import { useEffect, useRef, useState } from 'react'
 import { supabase } from '../../../lib/supabaseClient'
+import { todayIsoDateInput } from '@/lib/core/date'
 
 interface PersonnelOption {
   option_value: string
@@ -24,7 +25,6 @@ interface PersonnelOption {
 }
 
 const PRE_PRODUCTION_TAG = '【尚未生產】'
-const getTodayDateInput = () => new Date().toISOString().slice(0, 10)
 
 // members.department 與 qa_anomaly_option_items 的部門寫法不一致，需對照；
 // 表上沒有對應選項的部門（管理部、雷射切割）刻意不列 → 不預填，由使用者自選。
@@ -64,7 +64,7 @@ function matchPersonnel(cands: PersonnelOption[], names: string[]): string | nul
 
 export default function SalesDesignAnomalyReportPage() {
   // ── 表單欄位 ──────────────────────────────────────────────
-  const [createdDate, setCreatedDate] = useState(getTodayDateInput())
+  const [createdDate, setCreatedDate] = useState(todayIsoDateInput())
   const [orderNumber, setOrderNumber] = useState('')
   const [itemCode, setItemCode] = useState('')
   const [itemName, setItemName] = useState('')
@@ -189,7 +189,7 @@ export default function SalesDesignAnomalyReportPage() {
       setHandlerPersonnel('')
       setReason('')
       setAttachFiles([])
-      setCreatedDate(getTodayDateInput())
+      setCreatedDate(todayIsoDateInput())
     } catch (err) {
       alert(`送出失敗：${err instanceof Error ? err.message : String(err)}`)
     } finally {

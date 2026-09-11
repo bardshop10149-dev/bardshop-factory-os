@@ -3,6 +3,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { getSupabaseAdminClient, formatSupabaseAdminError } from '@/lib/supabaseAdmin'
 import { guardAuth } from '@/lib/requireAuth'
 import { saraProjects, saraWip, moToSoLine } from '@/lib/saraWebClient'
+import { chunk } from '@/lib/core/array'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 塔台現場進度同步（網頁版 API → Supabase）
@@ -20,12 +21,6 @@ import { saraProjects, saraWip, moToSoLine } from '@/lib/saraWebClient'
 // ─────────────────────────────────────────────────────────────────────────────
 
 const CHUNK = 500
-
-function chunk<T>(arr: T[], size: number): T[][] {
-  const out: T[][] = []
-  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size))
-  return out
-}
 
 function num(v: unknown): number | null {
   if (v === null || v === undefined || v === '') return null

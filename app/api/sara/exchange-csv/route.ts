@@ -20,10 +20,6 @@ function checkApiKey(request: NextRequest): boolean {
   return new URL(request.url).searchParams.get('api_key') === envKey
 }
 
-function escCsv(v: string): string {
-  return /[,"\n\r]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v
-}
-
 // GET — 塔台 API Key 拉取（回傳 CSV 文字），或管理端查詢（回傳 JSON rows）
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url)

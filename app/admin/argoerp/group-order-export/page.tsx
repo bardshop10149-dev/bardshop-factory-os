@@ -3,6 +3,8 @@
 import { useState, useEffect, useCallback, useMemo } from 'react'
 import { supabase } from '../../../../lib/supabaseClient'
 import SoOrderModal from '../../../../components/SoOrderModal'
+import { formatYmdSlash } from '@/lib/core/date'
+import { getNextBusinessDay, truncateByByteLength } from '@/lib/argoerp/moExportShared'
 
 // ==================== 型別 ====================
 interface GroupRow {
@@ -48,28 +50,6 @@ type DateSummary = {
   imported: number
 }
 
-// ==================== 工具函式 ====================
-function fmtDate(d: Date): string {
-  return `${d.getFullYear()}/${String(d.getMonth() + 1).padStart(2, '0')}/${String(d.getDate()).padStart(2, '0')}`
-}
-
-function nextBizDay(from: Date): Date {
-  const d = new Date(from)
-  d.setDate(d.getDate() + 1)
-  while (d.getDay() === 0 || d.getDay() === 6) d.setDate(d.getDate() + 1)
-  return d
-}
-
-function truncateToBytes(text: string, maxBytes: number): string {
-  const enc = new TextEncoder()
-  const bytes = enc.encode(text)
-  if (bytes.length <= maxBytes) return text
-  const dec = new TextDecoder('utf-8')
-  let cut = maxBytes
-  while (cut > 0 && (bytes[cut] & 0xc0) === 0x80) cut--
-  return dec.decode(bytes.slice(0, cut))
-}
-
 function fixPackingShift(row: GroupRow, sheetDate: string): GroupRow {
   if (sheetDate >= '2026-06-18') return row
   if (!row.quantity || !/^\d{4}[\/\-]/.test(row.quantity)) return row
@@ -89,17 +69,17 @@ function buildErpRecord(row: GroupRow, moNumber: string, lineNo: number = 1): Re
   const today = new Date()
   const rec: Record<string, string> = {}
   rec['PROJECT_ID'] = moNumber
-  rec['BEGIN_DATE'] = fmtDate(nextBizDay(today))
+  rec['BEGIN_DATE'] = formatYmdSlash(getNextBusinessDay(today))
   if (row.delivery_date) rec['END_DATE'] = row.delivery_date.replace(/\//g, '-')
   rec['HOLD_STATUS'] = 'OPEN'
   rec['SEG_SEGMENT_NO_DEPARTMENT'] = 'M1100'
   rec['PJT_SEG_SEGMENT_NO'] = 'M1000'
-  rec['MO_BEGIN_DATE'] = fmtDate(today)
+  rec['MO_BEGIN_DATE'] = formatYmdSlash(today)
   rec['AUTO_PREPARE'] = 'N'
   rec['LINE_NO'] = String(lineNo)
   if (row.item_code) rec['MBP_PART'] = row.item_code
   rec['MBP_VER'] = '1'
-  if (row.order_number) rec['MBP_LOT_NO'] = truncateToBytes(row.order_number, 30)
+  if (row.order_number) rec['MBP_LOT_NO'] = truncateByByteLength(row.order_number, 30)
   if (row.quantity) rec['ORDER_QTY'] = row.quantity.replace(/,/g, '')
   rec['BOM_LEVELS'] = '99'
   rec['EQUIVALENT_RATIO'] = '1'
@@ -1038,11 +1018,11 @@ export default function GroupOrderExportPage() {
             product_code: r.item_code,
             planned_qty: r.quantity,
             source_order: r.order_number,
-            lot_number: truncateToBytes(r.order_number, 30),
+            lot_number: truncateByByteLength(r.order_number, 30),
             mo_note: [r.item_name, r.note].filter(Boolean).join(' '),
-            planned_start_date: fmtDate(nextBizDay(now)),
+            planned_start_date: formatYmdSlash(getNextBusinessDay(now)),
             planned_end_date: r.delivery_date,
-            create_date: fmtDate(now),
+            create_date: formatYmdSlash(now),
             interface_id: 'IFAF028',
           })),
         }),

@@ -7,6 +7,7 @@
 // 詳細計算邏輯見 lib/dailyMachineOutput.ts。
 
 import { useCallback, useEffect, useState } from 'react'
+import { taipeiYmd } from '@/lib/core/date'
 
 interface ProductQty {
   code: string
@@ -27,14 +28,6 @@ interface Snapshot {
   total_mo_count: number
   unassigned_mo_count: number
   computed_at: string
-}
-
-function taipeiDateStr(d: Date): string {
-  const parts = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Taipei', year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(d)
-  const y = parts.find(p => p.type === 'year')!.value
-  const m = parts.find(p => p.type === 'month')!.value
-  const dd = parts.find(p => p.type === 'day')!.value
-  return `${y}-${m}-${dd}`
 }
 
 function MachineCard({ row }: { row: MachineOutputRow }) {
@@ -70,7 +63,7 @@ function MachineCard({ row }: { row: MachineOutputRow }) {
 }
 
 export default function DailyMachineOutputPage() {
-  const [date, setDate] = useState(() => taipeiDateStr(new Date(Date.now() - 24 * 60 * 60 * 1000)))
+  const [date, setDate] = useState(() => taipeiYmd(new Date(Date.now() - 24 * 60 * 60 * 1000)))
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
@@ -172,7 +165,7 @@ export default function DailyMachineOutputPage() {
 
   const shiftDate = (deltaDays: number) => {
     const d = new Date(`${date}T00:00:00+08:00`)
-    setDate(taipeiDateStr(new Date(d.getTime() + deltaDays * 24 * 60 * 60 * 1000)))
+    setDate(taipeiYmd(new Date(d.getTime() + deltaDays * 24 * 60 * 60 * 1000)))
   }
 
   return (

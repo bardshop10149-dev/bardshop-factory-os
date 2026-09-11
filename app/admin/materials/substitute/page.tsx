@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
 import { supabase } from '../../../../lib/supabaseClient'
+import { csvCellQuoted } from '@/lib/core/csv'
 
 interface MaterialOption {
   item_code: string
@@ -389,7 +390,7 @@ export default function MaterialsSubstitutePage() {
       ])
 
     const csvContent = [header, ...rows]
-      .map((row) => row.map((cell) => `"${String(cell).replace(/"/g, '""')}"`).join(','))
+      .map((row) => row.map(csvCellQuoted).join(','))
       .join('\n')
 
     const blob = new Blob(['\uFEFF' + csvContent], { type: 'text/csv;charset=utf-8;' })

@@ -2,6 +2,7 @@
 
 import { useState, useCallback } from 'react'
 import { supabase } from '../../../../lib/supabaseClient'
+import { taipeiYmd } from '@/lib/core/date'
 
 // ===== CSV 欄位型別（對應 wip_record__ 匯出格式）=====
 interface WipRecord {
@@ -71,15 +72,6 @@ interface DailyMachineRow {
   jobNames: Set<string>
 }
 
-function taipeiDateStr(d: Date): string {
-  // 用 Intl 取得 Asia/Taipei 當地日期字串（YYYY-MM-DD），避免用本機瀏覽器時區猜測
-  const parts = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Taipei', year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(d)
-  const y = parts.find(p => p.type === 'year')!.value
-  const m = parts.find(p => p.type === 'month')!.value
-  const dd = parts.find(p => p.type === 'day')!.value
-  return `${y}-${m}-${dd}`
-}
-
 function taipeiDayUtcRange(dateStr: string): { startUtc: string; endUtc: string } {
   // Asia/Taipei 為 UTC+8，當地一天的範圍換算成 UTC 區間
   const start = new Date(`${dateStr}T00:00:00+08:00`)
@@ -120,7 +112,7 @@ export default function SaraWipRecordsPage() {
   // --- 各機台日報狀態 ---
   const [dailyDate, setDailyDate] = useState(() => {
     const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000)
-    return taipeiDateStr(yesterday)
+    return taipeiYmd(yesterday)
   })
   const [dailySiteFilter, setDailySiteFilter] = useState<string>('all')
   const [dailyLoading, setDailyLoading] = useState(false)
@@ -129,7 +121,7 @@ export default function SaraWipRecordsPage() {
   const [dailyLatestDate, setDailyLatestDate] = useState<string | null>(null)  // 資料庫實際最新一筆報工的日期，供新鮮度提示
 
   // --- 各機台日報（ARGO 實際繳庫版）狀態 ---
-  const [argoDate, setArgoDate] = useState(() => taipeiDateStr(new Date(Date.now() - 24 * 60 * 60 * 1000)))
+  const [argoDate, setArgoDate] = useState(() => taipeiYmd(new Date(Date.now() - 24 * 60 * 60 * 1000)))
   const [argoLoading, setArgoLoading] = useState(false)
   const [argoRows, setArgoRows] = useState<ArgoMachineOutputRow[]>([])
   const [argoPackingList, setArgoPackingList] = useState<ArgoProductQty[]>([])
@@ -220,7 +212,7 @@ export default function SaraWipRecordsPage() {
         .not('real_end_time', 'is', null)
         .order('real_end_time', { ascending: false })
         .limit(1)
-      setDailyLatestDate(latest?.[0]?.real_end_time ? taipeiDateStr(new Date(latest[0].real_end_time)) : null)
+      setDailyLatestDate(latest?.[0]?.real_end_time ? taipeiYmd(new Date(latest[0].real_end_time)) : null)
     } catch (e) {
       console.error('fetchDailySummary error', e)
       setDailyRows([])
@@ -431,7 +423,7 @@ export default function SaraWipRecordsPage() {
               <button
                 onClick={() => {
                   const d = new Date(`${dailyDate}T00:00:00+08:00`)
-                  const prev = taipeiDateStr(new Date(d.getTime() - 24 * 60 * 60 * 1000))
+                  const prev = taipeiYmd(new Date(d.getTime() - 24 * 60 * 60 * 1000))
                   setDailyDate(prev)
                   void fetchDailySummary(prev)
                 }}
@@ -446,7 +438,7 @@ export default function SaraWipRecordsPage() {
               <button
                 onClick={() => {
                   const d = new Date(`${dailyDate}T00:00:00+08:00`)
-                  const next = taipeiDateStr(new Date(d.getTime() + 24 * 60 * 60 * 1000))
+                  const next = taipeiYmd(new Date(d.getTime() + 24 * 60 * 60 * 1000))
                   setDailyDate(next)
                   void fetchDailySummary(next)
                 }}
@@ -562,7 +554,7 @@ export default function SaraWipRecordsPage() {
               <button
                 onClick={() => {
                   const d = new Date(`${argoDate}T00:00:00+08:00`)
-                  const prev = taipeiDateStr(new Date(d.getTime() - 24 * 60 * 60 * 1000))
+                  const prev = taipeiYmd(new Date(d.getTime() - 24 * 60 * 60 * 1000))
                   setArgoDate(prev)
                   void fetchArgoDailyOutput(prev)
                 }}
@@ -577,7 +569,7 @@ export default function SaraWipRecordsPage() {
               <button
                 onClick={() => {
                   const d = new Date(`${argoDate}T00:00:00+08:00`)
-                  const next = taipeiDateStr(new Date(d.getTime() + 24 * 60 * 60 * 1000))
+                  const next = taipeiYmd(new Date(d.getTime() + 24 * 60 * 60 * 1000))
                   setArgoDate(next)
                   void fetchArgoDailyOutput(next)
                 }}

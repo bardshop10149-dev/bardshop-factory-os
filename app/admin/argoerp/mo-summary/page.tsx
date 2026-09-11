@@ -2,6 +2,7 @@
 
 import { useState, useCallback, useEffect } from 'react'
 import * as XLSX from 'xlsx'
+import { csvCell } from '@/lib/core/csv'
 
 // ==================== 製令總表記錄 ====================
 interface MoRecord {
@@ -313,10 +314,7 @@ export default function MoSummaryPage() {
     } else {
       const csvLines = [headers.join(',')]
       dataRows.forEach(cells => {
-        csvLines.push(cells.map(v => {
-          if (v.includes(',') || v.includes('\n') || v.includes('"')) return `"${v.replace(/"/g, '""')}"`
-          return v
-        }).join(','))
+        csvLines.push(cells.map(v => csvCell(v)).join(','))
       })
       const blob = new Blob(['\uFEFF' + csvLines.join('\n')], { type: 'text/csv;charset=utf-8;' })
       const url = URL.createObjectURL(blob)

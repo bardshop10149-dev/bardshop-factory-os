@@ -1,6 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
+import { csvCellQuoted } from '@/lib/core/csv'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 業務訂單修改 LOG（唯讀顯示）
@@ -190,7 +191,7 @@ export default function SoEditLogCard({ onInspectOrder }: Props) {
       e.detectedAt,
     ])
     const csv = [head, ...body]
-      .map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(','))
+      .map((r) => r.map(csvCellQuoted).join(','))
       .join('\r\n')
     const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8' })
     const url = URL.createObjectURL(blob)

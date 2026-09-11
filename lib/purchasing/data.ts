@@ -18,6 +18,7 @@ import {
   normalizeDateText,
   todayTaipei,
 } from './types'
+import { chunk } from '@/lib/core/array'
 
 type SupabaseAdmin = ReturnType<typeof getSupabaseAdminClient>
 
@@ -57,12 +58,6 @@ interface PrCandidate {
 
 const BATCH = 1000
 const IN_CHUNK = 200
-
-function chunk<T>(arr: T[], size: number): T[][] {
-  const out: T[][] = []
-  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size))
-  return out
-}
 
 /** YYYY-MM-DD → YYYY/MM/DD（erp_pj_sync.start_date 存斜線格式，可字典序比較） */
 function toSlashDate(d?: string | null): string | null {

@@ -5,6 +5,7 @@ import { useCallback, useMemo, useState } from 'react'
 import { NavButton } from '../../../components/NavButton'
 import * as XLSX from 'xlsx'
 import { supabase } from '../../../lib/supabaseClient'
+import { toIsoDateInput } from '@/lib/core/date'
 
 interface AnomalyReportRow {
   created_at: string
@@ -29,10 +30,6 @@ interface RatioItem {
   percentage: number
 }
 
-function toDateInputValue(date: Date) {
-  return date.toISOString().slice(0, 10)
-}
-
 function normalizeArray(value: string[] | null | undefined) {
   return Array.isArray(value) ? value : []
 }
@@ -41,9 +38,9 @@ export default function QaAnalyticsPage() {
   const [startDate, setStartDate] = useState(() => {
     const start = new Date()
     start.setDate(start.getDate() - 30)
-    return toDateInputValue(start)
+    return toIsoDateInput(start)
   })
-  const [endDate, setEndDate] = useState(() => toDateInputValue(new Date()))
+  const [endDate, setEndDate] = useState(() => toIsoDateInput(new Date()))
   const [loading, setLoading] = useState(false)
   const [rows, setRows] = useState<AnomalyReportRow[]>([])
   const [personnelMap, setPersonnelMap] = useState<Map<string, string>>(new Map())

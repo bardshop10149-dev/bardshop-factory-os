@@ -7,6 +7,7 @@ import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import { useState, useEffect } from 'react'
 import { supabase } from '../lib/supabaseClient'
+import { csvCellQuoted } from '@/lib/core/csv'
 
 interface Announcement {
   id: number
@@ -202,7 +203,7 @@ export default function HomePage() {
         header,
         ...rows.map(r =>
           [r.item_code, r.item_name, r.spec]
-            .map(v => `"${String(v ?? '').replace(/"/g, '""')}"`)
+            .map(csvCellQuoted)
             .join(',')
         ),
       ].join('\n');
@@ -253,7 +254,7 @@ export default function HomePage() {
         header,
         ...allRows.map(r =>
           [r.product_code, r.product_name]
-            .map(v => `"${String(v ?? '').replace(/"/g, '""')}"`)
+            .map(csvCellQuoted)
             .join(',')
         ),
       ].join('\n');

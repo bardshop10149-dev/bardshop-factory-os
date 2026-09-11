@@ -13,6 +13,7 @@ import {
   type ExportRow,
   type SoMatchResult,
 } from '../../../../lib/argoerp/moExportShared'
+import { csvCell } from '@/lib/core/csv'
 
 // ==================== 來源欄位（貼上的格式） ====================
 const INPUT_COLUMNS = [
@@ -651,12 +652,7 @@ export default function OrderBatchExportPage() {
       csvLines.push(headers.join(','))
       csvLines.push(typeDefs.join(','))
       dataRows.forEach(cells => {
-        const line = cells.map(val => {
-          if (val.includes(',') || val.includes('\n') || val.includes('"')) {
-            return `"${val.replace(/"/g, '""')}"`
-          }
-          return val
-        })
+        const line = cells.map(val => csvCell(val))
         csvLines.push(line.join(','))
       })
       const BOM = '\uFEFF'

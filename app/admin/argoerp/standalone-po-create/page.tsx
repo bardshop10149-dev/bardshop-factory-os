@@ -7,6 +7,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { supabase } from '../../../../lib/supabaseClient'
+import { formatYmdSlash } from '@/lib/core/date'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -72,10 +73,6 @@ const BLANK_ITEM: LineItem = {
   uom: 'PCS', unit_price: '0', remark2: '', packing: '',
 }
 
-function fmtDate(d: Date) {
-  return `${d.getFullYear()}/${String(d.getMonth() + 1).padStart(2, '0')}/${String(d.getDate()).padStart(2, '0')}`
-}
-
 function pocPrefixToday() {
   const d = new Date()
   return `POC${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`
@@ -107,7 +104,7 @@ async function fetchNextPocNo(): Promise<string> {
 
 function makeDefaultHeader(): PoHeader {
   return {
-    project_id: '', modify_ver: '1', begin_date: fmtDate(new Date()),
+    project_id: '', modify_ver: '1', begin_date: formatYmdSlash(new Date()),
     hold_status: 'UNSIGNED', tpn_partner_id: 'C01510', department: 'M1100',
     sales_id: '10149', po_type: 'GENERAL', payment_term: 'PM30',
     payment_mode: 'T', currency: 'CNY', exchange_rate: '4', tax_rate: '0',
@@ -149,7 +146,7 @@ export default function StandalonePoCreatePage() {
         for (const k of Object.keys(def) as (keyof PoHeader)[])
           if ((s[k] ?? '') === '') (merged as unknown as Record<string, unknown>)[k] = def[k]
         merged.project_id = ''
-        merged.begin_date = fmtDate(new Date())
+        merged.begin_date = formatYmdSlash(new Date())
         setHeader(merged)
       }
     } catch { /* empty */ }

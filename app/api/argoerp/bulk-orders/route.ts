@@ -1,17 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getSupabaseAdminClient, formatSupabaseAdminError } from '@/lib/supabaseAdmin'
 import { guardAuth } from '@/lib/requireAuth'
+import { normDate } from '@/lib/core/date'
 
 export const dynamic = 'force-dynamic'
 
 /** "2026/8/5" | "2026-8-5" | "2026/08/05" → "2026-08-05" for string comparison */
-function normDate(d: unknown): string {
-  if (!d) return ''
-  const s = String(d).split(/[ T]/)[0].replace(/\//g, '-').split('-')
-  if (s.length !== 3) return ''
-  return `${s[0]}-${s[1].padStart(2, '0')}-${s[2].padStart(2, '0')}`
-}
-
 function parseQty(q: unknown): number {
   return parseFloat(String(q ?? '0').replace(/,/g, '')) || 0
 }

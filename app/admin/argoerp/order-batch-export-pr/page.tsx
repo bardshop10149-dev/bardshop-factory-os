@@ -13,6 +13,8 @@ import * as XLSX from 'xlsx'
 import { supabase } from '../../../../lib/supabaseClient'
 import PoOrderModal from '../../../../components/PoOrderModal'
 import SoOrderModal from '../../../../components/SoOrderModal'
+import { csvCell } from '@/lib/core/csv'
+import { formatYmdSlash, clampDueDate } from '@/lib/core/date'
 
 interface SourceRow {
   row_key?: string
@@ -67,38 +69,10 @@ const ERP_KEYS = [
   'REMARK',
 ] as const
 
-function fmtDate(d: Date): string {
-  return `${d.getFullYear()}/${String(d.getMonth() + 1).padStart(2, '0')}/${String(d.getDate()).padStart(2, '0')}`
-}
-
-// 解析 YYYY/MM/DD、YYYY-MM-DD、YYYYMMDD 為 Date（本地時區），失敗回 null
-function parseYmd(s: string): Date | null {
-  const t = (s ?? '').trim()
-  if (!t) return null
-  let y: number, m: number, d: number
-  if (/^\d{8}$/.test(t)) { y = +t.slice(0, 4); m = +t.slice(4, 6); d = +t.slice(6, 8) }
-  else if (/^\d{4}[/-]\d{1,2}[/-]\d{1,2}/.test(t)) {
-    const p = t.slice(0, 10).split(/[/-]/); y = +p[0]; m = +p[1]; d = +p[2]
-  } else return null
-  const dt = new Date(y, m - 1, d)
-  return Number.isNaN(dt.getTime()) ? null : dt
-}
-
-// ARGO 規則：DUEDATE 必須晚於 APPLY_DATE。若交期為空或 <= 開立日，clamp 為開立日 + 1 天。
-function clampDueDate(deliveryDate: string, applyDate: string): string {
-  const apply = parseYmd(applyDate)
-  if (!apply) return (deliveryDate ?? '').trim()
-  const minDue = new Date(apply.getTime())
-  minDue.setDate(minDue.getDate() + 1)
-  const due = parseYmd(deliveryDate)
-  if (due && due.getTime() >= minDue.getTime()) return fmtDate(due)
-  return fmtDate(minDue)
-}
-
 function makeDefaultHeader(): PrHeader {
   return {
     apply_id: '',
-    apply_date: fmtDate(new Date()),
+    apply_date: formatYmdSlash(new Date()),
     department: 'M1100',
     hold_status: 'UNSIGNED',
     currency: 'CNY',
@@ -301,7 +275,7 @@ export default function PrBatchExportOPage() {
         const parsed = JSON.parse(raw)
         // 單號＝傳入時自動取號、開立日期＝一律帶當天，兩者都不還原 localStorage 舊值
         // （曾發生開立日期停在舊值 → ARGO 單 APPLY_DATE 錯置，例 MPO2026070901 開立日 6/25）
-        setHeader({ ...makeDefaultHeader(), ...parsed, apply_id: '', apply_date: fmtDate(new Date()) })
+        setHeader({ ...makeDefaultHeader(), ...parsed, apply_id: '', apply_date: formatYmdSlash(new Date()) })
       }
     } catch {
       // ignore
@@ -521,10 +495,7 @@ export default function PrBatchExportOPage() {
       return
     }
 
-    const csvLines = [[...ERP_KEYS].join(','), ...rows.map(row => row.map(v => {
-      if (v.includes(',') || v.includes('"') || v.includes('\n')) return `"${v.replace(/"/g, '""')}"`
-      return v
-    }).join(','))]
+    const csvLines = [[...ERP_KEYS].join(','), ...rows.map(row => row.map(v => csvCell(v)).join(','))]
     const blob = new Blob(['\uFEFF' + csvLines.join('\n')], { type: 'text/csv;charset=utf-8;' })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')

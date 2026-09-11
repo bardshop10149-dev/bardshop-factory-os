@@ -6,6 +6,7 @@ import { buildSaraRow, type SaraRow } from '../../../../lib/sara/buildSaraRow'
 import { DEFAULT_PRIORITY_RULES, computePriorityFromDue, type PriorityRule } from '../../../../lib/sara/priorityRules'
 import { calcEst, fmtToday, isPackagingStation, isPrintStation2F6F, loadSheetInputRows, type InputRow } from './sheetRows'
 import PendingPastePanel from './PendingPastePanel'
+import { csvCell } from '@/lib/core/csv'
 
 // ── 型別 ─────────────────────────────────────────────────────────
 // InputRow 與工時計算規則（calcEst 等）已抽到 ./sheetRows.ts，與待處理「貼上製程」面板共用
@@ -65,11 +66,6 @@ function detectCols(header: string[]): Record<string, number> {
 }
 
 // ── 輔助函式 ─────────────────────────────────────────────────────
-
-function escCsv(v: string | number): string {
-  const s = String(v ?? '')
-  return /[,"\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s
-}
 
 const FACTORY_LABEL: Record<string, string> = { T: '台北', C: '常平', O: '委外' }
 const FACTORY_BADGE: Record<string, string> = {
@@ -607,7 +603,7 @@ export default function ProcessGenPage() {
     if (!rows.length) return
     const h1 = 'Order Number,Manufacturing Order Number,Product Name,Product Description,Lot Number,Production Quantity,Due,Priority Level,Earliest Start Time,Job Sequence,Workcenter,Job Name,Job Quantity,Out Sourcing,Est. Time,Time Unit,BOM Components,Material Required Quantity,customer_id,assigned_machine,Rule,Parameter 1'
     const h2 = '訂單編號,(必填)工單編號,(必填)品號,規格,生產批號,(必填)生產需求數量,(必填)需求日,排程優先等級(1-99),最早可開始時間,(必填)工序,(必填)站點,(必填)製程名稱,製程數量,製程委外,(必填)預估工時,工時單位,BOM元件品號,物料需求數量,客戶名稱,分配機台,規則,參數1'
-    const data = rows.map(r => buildSaraRow(r).map(escCsv).join(','))
+    const data = rows.map(r => buildSaraRow(r).map(csvCell).join(','))
     const csv = [h1, h2, ...data].join('\r\n')
     const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' })
     const url = URL.createObjectURL(blob)

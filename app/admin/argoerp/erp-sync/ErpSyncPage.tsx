@@ -5,6 +5,7 @@ import { supabase } from '../../../../lib/supabaseClient'
 import SoOrderModal from '../../../../components/SoOrderModal'
 import SoEditLogCard from './SoEditLogCard'
 import SoMisalignCard from './SoMisalignCard'
+import { csvCellQuoted } from '@/lib/core/csv'
 
 // ─── 型別 ─────────────────────────────────────────────
 type DocTypeKey = 'sales' | 'mo' | 'pr' | 'po' | 'subcontract' | 'inventory' | 'material_prep' | 'customer' | 'bom_structure'
@@ -802,7 +803,7 @@ function SyncCard({ docKey }: SyncCardProps) {
       r.mbp_lot_no ?? '',
     ])
     const csvContent = [headers, ...rows]
-      .map((row) => row.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(','))
+      .map((row) => row.map(csvCellQuoted).join(','))
       .join('\r\n')
     const bom = '\uFEFF'
     const blob = new Blob([bom + csvContent], { type: 'text/csv;charset=utf-8;' })
@@ -895,7 +896,7 @@ function SyncCard({ docKey }: SyncCardProps) {
       r.remark ?? '',
     ])
     const csvContent = [headers, ...rows]
-      .map((row) => row.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(','))
+      .map((row) => row.map(csvCellQuoted).join(','))
       .join('\r\n')
     const bom = '\uFEFF'
     const blob = new Blob([bom + csvContent], { type: 'text/csv;charset=utf-8;' })

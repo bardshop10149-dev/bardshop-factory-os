@@ -14,6 +14,8 @@
  */
 
 import { useCallback, useState } from 'react'
+import { formatYmdSlash } from '@/lib/core/date'
+import { getNextBusinessDay, parseSoDateDigits, truncateByByteLength } from '@/lib/argoerp/moExportShared'
 
 const INTERFACE_ID = 'IFAF028'
 
@@ -75,35 +77,6 @@ function toErpPayload(row: Record<string, string>): Record<string, string> {
     erp[code] = v
   }
   return erp
-}
-
-function formatDate(d: Date): string {
-  return `${d.getFullYear()}/${String(d.getMonth() + 1).padStart(2, '0')}/${String(d.getDate()).padStart(2, '0')}`
-}
-
-function getNextBusinessDay(from: Date): Date {
-  const d = new Date(from)
-  d.setDate(d.getDate() + 1)
-  while (d.getDay() === 0 || d.getDay() === 6) d.setDate(d.getDate() + 1)
-  return d
-}
-
-// 與「出單表→製令工單」parseSoDateDigits 完全相同：英文前綴 + YYMMDD(+後綴)
-function parseSoDateDigits(orderNumber: string): string | null {
-  const m = orderNumber.match(/^[A-Za-z]+(.+)/)
-  if (!m) return null
-  return m[1]
-}
-
-function truncateByByteLength(text: string, maxBytes: number): string {
-  if (!text) return ''
-  const encoder = new TextEncoder()
-  const decoder = new TextDecoder('utf-8')
-  const bytes = encoder.encode(text)
-  if (bytes.length <= maxBytes) return text
-  let cut = maxBytes
-  while (cut > 0 && (bytes[cut] & 0xc0) === 0x80) cut--
-  return decoder.decode(bytes.slice(0, cut))
 }
 
 // 製令基礎單號：與「出單表→製令工單」mapAllToExport 相同公式
@@ -215,8 +188,8 @@ export default function NgOrderExportPage() {
 
     setSubmitting(true)
     setMsg('')
-    const todayStr = formatDate(new Date())
-    const nextBizDay = formatDate(getNextBusinessDay(new Date()))
+    const todayStr = formatYmdSlash(new Date())
+    const nextBizDay = formatYmdSlash(getNextBusinessDay(new Date()))
     const newResults: Record<number, RowResult> = { ...results }
     const selectedLines = [...selected]
 

@@ -3,6 +3,7 @@
 import { useState, useCallback, useEffect } from 'react'
 import { supabase } from '../../../../lib/supabaseClient'
 import SoOrderModal from '../../../../components/SoOrderModal'
+import { normDate } from '@/lib/core/date'
 
 // ── 型別 ─────────────────────────────────────────────────────────────────────
 interface BulkRow {
@@ -39,14 +40,6 @@ interface MoLine {
   end_date: string | null
   hold_status: string | null
   source_order: string | null
-}
-
-// ── helpers ───────────────────────────────────────────────────────────────────
-function normDate(d: unknown): string {
-  if (!d) return ''
-  const s = String(d).split(/[ T]/)[0].replace(/\//g, '-').split('-')
-  if (s.length !== 3) return ''
-  return `${s[0]}-${s[1].padStart(2, '0')}-${s[2].padStart(2, '0')}`
 }
 
 function parseQty(q: unknown): number {

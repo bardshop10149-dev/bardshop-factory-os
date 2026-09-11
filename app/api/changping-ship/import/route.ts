@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getSupabaseAdminClient, formatSupabaseAdminError } from '@/lib/supabaseAdmin'
 import { type ShipMethod } from '@/lib/purchasing/types'
+import { chunk } from '@/lib/core/array'
 
 export const dynamic = 'force-dynamic'
 // 全量同步(數千列)要跑幾十個批次查詢/寫入;Vercel 預設 function 時限太短
@@ -54,12 +55,6 @@ const NOTE_MAX_LEN = 500
 const NOTE_TAG = '【常平出貨】'
 const IN_CHUNK = 200
 const UPDATED_BY = '常平出貨同步'
-
-function chunk<T>(arr: T[], size: number): T[][] {
-  const out: T[][] = []
-  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size))
-  return out
-}
 
 const norm = (s: string | null | undefined) => String(s ?? '').trim().toUpperCase()
 

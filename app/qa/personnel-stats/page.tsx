@@ -13,6 +13,7 @@ import {
   type DeficiencySheetData,
 } from '../../../lib/qa/deficiencyPrint'
 import DeficiencyPreviewModal from './_deficiency-preview'
+import { toIsoDateInput } from '@/lib/core/date'
 
 interface AnomalyRow {
   id: number
@@ -33,10 +34,6 @@ interface AnomalyRow {
   corrective_action: string | null
 }
 
-function toDateInputValue(date: Date) {
-  return date.toISOString().slice(0, 10)
-}
-
 function normalizeArray(value: string[] | null | undefined): string[] {
   return Array.isArray(value) ? value : []
 }
@@ -54,9 +51,9 @@ export default function PersonnelStatsPage() {
   const [startDate, setStartDate] = useState(() => {
     const d = new Date()
     d.setDate(d.getDate() - 30)
-    return toDateInputValue(d)
+    return toIsoDateInput(d)
   })
-  const [endDate, setEndDate] = useState(() => toDateInputValue(new Date()))
+  const [endDate, setEndDate] = useState(() => toIsoDateInput(new Date()))
   const [loading, setLoading] = useState(false)
   const [rows, setRows] = useState<AnomalyRow[]>([])
   const [dispositionOptions, setDispositionOptions] = useState<string[]>([
