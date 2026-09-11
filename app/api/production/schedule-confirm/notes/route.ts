@@ -10,7 +10,8 @@ export const dynamic = 'force-dynamic'
 // 作者一律由伺服器依登入身分帶入，不接受前端傳來的 author_name/author_email
 // （與主 route 的 POST 同樣的理由：前端傳的身分不可信）。
 
-export const NOTES_TABLE = 'schedule_inquiry_notes'
+// route 檔只能匯出 HTTP method 與路由設定；此常數僅本檔使用
+const NOTES_TABLE = 'schedule_inquiry_notes'
 const NOTE_COLUMNS = 'id,inquiry_id,note,author_name,author_email,created_at'
 const MAX_NOTE_LEN = 2000
 

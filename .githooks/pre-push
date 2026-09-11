@@ -22,6 +22,11 @@ while read -r local_ref local_sha remote_ref remote_sha; do
   fi
 done
 
+# (3) route.ts 非法匯出 —— turbopack 不擋、webpack 型別驗證會炸，push 前先抓
+if command -v node >/dev/null 2>&1 && [ -f scripts/check-route-exports.mjs ]; then
+  node scripts/check-route-exports.mjs || exit 1
+fi
+
 # (2) 落後 upstream 就擋 —— 避免覆蓋別台機器已經推上去的 commit
 if git fetch --quiet 2>/dev/null; then
   upstream=$(git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null)
