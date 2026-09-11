@@ -7,6 +7,16 @@ import { useCallback, useEffect, useState, type ReactNode } from 'react'
 
 interface ProductItem { item_code: string; item_name: string; quantity: string }
 
+/** 業務在送出後追加的備註事項（業務端只能新增不能改寫，這裡唯讀顯示） */
+interface InquiryNote {
+  id: number
+  inquiry_id: number
+  note: string
+  author_name: string | null
+  author_email: string | null
+  created_at: string
+}
+
 interface Inquiry {
   id: number
   inquiry_date: string | null
@@ -22,6 +32,8 @@ interface Inquiry {
   department: string | null
   created_at: string
   updated_at: string
+  // 業務送出後追加的備註事項（見 sql/20260911_schedule_inquiry_notes.sql）
+  notes?: InquiryNote[]
   // 軟刪除欄位：業務端刪除後資料仍保留，生管端看得到並以紅底標示
   deleted_at?: string | null
   deleted_by?: string | null
@@ -390,6 +402,23 @@ export default function ScheduleInquiryPage() {
 
                 {rec.remark && (
                   <p className="text-[13px] text-[#6c7d99] leading-relaxed whitespace-pre-wrap">{rec.remark}</p>
+                )}
+
+                {/* 業務送出後補的備註事項：與原始備註分開呈現，逐則帶作者與時間 */}
+                {(rec.notes?.length ?? 0) > 0 && (
+                  <div className="rounded-[10px] border border-sky-500/25 bg-sky-500/[0.06] px-3.5 py-2.5">
+                    <div className="text-[11px] font-bold text-sky-300/90 mb-1.5">💬 業務補充的備註事項（{rec.notes!.length}）</div>
+                    <div className="flex flex-col gap-2">
+                      {rec.notes!.map(n => (
+                        <div key={n.id}>
+                          <div className="text-[13px] text-[#cdd8ea] leading-relaxed whitespace-pre-wrap break-words">{n.note}</div>
+                          <div className="text-[11px] text-[#5f7290] mt-0.5">
+                            {n.author_name || '—'}・{new Date(n.created_at).toLocaleString('zh-TW', { timeZone: 'Asia/Taipei', hour12: false })}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
                 )}
 
                 <div className="flex items-center justify-between border-t border-[#151f30] pt-3.5 flex-wrap gap-3">

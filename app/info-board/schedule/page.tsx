@@ -6,6 +6,16 @@ import { supabase } from '../../../lib/supabaseClient'
 
 interface ProductItem { item_code: string; item_name: string; quantity: string }
 
+/** 送出後追加的備註事項（只能新增，不能改寫；見 sql/20260911_schedule_inquiry_notes.sql） */
+interface InquiryNote {
+  id: number
+  inquiry_id: number
+  note: string
+  author_name: string | null
+  author_email: string | null
+  created_at: string
+}
+
 interface Inquiry {
   id: number
   inquiry_date: string | null
@@ -22,6 +32,7 @@ interface Inquiry {
   department: string | null
   created_at: string
   updated_at: string
+  notes?: InquiryNote[]
 }
 
 const REPLY_CONFIG: Record<string, { label: string; class: string; icon: ReactNode }> = {
@@ -70,6 +81,10 @@ function buildNotifyMessage(r: Inquiry): string {
     `📅 預計發單日：${r.planned_order_date || '-'}`,
     `📅 希望交期(寄出日期)：${r.expected_date || '-'}`,
     `💬 備註：${r.remark || '-'}`,
+    // 送出後追加的備註事項也一併帶進通知訊息，否則貼到 LINE 的內容會少掉最新的補充
+    ...((r.notes ?? []).length > 0
+      ? [`📝 備註事項：\n${(r.notes ?? []).map(n => `　・${n.note}（${n.author_name || '—'}）`).join('\n')}`]
+      : []),
     '',
     `🏢 部門：${r.department || '-'}`,
     `👤 填單人：${r.author_name}`,
@@ -127,6 +142,34 @@ export default function ScheduleInquiryPage() {
       alert(`刪除失敗：${e instanceof Error ? e.message : String(e)}`)
     } finally {
       setDeletingId(null)
+    }
+  }
+
+  // ── 新增備註事項 ──
+  // 詢問單送出後不開放改內容（訂單編號除外），但允許一直往下補備註：
+  // 每則獨立記名記時間，補過的不能改也不能刪，要更正就再補一則（2026-09-11 業務端需求）。
+  const [noteDrafts, setNoteDrafts] = useState<Record<number, string>>({})
+  const [savingNoteId, setSavingNoteId] = useState<number | null>(null)
+
+  const addNote = async (record: Inquiry) => {
+    const text = (noteDrafts[record.id] ?? '').trim()
+    if (!text) return
+    setSavingNoteId(record.id)
+    try {
+      const res = await fetch('/api/production/schedule-confirm/notes', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ inquiry_id: record.id, note: text }),
+      })
+      const json = await res.json().catch(() => null)
+      if (!res.ok || !json?.success) throw new Error(json?.error || `HTTP ${res.status}`)
+      const saved = json.note as InquiryNote
+      setRecords(prev => prev.map(r => (r.id === record.id ? { ...r, notes: [...(r.notes ?? []), saved] } : r)))
+      setNoteDrafts(prev => ({ ...prev, [record.id]: '' }))
+    } catch (e) {
+      alert(`備註新增失敗：${e instanceof Error ? e.message : String(e)}`)
+    } finally {
+      setSavingNoteId(null)
     }
   }
 
@@ -709,6 +752,17 @@ export default function ScheduleInquiryPage() {
                     {record.author_name}・{new Date(record.created_at).toLocaleString('zh-TW', { month: '2-digit', day: '2-digit' })}
                   </span>
 
+                  {/* 備註事項則數：沒展開也看得出來這筆後來有沒有被補充過 */}
+                  {(record.notes?.length ?? 0) > 0 && (
+                    <button
+                      onClick={() => toggleExpand(record.id)}
+                      title={`${record.notes!.length} 則備註事項（點擊展開）`}
+                      className="shrink-0 px-2 py-0.5 rounded-full text-[11px] font-bold border border-sky-500/40 bg-sky-500/10 text-sky-300 hover:bg-sky-500/20 transition-colors"
+                    >
+                      💬 {record.notes!.length}
+                    </button>
+                  )}
+
                   {/* 複製通知訊息（不必展開也能直接複製） */}
                   <button
                     onClick={() => void copyRecordMessage(record)}
@@ -773,8 +827,46 @@ export default function ScheduleInquiryPage() {
                     </div>
 
                     <div>
-                      <div className="text-[10px] font-mono uppercase tracking-wider text-[#5f7290] mb-0.5">備註</div>
+                      <div className="text-[10px] font-mono uppercase tracking-wider text-[#5f7290] mb-0.5">備註<span className="ml-1 normal-case tracking-normal">（送出當下填的）</span></div>
                       <div className="text-[13px] text-[#e7edf5] whitespace-pre-wrap break-words">{record.remark || '—'}</div>
+                    </div>
+
+                    {/* 備註事項：送出後才補的內容，只能往下加，不能改也不能刪 */}
+                    <div className="mt-4">
+                      <div className="text-[10px] font-mono uppercase tracking-wider text-[#5f7290] mb-1.5">
+                        備註事項（{record.notes?.length ?? 0}）<span className="ml-1 normal-case tracking-normal">送出後補充，生管後台同步看得到</span>
+                      </div>
+
+                      {(record.notes?.length ?? 0) > 0 && (
+                        <div className="flex flex-col gap-1.5 mb-2">
+                          {record.notes!.map(n => (
+                            <div key={n.id} className="rounded-[8px] border border-[#1c2739] bg-[#0b1220] px-3 py-2">
+                              <div className="text-[13px] text-[#e7edf5] whitespace-pre-wrap break-words">{n.note}</div>
+                              <div className="text-[11px] text-[#5f7290] mt-1">
+                                {n.author_name || '—'}・{new Date(n.created_at).toLocaleString('zh-TW', { timeZone: 'Asia/Taipei', hour12: false })}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+
+                      <div className="flex items-start gap-2">
+                        <textarea
+                          value={noteDrafts[record.id] ?? ''}
+                          onChange={e => setNoteDrafts(prev => ({ ...prev, [record.id]: e.target.value }))}
+                          onKeyDown={e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) void addNote(record) }}
+                          rows={2}
+                          placeholder="補充備註事項…（Ctrl+Enter 送出，送出後不可修改）"
+                          className="flex-1 bg-[#08101c] border border-[#1e2a3f] rounded-[8px] px-3 py-2 text-[13px] text-[#e7edf5] placeholder-[#445064] focus:outline-none focus:border-sky-500/70 transition-colors resize-y"
+                        />
+                        <button
+                          onClick={() => void addNote(record)}
+                          disabled={savingNoteId === record.id || !(noteDrafts[record.id] ?? '').trim()}
+                          className="shrink-0 px-3 py-2 rounded-[8px] text-xs font-bold border border-sky-500/40 bg-sky-500/15 text-sky-300 hover:bg-sky-500/25 disabled:opacity-40 transition-colors"
+                        >
+                          {savingNoteId === record.id ? '新增中…' : '➕ 新增備註'}
+                        </button>
+                      </div>
                     </div>
 
                     <div className="flex items-center gap-2 mt-4 pt-3 border-t border-[#1c2739]">

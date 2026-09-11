@@ -25,6 +25,37 @@ const ALLOWED_FIELDS = [
   'updated_at',
 ] as const
 
+// 備註事項（schedule_inquiry_notes）掛回每一筆詢問單。
+// 刻意獨立成一張表：見 sql/20260911_schedule_inquiry_notes.sql。
+// 這裡對備註查詢的失敗採寬容處理——migration 還沒套用到雲端時，詢問單清單照樣要能看，
+// 只是每筆的 notes 會是空陣列。
+type WithNotes = Record<string, unknown> & { notes: unknown[] }
+async function attachNotes(
+  supabase: ReturnType<typeof getSupabaseAdminClient>,
+  rows: Record<string, unknown>[],
+): Promise<WithNotes[]> {
+  const ids = rows.map(r => Number(r.id)).filter(n => Number.isFinite(n))
+  if (ids.length === 0) return rows.map(r => ({ ...r, notes: [] }))
+
+  const { data, error } = await supabase
+    .from('schedule_inquiry_notes')
+    .select('id,inquiry_id,note,author_name,author_email,created_at')
+    .in('inquiry_id', ids)
+    .order('created_at', { ascending: true })
+
+  if (error) {
+    console.error('[schedule-confirm] 讀取備註事項失敗（詢問單仍照常回傳）:', error.message)
+    return rows.map(r => ({ ...r, notes: [] }))
+  }
+
+  const byInquiry = new Map<number, unknown[]>()
+  for (const n of data ?? []) {
+    const key = Number((n as { inquiry_id: number }).inquiry_id)
+    byInquiry.set(key, [...(byInquiry.get(key) ?? []), n])
+  }
+  return rows.map(r => ({ ...r, notes: byInquiry.get(Number(r.id)) ?? [] }))
+}
+
 function pickAllowed(rec: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {}
   for (const k of ALLOWED_FIELDS) {
@@ -78,7 +109,8 @@ export async function GET(request: NextRequest) {
       )
     }
 
-    return NextResponse.json({ success: true, records: data ?? [] })
+    const records = await attachNotes(supabase, (data ?? []) as unknown as Record<string, unknown>[])
+    return NextResponse.json({ success: true, records })
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)
     return NextResponse.json({ success: false, error: formatSupabaseAdminError(msg) }, { status: 500 })
