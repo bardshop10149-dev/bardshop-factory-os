@@ -4354,18 +4354,16 @@ export default function DailyOrderSheetPage() {
                         <th className="px-3 py-2 border-b border-slate-800 w-8">#</th>
                         <th className="px-3 py-2 border-b border-slate-800 text-cyan-400">工單 / 廠別</th>
                         <th className="px-3 py-2 border-b border-slate-800">序號</th>
-                        <th className="px-3 py-2 border-b border-slate-800 text-purple-300 min-w-[280px]">品項編碼 / 品名規格</th>
+                        <th className="px-3 py-2 border-b border-slate-800 text-purple-300 min-w-[280px]">客戶 / 品項編碼 / 品名規格</th>
                         <th className="px-3 py-2 border-b border-slate-800">數量</th>
                         <th className="px-3 py-2 border-b border-slate-800 text-yellow-400">盤數</th>
-                        <th className="px-3 py-2 border-b border-slate-800">客戶</th>
-                        <th className="px-3 py-2 border-b border-slate-800">交付日</th>
                         <th className="px-3 py-2 border-b border-slate-800">製令/採購單號</th>
                         <th
                           className="px-3 py-2 border-b border-slate-800 whitespace-nowrap min-w-[110px]"
                           title={progressSyncedAt
                             ? `塔台報工進度，資料同步時間：${new Date(progressSyncedAt).toLocaleString('zh-TW', { timeZone: 'Asia/Taipei', hour12: false })}`
                             : '塔台報工進度'}
-                        >生產進度</th>
+                        >交付日 / 生產進度</th>
                         <th className="px-3 py-2 border-b border-slate-800">批備料</th>
                         <th className="px-3 py-2 border-b border-slate-800 whitespace-nowrap">打樣/追加單號</th>
                         <th className="px-3 py-2 border-b border-slate-800 whitespace-nowrap">示意圖</th>
@@ -4497,13 +4495,12 @@ export default function DailyOrderSheetPage() {
                               )}
                             </td>
                             <td className="px-3 py-2">
-                              <div className="font-mono text-purple-300">{row.item_code}</div>
+                              <div className="text-slate-400 text-[10px] max-w-[320px] truncate" title={row.customer}>{row.customer}</div>
+                              <div className="font-mono text-purple-300 mt-0.5">{row.item_code}</div>
                               <div className="text-slate-200 text-[10px] mt-0.5 max-w-[320px] truncate" title={row.item_name}>{row.item_name}</div>
                             </td>
                             <td className="px-3 py-2 text-slate-300 text-right">{row.quantity}</td>
                             <td className="px-3 py-2 text-yellow-400 text-center font-mono font-semibold">{row.plate_count || '—'}</td>
-                            <td className="px-3 py-2 text-slate-400 w-[110px] whitespace-normal break-words leading-snug">{row.customer}</td>
-                            <td className="px-3 py-2 text-slate-500 whitespace-nowrap">{row.delivery_date}</td>
                             <td className="px-3 py-2 font-mono text-xs">
                               {(row.factory === 'C' || row.factory === 'O') ? (
                                 row.po_status === 'matched' && row.po_number ? (
@@ -4630,8 +4627,9 @@ export default function DailyOrderSheetPage() {
                                 </div>
                               )}
                             </td>
-                            {/* 生產進度：塔台逐道工序的報工狀況（點進去看完整製程與各站報工量） */}
+                            {/* 交付日＋生產進度：交期在第一行，下面是塔台逐道工序的報工狀況（點進去看完整製程與各站報工量） */}
                             <td className="px-3 py-2">
+                              <div className="text-slate-500 text-[11px] whitespace-nowrap mb-1">{row.delivery_date || '—'}</div>
                               <MoProgressCell
                                 hasMo={row.factory === 'T' && !!row.mo_number}
                                 progress={row.mo_number ? moProgress[row.mo_number.trim().toUpperCase()] : undefined}
