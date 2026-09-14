@@ -5,6 +5,7 @@ import { supabase } from '../../../../lib/supabaseClient'
 import SoOrderModal from '../../../../components/SoOrderModal'
 import PoOrderModal from '../../../../components/PoOrderModal'
 import MoRouteModal from '../../../../components/MoRouteModal'
+import { MoProgressCell, type SheetProgress } from '../../../../components/MoProgressCell'
 import ChangeOrderPanel from './ChangeOrderPanel'
 import { useSheetAutoSave, diffRows } from './useSheetAutoSave'
 import SheetHistoryPanel from './SheetHistoryPanel'
@@ -435,6 +436,9 @@ export default function DailyOrderSheetPage() {
   const [soModalId, setSoModalId] = useState<string | null>(null)
   const [poModalId, setPoModalId] = useState<string | null>(null)
   const [moModalId, setMoModalId] = useState<string | null>(null)  // 製令→塔台製程/報工
+  // 生產進度：製令號 → 逐道工序的完成狀況（塔台報工，見 /api/argoerp/sheet-progress）
+  const [moProgress, setMoProgress] = useState<Record<string, SheetProgress>>({})
+  const [progressSyncedAt, setProgressSyncedAt] = useState<string | null>(null)
   const [searchQuery, setSearchQuery] = useState('')
   const [activeFactory, setActiveFactory] = useState<'ALL' | 'T' | 'C' | 'O' | 'G'>('ALL')
   const [globalSearch, setGlobalSearch] = useState('')
@@ -612,6 +616,39 @@ export default function DailyOrderSheetPage() {
       loading: false,
     })
   }, [])
+
+  // ---- 生產進度：整張出單表的台北製令一次查回逐道工序完成狀況 ----
+  // 只有台北(T)列有製令號可查；常平(C)走採購單、委外(O)走請購單，塔台本來就沒有這些單的工序。
+  // 依「製令號清單」當 effect 依賴（而非 sheetRows 本身），編輯數量/備註等欄位時不會重打 API。
+  const progressMoKey = [...new Set(
+    sheetRows.filter(r => r.factory === 'T' && r.mo_number)
+      .map(r => r.mo_number!.trim().toUpperCase())
+  )].sort().join(',')
+
+  useEffect(() => {
+    let cancelled = false
+    const mos = progressMoKey ? progressMoKey.split(',') : []
+    void (async () => {
+      if (mos.length === 0) {
+        if (!cancelled) { setMoProgress({}); setProgressSyncedAt(null) }
+        return
+      }
+      try {
+        const res = await fetch('/api/argoerp/sheet-progress', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ mos }),
+        })
+        const json = await res.json() as { success?: boolean; progress?: Record<string, SheetProgress>; synced_at?: string | null }
+        if (cancelled || !json?.success) return
+        setMoProgress(json.progress ?? {})
+        setProgressSyncedAt(json.synced_at ?? null)
+      } catch {
+        // 進度欄只是輔助資訊，查不到就維持空白，不干擾出單表本身的操作
+      }
+    })()
+    return () => { cancelled = true }
+  }, [progressMoKey])
 
   // ---- 讀取所有日期清單 ----
   const loadSheetList = useCallback(async () => {
@@ -4323,6 +4360,12 @@ export default function DailyOrderSheetPage() {
                         <th className="px-3 py-2 border-b border-slate-800">客戶</th>
                         <th className="px-3 py-2 border-b border-slate-800">交付日</th>
                         <th className="px-3 py-2 border-b border-slate-800">製令/採購單號</th>
+                        <th
+                          className="px-3 py-2 border-b border-slate-800 whitespace-nowrap min-w-[110px]"
+                          title={progressSyncedAt
+                            ? `塔台報工進度，資料同步時間：${new Date(progressSyncedAt).toLocaleString('zh-TW', { timeZone: 'Asia/Taipei', hour12: false })}`
+                            : '塔台報工進度'}
+                        >生產進度</th>
                         <th className="px-3 py-2 border-b border-slate-800">批備料</th>
                         <th className="px-3 py-2 border-b border-slate-800 whitespace-nowrap">打樣/追加單號</th>
                         <th className="px-3 py-2 border-b border-slate-800 whitespace-nowrap">示意圖</th>
@@ -4586,6 +4629,14 @@ export default function DailyOrderSheetPage() {
                                   {row.pr_sub_no && <span className="text-slate-500">#{row.pr_sub_no}</span>}
                                 </div>
                               )}
+                            </td>
+                            {/* 生產進度：塔台逐道工序的報工狀況（點進去看完整製程與各站報工量） */}
+                            <td className="px-3 py-2">
+                              <MoProgressCell
+                                hasMo={row.factory === 'T' && !!row.mo_number}
+                                progress={row.mo_number ? moProgress[row.mo_number.trim().toUpperCase()] : undefined}
+                                onOpen={() => row.mo_number && setMoModalId(row.mo_number)}
+                              />
                             </td>
                             <td className="px-3 py-2">
                               {row.material_prep_status === '已批備料' ? (
