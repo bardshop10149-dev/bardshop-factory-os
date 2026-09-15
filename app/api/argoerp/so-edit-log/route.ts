@@ -67,26 +67,68 @@ const FINANCE_FIELDS = new Set([
   'unit_price_oru', 'currency', 'exchange_rate', 'invoice_format', 'tpn_partner_id',
 ])
 
-/** 影響出貨端（交期、地址、包裝）→ 已發單時連包裝出貨都要知道 */
-const SHIPPING_FIELDS = new Set(['duedate', 'delivery_address', 'packing'])
+/** 只動到「東西寄到哪、怎麼寄」→ 生產內容沒變，只有出貨端要知道 */
+const SHIPPING_ONLY_FIELDS = new Set(['delivery_address'])
 
 /**
- * 這筆變動該通知誰。
- *   - 金額/發票類 → 財務部門（不影響生產）
- *   - 其餘欄位：已發單 → 全廠（交期、包裝另註明含包裝出貨）；未發單 → 美編部門
- * 未發單代表工單還沒發到現場，不影響生產，但美編可能已依舊內容作業。
+ * 塔台工作中心 → 要通知的單位。用關鍵字比對而非全等，因為站名會分廠區
+ * （印刷站2F／印刷站6F）也會長出新站，寫死站名清單遲早漏掉。順序有意義，先中先用。
  */
-function notifyTarget(field: string, dispatched: boolean): { target: string; note: string } {
+const STATION_DEPT: Array<[RegExp, string]> = [
+  [/印刷|UV/, '印刷部門'],
+  [/雷切|切割|CNC/, '雷切部門'],
+  [/後加工|貼合|包邊|熱壓|裁切/, '後加工部門'],
+  [/包裝/, '包裝出貨'],
+  [/轉運|倉/, '倉庫部門'],
+  [/常平/, '常平廠'],
+  [/委外/, '委外採購'],
+]
+
+function stationToDept(station: string): string | null {
+  for (const [re, dept] of STATION_DEPT) if (re.test(station)) return dept
+  return null
+}
+
+/**
+ * 這筆變動該通知誰（2026-09-15 依 Snow 的規則重寫）。
+ *
+ * 舊版只分「財務／美編／全廠」三檔，已發單一律吼全廠——結果是改一個備註也把
+ * 九個單位都吵醒，久了就沒人看。新版改成照「這一行實際做到哪一站」精準點名：
+ *
+ *   ① 金額、幣別、發票 → 財務部門（跟生產無關，發不發單都一樣）
+ *   ② 只動交貨地址這類出貨資訊 → 包裝出貨（做的東西沒變）
+ *   ③ 交期 → 全廠（交期一動整條排程重排，每一站的順位都受影響）
+ *   ④ 其餘（數量、品名、規格、備註、包裝…）：
+ *        未發單 → 美編部門（現場還沒動工，但美編可能已照舊內容做圖）
+ *        已發單 → 已經動工過的每一站都通知（它們已依舊內容做過了）
+ *        已發單但現場還沒報工 → 倉庫部門（料已領出，先擋下來）
+ *
+ * 為什麼是「已動工的站」而不是「還會經過的站」：後者包含尚未開工、甚至只是用標準
+ * 途程猜的站，通知它們沒有意義——真正要重做或要回頭清點的，是已經照舊內容做完的站。
+ */
+function notifyTarget(field: string, impact: LineImpact, dispatched: boolean): { targets: string[]; note: string } {
   if (FINANCE_FIELDS.has(field)) {
-    return { target: '財務部門', note: '不影響生產，僅影響帳務' }
+    return { targets: ['財務部門'], note: '金額／帳務類欄位，不影響生產' }
+  }
+  if (SHIPPING_ONLY_FIELDS.has(field)) {
+    return { targets: ['包裝出貨'], note: '只動到出貨資訊，生產內容沒變' }
+  }
+  if (field === 'duedate') {
+    return { targets: ['全廠'], note: '交期一動整條排程要重排，每一站的順位都受影響' }
   }
   if (!dispatched) {
-    return { target: '美編部門', note: '尚未發單，不影響生產' }
+    return { targets: ['美編部門'], note: `${impact.dispatchState}，現場還沒動工；美編可能已依舊內容作業` }
   }
-  if (SHIPPING_FIELDS.has(field)) {
-    return { target: '全廠', note: '已發單，含包裝出貨都需知悉' }
+  const depts = Array.from(new Set(
+    impact.reportedStations.map(stationToDept).filter((d): d is string => !!d),
+  ))
+  if (depts.length === 0) {
+    return { targets: ['倉庫部門'], note: `已發單（${impact.dispatchState}）但現場尚無報工，料已領出` }
   }
-  return { target: '全廠', note: '已發單，現場正在依舊內容作業' }
+  return {
+    targets: depts,
+    note: `已做到 ${impact.reportedStations.join(' → ')}，這些站已依舊內容作業過`,
+  }
 }
 
 /** UPDATE_BY 不是工號而是系統帳號時的顯示名稱（介面檔/API 寫入，非真人操作） */
@@ -171,6 +213,14 @@ export interface LineImpact {
   running: Array<{ station: string; job: string; status: string; qty: number | null; done: number | null; resource: string | null }>
   /** 這一行會經過的工作中心（塔台排程實際有的；沒有塔台資料時用料號的標準途程預測） */
   stations: string[]
+  /**
+   * 這一行「實際已經做過」的工作中心，依製程順序排列。
+   * 判定＝塔台狀態是 finished/running/pause，或已有報工量。
+   * 與 stations 的差別：stations 是「會經過哪些站」（含還沒開工、甚至是用標準途程猜的），
+   * 這裡是「真的已經動工的站」——改單要通知誰只能看這個，拿 stations 會把還沒開工的
+   * 單位也一起吵醒。
+   */
+  reportedStations: string[]
   /** stations 是預測值而非塔台實際排程 */
   stationsPredicted: boolean
   /**
@@ -207,7 +257,7 @@ export interface EditLogEntry {
   /** 這一行的下游狀態（同一訂單行的多個欄位共用同一份） */
   impact: LineImpact
   /** 這筆變動該通知哪個單位 */
-  notify: { target: string; note: string }
+  notify: { targets: string[]; note: string }
 }
 
 function toText(v: unknown): string | null {
@@ -217,7 +267,7 @@ function toText(v: unknown): string | null {
 
 const EMPTY_IMPACT: LineImpact = {
   dispatchState: '未發單', moNumbers: [], matchConfidence: '未發單',
-  progress: null, warnings: [], running: [], stations: [], stationsPredicted: false,
+  progress: null, warnings: [], running: [], stations: [], reportedStations: [], stationsPredicted: false,
   misalignedMos: 0,
 }
 
@@ -410,6 +460,17 @@ async function buildImpacts(
         .map((j) => j.workcenter_name)
         .filter(Boolean) as string[],
     ))
+    // 已實際動工的站：finished/running/pause 或已有報工量。同樣依 job_sequence 排序，
+    // 印出來才是「印刷→雷切→包裝」的真實先後，而不是資料庫回傳順序。
+    const reportedStations = Array.from(new Set(
+      [...jobRows]
+        .filter((j) => ['finished', 'running', 'pause'].includes(String(j.system_status ?? ''))
+          || Number(j.wip_qty ?? 0) > 0)
+        .sort((a, b) => (a.job_sequence ?? 9999) - (b.job_sequence ?? 9999))
+        .map((j) => j.workcenter_name)
+        .filter(Boolean) as string[],
+    ))
+
     let predicted = false
     if (stations.length === 0 && part) {
       const rid = routeOf.get(part)
@@ -429,6 +490,7 @@ async function buildImpacts(
       warnings: Array.from(new Set(warnings)),
       running,
       stations,
+      reportedStations,
       stationsPredicted: predicted,
       misalignedMos: misalignBySo.get(doc) ?? 0,
     })
@@ -567,7 +629,7 @@ export async function GET(request: NextRequest) {
             fieldLabel: FIELD_LABEL[f] ?? f,
             oldValue: toText(before[f]),
             newValue: toText(after[f]),
-            notify: notifyTarget(f, dispatched),
+            notify: notifyTarget(f, common.impact, dispatched),
           })
         }
       } else if (log.change_type === 'insert') {
@@ -582,8 +644,8 @@ export async function GET(request: NextRequest) {
             .filter(Boolean).join(' / '),
           // 新增品項本身不動到既有製令，但會把後面的行號整批往後推
           notify: dispatched
-            ? { target: '全廠', note: '該單已發單，插行會讓後面品項的工單行號失效' }
-            : { target: '美編部門', note: '尚未發單，不影響生產' },
+            ? { targets: ['全廠'], note: '該單已發單，插行會讓後面品項的工單行號失效' }
+            : { targets: ['美編部門'], note: '尚未發單，不影響生產' },
         })
       } else {
         entries.push({
@@ -596,8 +658,8 @@ export async function GET(request: NextRequest) {
             .filter(Boolean).join(' / '),
           newValue: null,
           notify: dispatched
-            ? { target: '全廠', note: '該單已發單，刪行會讓後面品項的工單行號失效' }
-            : { target: '美編部門', note: '尚未發單，不影響生產' },
+            ? { targets: ['全廠'], note: '該單已發單，刪行會讓後面品項的工單行號失效' }
+            : { targets: ['美編部門'], note: '尚未發單，不影響生產' },
         })
       }
     }

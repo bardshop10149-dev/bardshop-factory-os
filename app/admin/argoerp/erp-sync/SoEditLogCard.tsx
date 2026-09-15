@@ -26,6 +26,8 @@ interface LineImpact {
 interface Props {
   /** 點「工單行號失效」標記時，跳到「工單對位體檢」並篩選該訂單 */
   onInspectOrder?: (docNo: string) => void
+  /** 點訂單號時開訂單詳情視窗（含塔台生產進度）；不給就維持純文字不可點 */
+  onOpenOrder?: (docNo: string) => void
 }
 
 interface EditLogEntry {
@@ -45,14 +47,23 @@ interface EditLogEntry {
   approximate: boolean
   detectedAt: string
   impact: LineImpact
-  notify: { target: string; note: string }
+  notify: { targets: string[]; note: string }
 }
 
 /** 通知對象的顏色 */
+// 顏色＝急迫度，不是部門色票：紅＝波及整廠、琥珀＝現場已動工過的站要回頭處理、
+// 藍＝帳務、灰＝還沒動工。沒列到的單位走預設灰，不會因為新增站別就顯示成怪樣子。
 const NOTIFY_STYLE: Record<string, string> = {
   全廠: 'bg-red-900/60 text-red-300 border-red-700/50',
   財務部門: 'bg-sky-900/50 text-sky-300 border-sky-700/50',
   美編部門: 'bg-slate-800 text-slate-400 border-slate-700',
+  印刷部門: 'bg-amber-900/50 text-amber-300 border-amber-700/50',
+  雷切部門: 'bg-amber-900/50 text-amber-300 border-amber-700/50',
+  後加工部門: 'bg-amber-900/50 text-amber-300 border-amber-700/50',
+  包裝出貨: 'bg-emerald-900/50 text-emerald-300 border-emerald-700/50',
+  倉庫部門: 'bg-violet-900/50 text-violet-300 border-violet-700/50',
+  常平廠: 'bg-amber-900/50 text-amber-300 border-amber-700/50',
+  委外採購: 'bg-amber-900/50 text-amber-300 border-amber-700/50',
 }
 
 /** 一頁最多幾筆（以「一次操作」為單位換算，不會把同一次操作拆到兩頁） */
@@ -105,7 +116,7 @@ function splitAt(at: string): { date: string; time: string } {
   return { date: at.slice(0, 10), time: at.slice(11, 16) }
 }
 
-export default function SoEditLogCard({ onInspectOrder }: Props) {
+export default function SoEditLogCard({ onInspectOrder, onOpenOrder }: Props) {
   const [days, setDays] = useState(3)
   const [entries, setEntries] = useState<EditLogEntry[]>([])
   const [loading, setLoading] = useState(false)
@@ -180,7 +191,7 @@ export default function SoEditLogCard({ onInspectOrder }: Props) {
     const body = filtered.map((e) => [
       e.at, e.empNo, e.empName, e.action, e.docNo, e.lineNo, e.fieldLabel,
       e.oldValue ?? '', e.newValue ?? '', e.salesName,
-      e.notify.target, e.notify.note,
+      e.notify.targets.join('、'), e.notify.note,
       e.impact.dispatchState,
       e.impact.moNumbers.join(' '),
       e.impact.matchConfidence,
@@ -436,7 +447,18 @@ export default function SoEditLogCard({ onInspectOrder }: Props) {
                   {/* 行號每列都印：同一次操作常一次改好幾行，隱藏行號會誤讀成都改同一行 */}
                   <td className="whitespace-nowrap px-3 py-2 align-top font-mono text-xs">
                     {first
-                      ? <span className="text-cyan-300">{e.docNo}</span>
+                      ? (onOpenOrder
+                          ? (
+                            <button
+                              type="button"
+                              onClick={() => onOpenOrder(e.docNo)}
+                              title="查看訂單詳情與塔台生產進度"
+                              className="text-cyan-300 underline decoration-dotted underline-offset-2 transition-colors hover:text-cyan-100"
+                            >
+                              {e.docNo}
+                            </button>
+                          )
+                          : <span className="text-cyan-300">{e.docNo}</span>)
                       : <span className="text-slate-600">↳</span>}
                     {e.lineNo && <span className="ml-1 text-slate-300">#{e.lineNo}</span>}
                     {/* 這張單目前有工單行號失效 → 可點進「工單對位體檢」看明細 */}
@@ -530,14 +552,19 @@ export default function SoEditLogCard({ onInspectOrder }: Props) {
                     )}
                   </td>
                   {/* 應通知：依「改了什麼」＋「有沒有發單」判定 */}
-                  <td className="whitespace-nowrap px-3 py-2 align-top text-xs">
-                    <span
-                      title={e.notify.note}
-                      className={`cursor-help rounded border px-2 py-0.5 text-[11px] ${
-                        NOTIFY_STYLE[e.notify.target] ?? NOTIFY_STYLE.美編部門}`}
-                    >
-                      {e.notify.target}
-                    </span>
+                  <td className="px-3 py-2 align-top text-xs">
+                    <div className="flex flex-wrap gap-1">
+                      {e.notify.targets.map((t) => (
+                        <span
+                          key={t}
+                          title={e.notify.note}
+                          className={`cursor-help whitespace-nowrap rounded border px-2 py-0.5 text-[11px] ${
+                            NOTIFY_STYLE[t] ?? NOTIFY_STYLE.美編部門}`}
+                        >
+                          {t}
+                        </span>
+                      ))}
+                    </div>
                   </td>
                 </tr>
               )
@@ -647,13 +674,39 @@ export default function SoEditLogCard({ onInspectOrder }: Props) {
           灰字是這一行會經過的站別，標「預估」代表塔台還沒有這批、是用料號的標準途程推的。
         </p>
         <p>
-          <span className="text-slate-300">應通知</span>依「改了什麼」加「有沒有發單」判定：
-          單價、幣別、發票型態這類只影響帳務 →
-          <span className="mx-1 rounded border border-sky-700/50 bg-sky-900/50 px-1.5 text-sky-300">財務部門</span>；
-          尚未發單 → <span className="mx-1 rounded border border-slate-700 bg-slate-800 px-1.5 text-slate-400">美編部門</span>
-          （不影響生產，但美編可能已依舊內容作業）；
-          已發單後才改 → <span className="mx-1 rounded border border-red-700/50 bg-red-900/60 px-1.5 text-red-300">全廠</span>，
-          交期與包裝連包裝出貨都要知悉。滑鼠移到標籤上有判定原因。
+          <span className="text-slate-300">應通知</span>依「改了什麼」＋「這一行做到哪一站」判定，
+          不再是已發單就一律吼全廠：
+        </p>
+        <ul className="ml-4 list-disc space-y-0.5">
+          <li>
+            單價、幣別、發票型態 →
+            <span className="mx-1 rounded border border-sky-700/50 bg-sky-900/50 px-1.5 text-sky-300">財務部門</span>
+            （跟生產無關，發不發單都一樣）
+          </li>
+          <li>
+            交貨地址這類只動出貨資訊的 →
+            <span className="mx-1 rounded border border-emerald-700/50 bg-emerald-900/50 px-1.5 text-emerald-300">包裝出貨</span>
+            （做的東西沒變）
+          </li>
+          <li>
+            <span className="text-slate-300">交期</span> →
+            <span className="mx-1 rounded border border-red-700/50 bg-red-900/60 px-1.5 text-red-300">全廠</span>
+            （交期一動整條排程要重排，每一站的順位都受影響）
+          </li>
+          <li>
+            數量、品名、規格、備註等：尚未發單 →
+            <span className="mx-1 rounded border border-slate-700 bg-slate-800 px-1.5 text-slate-400">美編部門</span>；
+            已發單 → 點名<span className="text-slate-300">已經動工過的每一站</span>
+            （<span className="mx-0.5 rounded border border-amber-700/50 bg-amber-900/50 px-1.5 text-amber-300">印刷部門</span>
+            <span className="mx-0.5 rounded border border-amber-700/50 bg-amber-900/50 px-1.5 text-amber-300">雷切部門</span>
+            …）；已發單但現場還沒報工 →
+            <span className="mx-1 rounded border border-violet-700/50 bg-violet-900/50 px-1.5 text-violet-300">倉庫部門</span>
+            （料已領出）
+          </li>
+        </ul>
+        <p>
+          點名的是「已經照舊內容做過」的站，不是「將來會經過」的站——後者還沒動工，通知了也沒事做。
+          滑鼠移到標籤上會顯示判定原因與走過的站順序。
         </p>
         <p>
           訂單號旁的
