@@ -58,7 +58,9 @@ export function checkApiKeyAgainst(
   queryKey: string | null,
   allowed: Array<string | undefined>,
 ): boolean {
-  const keys = allowed.filter((k): k is string => !!k && k.length > 0)
+  // 環境變數值在各家後台貼上時常帶到前後空白或換行，這裡一律 trim 後比對，
+  // 避免「看起來一模一樣的 Key 卻被拒絕」這種很難查的狀況。
+  const keys = allowed.map(k => (k ?? '').trim()).filter(k => k.length > 0)
   if (keys.length === 0) return false
   const auth = authHeader ?? ''
   const bearer = auth.toLowerCase().startsWith('bearer ') ? auth.slice(7).trim() : null
