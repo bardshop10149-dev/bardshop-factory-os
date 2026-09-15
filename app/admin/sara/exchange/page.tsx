@@ -68,6 +68,8 @@ export default function SaraExchangePage() {
   const [csvLoading, setCsvLoading] = useState(false)
   const [csvMsg, setCsvMsg]     = useState('')
   const [lastPulledAt, setLastPulledAt] = useState<string | null>(null)
+  // 第二支端口（/api/sara/exchange-csv-2）的最後拉取時間，與塔台那格分開記
+  const [lastPulledAt2, setLastPulledAt2] = useState<string | null>(null)
   // 上傳檔案引用：分別用於「取代基底」和「追加新列」
 
   // 新增表單
@@ -88,11 +90,12 @@ export default function SaraExchangePage() {
 
   // 載入 API Key（server-side env，僅管理員可見）
   const [apiKey, setApiKey] = useState<string | null>(null)
+  const [apiKey2, setApiKey2] = useState<string | null>(null)
   const [showKey, setShowKey] = useState(false)
   useEffect(() => {
     fetch('/api/sara/exchange-key', { cache: 'no-store' })
       .then(r => r.json())
-      .then((j: { key: string | null }) => setApiKey(j.key))
+      .then((j: { key: string | null; key2?: string | null }) => { setApiKey(j.key); setApiKey2(j.key2 ?? null) })
       .catch(() => {})
   }, [])
 
@@ -101,10 +104,11 @@ export default function SaraExchangePage() {
     setCsvLoading(true)
     try {
       const res = await fetch('/api/sara/exchange-csv', { cache: 'no-store' })
-      const j = await res.json() as { success: boolean; rows?: string[][]; last_pulled_at?: string | null }
+      const j = await res.json() as { success: boolean; rows?: string[][]; last_pulled_at?: string | null; last_pulled_at_2?: string | null }
       if (j.success) {
         setCsvRows(j.rows ?? [])
         setLastPulledAt(j.last_pulled_at ?? null)
+        setLastPulledAt2(j.last_pulled_at_2 ?? null)
       }
     } finally { setCsvLoading(false) }
   }, [])
@@ -485,6 +489,50 @@ export default function SaraExchangePage() {
           </div>
         </div>
 
+        {/* 第二支端口說明卡片（資料與塔台那支相同，唯讀） */}
+        <div className="mb-6 rounded-xl border border-violet-800/40 bg-violet-950/20 p-5">
+          <h2 className="text-sm font-semibold text-violet-300 mb-1">📡 第二支端口（給塔台以外的取用方）</h2>
+          <p className="text-xs text-slate-400 mb-4">
+            回傳的資料與上面那支<span className="text-violet-300">完全相同</span>（同一份 CSV 累積區），
+            差別在於：<span className="text-violet-300">獨立的 API Key</span>、
+            <span className="text-violet-300">獨立的拉取時間紀錄</span>、
+            且<span className="text-amber-300">不支援 mark_consumed、永遠不會清空累積區</span>
+            （累積區是共用的，這一家清掉塔台就拉不到了）。
+          </p>
+          <div className="space-y-4 text-xs">
+            <div className="rounded-lg bg-slate-900/60 border border-slate-700 p-4">
+              <div className="text-slate-300 font-semibold mb-2">① 端口 URL</div>
+              <code className="block px-3 py-2 rounded bg-slate-950 text-violet-200 font-mono select-all text-sm">
+                {`${origin}/api/sara/exchange-csv-2`}
+              </code>
+            </div>
+            <div className="rounded-lg bg-slate-900/60 border border-slate-700 p-4">
+              <div className="text-slate-300 font-semibold mb-2">② 認證 Header（必填）</div>
+              <div className="flex items-center gap-3 flex-wrap">
+                <code className="px-3 py-2 rounded bg-slate-950 text-amber-200 font-mono select-all">
+                  Authorization: Bearer {apiKey2 ? (showKey ? apiKey2 : '••••••••••••') : '<SARA_EXCHANGE_API_KEY_2>'}
+                </code>
+              </div>
+              {!apiKey2 && (
+                <div className="mt-2 p-2 rounded bg-amber-950/40 border border-amber-700/40 text-amber-300">
+                  ⚠️ Vercel 尚未設定 SARA_EXCHANGE_API_KEY_2——目前這支會暫時接受塔台那把 Key。
+                  設定專屬 Key 之後才能單獨換發或停用這一家，不影響塔台。
+                </div>
+              )}
+            </div>
+            <div className="rounded-lg bg-slate-900/60 border border-slate-700 p-4">
+              <div className="text-slate-300 font-semibold mb-2">③ curl 範例</div>
+              <pre className="text-slate-300 font-mono overflow-x-auto text-[11px] leading-relaxed select-all">{`curl -X GET \\
+  "${origin}/api/sara/exchange-csv-2" \\
+  -H "Authorization: Bearer ${apiKey2 ? (showKey ? apiKey2 : '••••••••••••') : '<YOUR_API_KEY>'}" \\
+  -H "Accept: application/json"`}</pre>
+              <div className="text-slate-500 mt-2">
+                回傳格式與塔台那支相同，另外多一個 <code className="text-violet-300">mark_consumed_supported: false</code> 欄位。
+              </div>
+            </div>
+          </div>
+        </div>
+
         {/* ── 單張訂單轉換 ── */}
         <SingleOrderConvert onAppended={() => void loadCsvBuffer()} />
 
@@ -510,6 +558,10 @@ export default function SaraExchangePage() {
               <span className={`px-3 py-1 rounded-full text-xs font-medium border ${lastPulledAt ? 'bg-slate-800 text-slate-300 border-slate-700' : 'bg-slate-800 text-slate-500 border-slate-700'}`}
                 title="塔台最後一次成功呼叫本端口的時間（不論是否帶 mark_consumed）">
                 📡 塔台上次呼出：{lastPulledAt ? new Date(lastPulledAt).toLocaleString('zh-TW', { hour12: false }) : '尚無紀錄'}
+              </span>
+              <span className={`px-3 py-1 rounded-full text-xs font-medium border ${lastPulledAt2 ? 'bg-violet-950/40 text-violet-300 border-violet-800/50' : 'bg-slate-800 text-slate-500 border-slate-700'}`}
+                title="第二支端口（/api/sara/exchange-csv-2）最後一次成功被呼叫的時間">
+                📡 第二支上次呼出：{lastPulledAt2 ? new Date(lastPulledAt2).toLocaleString('zh-TW', { hour12: false }) : '尚無紀錄'}
               </span>
               <input ref={csvReplaceRef} type="file" accept=".csv" className="hidden"
                 onChange={e => { const f = e.target.files?.[0]; if (f) void handleCsvUpload(f, false); e.target.value = '' }} />
