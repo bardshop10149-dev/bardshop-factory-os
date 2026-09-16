@@ -1,0 +1,871 @@
+{
+  "_comment": "驗證案例（設計書 §5.5）。每筆 input 是已解析成數字的引擎輸入；settings 是那張 Excel 當時的常數快照。匯入資料庫後 status=proposed，Snow 核可才成發布閘門。",
+  "settings_v156": {
+    "nesting": {
+      "gapCm": 0.4,
+      "marginCm": 0
+    },
+    "cut": {
+      "hoursPerDay": 9,
+      "machines": 5,
+      "shiftFactor": 2,
+      "efficiency": 0.8,
+      "workDays": 26,
+      "outlineTimeFactor": 1.1,
+      "machinesMonthly": [
+        {
+          "name": "刀庫機（精雕機）×5",
+          "monthly": 7473.5714285714
+        },
+        {
+          "name": "電腦 ×1",
+          "monthly": 117.695
+        },
+        {
+          "name": "打孔機 ×1",
+          "monthly": 443.333333333333
+        }
+      ],
+      "laborMonthly": 14500,
+      "knifeOutlineMonthly": 21060,
+      "knifeGrooveMonthly": 9360,
+      "knifeCoverMonthly": 9360
+    },
+    "packLabor": {
+      "hoursPerDay": 9,
+      "workDays": 26,
+      "staff": [
+        {
+          "name": "小柯",
+          "monthly": 9500,
+          "share": 0.06
+        },
+        {
+          "name": "小俏",
+          "monthly": 5000,
+          "share": 0.15
+        },
+        {
+          "name": "飛燕",
+          "monthly": 4500,
+          "share": 0.15
+        },
+        {
+          "name": "臨時工",
+          "hourly": 15,
+          "share": 0.64
+        }
+      ]
+    },
+    "koshi": {
+      "allowancePct": 10,
+      "trialSheets": 600,
+      "extraFreeSheets": 1600,
+      "extraUnitPrice": 0.8
+    },
+    "flags": {
+      "outlineScrapFactorFixed": true,
+      "secondBoardExcludedFromCut": true,
+      "fixedFeeScrapApplied": true
+    }
+  },
+  "cases": [
+    {
+      "key": "c-keychain-50000",
+      "name": "C款 吊飾 5 萬（柯氏、鑰匙圈、舊刀價）",
+      "product": "keyring",
+      "template_version": "v1.5.2（柯氏分支；存檔 2026-08-05，外形刀 12 元/把）",
+      "source_file": "BA26080503 澄鑫 C款_柯氏报价模板_v1.5.2.xlsx",
+      "source_sheet": "5万",
+      "settings_override": {
+        "cut": {
+          "knifeOutlineMonthly": 9360
+        }
+      },
+      "input": {
+        "qty": 50000,
+        "partWcm": 8,
+        "partHcm": 10.2,
+        "nOverride": null,
+        "boards": [
+          {
+            "key": "main",
+            "item": "亚克力板【挤压型】 [300mm * 400mm * 2.8]",
+            "unitPrice": 6.96,
+            "layoutWcm": 29,
+            "layoutHcm": 39,
+            "roundup": true,
+            "sides": 1,
+            "printed": true,
+            "laminated": true,
+            "cut": true
+          }
+        ],
+        "pet": {
+          "item": "0.188单面覆膜不加硬PET [0.188mm * 680mm * 460mm]",
+          "unitPrice": 1.73,
+          "mode": "koshi_sheet",
+          "sides": 1,
+          "kPet": 2
+        },
+        "print": {
+          "method": "koshi",
+          "sides": 1,
+          "unitPrice": 1760,
+          "versions": 4
+        },
+        "laminate": [
+          {
+            "item": "贴合/单面",
+            "unitPrice": 2.5,
+            "platesFrom": [
+              "main"
+            ]
+          }
+        ],
+        "wash": {
+          "unitPrice": 0.1823,
+          "platesFrom": "main"
+        },
+        "cut": {
+          "t1": 12,
+          "t2": 0,
+          "t3": 0
+        },
+        "scrapPct": 10,
+        "costRatio": 0.72,
+        "packCapacityPerHour": 100,
+        "packing": [
+          {
+            "item": "OPP自粘袋 [04*8*12+3cm]",
+            "unitPrice": 0.02,
+            "mode": "per_unit",
+            "k": 1,
+            "group": "packing"
+          },
+          {
+            "item": "OPP自粘袋4*20*30MM+3c【右下5mm的孔】",
+            "unitPrice": 0.11,
+            "mode": "per_n_units",
+            "n": 20,
+            "group": "packing"
+          },
+          {
+            "item": "纸箱40 * 28 * 23cm",
+            "unitPrice": 2.9,
+            "mode": "per_n_units",
+            "n": 200,
+            "group": "packing"
+          },
+          {
+            "item": "出货平卡",
+            "unitPrice": 0.6,
+            "mode": "per_box",
+            "n": 200,
+            "k": 2,
+            "group": "packing"
+          },
+          {
+            "item": "银色D字吊环 [【L=27mm + 字扣L=18.3】]",
+            "unitPrice": 0.51,
+            "mode": "per_unit",
+            "k": 1,
+            "group": "accessory"
+          },
+          {
+            "item": "银色C字扣 [【Φ1.2 * 8mm】]",
+            "unitPrice": 0.01,
+            "mode": "per_unit",
+            "k": 1,
+            "group": "accessory"
+          },
+          {
+            "item": "纸卡 4c",
+            "unitPrice": 0.25,
+            "mode": "per_unit",
+            "k": 1,
+            "group": "accessory"
+          }
+        ]
+      },
+      "expected": {
+        "plates": 5556,
+        "petPlates": 3655.8,
+        "material": 44994.294,
+        "print": 23587.4988,
+        "cut": 20825.538,
+        "packLabor": 9062.8205,
+        "packMaterial": 40800,
+        "cost": 3.063943329410562,
+        "price": 4.255476846403559
+      }
+    },
+    {
+      "key": "c-keychain-21000",
+      "name": "C款 吊飾 2.1 萬（紙卡階梯 0.3）",
+      "product": "keyring",
+      "template_version": "v1.5.2（柯氏分支；存檔 2026-08-05）",
+      "source_file": "BA26080503 澄鑫 C款_柯氏报价模板_v1.5.2.xlsx",
+      "source_sheet": "2.1万",
+      "same_as": "c-keychain-50000",
+      "input_override": {
+        "qty": 21000,
+        "costRatio": 0.72,
+        "packing_price": {
+          "纸卡 4c": 0.3
+        }
+      },
+      "expected": {
+        "plates": 2334,
+        "petPlates": 1883.7,
+        "cost": 3.3404275649917876,
+        "price": 4.639482729155261
+      }
+    },
+    {
+      "key": "c-keychain-5000",
+      "name": "C款 吊飾 5000（r=0.70、紙卡 0.5）",
+      "product": "keyring",
+      "template_version": "v1.5.2（柯氏分支；存檔 2026-08-05）",
+      "source_file": "BA26080503 澄鑫 C款_柯氏报价模板_v1.5.2.xlsx",
+      "source_sheet": "5000",
+      "same_as": "c-keychain-50000",
+      "input_override": {
+        "qty": 5000,
+        "costRatio": 0.7,
+        "packing_price": {
+          "纸卡 4c": 0.5
+        }
+      },
+      "expected": {
+        "plates": 556,
+        "petPlates": 905.8,
+        "cost": 4.903467353944852,
+        "price": 7.004953362778361
+      }
+    },
+    {
+      "key": "carabiner-1000",
+      "name": "登山勾 1000（7151、雙板材、小龍蝦扣每套 2 顆、現行刀價）",
+      "product": "carabiner",
+      "template_version": "v1.5.6（存檔 2026-08-25）",
+      "source_file": "BA26082304 关关 登山沟_报价模板_v1.5.6.xlsx",
+      "source_sheet": "主产品",
+      "input": {
+        "qty": 1000,
+        "partWcm": 7,
+        "partHcm": 7,
+        "nOverride": null,
+        "boards": [
+          {
+            "key": "main",
+            "item": "亚克力板【挤压型】 [300mm * 400mm * 4.8]",
+            "unitPrice": 11.92,
+            "layoutWcm": 29,
+            "layoutHcm": 39,
+            "roundup": true,
+            "sides": 1,
+            "printed": true,
+            "laminated": true,
+            "cut": true
+          },
+          {
+            "key": "acc",
+            "item": "亚克力板【挤压型】 [300mm * 400mm * 2.8]",
+            "unitPrice": 6.96,
+            "nPerSheet": 66,
+            "roundup": false,
+            "sides": 1,
+            "printed": true,
+            "laminated": true,
+            "cut": false
+          }
+        ],
+        "pet": {
+          "item": "0.188单面不加硬PET [0.188mm * 310mm * 420mm]",
+          "unitPrice": 0.7,
+          "mode": "roundup_plates",
+          "sides": 1,
+          "kPet": 2
+        },
+        "print": {
+          "method": "7151",
+          "sides": 1,
+          "unitPrice": 7
+        },
+        "laminate": [
+          {
+            "item": "贴合/单面",
+            "unitPrice": 2.5,
+            "platesFrom": [
+              "main",
+              "acc"
+            ]
+          }
+        ],
+        "wash": {
+          "unitPrice": 0.1823,
+          "platesFrom": "laminate"
+        },
+        "cut": {
+          "t1": 12,
+          "t2": 0,
+          "t3": 0
+        },
+        "scrapPct": 10,
+        "costRatio": 0.65,
+        "packCapacityPerHour": 100,
+        "packing": [
+          {
+            "item": "OPP自粘袋 [04*8*12+3cm]",
+            "unitPrice": 0.02,
+            "mode": "per_unit",
+            "k": 1,
+            "group": "packing"
+          },
+          {
+            "item": "OPP自粘袋4*20*30MM+3c【右下5mm的孔】",
+            "unitPrice": 0.11,
+            "mode": "per_n_units",
+            "n": 20,
+            "group": "packing"
+          },
+          {
+            "item": "纸箱40 * 28 * 23cm",
+            "unitPrice": 2.9,
+            "mode": "per_n_units",
+            "n": 200,
+            "group": "packing"
+          },
+          {
+            "item": "出货平卡",
+            "unitPrice": 0.6,
+            "mode": "per_box",
+            "n": 200,
+            "k": 2,
+            "group": "packing"
+          },
+          {
+            "item": "登山沟",
+            "unitPrice": 0.42,
+            "mode": "per_unit",
+            "k": 1,
+            "group": "accessory"
+          },
+          {
+            "item": "银色C字扣 [【Φ1.2 * 8mm】]",
+            "unitPrice": 0.01,
+            "mode": "per_unit",
+            "k": 1,
+            "group": "accessory"
+          },
+          {
+            "item": "银色小龙虾扣 [【L=15mm】]",
+            "unitPrice": 0.08,
+            "mode": "per_unit",
+            "k": 2,
+            "group": "accessory"
+          },
+          {
+            "item": "气泡袋",
+            "unitPrice": 0.12,
+            "mode": "per_unit",
+            "k": 1,
+            "group": "packing"
+          }
+        ]
+      },
+      "expected": {
+        "plates": 67,
+        "petPlates": 67,
+        "material": 950.9945,
+        "print": 795.4156,
+        "cut": 343.2609,
+        "packLabor": 181.2564,
+        "packMaterial": 756,
+        "cost": 3.32962021541641,
+        "price": 5.12249263910217
+      }
+    },
+    {
+      "key": "andy-board-1000",
+      "name": "ANDY 燙金畫板 1000（s=15、330×440 板、外發固定費）",
+      "product": "hotstamp-board",
+      "template_version": "v1.5.6",
+      "source_file": "BA26090701 ANDY 烫金画板_报价模板_v1.5.6.xlsx",
+      "source_sheet": "主产品",
+      "input": {
+        "qty": 1000,
+        "partWcm": 10,
+        "partHcm": 10,
+        "nOverride": null,
+        "boards": [
+          {
+            "key": "main",
+            "item": "亚克力板【挤压型】 [330mm * 440mm * 1.8]",
+            "unitPrice": 5.65,
+            "layoutWcm": 31.6,
+            "layoutHcm": 42.6,
+            "roundup": true,
+            "sides": 1,
+            "printed": true,
+            "laminated": true,
+            "cut": true
+          }
+        ],
+        "pet": {
+          "item": "0.188单面不加硬PET [0.188mm * 340mm * 480mm]",
+          "unitPrice": 0.88,
+          "mode": "roundup_plates",
+          "sides": 1,
+          "kPet": 2
+        },
+        "print": {
+          "method": "7151",
+          "sides": 1,
+          "unitPrice": 7
+        },
+        "laminate": [
+          {
+            "item": "贴合/单面",
+            "unitPrice": 2.5,
+            "platesFrom": [
+              "main"
+            ]
+          }
+        ],
+        "wash": {
+          "unitPrice": 0.1823,
+          "platesFrom": "main"
+        },
+        "cut": {
+          "t1": 12,
+          "t2": 0,
+          "t3": 0
+        },
+        "scrapPct": 15,
+        "costRatio": 0.7,
+        "packCapacityPerHour": 100,
+        "packing": [
+          {
+            "item": "OPP自粘袋 [04*8*12+3cm]",
+            "unitPrice": 0.02,
+            "mode": "per_unit",
+            "k": 1,
+            "group": "packing"
+          },
+          {
+            "item": "OPP自粘袋4*20*30MM+3c【右下5mm的孔】",
+            "unitPrice": 0.11,
+            "mode": "per_n_units",
+            "n": 20,
+            "group": "packing"
+          },
+          {
+            "item": "纸箱40 * 28 * 23cm",
+            "unitPrice": 2.9,
+            "mode": "per_n_units",
+            "n": 200,
+            "group": "packing"
+          },
+          {
+            "item": "烫金开版",
+            "unitPrice": 200,
+            "mode": "fixed",
+            "n": 1,
+            "group": "outsourced"
+          },
+          {
+            "item": "烫金费用",
+            "unitPrice": 0.5,
+            "mode": "per_unit",
+            "k": 1,
+            "group": "outsourced"
+          }
+        ]
+      },
+      "expected": {
+        "plates": 84,
+        "petPlates": 84,
+        "material": 548.52,
+        "print": 813.3132,
+        "cut": 430.3569,
+        "packLabor": 181.2564,
+        "packMaterial": 740,
+        "cost": 3.12046354011752,
+        "price": 4.45780505731075
+      }
+    },
+    {
+      "key": "template-v156-5000",
+      "name": "空白模板 v1.5.6 預設案（純公式基準）",
+      "product": "keyring",
+      "template_version": "v1.5.6（空白模板）",
+      "source_file": "_报价模板_v1.5.6.xlsx",
+      "source_sheet": "主产品",
+      "input": {
+        "qty": 5000,
+        "partWcm": 5,
+        "partHcm": 5,
+        "nOverride": null,
+        "boards": [
+          {
+            "key": "main",
+            "item": "亚克力板【挤压型】 [300mm * 400mm * 2.8]",
+            "unitPrice": 6.96,
+            "layoutWcm": 29,
+            "layoutHcm": 39,
+            "roundup": true,
+            "sides": 1,
+            "printed": true,
+            "laminated": true,
+            "cut": true
+          }
+        ],
+        "pet": {
+          "item": "0.188单面不加硬PET [0.188mm * 310mm * 420mm]",
+          "unitPrice": 0.7,
+          "mode": "roundup_plates",
+          "sides": 1,
+          "kPet": 2
+        },
+        "print": {
+          "method": "7151",
+          "sides": 1,
+          "unitPrice": 7
+        },
+        "laminate": [
+          {
+            "item": "贴合/单面",
+            "unitPrice": 2.5,
+            "platesFrom": [
+              "main"
+            ]
+          }
+        ],
+        "wash": {
+          "unitPrice": 0.1823,
+          "platesFrom": "main"
+        },
+        "cut": {
+          "t1": 12,
+          "t2": 0,
+          "t3": 0
+        },
+        "scrapPct": 10,
+        "costRatio": 0.65,
+        "packCapacityPerHour": 100,
+        "packing": [
+          {
+            "item": "OPP自粘袋 [04*8*12+3cm]",
+            "unitPrice": 0.02,
+            "mode": "per_unit",
+            "k": 1,
+            "group": "packing"
+          },
+          {
+            "item": "OPP自粘袋4*20*30MM+3c【右下5mm的孔】",
+            "unitPrice": 0.11,
+            "mode": "per_n_units",
+            "n": 20,
+            "group": "packing"
+          },
+          {
+            "item": "纸箱40 * 28 * 23cm",
+            "unitPrice": 2.9,
+            "mode": "per_n_units",
+            "n": 200,
+            "group": "packing"
+          },
+          {
+            "item": "出货平卡",
+            "unitPrice": 0.6,
+            "mode": "per_box",
+            "n": 200,
+            "k": 2,
+            "group": "packing"
+          },
+          {
+            "item": "银色D字吊环 [【L=27mm + 字扣L=18.3】]",
+            "unitPrice": 0.51,
+            "mode": "per_unit",
+            "k": 1,
+            "group": "accessory"
+          },
+          {
+            "item": "银色C字扣 [【Φ1.2 * 8mm】]",
+            "unitPrice": 0.01,
+            "mode": "per_unit",
+            "k": 1,
+            "group": "accessory"
+          }
+        ]
+      },
+      "expected": {
+        "plates": 143,
+        "petPlates": 143,
+        "material": 1095.38,
+        "print": 1384.5689,
+        "cut": 732.6315,
+        "packLabor": 906.2821,
+        "packMaterial": 2830,
+        "cost": 1.52874973229065,
+        "price": 2.35192266506254
+      }
+    },
+    {
+      "key": "laminated-2on2-5000",
+      "name": "2貼2 模板 v1.5.6（1.8 + 1.8 雙面印刷貼合）5,000",
+      "product": "laminated-keyring",
+      "template_version": "v1.5.6（空白模板）",
+      "source_file": "_2贴2报价模板_v1.5.6.xlsx",
+      "source_sheet": "主产品",
+      "input": {
+        "qty": 5000,
+        "partWcm": 5,
+        "partHcm": 5,
+        "nOverride": null,
+        "boards": [
+          {
+            "key": "main",
+            "item": "亚克力板【挤压型】 [300mm * 400mm * 1.8]",
+            "unitPrice": 4.48,
+            "layoutWcm": 29,
+            "layoutHcm": 39,
+            "roundup": true,
+            "sides": 1,
+            "printed": true,
+            "laminated": true,
+            "cut": true
+          },
+          {
+            "key": "back",
+            "item": "亚克力板【挤压型】 [300mm * 400mm * 1.8]",
+            "unitPrice": 4.48,
+            "roundup": true,
+            "sides": 1,
+            "printed": false,
+            "laminated": false,
+            "cut": false
+          }
+        ],
+        "pet": {
+          "item": "0.188单面不加硬PET [0.188mm * 310mm * 420mm]",
+          "unitPrice": 0.7,
+          "mode": "roundup_plates",
+          "sides": 1,
+          "kPet": 2
+        },
+        "print": {
+          "method": "7151",
+          "sides": 2,
+          "unitPrice": 14
+        },
+        "laminate": [
+          {
+            "item": "贴合/双面",
+            "unitPrice": 5,
+            "platesFrom": [
+              "main"
+            ]
+          }
+        ],
+        "wash": {
+          "unitPrice": 0.1823,
+          "platesFrom": "main"
+        },
+        "cut": {
+          "t1": 12,
+          "t2": 0,
+          "t3": 0
+        },
+        "scrapPct": 10,
+        "costRatio": 0.7,
+        "packCapacityPerHour": 120,
+        "packing": [
+          {
+            "item": "OPP自粘袋 [04*8*12+3cm]",
+            "unitPrice": 0.02,
+            "mode": "per_unit",
+            "group": "packing",
+            "k": 1
+          },
+          {
+            "item": "OPP自粘袋4*20*30MM+3c【右下5mm的孔】]",
+            "unitPrice": 0.11,
+            "mode": "per_n_units",
+            "group": "packing",
+            "n": 20
+          },
+          {
+            "item": "纸箱40 * 28 * 23cm",
+            "unitPrice": 2.9,
+            "mode": "per_n_units",
+            "group": "packing",
+            "n": 200
+          },
+          {
+            "item": "出货平卡",
+            "unitPrice": 0.6,
+            "mode": "per_box",
+            "group": "packing",
+            "k": 2,
+            "n": 200
+          },
+          {
+            "item": "银色D字吊环 [【L=27mm + 字扣L=18.3】]",
+            "unitPrice": 0.51,
+            "mode": "per_unit",
+            "group": "accessory",
+            "k": 1
+          },
+          {
+            "item": "银色C字扣 [【Φ1.2 * 8mm】]",
+            "unitPrice": 0.01,
+            "mode": "per_unit",
+            "group": "accessory",
+            "k": 1
+          }
+        ]
+      },
+      "expected": {
+        "plates": 143,
+        "petPlates": 143,
+        "material": 1381.38,
+        "print": 2743.0689,
+        "cut": 732.6315,
+        "packLabor": 755.235,
+        "packMaterial": 2830,
+        "cost": 1.85730939041031,
+        "price": 2.65329912915758
+      }
+    },
+    {
+      "key": "laminated-3on1-5000",
+      "name": "3貼1 模板 v1.5.6（2.8 + 0.8 雙面印刷貼合）5,000",
+      "product": "laminated-keyring",
+      "template_version": "v1.5.6（空白模板）",
+      "source_file": "_3贴1报价模板_v1.5.6.xlsx",
+      "source_sheet": "主产品",
+      "input": {
+        "qty": 5000,
+        "partWcm": 5,
+        "partHcm": 5,
+        "nOverride": null,
+        "boards": [
+          {
+            "key": "main",
+            "item": "亚克力板【挤压型】 [300mm * 400mm * 2.8]",
+            "unitPrice": 6.96,
+            "layoutWcm": 29,
+            "layoutHcm": 39,
+            "roundup": true,
+            "sides": 1,
+            "printed": true,
+            "laminated": true,
+            "cut": true
+          },
+          {
+            "key": "back",
+            "item": "亚克力板【挤压型】 [300mm * 400mm * 0.8]",
+            "unitPrice": 2.82,
+            "roundup": true,
+            "sides": 1,
+            "printed": false,
+            "laminated": false,
+            "cut": false
+          }
+        ],
+        "pet": {
+          "item": "0.188单面不加硬PET [0.188mm * 310mm * 420mm]",
+          "unitPrice": 0.7,
+          "mode": "roundup_plates",
+          "sides": 1,
+          "kPet": 2
+        },
+        "print": {
+          "method": "7151",
+          "sides": 2,
+          "unitPrice": 14
+        },
+        "laminate": [
+          {
+            "item": "贴合/双面",
+            "unitPrice": 5,
+            "platesFrom": [
+              "main"
+            ]
+          }
+        ],
+        "wash": {
+          "unitPrice": 0.1823,
+          "platesFrom": "main"
+        },
+        "cut": {
+          "t1": 12,
+          "t2": 0,
+          "t3": 0
+        },
+        "scrapPct": 10,
+        "costRatio": 0.7,
+        "packCapacityPerHour": 120,
+        "packing": [
+          {
+            "item": "OPP自粘袋 [04*8*12+3cm]",
+            "unitPrice": 0.02,
+            "mode": "per_unit",
+            "group": "packing",
+            "k": 1
+          },
+          {
+            "item": "OPP自粘袋4*20*30MM+3c【右下5mm的孔】]",
+            "unitPrice": 0.11,
+            "mode": "per_n_units",
+            "group": "packing",
+            "n": 20
+          },
+          {
+            "item": "纸箱40 * 28 * 23cm",
+            "unitPrice": 2.9,
+            "mode": "per_n_units",
+            "group": "packing",
+            "n": 200
+          },
+          {
+            "item": "出货平卡",
+            "unitPrice": 0.6,
+            "mode": "per_box",
+            "group": "packing",
+            "k": 2,
+            "n": 200
+          },
+          {
+            "item": "银色D字吊环 [【L=27mm + 字扣L=18.3】]",
+            "unitPrice": 0.51,
+            "mode": "per_unit",
+            "group": "accessory",
+            "k": 1
+          },
+          {
+            "item": "银色C字扣 [【Φ1.2 * 8mm】]",
+            "unitPrice": 0.01,
+            "mode": "per_unit",
+            "group": "accessory",
+            "k": 1
+          }
+        ]
+      },
+      "expected": {
+        "plates": 143,
+        "petPlates": 143,
+        "material": 1498.64,
+        "print": 2743.0689,
+        "cut": 732.6315,
+        "packLabor": 755.235,
+        "packMaterial": 2830,
+        "cost": 1.88310659041031,
+        "price": 2.69015227201473
+      }
+    }
+  ]
+}

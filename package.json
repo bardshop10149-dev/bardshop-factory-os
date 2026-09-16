@@ -6,7 +6,9 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "quote:golden": "node --experimental-strip-types scripts/quote-golden.mjs",
+    "quote:seed-sql": "node --experimental-strip-types scripts/quote-seed-sql.mjs"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",

@@ -117,3 +117,72 @@ input[type="date"]::-webkit-calendar-picker-indicator {
   filter: invert(0.75);
   cursor: pointer;
 }
+
+/* ============================================================
+   報價計算機專用設計 token。刻意「不」放進 @theme：只掛在 .q-page，
+   其他頁完全看不到。Tailwind v4 直接用變數語法取用：
+   bg-(--q-paper)  text-(--q-ink-2)  border-(--q-line)
+   ring-(--q-accent)/25  font-(family-name:--q-font-mono)
+   ============================================================ */
+.q-page {
+  /* 紙：三階明度，取代陰影做層級 */
+  --q-paper:   #F6F3EC;  /* 頁面底（模造紙） */
+  --q-paper-2: #EDE8DE;  /* 結果面板底、明細子列底、skeleton、橫幅底 */
+  --q-card:    #FFFDF9;  /* 工作卡底、輸入框底、摘要底 */
+  /* 墨 */
+  --q-ink:     #1C1A17;  /* 主文字、主鈕底、墨線（非純黑） */
+  --q-ink-2:   #5A5650;  /* 次要文字、欄位標籤（對 paper 6.6:1） */
+  --q-ink-3:   #6F695F;  /* 輔助字、單位、註腳、算式（4.8:1，只用 ≥11px） */
+  --q-line:    #D8D2C6;  /* 鉛筆線：格線、分隔線、輸入框邊框 */
+  --q-disabled:#C9C3B8;  /* 停用文字、停用鈕底、未開放分頁 */
+  /* 語意色：每色一義 */
+  --q-accent:      #2F5D50;  /* 松綠：焦點環、勾選、完成點、連結、TWD 切換、進度線 */
+  --q-accent-soft: #DDE8E1;  /* 松綠淡底：選取底、數值更新閃底 */
+  --q-seal:        #A93B2A;  /* 朱砂：錯誤、必填未填、無法拼板、已覆寫章印、API 錯誤 */
+  --q-seal-soft:   #F3E4E0;
+  --q-warn:        #8A5E12;  /* 茶金：未發布、匯率過期、接近板材極限 */
+  --q-warn-soft:   #F1E8D3;
+  /* 字型：值由 next/font 的 variable class 注入 */
+  --q-font-serif: var(--font-noto-serif-tc), "PingFang TC", "Microsoft JhengHei", serif;
+  --q-font-sans:  var(--font-noto-sans-tc), "q-sans-fallback", "PingFang TC", "Microsoft JhengHei", sans-serif;
+  --q-font-mono:  var(--font-ibm-plex-mono), "Noto Sans TC", "Microsoft JhengHei", ui-monospace, monospace;
+  /* 線寬、圓角 */
+  --q-hair: 1px; --q-rule: 2px; --q-rule-2: 3px;
+  --q-radius: 3px; --q-radius-lg: 4px;  /* 上限，不再更大 */
+  /* 間距 4px 基底 */
+  --q-s1: 4px; --q-s2: 8px; --q-s3: 12px; --q-s4: 16px; --q-s5: 20px; --q-s6: 24px; --q-s8: 32px; --q-s12: 48px;
+  /* 版面 */
+  --q-max: 1280px; --q-gutter: 32px; --q-panel-top: 24px;
+  --q-control-h: 40px; --q-control-h-touch: 44px;
+  /* 動態 */
+  --q-dur-fast: 120ms; --q-dur: 180ms; --q-dur-flash: 220ms;
+  --q-ease: cubic-bezier(0.2, 0, 0, 1);
+  /* wrapper 自身：蓋掉全站深色 body，不動 body */
+  color-scheme: light; min-height: 100dvh;
+  background: var(--q-paper); color: var(--q-ink);
+  font-family: var(--q-font-sans); font-size: 14px; line-height: 1.6; letter-spacing: 0.01em;
+  -webkit-font-smoothing: antialiased;
+}
+/* 內文後備字型度量：Noto 未到位時讓正黑/PingFang 的行高字寬接近 Noto，避免 swap 重排。上線前用兩行重疊法目測校正 */
+@font-face {
+  font-family: "q-sans-fallback";
+  src: local("Microsoft JhengHei"), local("微軟正黑體"), local("PingFang TC");
+  size-adjust: 100%; ascent-override: 88%; descent-override: 12%; line-gap-override: 0%;
+}
+.q-page .q-num { font-family: var(--q-font-mono); font-variant-numeric: tabular-nums; }
+@keyframes q-flash { from { background-color: var(--q-accent-soft); } to { background-color: transparent; } }
+.q-page .q-flash { animation: q-flash var(--q-dur-flash) var(--q-ease) 1; }
+@keyframes q-stamp { from { transform: scale(1.06); } to { transform: scale(1); } }
+.q-page .q-stamp { animation: q-stamp 150ms var(--q-ease) 1; }   /* 評審決議：章印不旋轉 */
+@keyframes q-progress { from { transform: translateX(-100%); } to { transform: translateX(100%); } }
+.q-page .q-progress { position: relative; overflow: hidden; }
+.q-page .q-progress::after { content: ""; position: absolute; inset: 0 0 auto 0; height: 2px; background: var(--q-accent); animation: q-progress 1.2s linear infinite; }
+.q-page .q-collapse { display: grid; grid-template-rows: 0fr; transition: grid-template-rows var(--q-dur) var(--q-ease); }
+.q-page .q-collapse[data-open="true"] { grid-template-rows: 1fr; }
+.q-page .q-collapse > * { overflow: hidden; min-height: 0; }
+.q-page .q-scroll { scrollbar-width: thin; scrollbar-color: var(--q-line) transparent; }
+.q-page .q-scroll::-webkit-scrollbar { width: 8px; }
+.q-page .q-scroll::-webkit-scrollbar-thumb { background: var(--q-line); border-radius: 4px; }
+.q-page input[type="date"]::-webkit-calendar-picker-indicator { filter: none; }  /* 全站反白，本頁還原 */
+@media (prefers-reduced-motion: reduce) { .q-page *, .q-page *::before, .q-page *::after { animation: none !important; transition: none !important; } }
+@media print { .q-page .q-screen { display: none !important; } .q-page .q-print { display: block !important; } .q-page { min-height: auto; } @page { size: A4; margin: 18mm 16mm; } }

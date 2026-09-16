@@ -1,0 +1,34 @@
+{
+  "_comment": "quote_settings seed。acrylic_settings 的常數以 v1.5.6（2026-07 後所有實案）為現值；舊值只留在 golden 的 settings_override。",
+  "acrylic_settings": {
+    "nesting": { "gapCm": 0.4, "marginCm": 0 },
+    "cut": {
+      "hoursPerDay": 9, "machines": 5, "shiftFactor": 2, "efficiency": 0.8, "workDays": 26,
+      "outlineTimeFactor": 1.1,
+      "machinesMonthly": [
+        { "name": "刀庫機（精雕機）×5", "monthly": 7473.5714285714 },
+        { "name": "電腦 ×1", "monthly": 117.695 },
+        { "name": "打孔機 ×1", "monthly": 443.333333333333 }
+      ],
+      "laborMonthly": 14500,
+      "knifeOutlineMonthly": 21060,
+      "knifeGrooveMonthly": 9360,
+      "knifeCoverMonthly": 9360
+    },
+    "packLabor": {
+      "hoursPerDay": 9, "workDays": 26,
+      "staff": [
+        { "name": "小柯", "monthly": 9500, "share": 0.06 },
+        { "name": "小俏", "monthly": 5000, "share": 0.15 },
+        { "name": "飛燕", "monthly": 4500, "share": 0.15 },
+        { "name": "臨時工", "hourly": 15, "share": 0.64 }
+      ]
+    },
+    "koshi": { "allowancePct": 10, "trialSheets": 600, "extraFreeSheets": 1600, "extraUnitPrice": 0.8 },
+    "flags": { "outlineScrapFactorFixed": true, "secondBoardExcludedFromCut": true, "fixedFeeScrapApplied": true }
+  },
+  "fx_rmb_twd": null,
+  "markup_bardshop_pct": 0,
+  "quote_validity_days": 14,
+  "rate_version": "2026-09"
+}

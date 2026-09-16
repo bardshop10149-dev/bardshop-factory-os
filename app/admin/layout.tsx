@@ -264,7 +264,7 @@ function AdminNavbar() {
 
           {/* 右側下拉導航（桌機／xl 以上：水平列 + 浮動下拉選單） */}
           <nav className="hidden xl:flex items-center gap-4 overflow-visible">
-            {NAV_GROUPS.map((group) => {
+            {NAV_GROUPS.map((group, groupIdx) => {
               const colors = getThemeColors(group.theme)
               const isActiveGroup = group.items.some(item => {
                 if ('children' in item && Array.isArray(item.children)) {
@@ -294,7 +294,7 @@ function AdminNavbar() {
                     )}
                   </button>
 
-                  <div className={`absolute left-0 top-full pt-3 w-64 transition-all duration-200 z-50 ${
+                  <div className={`absolute top-full pt-3 w-64 transition-all duration-200 z-50 ${groupIdx === NAV_GROUPS.length - 1 ? 'right-0' : 'left-0'} ${
                     isGroupOpen
                       ? 'opacity-100 translate-y-0 pointer-events-auto'
                       : 'opacity-0 translate-y-2 pointer-events-none group-hover/menu:opacity-100 group-hover/menu:translate-y-0 group-hover/menu:pointer-events-auto'

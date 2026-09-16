@@ -5,7 +5,7 @@ import { guardChangpingShipOwner } from '@/lib/changpingShipOwner'
 export const dynamic = 'force-dynamic'
 
 // GET:常平訂單資料區列表(黃底=常平已出貨 標記快照)
-// 權限:**只有擁有者本人**(CHANGPING_SHIP_OWNERS,預設 Snow);其他管理員也看不到。
+// 權限:後台勾了 changping_ship 的人（目前只有 Snow 10011）;管理員不自動通過。
 // 表由 service_role 持有,前端不直連 —— 一律經此 API。
 //
 // 單號欄兩種來源(Snow 2026-09-14 要求 PO/SO 都要帶):

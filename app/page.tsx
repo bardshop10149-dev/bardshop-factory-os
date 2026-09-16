@@ -293,9 +293,9 @@ export default function HomePage() {
   const canProductDev = hasFeaturePermission('product_dev')
   const canInfoBoard = hasFeaturePermission('info_board')
   const canPurchasing = hasFeaturePermission('purchasing')
-  // 常平訂單資料區：不走權限鍵，限擁有者本人（連其他管理員都看不到；API 端 guardChangpingShipOwner 為準）
-  const CHANGPING_SHIP_OWNERS = ['s9323162@gmail.com']
-  const canChangpingShip = CHANGPING_SHIP_OWNERS.includes((currentUser?.email ?? '').trim().toLowerCase())
+  // 常平訂單資料區：只看有沒有被勾 changping_ship（不用 hasFeaturePermission——那會讓管理員自動通過；
+  // 這區連其他管理員都不該看到）。API 端 guardChangpingShipOwner 為準。
+  const canChangpingShip = memberPermissions.includes('changping_ship')
   // 採購到期徽章：僅具權限者抓計數（API 端亦有 guardPermission 把關）
   const [purchasingDue, setPurchasingDue] = useState(0)
   useEffect(() => {
@@ -985,15 +985,20 @@ export default function HomePage() {
                 <span className="px-3 py-1 rounded border border-amber-500 text-amber-300 text-xs font-mono bg-amber-900/30">前往 →</span>
               </div>
 
-              {/* 維修中 — 業務改單表 */}
-              <div className="bg-slate-800/40 border border-slate-700 rounded-xl p-5 flex items-center gap-4 opacity-50 cursor-not-allowed select-none">
-                <div className="text-3xl grayscale">✏️</div>
+              {/* 報價計算機：測試期只給有 quote_user 權限的帳號看（Snow 在團隊管理指定） */}
+              {hasFeaturePermission('quote_user') && (
+              <div
+                className="bg-amber-500/10 border border-amber-400 rounded-xl p-5 cursor-pointer hover:bg-amber-500/20 transition-all flex items-center gap-4"
+                onClick={() => { setShowInfoModal(false); router.push('/info-board/quote'); }}
+              >
+                <div className="text-3xl">🧮</div>
                 <div className="flex-1">
-                  <div className="text-slate-400 font-bold text-lg mb-1">業務改單表</div>
-                  <div className="text-xs text-slate-500">業務改單請求、變更紀錄</div>
+                  <div className="text-amber-300 font-bold text-lg mb-1">報價計算機</div>
+                  <div className="text-xs text-slate-300">壓克力鑰匙圈報價試算（MVP）</div>
                 </div>
-                <span className="px-3 py-1 rounded border border-slate-600 text-slate-500 text-xs font-mono bg-slate-800">🔧 維修中</span>
+                <span className="px-3 py-1 rounded border border-amber-500 text-amber-300 text-xs font-mono bg-amber-900/30">前往 →</span>
               </div>
+              )}
 
               {/* 未生產異常回報（捷徑 → 尚未生產的異常回報單） */}
               <div
