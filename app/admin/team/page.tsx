@@ -84,7 +84,8 @@ export default function TeamPage() {
         { key: 'info_board', label: '業務資訊看板 (Info Board)' },
         { key: 'argo_tool', label: 'ARGO 外掛區 (ARGO Tool)' },
         { key: 'purchasing', label: '採購專區 (Purchasing)' },
-        { key: 'changping_ship', label: '常平訂單資料區 (Changping POC)' },
+        // 常平訂單資料區已改為「擁有者本人限定」(lib/changpingShipOwner.ts)，
+        // 勾這個權限鍵不會生效，故從清單移除避免誤導。
         { key: 'quote_user', label: '報價計算機 (Quote)' },
         { key: 'quote_admin', label: '報價系統後台 (Quote Admin)' },
       ]

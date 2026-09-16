@@ -24,6 +24,19 @@ interface PersonnelOption {
 }
 
 const PRE_PRODUCTION_TAG = '【尚未生產】'
+
+/** 尚未生產階段用不到的產線部門（用 includes 比對，涵蓋「生產部-印刷課」等子部門） */
+const EXCLUDED_DEPARTMENTS = ['生產部', '包裝部', '品保部']
+/** 美編、業務排最前面，其餘照原順序 */
+const PRIORITY_DEPARTMENTS = ['美編部', '業務部']
+const deptRank = (d: string) => {
+  const i = PRIORITY_DEPARTMENTS.findIndex((p) => d.includes(p))
+  return i === -1 ? PRIORITY_DEPARTMENTS.length : i
+}
+
+/** schedule_anomaly_reports.qa_category 為 NOT NULL，但這頁刻意不分類
+ *  → 一律填此固定值（既滿足限制，也讓這批單在統計裡可辨識） */
+const PRE_PRODUCTION_CATEGORY = '尚未生產'
 const getTodayDateInput = () => new Date().toISOString().slice(0, 10)
 
 // members.department 與 qa_anomaly_option_items 的部門寫法不一致，需對照；
@@ -76,6 +89,9 @@ export default function SalesDesignAnomalyReportPage() {
   const [attachFiles, setAttachFiles] = useState<File[]>([])
   const [submitting, setSubmitting] = useState(false)
   const [doneMsg, setDoneMsg] = useState('')
+  /** 送出後產生的通報文字（供直接複製貼到 LINE 等），比照已生產異常單的通知樣板 */
+  const [notifyPreview, setNotifyPreview] = useState('')
+  const [copied, setCopied] = useState(false)
 
   // ── 選項（與既有異常單同一來源）───────────────────────────
   // 註：刻意沒有「異常分類」欄——尚未生產的異常先讓使用者自由手寫異常原因，
@@ -94,7 +110,16 @@ export default function SalesDesignAnomalyReportPage() {
         return
       }
       const rows = (data as Array<{ option_type: string; option_value: string; department_value?: string }>) ?? []
-      setDepartmentOptions(rows.filter((r) => r.option_type === 'department').map((r) => r.option_value).filter(Boolean))
+      // 尚未生產的異常與生產單位無關（Snow 2026-09-04）：濾掉生產/包裝/品保等產線部門，
+      // 並把美編、業務置頂——這頁的使用者就是他們。
+      const depts = rows
+        .filter((r) => r.option_type === 'department')
+        .map((r) => r.option_value)
+        .filter(Boolean)
+        .filter((d) => !EXCLUDED_DEPARTMENTS.some((x) => d.includes(x)))
+      setDepartmentOptions(
+        depts.sort((a, b) => deptRank(a) - deptRank(b) || a.localeCompare(b, 'zh-Hant')),
+      )
       setPersonnelOptions(
         rows
           .filter((r) => r.option_type === 'personnel' && r.option_value?.trim())
@@ -136,6 +161,43 @@ export default function SalesDesignAnomalyReportPage() {
   }, [departmentOptions, personnelOptions])
 
   // ── 送出 ─────────────────────────────────────────────────
+  /** 通報文字：欄位與圖示比照「已生產」異常單的通知樣板，狀態改為待處理 */
+  const buildNotifyMessage = () => {
+    const now = new Date().toLocaleString('zh-TW', { timeZone: 'Asia/Taipei' })
+    return [
+      '⚠️ 【異常回報｜尚未生產】',
+      '',
+      `📋 相關單號：${orderNumber.trim() || '-'}`,
+      `🔢 品項編碼：${itemCode.trim() || '-'}`,
+      `📦 品名/名稱：${itemName.trim() || '-'}`,
+      `⚠️ 異常原因：${reason.trim() || '-'}`,
+      `🏢 回報部門：${reporterDepartment.trim() || '-'}`,
+      `👤 回報人員：${reporter.trim() || '-'}`,
+      `🏭 處理部門：${handlerDepartment.trim() || '-'}`,
+      `🔧 處理人員：${handlerPersonnel.trim() || '-'}`,
+      `🖼️ 附件圖片：${attachFiles.length > 0 ? `${attachFiles.length} 張` : '無'}`,
+      '📌 狀態：🟡 待處理',
+      `🕐 回報時間：${now}`,
+    ].join('\n')
+  }
+
+  const handleCopyNotify = async () => {
+    if (!notifyPreview) return
+    try {
+      await navigator.clipboard.writeText(notifyPreview)
+    } catch {
+      // 非 HTTPS 或舊瀏覽器沒有 clipboard API，退回 execCommand
+      const ta = document.createElement('textarea')
+      ta.value = notifyPreview
+      document.body.appendChild(ta)
+      ta.select()
+      document.execCommand('copy')
+      document.body.removeChild(ta)
+    }
+    setCopied(true)
+    setTimeout(() => setCopied(false), 2000)
+  }
+
   const handleSubmit = async () => {
     if (!orderNumber.trim()) {
       alert('請填寫相關單號')
@@ -169,7 +231,7 @@ export default function SalesDesignAnomalyReportPage() {
         qa_department: reporterDepartment.trim() || null,
         qa_reporter: reporter.trim() || null,
         qa_handlers: handlerPersonnel.trim() ? [handlerPersonnel.trim()] : [],
-        qa_category: null,
+        qa_category: PRE_PRODUCTION_CATEGORY,
         qa_responsible: [],
         handler_department: handlerDepartment.trim() || null,
         item_code: itemCode.trim() || null,
@@ -180,6 +242,9 @@ export default function SalesDesignAnomalyReportPage() {
       if (error) throw error
 
       setDoneMsg(`已送出：${orderNumber.trim()}（${PRE_PRODUCTION_TAG.replace(/[【】]/g, '')}異常）`)
+      // 必須在清空欄位「之前」組好通報文字，否則內容會全變成 '-'
+      setNotifyPreview(buildNotifyMessage())
+      setCopied(false)
       setOrderNumber('')
       setItemCode('')
       setItemName('')
@@ -191,7 +256,13 @@ export default function SalesDesignAnomalyReportPage() {
       setAttachFiles([])
       setCreatedDate(getTodayDateInput())
     } catch (err) {
-      alert(`送出失敗：${err instanceof Error ? err.message : String(err)}`)
+      // Supabase 的錯誤是普通物件（有 message/details/hint），不是 Error，
+      // 直接 String() 會變成 [object Object]，看不出原因
+      const e = err as { message?: string; details?: string; hint?: string } | null
+      const msg = err instanceof Error
+        ? err.message
+        : [e?.message, e?.details, e?.hint].filter(Boolean).join('｜') || JSON.stringify(err)
+      alert(`送出失敗：${msg}`)
     } finally {
       setSubmitting(false)
     }
@@ -222,36 +293,36 @@ export default function SalesDesignAnomalyReportPage() {
           </div>
         )}
 
+        {/* 通報內容：送出後才出現，可直接複製貼到 LINE／群組（比照已生產異常單的通知） */}
+        {notifyPreview && (
+          <div className="mb-6 rounded-xl border border-slate-700 bg-slate-900/70 overflow-hidden">
+            <div className="flex items-center justify-between gap-3 px-4 py-2.5 border-b border-slate-800">
+              <span className="text-sm font-semibold text-white">通報內容</span>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={handleCopyNotify}
+                  className={`px-3 py-1.5 rounded text-sm font-medium transition-colors ${
+                    copied
+                      ? 'bg-emerald-700 text-white'
+                      : 'bg-slate-700 hover:bg-slate-600 text-slate-100'
+                  }`}
+                >{copied ? '✓ 已複製' : '📋 複製通報'}</button>
+                <button
+                  type="button"
+                  onClick={() => setNotifyPreview('')}
+                  title="關閉通報內容"
+                  className="text-slate-500 hover:text-slate-300 text-xl leading-none px-1"
+                >×</button>
+              </div>
+            </div>
+            <pre className="px-4 py-3 text-[13px] leading-relaxed text-slate-200 whitespace-pre-wrap break-words font-sans max-h-72 overflow-y-auto">
+{notifyPreview}
+            </pre>
+          </div>
+        )}
+
         <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 flex flex-col gap-5">
-          {/* 日期＋單號 */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <div>
-              <label className={labelCls}>日期</label>
-              <input type="date" value={createdDate} onChange={(e) => setCreatedDate(e.target.value)} className={inputCls} />
-            </div>
-            <div>
-              <label className={labelCls}>相關單號（SO 訂單號或 MOT 製令號）</label>
-              <input
-                value={orderNumber}
-                onChange={(e) => setOrderNumber(e.target.value)}
-                placeholder="例：SO260804025"
-                className={inputCls}
-              />
-            </div>
-          </div>
-
-          {/* 品項 */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <div>
-              <label className={labelCls}>品項編碼（選填）</label>
-              <input value={itemCode} onChange={(e) => setItemCode(e.target.value)} className={inputCls} />
-            </div>
-            <div>
-              <label className={labelCls}>品名/名稱（選填）</label>
-              <input value={itemName} onChange={(e) => setItemName(e.target.value)} className={inputCls} />
-            </div>
-          </div>
-
           {/* 回報者 */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div>
@@ -311,6 +382,35 @@ export default function SalesDesignAnomalyReportPage() {
                   <option key={p.option_value} value={p.option_value}>{p.option_value}</option>
                 ))}
               </select>
+            </div>
+          </div>
+
+          {/* 日期＋單號 */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div>
+              <label className={labelCls}>日期</label>
+              <input type="date" value={createdDate} onChange={(e) => setCreatedDate(e.target.value)} className={inputCls} />
+            </div>
+            <div>
+              <label className={labelCls}>相關單號（SO 訂單號或 MOT 製令號）</label>
+              <input
+                value={orderNumber}
+                onChange={(e) => setOrderNumber(e.target.value)}
+                placeholder="例：SO260804025"
+                className={inputCls}
+              />
+            </div>
+          </div>
+
+          {/* 品項 */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div>
+              <label className={labelCls}>品項編碼（選填）</label>
+              <input value={itemCode} onChange={(e) => setItemCode(e.target.value)} className={inputCls} />
+            </div>
+            <div>
+              <label className={labelCls}>品名/名稱（選填）</label>
+              <input value={itemName} onChange={(e) => setItemName(e.target.value)} className={inputCls} />
             </div>
           </div>
 

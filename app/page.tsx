@@ -293,7 +293,9 @@ export default function HomePage() {
   const canProductDev = hasFeaturePermission('product_dev')
   const canInfoBoard = hasFeaturePermission('info_board')
   const canPurchasing = hasFeaturePermission('purchasing')
-  const canChangpingShip = hasFeaturePermission('changping_ship')
+  // 常平訂單資料區：不走權限鍵，限擁有者本人（連其他管理員都看不到；API 端 guardChangpingShipOwner 為準）
+  const CHANGPING_SHIP_OWNERS = ['s9323162@gmail.com']
+  const canChangpingShip = CHANGPING_SHIP_OWNERS.includes((currentUser?.email ?? '').trim().toLowerCase())
   // 採購到期徽章：僅具權限者抓計數（API 端亦有 guardPermission 把關）
   const [purchasingDue, setPurchasingDue] = useState(0)
   useEffect(() => {
@@ -884,16 +886,16 @@ export default function HomePage() {
             </span>
           </Link>
 
-          {/* 常平訂單資料區 (Amber) — 訂單工作表黃底(常平已出貨)快照,每天 07:00 自動同步 */}
+          {/* 常平訂單資料區 (Amber) — 訂單工作表黃底(常平已出貨)快照,每晚 23:30 自動同步。
+              限擁有者本人：非擁有者整張卡片不渲染（不是變灰），其他人不會知道有這個區。 */}
+          {canChangpingShip && (
           <Link href="/changping-ship"
-            onClick={guardFeatureAccess('changping_ship', '常平訂單資料區')}
             onMouseEnter={() => setIsHovered('none')}
             onMouseLeave={() => setIsHovered('none')}
             className={`
               group relative order-15 h-40 md:h-60 lg:h-64 rounded-2xl border border-slate-700 bg-slate-900/40 backdrop-blur-sm
               flex flex-col items-center justify-center text-center p-3 md:p-6 transition-all duration-500 cursor-pointer
               hover:border-amber-500 hover:bg-slate-800/60 hover:shadow-[0_0_30px_rgba(245,158,11,0.15)]
-              ${canChangpingShip ? '' : 'opacity-50 grayscale'}
             `}
           >
             <div className="absolute top-4 right-4 flex items-center gap-1.5 px-2 py-1 bg-amber-500/10 rounded border border-amber-500/20">
@@ -912,6 +914,7 @@ export default function HomePage() {
               OPEN &rarr;
             </span>
           </Link>
+          )}
 
         </div>
 
@@ -1077,6 +1080,19 @@ export default function HomePage() {
                 </div>
                 <span className="px-3 py-1 rounded border border-green-600 text-green-300 text-xs font-mono bg-green-900/30">
                   {downloadingProducts ? '下載中...' : '下載 →'}
+                </span>
+              </button>
+              <button
+                onClick={() => { setShowProductDevModal(false); router.push('/product-dev/item-request'); }}
+                className="bg-green-700/20 border border-green-600 rounded-xl p-5 cursor-pointer hover:bg-green-700/40 transition-all flex items-center gap-4 w-full text-left"
+              >
+                <div className="text-3xl">🆕</div>
+                <div className="flex-1">
+                  <div className="text-green-400 font-bold text-lg mb-1">申請新品項編碼</div>
+                  <div className="text-xs text-slate-300">填寫建檔資料，可引用類似品項帶入 ERP 設定</div>
+                </div>
+                <span className="px-3 py-1 rounded border border-green-600 text-green-300 text-xs font-mono bg-green-900/30">
+                  前往申請 →
                 </span>
               </button>
             </div>

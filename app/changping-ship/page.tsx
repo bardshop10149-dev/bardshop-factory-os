@@ -35,6 +35,8 @@ interface MarkRow {
   match_status: string | null
   applied_at: string | null
   apply_note: string | null
+  po_line: string | null      // 權威採購行:POC…#序(由 matched_lines 來)
+  so_erp: string | null       // 權威來源單:ARGO SO_PROJECT_ID(工作表 SO 欄常夾雜註記)
 }
 
 interface Counts { total: number; active: number; applied: number; unmatched: number }
@@ -66,7 +68,7 @@ export default function ChangpingShipPage() {
     return rows.filter((r) => {
       if (onlyActive && !r.still_marked) return false
       if (!kw) return true
-      return [r.po_no, r.so_no, r.pr_no, r.item_code, r.item_name, r.detail_id]
+      return [r.po_no, r.so_no, r.po_line, r.so_erp, r.pr_no, r.item_code, r.item_name, r.detail_id]
         .some((v) => (v ?? '').toUpperCase().includes(kw))
     })
   }, [rows, search, onlyActive])
@@ -120,8 +122,8 @@ export default function ChangpingShipPage() {
               <thead>
                 <tr className="bg-slate-900 text-slate-400 text-left text-xs">
                   <th className="px-3 py-2 whitespace-nowrap">常平出貨日</th>
-                  <th className="px-3 py-2 whitespace-nowrap">採購單號</th>
-                  <th className="px-3 py-2 whitespace-nowrap">來源單</th>
+                  <th className="px-3 py-2 whitespace-nowrap">採購單號 PO</th>
+                  <th className="px-3 py-2 whitespace-nowrap">來源單 SO</th>
                   <th className="px-3 py-2">品號 / 品名</th>
                   <th className="px-3 py-2 text-right whitespace-nowrap">數量</th>
                   <th className="px-3 py-2 whitespace-nowrap">狀態</th>
@@ -141,8 +143,19 @@ export default function ChangpingShipPage() {
                       <span className="text-amber-300">{r.ship_date_text || '(未填)'}</span>
                       {r.ship_date && <span className="text-slate-500 text-xs ml-1">({r.ship_date})</span>}
                     </td>
-                    <td className="px-3 py-2 whitespace-nowrap font-mono text-cyan-300">{r.po_no}</td>
-                    <td className="px-3 py-2 whitespace-nowrap font-mono text-slate-400 text-xs max-w-[160px] truncate" title={r.so_no ?? ''}>{r.so_no ?? '—'}</td>
+                    {/* PO：以 ARGO 對到的採購行為準（工作表可能寫作廢前的舊單號）；工作表原文放 title */}
+                    <td className="px-3 py-2 whitespace-nowrap font-mono text-cyan-300"
+                        title={r.po_line && r.po_line !== r.po_no ? `工作表寫：${r.po_no}` : ''}>
+                      {r.po_line ?? r.po_no}
+                      {r.po_line && !r.po_line.startsWith(r.po_no) && (
+                        <span className="ml-1 text-[10px] text-amber-400/80">(表:{r.po_no})</span>
+                      )}
+                    </td>
+                    {/* SO：優先用 ARGO 的來源單（乾淨單號）；工作表原文常夾雜「RO…/常平/PR…」註記 */}
+                    <td className="px-3 py-2 whitespace-nowrap font-mono text-slate-300 text-xs max-w-[180px] truncate"
+                        title={r.so_no && r.so_no !== r.so_erp ? `工作表寫：${r.so_no}` : (r.so_no ?? '')}>
+                      {r.so_erp ?? r.so_no ?? '—'}
+                    </td>
                     <td className="px-3 py-2 min-w-[220px]">
                       <div className="font-mono text-xs text-slate-300">{r.item_code ?? '—'}</div>
                       <div className="text-xs text-slate-500 line-clamp-2" title={r.item_name ?? ''}>{r.item_name ?? ''}</div>
