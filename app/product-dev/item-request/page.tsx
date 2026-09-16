@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
+import { CATEGORY_PRESETS, LOCKED_ERP_FIELDS } from '../../../lib/productDev/categoryPresets'
 
 /**
  * 商品開發 —— 新品項編碼建立申請
@@ -18,6 +19,8 @@ interface PartRow { [key: string]: string | number | null }
 
 interface RequestRow {
   id: number
+  /** 每次處理都會更新；用來當軌跡重抓的觸發點 */
+  updated_at: string
   request_no: string
   status: 'pending' | 'created' | 'rejected'
   requester_email: string
@@ -82,46 +85,10 @@ const EMPTY_FORM: FormState = {
 }
 
 // ── 選項（取自 ARGO 現有品項的實際用法統計）────────────
-/**
- * 大類 = 料號第一碼 = ARGO PRODUCT_CATEGORY。
- * defaults 是該類「目前 ARGO 上最常見」的設定組合，只作參考預填；
- * 真正可靠的來源是引用既有品項 —— 例外不少（例如 S 類就有四種存貨科目）。
- */
-const CATEGORIES: {
-  code: string
-  label: string
-  hint: string
-  defaults: Partial<FormState>
-}[] = [
-  {
-    code: 'M', label: 'M — 材料', hint: '採購原料，進 FS100 倉',
-    defaults: { source_type: 'B', inventory_type: 'M', cost_category: 'M', leadtime_flag: 'PURCHASE', bom_warehouse_id: 'FS100', lot_no_flag: 'N', expense_flag: 'N', level_code_inv: '1148', account_no_inv: '1315' },
-  },
-  {
-    code: 'W', label: 'W — 耗材／輔料', hint: '消耗性物料，成本類別 M_MRO',
-    defaults: { source_type: 'B', inventory_type: 'M', cost_category: 'M_MRO', leadtime_flag: 'PURCHASE', bom_warehouse_id: 'FS100', lot_no_flag: 'N', expense_flag: 'N', level_code_inv: '1148', account_no_inv: '1316' },
-  },
-  {
-    code: 'P', label: 'P — 自製成品', hint: '本廠生產，批號控管',
-    defaults: { source_type: 'B', inventory_type: 'FINSHED_GOODS', cost_category: 'FINSHED_GOODS', leadtime_flag: 'MANUFACTURE', bom_warehouse_id: 'FS100', lot_no_flag: 'Y', expense_flag: 'N', level_code_inv: '1143', account_no_inv: '1311' },
-  },
-  {
-    code: 'C', label: 'C — 採購成品', hint: '外購成品／半成品，批號控管',
-    defaults: { source_type: 'B', inventory_type: 'P', cost_category: 'P', leadtime_flag: 'PURCHASE', bom_warehouse_id: 'FS100', lot_no_flag: 'Y', expense_flag: 'N', level_code_inv: '1141', account_no_inv: '1301' },
-  },
-  {
-    code: 'S', label: 'S — 費用（加工／服務）', hint: '費用類，進 FEXP 費用倉',
-    defaults: { source_type: 'B', inventory_type: 'P', cost_category: 'P', leadtime_flag: 'PURCHASE', bom_warehouse_id: 'FEXP', lot_no_flag: 'N', expense_flag: 'Y', level_code_inv: '515', account_no_inv: '5736' },
-  },
-  {
-    code: 'A', label: 'A — 費用（其他）', hint: '費用類，進 FEXP 費用倉',
-    defaults: { source_type: 'P', inventory_type: 'P', cost_category: 'P', leadtime_flag: 'PURCHASE', bom_warehouse_id: 'FEXP', lot_no_flag: 'N', expense_flag: 'Y', level_code_inv: '62', account_no_inv: '6288' },
-  },
-  {
-    code: 'O', label: 'O — 委外', hint: '委外生產品項',
-    defaults: { source_type: 'P', inventory_type: 'FINSHED_GOODS', cost_category: 'FINSHED_GOODS', leadtime_flag: 'MANUFACTURE', bom_warehouse_id: '', lot_no_flag: 'N', expense_flag: 'N', level_code_inv: '1143', account_no_inv: '1311' },
-  },
-]
+// 大類預設值與「申請人不能改」的欄位清單都放在 lib/productDev/categoryPresets，
+// 與後端共用同一份——兩邊各留一份，改了一邊忘了另一邊，畫面顯示的和實際寫進去的
+// 就會不一致，而且從畫面上完全看不出來。
+const CATEGORIES = CATEGORY_PRESETS
 
 const UNITS = ['個', '片', 'PCS', '張', '次', '罐', '包', '支', '瓶', '條', '串', '組', '盒', '卷', '式', '版', '箱', '桶', '公斤', 'M', '碼', '才', '幅']
 
@@ -137,6 +104,9 @@ const SUBCATEGORIES: Record<string, string[]> = {
 }
 
 /** 表單上的 ERP 設定欄位；label 給人看，erp 給建檔人員對照 ARGO 欄位 */
+/** 這幾個欄位申請人不能改（會影響帳務），值由引用品項或大類預設決定 */
+const LOCKED = new Set<string>(LOCKED_ERP_FIELDS)
+
 const ERP_FIELDS: { key: keyof FormState; label: string; erp: string; options?: string[]; placeholder?: string }[] = [
   { key: 'source_type', label: '來源型態', erp: 'SOURCE_TYPE', options: ['B', 'P'] },
   { key: 'inventory_type', label: '庫存類型', erp: 'INVENTORY_TYPE', options: ['M', 'P', 'FINSHED_GOODS'] },
@@ -560,21 +530,42 @@ export default function ItemCodeRequestPage() {
             <p className="text-xs text-slate-500 mb-4">
               引用品項後會自動帶入。<span className="text-amber-400">不確定的欄位就別改</span>，沿用引用來源比自己猜安全。
             </p>
+            <p className="mb-4 rounded-lg border border-slate-700/60 bg-slate-800/40 px-3 py-2 text-xs text-slate-400">
+              🔒 標記的欄位<span className="text-slate-200">不開放修改</span>——會計科目、庫存類型、成本類別、
+              費用類填錯會讓帳跑錯地方。這些值一律取自你引用的品項；沒有引用來源時用大類預設值。
+              若這張單的設定確實該不一樣，請寫在「用途說明」裡，由建檔人員調整。
+            </p>
 
             <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-              {ERP_FIELDS.map(f => (
-                <div key={f.key}>
-                  <label className={labelCls}>{f.label}<span className="block text-[9px] text-slate-600 font-mono">{f.erp}</span></label>
-                  {f.options ? (
-                    <select value={form[f.key]} onChange={e => set(f.key, e.target.value)} className={inputCls}>
-                      <option value="">—</option>
-                      {f.options.map(o => <option key={o} value={o}>{o}</option>)}
-                    </select>
-                  ) : (
-                    <input value={form[f.key]} onChange={e => set(f.key, e.target.value)} placeholder={f.placeholder} className={inputCls} />
-                  )}
-                </div>
-              ))}
+              {ERP_FIELDS.map(f => {
+                const locked = LOCKED.has(f.key)
+                return (
+                  <div key={f.key}>
+                    <label className={labelCls}>
+                      {locked && <span className="mr-1" title="不開放修改">🔒</span>}
+                      {f.label}
+                      <span className="block text-[9px] text-slate-600 font-mono">{f.erp}</span>
+                    </label>
+                    {locked ? (
+                      // 唯讀用 div 而不是 disabled input：disabled 的值在某些瀏覽器會被跳過、
+                      // 也不利閱讀；這裡只是要「看得到、改不動」
+                      <div
+                        title={'由' + (template ? '引用品項 ' + s(template.PART) : '大類預設') + '決定，不開放修改'}
+                        className="w-full rounded-lg border border-slate-700/60 bg-slate-800/60 px-3 py-2 text-sm text-slate-300"
+                      >
+                        {form[f.key] || <span className="text-slate-600">—</span>}
+                      </div>
+                    ) : f.options ? (
+                      <select value={form[f.key]} onChange={e => set(f.key, e.target.value)} className={inputCls}>
+                        <option value="">—</option>
+                        {f.options.map(o => <option key={o} value={o}>{o}</option>)}
+                      </select>
+                    ) : (
+                      <input value={form[f.key]} onChange={e => set(f.key, e.target.value)} placeholder={f.placeholder} className={inputCls} />
+                    )}
+                  </div>
+                )
+              })}
             </div>
           </section>
 
@@ -684,6 +675,24 @@ export default function ItemCodeRequestPage() {
   )
 }
 
+interface LogRow {
+  id: number
+  action: string
+  actor_email: string
+  actor_name: string | null
+  changes: Record<string, { before?: unknown; after?: unknown }> | null
+  note: string | null
+  created_at: string
+}
+
+const LOG_ACTION_META: Record<string, { label: string; cls: string }> = {
+  submitted: { label: '送出申請', cls: 'bg-sky-900/50 text-sky-300 border-sky-700/60' },
+  created: { label: '完成建檔', cls: 'bg-emerald-900/50 text-emerald-300 border-emerald-700/60' },
+  rejected: { label: '退回', cls: 'bg-rose-900/50 text-rose-300 border-rose-700/60' },
+  reopen: { label: '救回待建檔', cls: 'bg-amber-900/50 text-amber-300 border-amber-700/60' },
+  updated: { label: '修改', cls: 'bg-slate-800 text-slate-300 border-slate-700' },
+}
+
 // ── 清單列（含展開後的完整內容與處理動作）────────────
 function RequestRowView({
   row, me, expanded, onToggle, onPatch,
@@ -698,6 +707,25 @@ function RequestRowView({
   const [reason, setReason] = useState(row.reject_reason ?? '')
   const [busy, setBusy] = useState(false)
   const meta = STATUS_META[row.status]
+
+  // 軌跡展開才抓：清單一次 300 張，全部帶軌跡會把回應撐大好幾倍，實際一次只看一張。
+  // row.updated_at 也放進相依，處理完（結案/退回）會重抓，軌跡當場多一筆。
+  const [logs, setLogs] = useState<LogRow[] | null>(null)
+  useEffect(() => {
+    if (!expanded) return
+    let cancelled = false
+    const load = async () => {
+      try {
+        const res = await fetch('/api/product-dev/item-request?logs=' + row.id)
+        const json = await res.json()
+        if (!cancelled) setLogs(json.success ? (json.logs ?? []) : [])
+      } catch {
+        if (!cancelled) setLogs([])
+      }
+    }
+    void load()
+    return () => { cancelled = true }
+  }, [expanded, row.id, row.updated_at])
 
   const act = async (body: Record<string, unknown>) => {
     setBusy(true)
@@ -766,6 +794,55 @@ function RequestRowView({
             {row.handled_by && (
               <div className="mb-4 text-[10px] text-slate-600">處理：{row.handled_by}　{fmtTime(row.handled_at)}</div>
             )}
+
+            {/* 異動軌跡：申請單只留得住「現在長什麼樣」，被退回、補件、再送出的過程
+                都會被覆蓋掉；要回頭問「當初是誰、把什麼改成什麼」就只能看這裡。 */}
+            <div className="mb-4 pt-3 border-t border-slate-800">
+              <div className="text-[10px] text-slate-600 mb-2">異動軌跡</div>
+              {logs === null ? (
+                <div className="text-slate-600">讀取中…</div>
+              ) : logs.length === 0 ? (
+                <div className="text-slate-600">
+                  沒有軌跡紀錄
+                  <span className="ml-1 text-slate-700">（這張單早於軌跡功能上線，或軌跡表尚未建立）</span>
+                </div>
+              ) : (
+                <ol className="space-y-2">
+                  {logs.map(lg => {
+                    const m = LOG_ACTION_META[lg.action] ?? LOG_ACTION_META.updated
+                    const diffs = Object.entries(lg.changes ?? {}).filter(
+                      ([, v]) => v && typeof v === 'object' && ('before' in v || 'after' in v),
+                    )
+                    return (
+                      <li key={lg.id} className="flex gap-2">
+                        <span className={'shrink-0 h-fit rounded border px-1.5 py-0.5 text-[10px] ' + m.cls}>{m.label}</span>
+                        <div className="min-w-0">
+                          <div className="text-slate-400">
+                            {lg.actor_name || lg.actor_email}
+                            <span className="ml-2 text-slate-600">{fmtTime(lg.created_at)}</span>
+                          </div>
+                          {lg.note && <div className="text-slate-500 break-all">{lg.note}</div>}
+                          {/* 送出時 changes 記的是整張單的內容，逐欄列出來會洗版；
+                              只有「狀態轉換」這種少數欄位的異動才展開成 A → B */}
+                          {lg.action !== 'submitted' && diffs.length > 0 && (
+                            <div className="mt-0.5 space-y-0.5">
+                              {diffs.map(([k, v]) => (
+                                <div key={k} className="text-slate-500">
+                                  <span className="font-mono text-[10px] text-slate-600">{k}</span>
+                                  <span className="mx-1 text-slate-600 line-through">{String(v.before ?? '—')}</span>
+                                  →
+                                  <span className="ml-1 text-slate-300">{String(v.after ?? '—')}</span>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      </li>
+                    )
+                  })}
+                </ol>
+              )}
+            </div>
 
             {/* 處理動作 */}
             {row.status === 'pending' ? (
