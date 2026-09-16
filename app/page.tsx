@@ -293,9 +293,9 @@ export default function HomePage() {
   const canProductDev = hasFeaturePermission('product_dev')
   const canInfoBoard = hasFeaturePermission('info_board')
   const canPurchasing = hasFeaturePermission('purchasing')
-  // 常平訂單資料區：不走權限鍵，限擁有者本人（連其他管理員都看不到；API 端 guardChangpingShipOwner 為準）
-  const CHANGPING_SHIP_OWNERS = ['s9323162@gmail.com']
-  const canChangpingShip = CHANGPING_SHIP_OWNERS.includes((currentUser?.email ?? '').trim().toLowerCase())
+  // 常平訂單資料區：只看有沒有被勾 changping_ship（不用 hasFeaturePermission——那會讓管理員自動通過；
+  // 這區連其他管理員都不該看到）。API 端 guardChangpingShipOwner 為準。
+  const canChangpingShip = memberPermissions.includes('changping_ship')
   // 採購到期徽章：僅具權限者抓計數（API 端亦有 guardPermission 把關）
   const [purchasingDue, setPurchasingDue] = useState(0)
   useEffect(() => {
