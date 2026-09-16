@@ -21,6 +21,12 @@ import { matchMoToOrder } from '@/lib/moLineMatch'
 //     代表「這張單最後是誰動的」，未必就是刪掉這一行的人 → approximate=true。
 //   * ARGO 行號（LINE_NO）會被重用/位移：在中間插一行，後面所有行的行號會往後推，
 //     內容比對就會看起來像「這幾行的料號被改掉」。這類位移無法從 change_log 分辨。
+//
+// 「發單前改 vs 發單後改」的判定（2026-09-17 修正）：
+//   發單時間的權威來源＝每日出單表（daily_order_sheets）裡這張單第一次出現的日期。
+//   拿「這張單現在有沒有製令／上傳紀錄」當「已發單後才改」是錯的——那是現況，
+//   一張 9/1 修改、9/10 才發單的單會被誤標成「發單後才改」而驚動現場。
+//   正確判定＝逐筆比較「修改時間」與「實際發單日」；同日從嚴視為發單後。
 // ─────────────────────────────────────────────────────────────────────────────
 
 const API_BASE = process.env.ARGOERP_API_BASE!
@@ -106,7 +112,9 @@ function stationToDept(station: string): string | null {
  * 為什麼是「已動工的站」而不是「還會經過的站」：後者包含尚未開工、甚至只是用標準
  * 途程猜的站，通知它們沒有意義——真正要重做或要回頭清點的，是已經照舊內容做完的站。
  */
-function notifyTarget(field: string, impact: LineImpact, dispatched: boolean): { targets: string[]; note: string } {
+function notifyTarget(
+  field: string, impact: LineImpact, editedAfterDispatch: boolean, dispatchDate: string | null,
+): { targets: string[]; note: string } {
   if (FINANCE_FIELDS.has(field)) {
     return { targets: ['財務部門'], note: '金額／帳務類欄位，不影響生產' }
   }
@@ -116,18 +124,23 @@ function notifyTarget(field: string, impact: LineImpact, dispatched: boolean): {
   if (field === 'duedate') {
     return { targets: ['全廠'], note: '交期一動整條排程要重排，每一站的順位都受影響' }
   }
-  if (!dispatched) {
-    return { targets: ['美編部門'], note: `${impact.dispatchState}，現場還沒動工；美編可能已依舊內容作業` }
+  if (!editedAfterDispatch) {
+    return {
+      targets: ['美編部門'],
+      note: dispatchDate
+        ? `此修改在發單日（${dispatchDate}）之前，發出的工單已是新內容；美編可能已依舊內容作業`
+        : '出單表查無此單＝尚未發單，現場還沒動工；美編可能已依舊內容作業',
+    }
   }
   const depts = Array.from(new Set(
     impact.reportedStations.map(stationToDept).filter((d): d is string => !!d),
   ))
   if (depts.length === 0) {
-    return { targets: ['倉庫部門'], note: `已發單（${impact.dispatchState}）但現場尚無報工，料已領出` }
+    return { targets: ['倉庫部門'], note: `${dispatchDate} 發單後才改，現場尚無報工；料可能已領出` }
   }
   return {
     targets: depts,
-    note: `已做到 ${impact.reportedStations.join(' → ')}，這些站已依舊內容作業過`,
+    note: `${dispatchDate} 發單後才改，已做到 ${impact.reportedStations.join(' → ')}，這些站已依舊內容作業過`,
   }
 }
 
@@ -256,6 +269,10 @@ export interface EditLogEntry {
   detectedAt: string
   /** 這一行的下游狀態（同一訂單行的多個欄位共用同一份） */
   impact: LineImpact
+  /** 這張單第一次出現在每日出單表的日期（YYYY-MM-DD）＝實際發單日；null＝出單表查無＝尚未發單 */
+  dispatchDate: string | null
+  /** 這筆修改是否發生在發單之後（修改日期 ≥ 出單表發單日；同日從嚴視為發單後） */
+  editedAfterDispatch: boolean
   /** 這筆變動該通知哪個單位 */
   notify: { targets: string[]; note: string }
 }
@@ -297,6 +314,35 @@ async function inBatches<T>(
     }
   }
   return out
+}
+
+/**
+ * 實際發單日：每日出單表（daily_order_sheets）裡這張單「第一次出現」的 sheet_date。
+ * 出單表一天一列、rows 內每列帶 order_number，全表逐日掃一遍即可（目前僅百餘天）。
+ * 這是「發單前改 vs 發單後改」唯一可信的時間依據——製令／上傳紀錄只能說明現況，
+ * 說明不了「這筆修改發生時發單了沒」。
+ */
+async function loadDispatchDates(supabase: Supa, docIds: string[]): Promise<Map<string, string>> {
+  const want = new Set(docIds)
+  const earliest = new Map<string, string>()
+  for (let from = 0; ; from += PAGE) {
+    const { data, error } = await supabase
+      .from('daily_order_sheets')
+      .select('sheet_date, rows')
+      .order('sheet_date', { ascending: true })
+      .range(from, from + PAGE - 1)
+    if (error) throw error
+    const batch = (data ?? []) as Array<{ sheet_date: string; rows: unknown }>
+    for (const sheet of batch) {
+      const rows = Array.isArray(sheet.rows) ? sheet.rows as Row[] : []
+      for (const r of rows) {
+        const no = String(r.order_number ?? '').trim()
+        if (no && want.has(no) && !earliest.has(no)) earliest.set(no, sheet.sheet_date)
+      }
+    }
+    if (batch.length < PAGE) break
+  }
+  return earliest
 }
 
 /**
@@ -577,8 +623,11 @@ export async function GET(request: NextRequest) {
       if (id) empName.set(id, String(r.NAME ?? ''))
     }
 
-    // 3.5) 下游狀態：這一行發到哪了、影響哪些單位（全部批次查，避免逐列查表）
-    const impacts = await buildImpacts(supabase, logs, docIds)
+    // 3.5) 下游狀態（現況）＋ 實際發單日（出單表），兩者互相獨立、並行查
+    const [impacts, dispatchDates] = await Promise.all([
+      buildImpacts(supabase, logs, docIds),
+      loadDispatchDates(supabase, docIds),
+    ])
 
     // 4) 翻成人話
     const entries: EditLogEntry[] = []
@@ -603,6 +652,13 @@ export async function GET(request: NextRequest) {
 
       const salesName = toText(after.sales_name) ?? toText(before.sales_name)
         ?? toText(header?.SALES_NAME) ?? ''
+      // 發單前改 vs 發單後改：拿「這筆修改的日期」跟「出單表的實際發單日」比，
+      // 不能拿現況（有無製令／上傳紀錄）判斷——先改後發單的會被誤標成發單後改。
+      // at 是 '2026/08/25 17:57:32'（ARGO）或 '2026-08-25 …'（退回偵測時間），取日期正規化成 -。
+      const dispatchDate = dispatchDates.get(log.doc_no) ?? null
+      const editDate = at.slice(0, 10).replace(/\//g, '-')
+      // 出單表只有日期沒有時刻，同日分不出先後 → 從嚴視為發單後（寧可多通知）
+      const editedAfterDispatch = dispatchDate !== null && editDate >= dispatchDate
       const common = {
         groupKey: `${log.doc_no}|${empNo}|${at}`,
         at,
@@ -614,9 +670,9 @@ export async function GET(request: NextRequest) {
         approximate,
         detectedAt: log.created_at,
         impact: impacts.get(`${log.doc_no}|${log.sub_no ?? ''}`) ?? EMPTY_IMPACT,
+        dispatchDate,
+        editedAfterDispatch,
       }
-      // 已發到現場（含備料、生產中）才會影響生產單位
-      const dispatched = ['已發單上傳', '已備料', '生產中'].includes(common.impact.dispatchState)
 
       if (log.change_type === 'update') {
         const fields = (log.changed_fields ?? []).filter((f) => !NOISE_FIELDS.has(f))
@@ -629,7 +685,7 @@ export async function GET(request: NextRequest) {
             fieldLabel: FIELD_LABEL[f] ?? f,
             oldValue: toText(before[f]),
             newValue: toText(after[f]),
-            notify: notifyTarget(f, common.impact, dispatched),
+            notify: notifyTarget(f, common.impact, editedAfterDispatch, dispatchDate),
           })
         }
       } else if (log.change_type === 'insert') {
@@ -643,9 +699,14 @@ export async function GET(request: NextRequest) {
           newValue: [toText(after.mbp_part), toText(after.description), `數量 ${toText(after.order_qty_oru) ?? '-'}`]
             .filter(Boolean).join(' / '),
           // 新增品項本身不動到既有製令，但會把後面的行號整批往後推
-          notify: dispatched
-            ? { targets: ['全廠'], note: '該單已發單，插行會讓後面品項的工單行號失效' }
-            : { targets: ['美編部門'], note: '尚未發單，不影響生產' },
+          notify: editedAfterDispatch
+            ? { targets: ['全廠'], note: `該單已於 ${dispatchDate} 發單，插行會讓後面品項的工單行號失效` }
+            : {
+              targets: ['美編部門'],
+              note: dispatchDate
+                ? `發單日（${dispatchDate}）之前的調整，發出的工單已是新內容`
+                : '尚未發單，不影響生產',
+            },
         })
       } else {
         entries.push({
@@ -657,9 +718,14 @@ export async function GET(request: NextRequest) {
           oldValue: [toText(before.mbp_part), toText(before.description), `數量 ${toText(before.order_qty_oru) ?? '-'}`]
             .filter(Boolean).join(' / '),
           newValue: null,
-          notify: dispatched
-            ? { targets: ['全廠'], note: '該單已發單，刪行會讓後面品項的工單行號失效' }
-            : { targets: ['美編部門'], note: '尚未發單，不影響生產' },
+          notify: editedAfterDispatch
+            ? { targets: ['全廠'], note: `該單已於 ${dispatchDate} 發單，刪行會讓後面品項的工單行號失效` }
+            : {
+              targets: ['美編部門'],
+              note: dispatchDate
+                ? `發單日（${dispatchDate}）之前的調整，發出的工單已是新內容`
+                : '尚未發單，不影響生產',
+            },
         })
       }
     }

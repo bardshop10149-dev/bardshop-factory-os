@@ -47,6 +47,10 @@ interface EditLogEntry {
   approximate: boolean
   detectedAt: string
   impact: LineImpact
+  /** 這張單第一次出現在每日出單表的日期（YYYY-MM-DD）＝實際發單日；null＝出單表查無＝尚未發單 */
+  dispatchDate: string | null
+  /** 這筆修改是否發生在發單之後（修改日期 ≥ 出單表發單日；同日從嚴視為發單後） */
+  editedAfterDispatch: boolean
   notify: { targets: string[]; note: string }
 }
 
@@ -160,7 +164,8 @@ export default function SoEditLogCard({ onInspectOrder, onOpenOrder }: Props) {
     const q = search.trim().toLowerCase()
     const list = entries.filter((e) => {
       if (actionFilter !== '全部' && e.action !== actionFilter) return false
-      if (riskOnly && (STATE_RANK[e.impact.dispatchState] ?? 0) < 3) return false
+      // 「已發單後才改」依修改時間 vs 出單表實際發單日判斷，不是看這張單現在的狀態
+      if (riskOnly && !e.editedAfterDispatch) return false
       if (!q) return true
       return [e.docNo, e.empNo, e.empName, e.salesName, e.fieldLabel, e.oldValue, e.newValue,
         e.impact.dispatchState, ...e.impact.stations]
@@ -178,8 +183,8 @@ export default function SoEditLogCard({ onInspectOrder, onOpenOrder }: Props) {
     修改: entries.filter((e) => e.action === '修改').length,
     刪除: entries.filter((e) => e.action === '刪除').length,
     人數: new Set(entries.map((e) => e.empNo).filter(Boolean)).size,
-    // 已發單上傳以後才改的（＝料可能已經領了、甚至已經在做）
-    風險: new Set(entries.filter((e) => (STATE_RANK[e.impact.dispatchState] ?? 0) >= 3)
+    // 發單之後才被改的（＝現場可能已依舊內容領料、作業）
+    風險: new Set(entries.filter((e) => e.editedAfterDispatch)
       .map((e) => `${e.docNo}|${e.lineNo}`)).size,
     生產中: new Set(entries.filter((e) => e.impact.dispatchState === '生產中')
       .map((e) => `${e.docNo}|${e.lineNo}`)).size,
@@ -187,12 +192,14 @@ export default function SoEditLogCard({ onInspectOrder, onOpenOrder }: Props) {
 
   const exportCsv = useCallback(() => {
     const head = ['異動時間', '工號', '姓名', '動作', '訂單號', '行號', '修改位置', '原內容', '新內容',
-      '訂單業務員', '應通知', '通知原因', '發單狀態', '對應製令', '對應可信度', '塔台進度%', '進行中工序', '影響單位', '偵測時間']
+      '訂單業務員', '應通知', '通知原因', '發單狀態', '發單日', '發單前後', '對應製令', '對應可信度', '塔台進度%', '進行中工序', '影響單位', '偵測時間']
     const body = filtered.map((e) => [
       e.at, e.empNo, e.empName, e.action, e.docNo, e.lineNo, e.fieldLabel,
       e.oldValue ?? '', e.newValue ?? '', e.salesName,
       e.notify.targets.join('、'), e.notify.note,
       e.impact.dispatchState,
+      e.dispatchDate ?? '',
+      e.editedAfterDispatch ? '發單後改' : (e.dispatchDate ? '發單前改' : '未發單'),
       e.impact.moNumbers.join(' '),
       e.impact.matchConfidence,
       e.impact.progress ?? '',
@@ -321,7 +328,7 @@ export default function SoEditLogCard({ onInspectOrder, onOpenOrder }: Props) {
         <button
           type="button"
           onClick={() => setRiskOnly((v) => !v)}
-          title="只看已發單上傳、已備料、生產中才被改的訂單行（料可能已經領出去或已經在做）"
+          title="只看發單之後才發生的修改（發單時間依每日出單表的實際紀錄判斷；料可能已經領出去或已經在做）"
           className={`ml-1 rounded-lg border px-3 py-1.5 transition-colors ${
             riskOnly
               ? 'border-red-600 bg-red-800/50 text-white'
@@ -503,6 +510,16 @@ export default function SoEditLogCard({ onInspectOrder, onOpenOrder }: Props) {
                           STATE_STYLE[e.impact.dispatchState] ?? STATE_STYLE.未發單}`}>
                           {e.impact.dispatchState}
                         </span>
+                        {/* 狀態是「現況」；這筆修改若發生在實際發單日之前，明確標出來，
+                            不然「生產中」紅底會被誤讀成「發單後才改」 */}
+                        {!e.editedAfterDispatch && e.dispatchDate && (
+                          <span
+                            title={`這筆修改在實際發單日（${e.dispatchDate}）之前，發出的工單已是新內容`}
+                            className="ml-1 cursor-help rounded border border-emerald-700/50 bg-emerald-900/50 px-1.5 py-0.5 text-[10px] text-emerald-300"
+                          >
+                            發單前改
+                          </span>
+                        )}
                         {e.impact.progress != null && e.impact.progress > 0 && (
                           <span className="ml-1 font-mono text-[11px] text-slate-400">{e.impact.progress}%</span>
                         )}
@@ -514,6 +531,17 @@ export default function SoEditLogCard({ onInspectOrder, onOpenOrder }: Props) {
                             title={e.impact.moNumbers.join(', ')}>
                             {e.impact.moNumbers[0]}
                             {e.impact.moNumbers.length > 1 && ` +${e.impact.moNumbers.length - 1}`}
+                          </div>
+                        )}
+                        {e.dispatchDate ? (
+                          <div className="mt-0.5 font-mono text-[10px] text-slate-500"
+                            title="這張單第一次出現在每日出單表的日期＝實際發單日">
+                            {e.dispatchDate} 發單
+                          </div>
+                        ) : e.impact.dispatchState !== '未發單' && (
+                          <div className="mt-0.5 text-[10px] text-amber-600"
+                            title="每日出單表找不到這張單：狀態雖顯示有下游紀錄，但依出單表判定尚未發單">
+                            出單表查無
                           </div>
                         )}
                         {(e.impact.matchConfidence === '僅末碼' || e.impact.matchConfidence === '僅料號'
@@ -664,10 +692,19 @@ export default function SoEditLogCard({ onInspectOrder, onOpenOrder }: Props) {
           時間與人員改用<span className="text-slate-300">這張單最後的異動紀錄</span>推得，僅供參考。
         </p>
         <p>
-          <span className="text-slate-300">發單狀態</span>是這一行發到哪了：
+          <span className="text-slate-300">發單狀態</span>是這一行<span className="text-slate-300">現在</span>發到哪了：
           未發單 → 已開製令 → 已發單上傳 → 已備料（料已領出去）→
           <span className="text-red-300">生產中</span>（機台正在做）。愈後面代表改單的殺傷力愈大。
           百分比是塔台的整批進度。
+        </p>
+        <p>
+          <span className="text-slate-300">發單前 / 發單後</span>的判定則看時間先後：
+          以<span className="text-slate-300">每日出單表裡這張單第一次出現的日期</span>為實際發單日，
+          修改發生在發單日之前就標
+          <span className="mx-1 rounded border border-emerald-700/50 bg-emerald-900/50 px-1.5 text-emerald-300">發單前改</span>
+          （發出的工單已是新內容，即使這張單現在已在生產中）；
+          同一天因出單表沒有時刻、分不出先後，從嚴視為發單後。
+          「⚠ 只看已發單後才改」篩選也依此判定。
         </p>
         <p>
           <span className="text-slate-300">影響單位</span>紅點是塔台上正在跑或暫停的工序（含機台/人員）；
