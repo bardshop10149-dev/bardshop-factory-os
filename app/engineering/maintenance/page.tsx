@@ -215,7 +215,8 @@ export default function MaintenancePage() {
           {msg && <span className={`text-xs ${msg.startsWith('✅') ? 'text-emerald-400' : 'text-red-400'}`}>{msg}</span>}
         </div>
 
-        {/* 列表 */}
+        {/* 列表：每筆兩行——上行是單據主要欄位，下行把請購與進度攤開放大，
+            進度是手填長文字，擠在單行表格裡會被截斷看不到重點 */}
         <div className="rounded-xl border border-slate-800 overflow-x-auto">
           <table className="w-full text-sm">
             <thead className="bg-slate-900/80">
@@ -225,62 +226,81 @@ export default function MaintenancePage() {
                 <th className="px-3 py-2.5 whitespace-nowrap">類型</th>
                 <th className="px-3 py-2.5 whitespace-nowrap">機台／種類‧原因</th>
                 <th className="px-3 py-2.5">維護／維修項目</th>
-                <th className="px-3 py-2.5 whitespace-nowrap">開始日</th>
-                <th className="px-3 py-2.5 whitespace-nowrap">預計完成日</th>
-                <th className="px-3 py-2.5 whitespace-nowrap">請購</th>
-                <th className="px-3 py-2.5">進度</th>
+                <th className="px-3 py-2.5 whitespace-nowrap">開始日 → 預計完成日</th>
                 <th className="px-3 py-2.5 whitespace-nowrap">開單人</th>
                 <th className="px-3 py-2.5 whitespace-nowrap text-center">結案</th>
               </tr>
             </thead>
-            <tbody>
-              {shown.length === 0 && (
-                <tr><td colSpan={11} className="px-3 py-10 text-center text-slate-600 text-sm">
+
+            {shown.length === 0 && (
+              <tbody>
+                <tr><td colSpan={8} className="px-3 py-10 text-center text-slate-600 text-sm">
                   {loading ? '載入中…' : '沒有符合條件的紀錄'}
                 </td></tr>
-              )}
-              {shown.map(r => {
-                // 預計完成日已過且還沒結案 → 標紅提醒
-                const overdue = r.status === '進行中' && r.expected_end_date && r.expected_end_date < todayStr()
-                return (
-                  <tr key={r.id} onClick={() => setDraft({ ...r })}
-                    className={`border-t border-slate-800 hover:bg-slate-900/60 cursor-pointer transition-colors ${r.status === '已結案' ? 'opacity-60' : ''}`}>
-                    <td className="px-3 py-2 font-mono text-xs text-slate-300 whitespace-nowrap">{r.record_no}</td>
-                    <td className="px-3 py-2 whitespace-nowrap">
+              </tbody>
+            )}
+
+            {/* 一筆一個 tbody：兩個 tr 才能共用同一個 hover 與點擊範圍 */}
+            {shown.map(r => {
+              // 預計完成日已過且還沒結案 → 標紅提醒
+              const overdue = r.status === '進行中' && r.expected_end_date && r.expected_end_date < todayStr()
+              return (
+                <tbody key={r.id} onClick={() => setDraft({ ...r })}
+                  className={`border-t-2 border-slate-800 hover:bg-slate-900/60 cursor-pointer transition-colors ${r.status === '已結案' ? 'opacity-60' : ''}`}>
+                  <tr>
+                    <td className="px-3 pt-3 font-mono text-xs text-slate-300 whitespace-nowrap align-top">{r.record_no}</td>
+                    <td className="px-3 pt-3 whitespace-nowrap align-top">
                       <span className={`px-2 py-0.5 rounded-full text-[11px] border ${
                         r.status === '已結案' ? 'bg-slate-800 text-slate-400 border-slate-700' : 'bg-amber-900/40 text-amber-300 border-amber-700/50'
                       }`}>{r.status}</span>
                     </td>
-                    <td className="px-3 py-2 text-xs text-slate-400 whitespace-nowrap">{r.type}</td>
-                    <td className="px-3 py-2 text-xs text-slate-300 whitespace-nowrap">{r.machine || r.type_other || '—'}</td>
-                    <td className="px-3 py-2 text-slate-200">{r.title}</td>
-                    <td className="px-3 py-2 text-xs text-slate-400 whitespace-nowrap">{r.start_date || '—'}</td>
-                    <td className={`px-3 py-2 text-xs whitespace-nowrap ${overdue ? 'text-rose-400 font-semibold' : 'text-slate-400'}`}>
-                      {r.expected_end_date || '—'}{overdue ? ' ⚠' : ''}
+                    <td className="px-3 pt-3 text-xs text-slate-400 whitespace-nowrap align-top">{r.type}</td>
+                    <td className="px-3 pt-3 text-base text-white font-medium align-top min-w-[9rem]">{r.machine || r.type_other || '—'}</td>
+                    <td className="px-3 pt-3 text-base text-slate-100 align-top">{r.title}</td>
+                    <td className="px-3 pt-3 text-xs whitespace-nowrap align-top">
+                      <span className="text-slate-400">{r.start_date || '—'}</span>
+                      <span className="text-slate-600 mx-1">→</span>
+                      <span className={overdue ? 'text-rose-400 font-semibold' : 'text-slate-400'}>
+                        {r.expected_end_date || '—'}{overdue ? ' ⚠' : ''}
+                      </span>
                     </td>
-                    <td className="px-3 py-2 text-xs whitespace-nowrap">
-                      {r.needs_purchase
-                        ? <span className="text-cyan-300">有{r.pr_number ? `・${r.pr_number}` : ''}</span>
-                        : <span className="text-slate-600">無</span>}
-                    </td>
-                    <td className="px-3 py-2 text-xs text-slate-300 max-w-[18rem] truncate" title={r.progress ?? ''}>{r.progress || '—'}</td>
-                    <td className="px-3 py-2 text-xs text-slate-500 whitespace-nowrap">{r.created_by_name || '—'}</td>
-                    <td className="px-3 py-2 text-center whitespace-nowrap">
+                    <td className="px-3 pt-3 text-xs text-slate-500 whitespace-nowrap align-top">{r.created_by_name || '—'}</td>
+                    <td rowSpan={2} className="px-3 text-center align-middle whitespace-nowrap">
                       {r.status === '已結案' ? (
                         <span className="text-[11px] text-slate-600" title={`${fmtDT(r.closed_at)}${r.closed_by ? `・${r.closed_by}` : ''}`}>
                           {r.closed_at ? r.closed_at.slice(0, 10) : '已結案'}
                         </span>
                       ) : (
                         <button onClick={e => { e.stopPropagation(); void setClosed(r, true) }} disabled={saving}
-                          className="px-3 py-1 rounded bg-emerald-700 hover:bg-emerald-600 disabled:opacity-50 text-white text-[11px] font-medium transition-colors">
+                          className="px-4 py-2 rounded bg-emerald-700 hover:bg-emerald-600 disabled:opacity-50 text-white text-xs font-medium transition-colors">
                           結案
                         </button>
                       )}
                     </td>
                   </tr>
-                )
-              })}
-            </tbody>
+                  <tr>
+                    <td colSpan={7} className="px-3 pt-1.5 pb-3">
+                      <div className="flex flex-wrap items-start gap-x-8 gap-y-2">
+                        <div className="flex items-start gap-2 shrink-0">
+                          <span className="text-[11px] text-slate-500 mt-1 shrink-0">請購</span>
+                          {r.needs_purchase ? (
+                            <span className="text-base text-cyan-300 font-medium">
+                              有{r.pr_number ? <span className="ml-1.5 font-mono">{r.pr_number}</span> : <span className="ml-1.5 text-rose-400 text-sm">（未填單號）</span>}
+                            </span>
+                          ) : <span className="text-base text-slate-600">無</span>}
+                        </div>
+                        <div className="flex items-start gap-2 flex-1 min-w-[18rem]">
+                          <span className="text-[11px] text-slate-500 mt-1 shrink-0">進度</span>
+                          <span className={`text-base whitespace-pre-wrap ${r.progress ? 'text-slate-100' : 'text-slate-600'}`}>
+                            {r.progress || '—'}
+                          </span>
+                        </div>
+                      </div>
+                    </td>
+                  </tr>
+                </tbody>
+              )
+            })}
           </table>
         </div>
         <p className="text-xs text-slate-600 mt-2">顯示 {shown.length} 筆（共 {records.length} 筆）・點任一列可編輯</p>
@@ -317,13 +337,13 @@ export default function MaintenancePage() {
                   <div>
                     <label className={label}>種類／原因 *（手填）</label>
                     <input value={draft.type_other ?? ''} onChange={e => setDraft({ ...draft, type_other: e.target.value })}
-                      placeholder="例：廠務電力、空調、治具改善、環境安全…" className={input} />
+                      placeholder="例：廠務電力、空調、治具改善、環境安全…" className={`${input} text-base py-2.5`} />
                   </div>
                 ) : (
                   <div>
                     <label className={label}>機台 *</label>
                     <input value={draft.machine ?? ''} onChange={e => setDraft({ ...draft, machine: e.target.value })}
-                      list="machine-options" placeholder="機台名稱" className={input} />
+                      list="machine-options" placeholder="機台名稱" className={`${input} text-base py-2.5`} />
                     <datalist id="machine-options">
                       {machineOptions.map(m => <option key={m} value={m} />)}
                     </datalist>
@@ -367,8 +387,9 @@ export default function MaintenancePage() {
                         }`}>{v ? '有' : '無'}</button>
                     ))}
                     {draft.needs_purchase && (
+                      // 之後要接採購：這個單號將對應 erp_docs 的請購單，帶出核准/到貨狀態
                       <input value={draft.pr_number ?? ''} onChange={e => setDraft({ ...draft, pr_number: e.target.value })}
-                        placeholder="請購單號 *" className={`${input} flex-1 min-w-[12rem]`} />
+                        placeholder="請購單號 *" className={`${input} flex-1 min-w-[14rem] text-base py-2.5 font-mono`} />
                     )}
                   </div>
                 </div>
@@ -377,7 +398,7 @@ export default function MaintenancePage() {
                 <div className="border-t border-slate-800 pt-4">
                   <label className={label}>進度（手填）</label>
                   <textarea value={draft.progress ?? ''} onChange={e => setDraft({ ...draft, progress: e.target.value })}
-                    rows={3} placeholder="例：9/16 已叫料，零件約 9/20 到，到料後排休停機更換" className={input} />
+                    rows={5} placeholder="例：9/16 已叫料，零件約 9/20 到，到料後排休停機更換" className={`${input} text-base leading-relaxed`} />
                 </div>
 
                 {draft.id !== undefined && (
