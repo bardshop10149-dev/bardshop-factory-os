@@ -16,9 +16,11 @@
 //   3. 其餘 → 跳過，記入待處理清單（app_settings.sara_process_gen_pending），
 //      導覽列顯示未完成數量提醒（同產期詢問未讀的做法），人工至工序產生器頁面補處理
 //
-// 冪等性：塔台拉取交換區時會帶 mark_consumed=true 清空 buffer，所以「已送出過」不能只看
-// buffer 內容——另存一份 sent ledger（app_settings.sara_auto_gen_sent，key=訂單號||工單號，
+// 冪等性：另存一份 sent ledger（app_settings.sara_auto_gen_sent，key=訂單號||工單號，
 // 值為送出時間），重跑時跳過已送過的組合，並修剪 30 天前的舊記錄避免無限成長。
+// （這段原本寫「塔台拉取時會帶 mark_consumed=true 清空 buffer，所以不能只看 buffer 內容」，
+//   那是錯的：塔台每次都是拉全量且不清除我方資料，交換區必須永遠保有完整內容。
+//   2026-09-16 起兩支對外端點都已改為唯讀，任何外部呼叫都不能清空交換區。）
 
 import { getSupabaseAdminClient } from '../supabaseAdmin'
 import { buildSaraRow, type SaraRow } from './buildSaraRow'

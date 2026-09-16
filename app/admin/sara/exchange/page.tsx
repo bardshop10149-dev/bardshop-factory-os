@@ -433,10 +433,14 @@ export default function SaraExchangePage() {
             <div className="rounded-lg bg-slate-900/60 border border-slate-700 p-4">
               <div className="text-slate-300 font-semibold mb-2">③ 呼叫範例</div>
               <div className="space-y-1 font-mono text-slate-300">
-                <div className="text-slate-500"># 拉取全部 CSV 資料</div>
+                <div className="text-slate-500"># 拉取全部 CSV 資料（唯讀，拉幾次都不會影響累積區內容）</div>
                 <div className="select-all">GET {`${origin}/api/sara/exchange-csv`}</div>
-                <div className="text-slate-500 mt-2"># 拉取後自動清空 buffer（建議塔台使用）</div>
-                <div className="select-all">GET {`${origin}/api/sara/exchange-csv`}?mark_consumed=true</div>
+              </div>
+              <div className="mt-3 p-2 rounded bg-amber-950/40 border border-amber-700/40 text-amber-300 font-normal">
+                ⚠️ 2026-09-16 起本端點<span className="font-semibold">唯讀</span>，
+                <code className="mx-1">mark_consumed=true</code>已不再受理。
+                累積區是塔台看板的<span className="font-semibold">全量來源</span>——塔台每次拉走整份內容，
+                所以它必須保有完整的歷史品項，被清空的話塔台下一次拉取就會把看板覆蓋成只剩當下那幾筆。
               </div>
             </div>
 
@@ -481,7 +485,7 @@ export default function SaraExchangePage() {
             <div className="rounded-lg bg-slate-900/60 border border-slate-700 p-4">
               <div className="text-slate-300 font-semibold mb-2">⑤ 完整 curl 範例</div>
               <pre className="text-slate-300 font-mono overflow-x-auto text-[11px] leading-relaxed select-all">{`curl -X GET \\
-  "${origin}/api/sara/exchange-csv?mark_consumed=true" \\
+  "${origin}/api/sara/exchange-csv" \\
   -H "Authorization: Bearer ${showKey && apiKey ? apiKey : (apiKey ? '••••••••••••' : '<YOUR_API_KEY>')}" \\
   -H "Accept: application/json"`}</pre>
             </div>
