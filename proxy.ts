@@ -81,9 +81,19 @@ export function proxy(request: NextRequest) {
         if (!hasPermission('system_settings')) {
           return NextResponse.redirect(new URL('/403', request.url))
         }
+      } else if (path.startsWith('/admin/quote')) {
+        // 報價系統後台：改價／核可 golden 是獨立權限 quote_admin，不跟生管的 production_admin 綁在一起
+        if (!hasPermission('quote_admin')) {
+          return NextResponse.redirect(new URL('/403', request.url))
+        }
       } else if (!hasPermission('production_admin')) {
         return NextResponse.redirect(new URL('/403', request.url))
       }
+    }
+
+    // 報價計算機（前台）：測試期只開給有 quote_user 的帳號，不跟整個業務資訊看板的 info_board 綁在一起
+    if (path.startsWith('/info-board/quote') && !hasPermission('quote_user')) {
+      return NextResponse.redirect(new URL('/403', request.url))
     }
 
     if (isOpsPath) {

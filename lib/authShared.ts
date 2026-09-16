@@ -6,7 +6,7 @@ export const ADMIN_PERMISSIONS = [
   'dashboard', 'notice', 'estimation', 'tasks',
   'qa_report', 'qa', 'production_admin', 'system_settings',
   'argo_db', 'design', 'material', 'product_dev', 'info_board', 'argo_tool',
-  'purchasing',
+  'purchasing', 'quote_admin', 'quote_user',
 ]
 
 /** 舊格式 permissions 正規化（與 login/page.tsx 原邏輯一致） */

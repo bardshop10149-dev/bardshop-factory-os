@@ -85,6 +85,8 @@ export default function TeamPage() {
         { key: 'argo_tool', label: 'ARGO 外掛區 (ARGO Tool)' },
         { key: 'purchasing', label: '採購專區 (Purchasing)' },
         { key: 'changping_ship', label: '常平訂單資料區 (Changping POC)' },
+        { key: 'quote_user', label: '報價計算機 (Quote)' },
+        { key: 'quote_admin', label: '報價系統後台 (Quote Admin)' },
       ]
     }
   ]
@@ -519,6 +521,8 @@ export default function TeamPage() {
                     {member.permissions?.includes('product_dev') && <span className="px-2 py-1 rounded bg-green-900/30 text-green-400 text-[10px] border border-green-800">商品開發</span>}
                     {member.permissions?.includes('info_board') && <span className="px-2 py-1 rounded bg-amber-900/30 text-amber-400 text-[10px] border border-amber-800">業務資訊看板</span>}
                     {member.permissions?.includes('argo_tool') && <span className="px-2 py-1 rounded bg-cyan-900/30 text-cyan-300 text-[10px] border border-cyan-700">ARGO外掛區</span>}
+                    {member.permissions?.includes('quote_user') && <span className="px-2 py-1 rounded bg-orange-900/30 text-orange-300 text-[10px] border border-orange-800">報價計算機</span>}
+                    {member.permissions?.includes('quote_admin') && <span className="px-2 py-1 rounded bg-lime-900/30 text-lime-400 text-[10px] border border-lime-800">報價系統後台</span>}
                   </>
                 )}
               </div>
