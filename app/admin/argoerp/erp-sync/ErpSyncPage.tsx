@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { supabase } from '../../../../lib/supabaseClient'
 import SoOrderModal from '../../../../components/SoOrderModal'
+import SoSaraProgress from '../../../../components/SoSaraProgress'
 import SoEditLogCard from './SoEditLogCard'
 import SoMisalignCard from './SoMisalignCard'
 
@@ -2374,6 +2375,8 @@ export function ErpSyncPage() {
   const [activeTab, setActiveTab] = useState<TabKey>('sales')
   /** 從「訂單修改紀錄」點某張單跳到「工單對位體檢」時，帶過去的訂單號 */
   const [misalignFilter, setMisalignFilter] = useState('')
+  /** 從「訂單修改紀錄」點訂單號時，要展開詳情的那張單 */
+  const [orderDetailId, setOrderDetailId] = useState<string | null>(null)
 
   // ---- 全表同步 ----
   type SyncStep = { key: DocTypeKey; label: string; status: 'pending' | 'running' | 'done' | 'error'; message: string }
@@ -2587,10 +2590,22 @@ export function ErpSyncPage() {
       {activeTab === MISALIGN_TAB
         ? <SoMisalignCard initialSearch={misalignFilter} />
         : activeTab === EDIT_LOG_TAB
-        ? <SoEditLogCard onInspectOrder={(docNo) => { setMisalignFilter(docNo); setActiveTab(MISALIGN_TAB) }} />
+        ? <SoEditLogCard
+            onInspectOrder={(docNo) => { setMisalignFilter(docNo); setActiveTab(MISALIGN_TAB) }}
+            onOpenOrder={setOrderDetailId}
+          />
         : activeTab === 'bom_structure'
         ? <BomSyncCard resetKey={syncAllLastTime?.getTime() ?? 0} />
         : <SyncCard key={`${activeTab}-${syncAllLastTime?.getTime() ?? 0}`} docKey={activeTab} />}
+
+      {/* 改單 LOG 點訂單號 → 訂單詳情 ＋ 塔台生產進度。
+          看完「誰把交期從 9/14 改成 9/21」，下一個問題必然是「這單做到哪一站、
+          改得動嗎」，所以兩個答案放同一個視窗，不必再跑一趟出單表查製令。 */}
+      <SoOrderModal
+        projectId={orderDetailId}
+        onClose={() => setOrderDetailId(null)}
+        extraContent={<SoSaraProgress projectId={orderDetailId} />}
+      />
     </div>
   )
 }
