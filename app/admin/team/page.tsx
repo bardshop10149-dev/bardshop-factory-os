@@ -88,6 +88,7 @@ export default function TeamPage() {
         { key: 'changping_ship', label: '常平訂單資料區 (Changping POC，限 Snow)' },
         { key: 'quote_user', label: '報價計算機 (Quote)' },
         { key: 'quote_admin', label: '報價系統後台 (Quote Admin)' },
+        { key: 'engineering', label: '工程專區 (Engineering)' },
       ]
     }
   ]

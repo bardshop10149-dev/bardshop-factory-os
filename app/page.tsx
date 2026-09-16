@@ -293,6 +293,7 @@ export default function HomePage() {
   const canProductDev = hasFeaturePermission('product_dev')
   const canInfoBoard = hasFeaturePermission('info_board')
   const canPurchasing = hasFeaturePermission('purchasing')
+  const canEngineering = hasFeaturePermission('engineering')
   // 常平訂單資料區：只看有沒有被勾 changping_ship（不用 hasFeaturePermission——那會讓管理員自動通過；
   // 這區連其他管理員都不該看到）。API 端 guardChangpingShipOwner 為準。
   const canChangpingShip = memberPermissions.includes('changping_ship')
@@ -915,6 +916,35 @@ export default function HomePage() {
             </span>
           </Link>
           )}
+
+          {/* 工程專區 (Orange) — 設備維護/維修登記，之後的工程相關功能都掛在這個入口底下 */}
+          <Link href="/engineering"
+            onClick={guardFeatureAccess('engineering', '工程專區')}
+            onMouseEnter={() => setIsHovered('none')}
+            onMouseLeave={() => setIsHovered('none')}
+            className={`
+              group relative order-16 h-40 md:h-60 lg:h-64 rounded-2xl border border-slate-700 bg-slate-900/40 backdrop-blur-sm
+              flex flex-col items-center justify-center text-center p-3 md:p-6 transition-all duration-500 cursor-pointer
+              hover:border-orange-500 hover:bg-slate-800/60 hover:shadow-[0_0_30px_rgba(249,115,22,0.15)]
+              ${canEngineering ? '' : 'opacity-50 grayscale'}
+            `}
+          >
+            <div className="absolute top-4 right-4 flex items-center gap-1.5 px-2 py-1 bg-orange-500/10 rounded border border-orange-500/20">
+              <span className="text-[10px] text-orange-400 font-bold uppercase tracking-wider">Engineering</span>
+            </div>
+            <div className="mb-3 md:mb-6 p-3 md:p-4 rounded-full bg-slate-800 group-hover:bg-orange-900/50 text-slate-400 group-hover:text-orange-400 transition-colors">
+              <svg className="w-7 h-7 md:w-10 md:h-10" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M11.42 15.17L17.25 21A2.652 2.652 0 0021 17.25l-5.877-5.877M11.42 15.17l2.496-3.03c.317-.384.74-.626 1.208-.766M11.42 15.17l-4.655 5.653a2.548 2.548 0 11-3.586-3.586l6.837-5.63m5.108-.233c.55-.164 1.163-.188 1.743-.14a4.5 4.5 0 004.486-6.336l-3.276 3.277a3.004 3.004 0 01-2.25-2.25l3.276-3.276a4.5 4.5 0 00-6.336 4.486c.091 1.076-.071 2.264-.904 2.95l-.102.085m-1.745 1.437L5.909 7.5H4.5L2.25 3.75l1.5-1.5L7.5 4.5v1.409l4.26 4.26m-1.745 1.437l1.745-1.437m6.615 8.206L15.75 15.75M4.867 19.125h.008v.008h-.008v-.008z" />
+              </svg>
+            </div>
+            <h2 className="text-base md:text-xl font-bold text-white mb-1 md:mb-2 group-hover:text-orange-400 transition-colors">工程專區</h2>
+            <p className="text-slate-500 text-[10px] md:text-xs mb-3 md:mb-6 group-hover:text-slate-300 px-1 md:px-2 hidden md:block">
+              設備維護/維修登記與追蹤。<br/>(Engineering)
+            </p>
+            <span className="hidden md:inline-block px-4 py-2 rounded border border-slate-600 text-slate-300 text-xs font-mono group-hover:bg-orange-600 group-hover:border-orange-600 group-hover:text-white transition-all">
+              OPEN &rarr;
+            </span>
+          </Link>
 
         </div>
 
