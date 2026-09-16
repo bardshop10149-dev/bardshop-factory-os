@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getSupabaseAdminClient, describeError } from '@/lib/supabaseAdmin'
 import { guardAuth, guardPermission } from '@/lib/requireAuth'
-import { computeSheetCounts, mergeIncomingRowsWithExisting } from '@/lib/argoerp/dailyOrderSheetShared'
+import { computeSheetCounts, mergeIncomingRowsWithExisting, rowMatchesKeyword } from '@/lib/argoerp/dailyOrderSheetShared'
 import { recordSheetHistory } from '@/lib/argoerp/sheetHistory'
 
 export const dynamic = 'force-dynamic'
@@ -54,11 +54,7 @@ export async function GET(request: NextRequest) {
       const results: { sheet_date: string; rows: Record<string, unknown>[] }[] = []
       for (const sheet of (data ?? [])) {
         const rowsArr = Array.isArray(sheet.rows) ? (sheet.rows as Array<Record<string, unknown>>) : []
-        const matched = rowsArr.filter(r => {
-          const on = typeof r.order_number === 'string' ? r.order_number.toLowerCase() : ''
-          const mo = typeof r.mo_number === 'string' ? r.mo_number.toLowerCase() : ''
-          return on.includes(q) || mo.includes(q)
-        })
+        const matched = rowsArr.filter(r => rowMatchesKeyword(r, q))
         if (matched.length > 0) results.push({ sheet_date: sheet.sheet_date, rows: matched })
       }
       return NextResponse.json({ success: true, results }, { headers: { 'Cache-Control': 'no-store' } })

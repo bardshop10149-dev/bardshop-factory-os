@@ -328,3 +328,27 @@ export function createRowKey(row: SourceRow & { match_line_no?: string | null })
     row.line_no_input || row.match_line_no || '',
   ].join('||')
 }
+
+/**
+ * 出單表列的關鍵字比對欄位（跨日期搜尋與當日篩選共用）。
+ *
+ * 2026-09-16：原本兩邊都只比對訂單號/製令號，搜客戶名（例如「補完計畫」）一律回
+ * 「找不到符合的工單」，使用者會以為系統裡沒這筆資料。客戶名本來就是最直覺的
+ * 搜尋條件之一（尤其客戶已併入品項欄顯示），因此把客戶、品項編碼、品名規格
+ * 一併納入比對。備註類欄位刻意不納入，避免一個常見詞就撈出整份出單表。
+ */
+const SEARCHABLE_FIELDS = [
+  'order_number', 'mo_number', 'po_number', 'pr_number',
+  'customer', 'line_nickname',
+  'item_code', 'item_name',
+] as const
+
+export function rowMatchesKeyword(row: Record<string, unknown>, keyword: string): boolean {
+  const q = (keyword ?? '').trim().toLowerCase()
+  if (!q) return true
+  for (const f of SEARCHABLE_FIELDS) {
+    const v = row[f]
+    if (typeof v === 'string' && v.toLowerCase().includes(q)) return true
+  }
+  return false
+}

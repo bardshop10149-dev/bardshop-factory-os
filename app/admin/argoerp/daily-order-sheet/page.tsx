@@ -18,6 +18,7 @@ import {
   parseDeliveryDate,
   countWorkingDaysFrom,
   DUE_THRESHOLD_DEFAULTS,
+  rowMatchesKeyword,
   type SourceRow,
   type MatchStatus,
   type SheetRow,
@@ -3758,8 +3759,7 @@ export default function DailyOrderSheetPage() {
       if (r.factory !== activeFactory) return false
     }
     if (!searchQuery.trim()) return true
-    const q = searchQuery.trim().toLowerCase()
-    return (r.order_number?.toLowerCase().includes(q)) || (r.mo_number?.toLowerCase().includes(q)) || (r.po_number?.toLowerCase().includes(q))
+    return rowMatchesKeyword(r as unknown as Record<string, unknown>, searchQuery)
   })
 
   const allSelected = visibleRows.length > 0 && visibleRows.every((r, i) => selectedKeys.has(r.row_key || String(i)))
@@ -3790,7 +3790,7 @@ export default function DailyOrderSheetPage() {
                 value={globalSearch}
                 onChange={e => { setGlobalSearch(e.target.value); if (!e.target.value.trim()) setGlobalResults(null) }}
                 onKeyDown={e => e.key === 'Enter' && runGlobalSearch(globalSearch)}
-                placeholder="跨日期搜尋單號…"
+                placeholder="跨日期搜尋單號/客戶/品項…"
                 className="pl-9 pr-8 py-2 rounded-lg bg-slate-800 border border-slate-700 text-white text-sm w-52 focus:outline-none focus:border-cyan-500 placeholder:text-slate-500"
               />
               {globalSearch && (
@@ -4312,7 +4312,7 @@ export default function DailyOrderSheetPage() {
                     type="text"
                     value={searchQuery}
                     onChange={e => setSearchQuery(e.target.value)}
-                    placeholder="搜尋工單 / 製令/採購單號…"
+                    placeholder="搜尋單號 / 客戶 / 品項…"
                     className="pl-8 pr-8 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-white text-sm w-56 focus:outline-none focus:border-cyan-500/70 placeholder:text-slate-600"
                   />
                   {searchQuery && (
