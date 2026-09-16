@@ -26,6 +26,7 @@ export async function guardQuote(permission: 'quote_user' | 'quote_admin'): Prom
         email: 'dev-seed@local',
         realName: '開發用假帳號',
         department: null,
+        employeeNo: null,
         isAdmin: true,
         permissions: ['info_board', 'quote_user', 'quote_admin'],
       },

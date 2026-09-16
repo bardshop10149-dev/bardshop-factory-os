@@ -22,6 +22,8 @@ export type AuthedMember = {
   email: string
   realName: string | null
   department: string | null
+  /** ARGO 端認的是工號不是 email（IFAF007 的 ACCOUNT_USER 必填），寫回 ERP 時要用 */
+  employeeNo: string | null
   isAdmin: boolean
   permissions: string[]
 }
@@ -74,13 +76,14 @@ export async function guardAuth(): Promise<Guarded> {
     : `auth_user_id.eq.${authUser.id}`
   const { data: members } = await admin
     .from('members')
-    .select('email, real_name, department, is_admin, permissions')
+    .select('email, real_name, department, employee_no, is_admin, permissions')
     .or(orFilter)
     .limit(1)
   const member = members?.[0] as {
     email: string | null
     real_name: string | null
     department: string | null
+    employee_no: string | null
     is_admin: boolean | null
     permissions: unknown
   } | undefined
@@ -94,6 +97,7 @@ export async function guardAuth(): Promise<Guarded> {
       email: member.email ?? authUser.email ?? '',
       realName: member.real_name ?? null,
       department: member.department ?? null,
+      employeeNo: member.employee_no ?? null,
       isAdmin: Boolean(member.is_admin),
       permissions: Array.isArray(member.permissions)
         ? (member.permissions as string[])
