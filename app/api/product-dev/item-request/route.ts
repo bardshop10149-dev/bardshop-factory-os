@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getSupabaseAdminClient, formatSupabaseAdminError } from '@/lib/supabaseAdmin'
 import { guardPermission } from '@/lib/requireAuth'
+import { LOCKED_ERP_FIELDS, LOCKED_FIELD_FROM_ARGO, presetOf } from '@/lib/productDev/categoryPresets'
+import { getPartTemplate } from '@/lib/productDev/argoParts'
 
 export const dynamic = 'force-dynamic'
 export const maxDuration = 60
@@ -46,6 +48,64 @@ function dbError(message: string): string {
   return formatSupabaseAdminError(message)
 }
 
+const LOG_TABLE = 'item_code_request_logs'
+
+/**
+ * 算出「申請人不能改」的那幾個欄位該是什麼值。
+ *
+ * 前端雖然把這些欄位鎖成唯讀，但唯讀只是 UX——請求是可以偽造的，真正的防線在這裡：
+ * 後端一律無視前端送來的值，自己重算。有引用品項就抄引用來源（最可靠），
+ * 沒有就退回大類預設。
+ */
+async function resolveLockedFields(
+  templatePart: string | null,
+  category: string,
+): Promise<{ values: Record<string, string | null>; from: string }> {
+  if (templatePart) {
+    try {
+      const tpl = await getPartTemplate(templatePart)
+      if (tpl) {
+        const values: Record<string, string | null> = {}
+        for (const key of LOCKED_ERP_FIELDS) {
+          const raw = tpl[LOCKED_FIELD_FROM_ARGO[key]]
+          values[key] = raw == null || String(raw).trim() === '' ? null : String(raw).trim()
+        }
+        return { values, from: '引用 ' + templatePart }
+      }
+    } catch (err) {
+      // 抄不到就退回大類預設，不讓 ARGO 連不上把整張申請單卡死
+      console.error('[item-request] 讀取引用品項失敗，改用大類預設:', err)
+    }
+  }
+  const preset = presetOf(category)
+  const values: Record<string, string | null> = {}
+  for (const key of LOCKED_ERP_FIELDS) {
+    const v = preset[key]
+    values[key] = v == null || v === '' ? null : v
+  }
+  return { values, from: '大類 ' + category + ' 預設' }
+}
+
+/**
+ * 寫一筆軌跡。刻意不讓寫 log 失敗連累主要操作——申請單已經成立了，
+ * 卻因為 log 寫不進去回報「送出失敗」，使用者會重送、變成兩張單，那更糟。
+ */
+async function writeLog(
+  supabase: ReturnType<typeof getSupabaseAdminClient>,
+  entry: {
+    request_id: number
+    request_no: string
+    action: string
+    actor_email: string
+    actor_name: string | null
+    changes?: Record<string, unknown> | null
+    note?: string | null
+  },
+) {
+  const { error } = await supabase.from(LOG_TABLE).insert(entry)
+  if (error) console.error('[item-request] 寫入異動軌跡失敗:', error.message)
+}
+
 /** 申請單號 IR + yyMMdd + 3 碼流水（台灣時間） */
 function todayStampTW(): string {
   const tw = new Date(Date.now() + 8 * 60 * 60 * 1000)
@@ -68,7 +128,13 @@ async function nextRequestNo(
   return prefix + String(seq).padStart(3, '0')
 }
 
-/** GET：申請清單。?status=pending 篩狀態、?mine=1 只看自己送出的 */
+/**
+ * GET：申請清單。?status=pending 篩狀態、?mine=1 只看自己送出的、
+ * ?logs=<申請單id> 改回該單的異動軌跡。
+ *
+ * 軌跡走「展開才查」而非跟清單一起回：清單一次 300 張，每張都帶軌跡會把回應撐大好幾倍，
+ * 而實際上一次只會看一張。
+ */
 export async function GET(request: NextRequest) {
   const guard = await guardPermission('product_dev')
   if (!guard.ok) return guard.res
@@ -76,6 +142,22 @@ export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url)
   const status = (searchParams.get('status') ?? '').trim()
   const mine = searchParams.get('mine') === '1'
+
+  const logsFor = Number(searchParams.get('logs') ?? 0)
+  if (Number.isInteger(logsFor) && logsFor > 0) {
+    const sb = getSupabaseAdminClient()
+    const { data, error } = await sb
+      .from(LOG_TABLE)
+      .select('id, action, actor_email, actor_name, changes, note, created_at')
+      .eq('request_id', logsFor)
+      .order('created_at', { ascending: true })
+    if (error) {
+      // 軌跡表沒建不該讓整頁掛掉，回空陣列並附說明即可
+      console.error('[item-request] 讀取軌跡失敗:', error.message)
+      return NextResponse.json({ success: true, logs: [], warning: dbError(error.message) })
+    }
+    return NextResponse.json({ success: true, logs: data ?? [] })
+  }
 
   const supabase = getSupabaseAdminClient()
   let query = supabase
@@ -143,6 +225,10 @@ export async function POST(request: NextRequest) {
   row.requester_name = guard.member.realName ?? null
   row.status = 'pending'
 
+  // 會影響帳務的欄位無視前端送來的值，後端重算（前端的唯讀只是 UX，不是防線）
+  const locked = await resolveLockedFields(str(row.template_part) as string | null, category)
+  Object.assign(row, locked.values)
+
   const supabase = getSupabaseAdminClient()
 
   // 兩人同時送出會撞到同一個流水號 → unique 擋下後重取，最多 3 次
@@ -154,7 +240,18 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ success: false, error: dbError(message) }, { status: 500 })
     }
     const { data, error } = await supabase.from(TABLE).insert(row).select().single()
-    if (!error) return NextResponse.json({ success: true, row: data })
+    if (!error) {
+      await writeLog(supabase, {
+        request_id: data.id,
+        request_no: data.request_no,
+        action: 'submitted',
+        actor_email: guard.member.email,
+        actor_name: guard.member.realName ?? null,
+        changes: { ...row },
+        note: '送出申請｜帳務欄位來源：' + locked.from,
+      })
+      return NextResponse.json({ success: true, row: data })
+    }
     if (!/duplicate key|unique/i.test(error.message) || attempt === 2) {
       return NextResponse.json(
         { success: false, error: dbError(error.message) },
@@ -218,6 +315,11 @@ export async function PATCH(request: NextRequest) {
   }
 
   const supabase = getSupabaseAdminClient()
+
+  // 先撈舊值，才記得出「從什麼變成什麼」——更新後就再也問不到了
+  const { data: before } = await supabase
+    .from(TABLE).select('status, assigned_part, reject_reason').eq('id', id).maybeSingle()
+
   const { data, error } = await supabase.from(TABLE).update(patch).eq('id', id).select().single()
   if (error) {
     return NextResponse.json(
@@ -225,5 +327,27 @@ export async function PATCH(request: NextRequest) {
       { status: 500 },
     )
   }
+
+  const changes: Record<string, { before: unknown; after: unknown }> = {}
+  for (const key of ['status', 'assigned_part', 'reject_reason'] as const) {
+    const b = (before as Record<string, unknown> | null)?.[key] ?? null
+    const a = (data as Record<string, unknown>)[key] ?? null
+    if (b !== a) changes[key] = { before: b, after: a }
+  }
+  const noteOf: Record<string, string> = {
+    created: '完成建檔，編碼 ' + String(data.assigned_part ?? '-'),
+    rejected: '退回：' + String(data.reject_reason ?? '-'),
+    reopen: '救回待建檔（清掉原本的結案／退回紀錄）',
+  }
+  await writeLog(supabase, {
+    request_id: id,
+    request_no: String(data.request_no),
+    action,
+    actor_email: guard.member.email,
+    actor_name: guard.member.realName ?? null,
+    changes,
+    note: noteOf[action] ?? null,
+  })
+
   return NextResponse.json({ success: true, row: data })
 }
