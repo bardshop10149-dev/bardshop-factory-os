@@ -90,6 +90,22 @@ export interface AutoGenResult {
   autoRoutedFakeKo: number
   skippedAlreadySent: number
   pending: PendingItem[]
+  /** 只有 dry 模式會帶：本輪算出來的工序列（未寫入交換區） */
+  rows?: string[][]
+}
+
+/**
+ * 補送／重建用的選項。平常的每日排程兩個都不帶。
+ *
+ * dry   只算不寫——不碰交換區、ledger、待處理清單，也不寫 sync log，
+ *       算出來的列放在 result.rows 回傳。用來在送出前先確認內容。
+ * force 忽略「已送出」判定（ledger 與交換區現有內容），強制重新產生。
+ *       用於交換區內容遺失後的重建：塔台是全量拉取，交換區必須補回完整內容，
+ *       但那些品項在 ledger 裡都已經標記送過了，不忽略就一列都產不出來。
+ */
+export interface AutoGenOptions {
+  dry?: boolean
+  force?: boolean
 }
 
 async function readSetting<T>(key: string): Promise<T | null> {
@@ -120,7 +136,8 @@ export async function writePendingList(items: PendingItem[]): Promise<void> {
 const parseQtyNum = (s: unknown): number => parseFloat(String(s ?? '').replace(/,/g, '')) || 0
 
 /** 主流程：把指定日期的出單表自動轉成 SARA 工序列並寫入交換區 */
-export async function runAutoProcessGen(sheetDate: string): Promise<AutoGenResult> {
+export async function runAutoProcessGen(sheetDate: string, opts: AutoGenOptions = {}): Promise<AutoGenResult> {
+  const { dry = false, force = false } = opts
   const sb = getSupabaseAdminClient()
 
   // 1. 讀出單表
@@ -266,7 +283,7 @@ export async function runAutoProcessGen(sheetDate: string): Promise<AutoGenResul
 
   for (const p of parsed) {
     const sentKey = `${p.order_number}||${p.mo_number}`
-    if (ledger[sentKey] || inBufferKeys.has(sentKey)) { result.skippedAlreadySent++; continue }
+    if (!force && (ledger[sentKey] || inBufferKeys.has(sentKey))) { result.skippedAlreadySent++; continue }
 
     const { routeId, autoRule, anomaly } = routeForRow(p)
     if (!routeId) {
@@ -315,6 +332,13 @@ export async function runAutoProcessGen(sheetDate: string): Promise<AutoGenResul
     if (autoRule === 'ko') result.autoRoutedFakeKo++
   }
   result.generatedLines = outRows.length
+
+  // dry：只算不寫，交換區／ledger／待處理清單／sync log 一律不動
+  if (dry) {
+    result.pending = [...noDocPending, ...pendingNoRoute]
+    result.rows = outRows
+    return result
+  }
 
   // 7. 寫入交換區（append）＋ ledger
   if (outRows.length > 0) {

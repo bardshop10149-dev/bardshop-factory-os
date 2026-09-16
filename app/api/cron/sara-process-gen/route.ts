@@ -49,9 +49,14 @@ async function run(request: NextRequest) {
           const d = new Date(Date.now() + 8 * 3600 * 1000 - back * 86400 * 1000)
           return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`
         })
+    // 補送／重建用（平常排程不帶）：
+    //   ?dry=1   只算不寫，回傳算出來的工序列，供送出前確認
+    //   ?force=1 忽略「已送出」判定強制重新產生，用於交換區內容遺失後的重建
+    const dry = request.nextUrl.searchParams.get('dry') === '1'
+    const force = request.nextUrl.searchParams.get('force') === '1'
     const results = []
     for (const date of dates) {
-      results.push(await runAutoProcessGen(date))
+      results.push(await runAutoProcessGen(date, { dry, force }))
     }
     return NextResponse.json({ success: true, results, elapsedMs: Date.now() - started })
   } catch (e) {
