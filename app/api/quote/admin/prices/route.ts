@@ -5,7 +5,9 @@ import {
   badRequest,
   createQuoteCtx,
   loadPriceRows,
+  mapPriceRow,
   PLANTS,
+  type PriceDbRow,
   quoteErrorResponse,
   readJsonBody,
   taipeiToday,
@@ -19,7 +21,97 @@ export const dynamic = 'force-dynamic'
 const NOTE_MAX_LEN = 200
 const DISPLAY_MAX_LEN = 80
 const PART_CODE_MAX_LEN = 40
+const NAME_MAX_LEN = 120
+const GROUP_MAX_LEN = 40
+const UNIT_MAX_LEN = 20
 const MAX_ROWS = 200
+const PRICE_SELECT_FOR_INSERT =
+  'id, group, name, display_name, unit, price, currency, plant, attrs, effective_from, source_file, argo_part_code, erp_suggested_price, erp_suggested_currency, erp_suggested_at, updated_by, updated_at, note'
+
+type NewRow = {
+  group?: string
+  name?: string
+  display_name?: string | null
+  unit?: string
+  price?: number
+  currency?: string
+  plant?: string
+  attrs?: Record<string, unknown> | null
+  argo_part_code?: string | null
+  note?: string | null
+}
+
+// POST { row:{group, name, price, unit?, display_name?, currency?, plant?, attrs?, argo_part_code?, note?} }：手動新增一列。
+// name 是引擎用的自然鍵（品項設定 boards.options[].item、accessories[].item 都引用它），同廠別不可重複。
+// 生效日自動帶今天、source_file 標「手動新增」。devSeed 模式回一列假資料讓畫面流程走得通，但不落庫。
+export async function POST(request: NextRequest) {
+  const guard = await guardQuote('quote_admin')
+  if (!guard.ok) return guard.res
+
+  const body = await readJsonBody<{ row?: NewRow }>(request)
+  const r = body?.row
+  if (!r || typeof r !== 'object') return badRequest('缺少 row')
+
+  const str = (v: unknown) => (typeof v === 'string' ? v.trim() : '')
+  const group = str(r.group)
+  const name = str(r.name)
+  if (!group) return badRequest('缺少分組')
+  if (group.length > GROUP_MAX_LEN) return badRequest(`分組最多 ${GROUP_MAX_LEN} 字`)
+  if (!name) return badRequest('名稱必填（這是引擎與品項設定引用的鍵）')
+  if (name.length > NAME_MAX_LEN) return badRequest(`名稱最多 ${NAME_MAX_LEN} 字`)
+  const price = Number(r.price)
+  if (r.price == null || !Number.isFinite(price) || price < 0) return badRequest('單價必填，且必須是 ≥ 0 的數字')
+  const unit = str(r.unit) || '個'
+  if (unit.length > UNIT_MAX_LEN) return badRequest(`單位最多 ${UNIT_MAX_LEN} 字`)
+  const currency = (str(r.currency) || 'RMB').toUpperCase()
+  if (!['RMB', 'TWD'].includes(currency)) return badRequest('幣別只能是 RMB 或 TWD')
+  const plant = str(r.plant) || 'changping'
+  if (!(PLANTS as string[]).includes(plant)) return badRequest('廠別不正確')
+  const display = str(r.display_name)
+  if (display.length > DISPLAY_MAX_LEN) return badRequest(`顯示名稱最多 ${DISPLAY_MAX_LEN} 字`)
+  const code = str(r.argo_part_code).toUpperCase()
+  if (code.length > PART_CODE_MAX_LEN) return badRequest(`ARGO 料號最多 ${PART_CODE_MAX_LEN} 字`)
+  const note = str(r.note)
+  if (note.length > NOTE_MAX_LEN) return badRequest(`備註最多 ${NOTE_MAX_LEN} 字`)
+  let attrs: Record<string, unknown> | null = null
+  if (r.attrs != null) {
+    if (typeof r.attrs !== 'object' || Array.isArray(r.attrs)) return badRequest('attrs 必須是物件')
+    attrs = Object.fromEntries(Object.entries(r.attrs).filter(([, v]) => v !== '' && v != null))
+    if (Object.keys(attrs).length === 0) attrs = null
+  }
+  if (group === '板材') {
+    // 板材沒有套版尺寸引擎算不了拼板（BOARD_LAYOUT_MISSING），新增時就擋
+    const lw = Number(attrs?.layout_w_cm)
+    const lh = Number(attrs?.layout_h_cm)
+    if (!(lw > 0 && lh > 0)) return badRequest('板材必須填套版可用範圍（layout_w_cm／layout_h_cm），否則前台無法拼板')
+  }
+
+  const today = taipeiToday()
+  const now = new Date().toISOString()
+  const insert = {
+    group, name, display_name: display || null, unit, price, currency, plant, attrs,
+    effective_from: today, source_file: '手動新增', argo_part_code: code || null, note: note || null,
+    updated_by: guard.member.email, updated_at: now,
+  }
+
+  try {
+    const ctx = createQuoteCtx()
+    const sb = writableClient(ctx)
+    if (!sb) {
+      // 開發 seed 模式：不落庫，回一列假資料讓畫面可以測
+      const fake: PriceDbRow = { id: `dev-${Date.now()}`, ...insert, erp_suggested_price: null, erp_suggested_currency: null, erp_suggested_at: null }
+      return NextResponse.json({ success: true, row: mapPriceRow(fake), devSeed: true })
+    }
+    const { data, error } = await sb.from('quote_price_items').insert(insert).select(PRICE_SELECT_FOR_INSERT).single()
+    if (error) {
+      if (error.code === '23505') return badRequest(`同廠別已有名稱「${name}」的項目，請改名或直接修改既有列`, 'DUPLICATE')
+      throw new Error(describeError(error))
+    }
+    return NextResponse.json({ success: true, row: mapPriceRow(data as PriceDbRow), devSeed: false })
+  } catch (e) {
+    return quoteErrorResponse(e)
+  }
+}
 
 // GET ?plant=changping：整張價格表（含 ERP 建議價欄位）。
 export async function GET(request: NextRequest) {

@@ -309,7 +309,7 @@ export { SETTINGS_KEYS }
 const PRICE_SELECT =
   'id, group, name, display_name, unit, price, currency, plant, attrs, effective_from, source_file, argo_part_code, erp_suggested_price, erp_suggested_currency, erp_suggested_at, updated_by, updated_at, note'
 
-type PriceDbRow = {
+export type PriceDbRow = {
   id: string; group: string; name: string; display_name: string | null; unit: string | null
   price: number | string | null; currency: string | null; plant: string | null
   attrs: Record<string, unknown> | null; effective_from: string | null; source_file: string | null
@@ -318,7 +318,7 @@ type PriceDbRow = {
   updated_by: string | null; updated_at: string | null; note: string | null
 }
 
-function mapPriceRow(r: PriceDbRow): AdminPriceRow {
+export function mapPriceRow(r: PriceDbRow): AdminPriceRow {
   const sug = r.erp_suggested_price == null ? null : Number(r.erp_suggested_price)
   return {
     id: r.id,
