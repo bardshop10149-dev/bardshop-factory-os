@@ -7,10 +7,10 @@
  * 「抓 ERP 建議價」→ POST /api/quote/admin/erp-suggest（查 erp_pj_sync 最近採購單價）。
  * 幣別不同時只顯示換算值，一律要人工按「採用」才寫進單價，絕不自動覆寫。
  */
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState, type ChangeEvent } from 'react'
 import type { AdminPriceRow, ErpSuggestion, QuoteSettingsMap } from '@/lib/quote/api'
 import { adminFetch, cloneJson, fmtDate, fmtDateTime, fmtNum, fmtPct, pickArray, pickObject, todayISO } from '../_shared/api'
-import { Btn, INPUT_SM_CLS, LoadingBlock, MONO, NotReadyBanner, Notice, NumInput, PageHeader, SaveBar, TD_CLS, TH_CLS } from '../_shared/ui'
+import { Btn, INPUT_SM_CLS, LoadingBlock, MONO, NotReadyBanner, Notice, PageHeader, SaveBar, TD_CLS, TH_CLS } from '../_shared/ui'
 
 const API = '/api/quote/admin/prices'
 const API_SUGGEST = '/api/quote/admin/erp-suggest'
@@ -48,6 +48,113 @@ function diffOf(row: AdminPriceRow, converted: number | null): { pct: number | n
   return { pct, changed: Math.abs(pct) > 1e-6 }
 }
 
+/** 板材類新增時要填的規格（存進 attrs；前台拼板靠 layout_w_cm／layout_h_cm） */
+const BOARD_ATTR_FIELDS: { key: string; label: string; required?: boolean }[] = [
+  { key: 'sheet_w_mm', label: '板寬 mm' },
+  { key: 'sheet_h_mm', label: '板高 mm' },
+  { key: 'thickness_mm', label: '厚度 mm' },
+  { key: 'layout_w_cm', label: '套版寬 cm', required: true },
+  { key: 'layout_h_cm', label: '套版高 cm', required: true },
+]
+const DEFAULT_UNIT: Record<string, string> = { 板材: '片', PET: '張', 五金: '個', 包材: '個', 工序: '盤', 人工: '小時', 設備: '月' }
+
+/**
+ * 單價欄：純文字框（inputMode=decimal），沒有上下箭頭——type=number 的箭頭在表格裡太容易誤點。
+ * 空白或不是數字＝無效（紅框），交給頁面擋儲存；合法時才往上送數字。
+ */
+function PriceInput({ value, invalid, onChange, onInvalid, className = '' }: {
+  value: number
+  invalid: boolean
+  onChange: (v: number) => void
+  onInvalid: (bad: boolean) => void
+  className?: string
+}) {
+  const [draft, setDraft] = useState(() => (Number.isFinite(value) ? String(value) : ''))
+  // 外部改了值（例如按「採用」ERP 建議價）→ 同步顯示
+  useEffect(() => {
+    if (Number.isFinite(value) && Number(draft) !== value) setDraft(String(value))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [value])
+  return (
+    <input
+      type="text"
+      inputMode="decimal"
+      autoComplete="off"
+      className={`${INPUT_SM_CLS} ${MONO} text-right ${invalid ? 'border-red-500' : ''} ${className}`}
+      value={draft}
+      placeholder="必填"
+      onChange={(e) => {
+        const t = e.target.value.replace(/[，,\s]/g, '')
+        setDraft(t)
+        const n = Number(t)
+        const ok = t !== '' && /^\d*\.?\d*$/.test(t) && Number.isFinite(n) && n >= 0
+        onInvalid(!ok)
+        if (ok) onChange(n)
+      }}
+    />
+  )
+}
+
+/** 分組底下的「新增項目」表單（每個分組都能手動新增） */
+function AddRowForm({ group, fx, onDone, onCancel }: {
+  group: string
+  fx: FxInfo
+  onDone: (row: AdminPriceRow, devSeed: boolean) => void
+  onCancel: () => void
+}) {
+  const isBoard = group === '板材'
+  const [f, setF] = useState({ name: '', display_name: '', unit: DEFAULT_UNIT[group] ?? '個', price: '', currency: 'RMB', argo_part_code: '', note: '' })
+  const [attrs, setAttrs] = useState<Record<string, string>>({})
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState<string | null>(null)
+  const priceNum = Number(f.price)
+  const priceOk = f.price.trim() !== '' && /^\d*\.?\d*$/.test(f.price.trim()) && Number.isFinite(priceNum) && priceNum >= 0
+  const boardOk = !isBoard || BOARD_ATTR_FIELDS.filter((x) => x.required).every((x) => Number(attrs[x.key]) > 0)
+  const canSubmit = f.name.trim() !== '' && priceOk && boardOk && !busy
+  const set = (k: keyof typeof f) => (e: ChangeEvent<HTMLInputElement | HTMLSelectElement>) => setF((prev) => ({ ...prev, [k]: e.target.value }))
+  const submit = async () => {
+    if (!canSubmit) return
+    setBusy(true)
+    setErr(null)
+    const attrsOut: Record<string, number> = {}
+    for (const [k, v] of Object.entries(attrs)) { const n = Number(v); if (v.trim() !== '' && Number.isFinite(n)) attrsOut[k] = n }
+    const r = await adminFetch<{ row: AdminPriceRow; devSeed?: boolean }>(API, {
+      method: 'POST',
+      body: { row: { group, name: f.name.trim(), display_name: f.display_name.trim() || null, unit: f.unit.trim() || '個', price: priceNum, currency: f.currency, argo_part_code: f.argo_part_code.trim() || null, note: f.note.trim() || null, attrs: Object.keys(attrsOut).length ? attrsOut : null } },
+    })
+    setBusy(false)
+    if (!r.ok) { setErr(r.error); return }
+    const row = (r.data as { row?: AdminPriceRow }).row
+    if (!row) { setErr('伺服器沒有回傳新增的列'); return }
+    onDone(row, !!(r.data as { devSeed?: boolean }).devSeed)
+  }
+  const cls = `${INPUT_SM_CLS} w-full`
+  return (
+    <div className="px-4 py-3 border-b border-amber-900/60 bg-amber-950/20">
+      <div className="text-xs text-amber-300 font-bold mb-2">新增「{group}」項目</div>
+      <div className="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-8 gap-2">
+        <label className="xl:col-span-2 text-[11px] text-slate-400">名稱 *（引擎鍵，品項設定引用這個）<input className={cls} value={f.name} onChange={set('name')} placeholder={isBoard ? '例 亚克力板【挤压型】 [300mm * 400mm * 2.0]' : '例 银色D字扣'} /></label>
+        <label className="text-[11px] text-slate-400">顯示名（選填）<input className={cls} value={f.display_name} onChange={set('display_name')} /></label>
+        <label className="text-[11px] text-slate-400">單位<input className={cls} value={f.unit} onChange={set('unit')} /></label>
+        <label className="text-[11px] text-slate-400">單價 *<input type="text" inputMode="decimal" className={`${cls} ${MONO} text-right ${f.price && !priceOk ? 'border-red-500' : ''}`} value={f.price} onChange={set('price')} placeholder="必填" /></label>
+        <label className="text-[11px] text-slate-400">幣別<select className={cls} value={f.currency} onChange={set('currency')}><option value="RMB">RMB</option><option value="TWD">TWD{fx ? '' : '（未設匯率）'}</option></select></label>
+        <label className="text-[11px] text-slate-400">ARGO 料號<input className={`${cls} ${MONO}`} value={f.argo_part_code} onChange={set('argo_part_code')} placeholder="例 WMTKEYB-S" /></label>
+        <label className="text-[11px] text-slate-400">備註<input className={cls} value={f.note} onChange={set('note')} /></label>
+        {isBoard && BOARD_ATTR_FIELDS.map((x) => (
+          <label key={x.key} className="text-[11px] text-slate-400">{x.label}{x.required ? ' *' : ''}<input type="text" inputMode="decimal" className={`${cls} ${MONO}`} value={attrs[x.key] ?? ''} onChange={(e) => setAttrs((prev) => ({ ...prev, [x.key]: e.target.value }))} /></label>
+        ))}
+      </div>
+      {isBoard && <div className="text-[11px] text-slate-500 mt-1">套版可用範圍＝板材扣邊後能排版的區域（300×400 板是 29×39 cm），前台拼板靠這兩格；沒填不能新增。</div>}
+      {err && <div className="text-xs text-red-300 mt-2">※ {err}</div>}
+      <div className="flex gap-2 mt-2">
+        <Btn size="sm" variant="primary" disabled={!canSubmit} onClick={() => { void submit() }}>{busy ? '新增中…' : '新增'}</Btn>
+        <Btn size="sm" onClick={onCancel} disabled={busy}>取消</Btn>
+        {!priceOk && f.price && <span className="text-xs text-red-300 self-center">單價必須是 ≥ 0 的數字</span>}
+      </div>
+    </div>
+  )
+}
+
 export default function QuotePricesPage() {
   const [loading, setLoading] = useState(true)
   const [notReady, setNotReady] = useState<string | null>(null)
@@ -63,6 +170,23 @@ export default function QuotePricesPage() {
   const [suggesting, setSuggesting] = useState(false)
   const [filter, setFilter] = useState('')
   const [onlyDirty, setOnlyDirty] = useState(false)
+  /** 單價欄空白或不是數字的列（擋儲存） */
+  const [invalidPrice, setInvalidPrice] = useState<Set<string>>(new Set())
+  /** 正在展開「新增項目」表單的分組 */
+  const [adding, setAdding] = useState<string | null>(null)
+  const markInvalid = (id: string, bad: boolean) => setInvalidPrice((prev) => {
+    if (prev.has(id) === bad) return prev
+    const next = new Set(prev)
+    if (bad) next.add(id); else next.delete(id)
+    return next
+  })
+  /** 新增成功：同時放進 orig 與 rows（不算未儲存變更） */
+  const appendRow = (row: AdminPriceRow, devSeed: boolean) => {
+    setOrig((prev) => [...prev, row])
+    setRows((prev) => [...prev, row])
+    setAdding(null)
+    setOkMsg(devSeed ? `已新增「${row.display_name || row.name}」（開發 seed 模式：只在畫面上，未寫入資料庫）` : `已新增「${row.display_name || row.name}」，生效日 ${row.effective_from ?? ''}。要讓品項用得到，記得到「品項維護」把它加進該品項的選項。`)
+  }
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -165,6 +289,11 @@ export default function QuotePricesPage() {
 
   const save = async () => {
     if (!dirty) return
+    if (invalidPrice.size > 0) {
+      const names = rows.filter((r) => invalidPrice.has(r.id)).map((r) => r.display_name || r.name)
+      alert(`有 ${invalidPrice.size} 列單價空白或不是數字（單價為必填）：\n${names.join('\n')}`)
+      return
+    }
     const bad = dirtyRows.filter((r) => !Number.isFinite(r.price) || r.price < 0)
     if (bad.length) {
       alert(`有 ${bad.length} 列單價不是有效數字：\n${bad.map((r) => r.display_name || r.name).join('\n')}`)
@@ -249,14 +378,29 @@ export default function QuotePricesPage() {
               <div className="px-4 py-2 border-b border-slate-700 flex items-center gap-3">
                 <h2 className="text-sm font-bold text-amber-500 uppercase tracking-wider">{g}</h2>
                 <span className="text-xs text-slate-500">{list.length} 項</span>
+                <div className="flex-1" />
+                <Btn size="sm" onClick={() => setAdding(adding === g ? null : g)}>{adding === g ? '收起新增' : '＋ 新增項目'}</Btn>
               </div>
+              {adding === g && <AddRowForm group={g} fx={fx} onDone={appendRow} onCancel={() => setAdding(null)} />}
               <div className="overflow-x-auto">
-                <table className="w-full min-w-[1200px]">
+                {/* 欄寬用 colgroup 釘死：名稱夠用就好、單價要看得到整個數字、料號要放得下 WMTKEYB-S 這種、ERP 建議價不用太寬 */}
+                <table className="w-full min-w-[1360px] table-fixed">
+                  <colgroup>
+                    <col className="w-[24%]" />
+                    <col className="w-[52px]" />
+                    <col className="w-[118px]" />
+                    <col className="w-[56px]" />
+                    <col className="w-[210px]" />
+                    <col className="w-[170px]" />
+                    <col className="w-[150px]" />
+                    <col className="w-[160px]" />
+                    <col className="w-[120px]" />
+                  </colgroup>
                   <thead>
                     <tr>
                       <th className={TH_CLS}>名稱（顯示名 / Excel 原名）</th>
                       <th className={TH_CLS}>單位</th>
-                      <th className={`${TH_CLS} text-right`}>單價</th>
+                      <th className={`${TH_CLS} text-right`}>單價 *</th>
                       <th className={TH_CLS}>幣別</th>
                       <th className={TH_CLS}>ARGO 料號</th>
                       <th className={TH_CLS}>ERP 建議價</th>
@@ -281,7 +425,7 @@ export default function QuotePricesPage() {
                       const attrText = Object.entries(attrs).filter(([, v]) => v != null && v !== '').map(([k, v]) => `${k}=${String(v)}`).join(' · ')
                       return (
                         <tr key={row.id} className={isDirty ? 'bg-yellow-950/20' : 'hover:bg-slate-800/40'}>
-                          <td className={`${TD_CLS} min-w-[260px]`}>
+                          <td className={TD_CLS}>
                             <input
                               className={`${INPUT_SM_CLS} w-full ${'display_name' in patch ? 'border-yellow-600' : ''}`}
                               value={row.display_name ?? ''}
@@ -291,15 +435,17 @@ export default function QuotePricesPage() {
                             <div className="text-[11px] text-slate-500 mt-0.5 truncate" title={row.name}>{row.name}{attrText ? ` ｜ ${attrText}` : ''}</div>
                           </td>
                           <td className={`${TD_CLS} whitespace-nowrap text-slate-400`}>{row.unit}</td>
-                          <td className={`${TD_CLS} w-32`}>
-                            <NumInput
-                              className={`${INPUT_SM_CLS} w-full text-right ${'price' in patch ? 'border-yellow-600' : ''}`}
+                          <td className={TD_CLS}>
+                            <PriceInput
+                              className={`w-full ${'price' in patch ? 'border-yellow-600' : ''}`}
                               value={row.price}
+                              invalid={invalidPrice.has(row.id)}
                               onChange={(v) => setPrice(row, v)}
+                              onInvalid={(bad) => markInvalid(row.id, bad)}
                             />
                           </td>
                           <td className={`${TD_CLS} ${MONO} text-slate-400`}>{row.currency}</td>
-                          <td className={`${TD_CLS} w-40`}>
+                          <td className={TD_CLS}>
                             <input
                               className={`${INPUT_SM_CLS} w-full ${MONO} ${'argo_part_code' in patch ? 'border-yellow-600' : ''}`}
                               value={row.argo_part_code ?? ''}
@@ -307,7 +453,7 @@ export default function QuotePricesPage() {
                               onChange={(e) => update(row.id, { argo_part_code: e.target.value.trim().toUpperCase() })}
                             />
                           </td>
-                          <td className={`${TD_CLS} min-w-[220px]`}>
+                          <td className={TD_CLS}>
                             {sugPrice == null ? (
                               <span className="text-xs text-slate-600">{(row.argo_part_code ?? '').trim() ? '尚未抓取' : '—'}</span>
                             ) : (
@@ -345,7 +491,7 @@ export default function QuotePricesPage() {
                               </div>
                             )}
                           </td>
-                          <td className={`${TD_CLS} w-36`}>
+                          <td className={TD_CLS}>
                             <input
                               type="date"
                               className={`${INPUT_SM_CLS} w-full ${MONO} ${'effective_from' in patch ? 'border-yellow-600' : ''}`}
@@ -356,7 +502,7 @@ export default function QuotePricesPage() {
                               }}
                             />
                           </td>
-                          <td className={`${TD_CLS} min-w-[160px]`}>
+                          <td className={TD_CLS}>
                             <input
                               className={`${INPUT_SM_CLS} w-full ${'note' in patch ? 'border-yellow-600' : ''}`}
                               value={row.note ?? ''}
@@ -380,7 +526,7 @@ export default function QuotePricesPage() {
             saving={saving}
             onSave={() => { void save() }}
             onReset={() => { setRows(cloneJson(orig)); setTouchedDate(new Set()) }}
-            extra={dirty ? <span className="text-xs text-slate-400">{dirtyRows.length} 列待儲存（只送有改的欄位）</span> : undefined}
+            extra={invalidPrice.size > 0 ? <span className="text-xs text-red-300">{invalidPrice.size} 列單價空白或不是數字，儲存前請補上</span> : dirty ? <span className="text-xs text-slate-400">{dirtyRows.length} 列待儲存（只送有改的欄位）</span> : undefined}
           />
         </>
       )}
