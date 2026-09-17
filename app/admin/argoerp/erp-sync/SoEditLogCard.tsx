@@ -382,21 +382,22 @@ export default function SoEditLogCard({ onInspectOrder, onOpenOrder }: Props) {
             <tr className="border-b border-slate-700 bg-slate-900">
               <th className="whitespace-nowrap px-3 py-3 text-left text-xs text-slate-300">異動時間</th>
               <th className="whitespace-nowrap px-3 py-3 text-left text-xs text-slate-300">工號 / 姓名</th>
-              <th className="whitespace-nowrap px-3 py-3 text-left text-xs text-slate-300">動作</th>
+              <th className="whitespace-nowrap py-3 pl-1 pr-2 text-left text-xs text-slate-300">動作</th>
               <th className="whitespace-nowrap px-3 py-3 text-left text-xs text-slate-300">訂單 / 行號</th>
               <th className="whitespace-nowrap px-3 py-3 text-left text-xs text-slate-300">修改位置</th>
               <th className="px-3 py-3 text-left text-xs text-slate-300">原內容 → 新內容</th>
+              <th className="whitespace-nowrap px-3 py-3 text-left text-xs text-slate-300">發單日</th>
               <th className="whitespace-nowrap px-3 py-3 text-left text-xs text-slate-300">發單狀態</th>
               <th className="whitespace-nowrap px-3 py-3 text-left text-xs text-slate-300">影響單位</th>
-              <th className="whitespace-nowrap px-3 py-3 text-left text-xs text-slate-300">應通知</th>
+              <th className="whitespace-nowrap py-3 pl-6 pr-3 text-left text-xs text-slate-300">應通知</th>
             </tr>
           </thead>
           <tbody>
             {loading && (
-              <tr><td colSpan={9} className="px-3 py-10 text-center text-slate-500">讀取中…（需向 ARGO 補查異動人員，約數秒）</td></tr>
+              <tr><td colSpan={10} className="px-3 py-10 text-center text-slate-500">讀取中…（需向 ARGO 補查異動人員，約數秒）</td></tr>
             )}
             {!loading && pageGroups.length === 0 && (
-              <tr><td colSpan={9} className="px-3 py-10 text-center text-slate-500">
+              <tr><td colSpan={10} className="px-3 py-10 text-center text-slate-500">
                 {entries.length === 0 ? `近 ${days} 天沒有偵測到訂單異動` : '無符合條件的紀錄'}
               </td></tr>
             )}
@@ -444,7 +445,7 @@ export default function SoEditLogCard({ onInspectOrder, onOpenOrder }: Props) {
                       </>
                     )}
                   </td>
-                  <td className="whitespace-nowrap px-3 py-2 align-top">
+                  <td className="whitespace-nowrap py-2 pl-1 pr-2 align-top">
                     {first && (
                       <span className={`rounded border px-2 py-0.5 text-[11px] ${ACTION_STYLE[e.action]}`}>
                         {e.action}
@@ -502,6 +503,36 @@ export default function SoEditLogCard({ onInspectOrder, onOpenOrder }: Props) {
                       </span>
                     )}
                   </td>
+                  {/* 發單日：出單表的實際發單日（整張單的性質，只在該行第一列顯示）。
+                      「發單前改」標籤放這裡——它是「修改時間 vs 發單日」的比較結果，
+                      跟旁邊那顆「現況」狀態 badge 是兩回事 */}
+                  <td className="whitespace-nowrap px-3 py-2 align-top text-xs">
+                    {firstOfLine && (
+                      e.dispatchDate ? (
+                        <>
+                          <div className="cursor-help font-mono text-slate-300"
+                            title="這張單第一次出現在每日出單表的日期＝實際發單日">
+                            {e.dispatchDate}
+                          </div>
+                          {!e.editedAfterDispatch && (
+                            <span
+                              title={`這筆修改在實際發單日（${e.dispatchDate}）之前，發出的工單已是新內容`}
+                              className="mt-0.5 inline-block cursor-help rounded border border-emerald-700/50 bg-emerald-900/50 px-1.5 py-0.5 text-[10px] text-emerald-300"
+                            >
+                              發單前改
+                            </span>
+                          )}
+                        </>
+                      ) : e.impact.dispatchState !== '未發單' ? (
+                        <span className="cursor-help text-[11px] text-amber-600"
+                          title="每日出單表找不到這張單：狀態雖顯示有下游紀錄，但依出單表判定尚未發單">
+                          查無
+                        </span>
+                      ) : (
+                        <span className="text-slate-600">—</span>
+                      )
+                    )}
+                  </td>
                   {/* 發單狀態：同一訂單行的多個欄位共用，只在該行第一列顯示 */}
                   <td className="whitespace-nowrap px-3 py-2 align-top text-xs">
                     {firstOfLine && (
@@ -510,16 +541,6 @@ export default function SoEditLogCard({ onInspectOrder, onOpenOrder }: Props) {
                           STATE_STYLE[e.impact.dispatchState] ?? STATE_STYLE.未發單}`}>
                           {e.impact.dispatchState}
                         </span>
-                        {/* 狀態是「現況」；這筆修改若發生在實際發單日之前，明確標出來，
-                            不然「生產中」紅底會被誤讀成「發單後才改」 */}
-                        {!e.editedAfterDispatch && e.dispatchDate && (
-                          <span
-                            title={`這筆修改在實際發單日（${e.dispatchDate}）之前，發出的工單已是新內容`}
-                            className="ml-1 cursor-help rounded border border-emerald-700/50 bg-emerald-900/50 px-1.5 py-0.5 text-[10px] text-emerald-300"
-                          >
-                            發單前改
-                          </span>
-                        )}
                         {e.impact.progress != null && e.impact.progress > 0 && (
                           <span className="ml-1 font-mono text-[11px] text-slate-400">{e.impact.progress}%</span>
                         )}
@@ -531,17 +552,6 @@ export default function SoEditLogCard({ onInspectOrder, onOpenOrder }: Props) {
                             title={e.impact.moNumbers.join(', ')}>
                             {e.impact.moNumbers[0]}
                             {e.impact.moNumbers.length > 1 && ` +${e.impact.moNumbers.length - 1}`}
-                          </div>
-                        )}
-                        {e.dispatchDate ? (
-                          <div className="mt-0.5 font-mono text-[10px] text-slate-500"
-                            title="這張單第一次出現在每日出單表的日期＝實際發單日">
-                            {e.dispatchDate} 發單
-                          </div>
-                        ) : e.impact.dispatchState !== '未發單' && (
-                          <div className="mt-0.5 text-[10px] text-amber-600"
-                            title="每日出單表找不到這張單：狀態雖顯示有下游紀錄，但依出單表判定尚未發單">
-                            出單表查無
                           </div>
                         )}
                         {(e.impact.matchConfidence === '僅末碼' || e.impact.matchConfidence === '僅料號'
@@ -580,7 +590,7 @@ export default function SoEditLogCard({ onInspectOrder, onOpenOrder }: Props) {
                     )}
                   </td>
                   {/* 應通知：依「改了什麼」＋「有沒有發單」判定 */}
-                  <td className="px-3 py-2 align-top text-xs">
+                  <td className="py-2 pl-6 pr-3 align-top text-xs">
                     <div className="flex flex-wrap gap-1">
                       {e.notify.targets.map((t) => (
                         <span
@@ -610,7 +620,7 @@ export default function SoEditLogCard({ onInspectOrder, onOpenOrder }: Props) {
                   gi % 2 === 0 ? 'bg-slate-900/40' : 'bg-slate-900/10'
                 } hover:bg-slate-800/60`}
               >
-                <td colSpan={9} className="px-3 py-1.5 text-xs text-slate-400">
+                <td colSpan={10} className="px-3 py-1.5 text-xs text-slate-400">
                   <span className="ml-1 text-slate-500">{open ? '▾' : '▸'}</span>
                   <span className="ml-2">
                     {open
