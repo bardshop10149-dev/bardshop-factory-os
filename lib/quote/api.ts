@@ -204,6 +204,8 @@ export interface GoldenRow {
   template_version: string | null
   source_file: string | null
   source_sheet: string | null
+  /** 稽核備註：來源可信度、手改處、核可建議 */
+  audit_note: string | null
   input: unknown
   settings_snapshot: unknown
   expected_cost: number

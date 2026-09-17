@@ -234,6 +234,7 @@ function seedGoldenRows(productId: string): GoldenRow[] {
         template_version: c.template_version,
         source_file: c.source_file,
         source_sheet: c.source_sheet,
+        audit_note: c.audit_note ?? null,
         input,
         settings_snapshot: settings,
         expected_cost: c.expected.cost,
@@ -456,11 +457,12 @@ export async function getProduct(ctx: QuoteCtx, id: string): Promise<AdminProduc
 /* ---------------------------------------------------------------- 讀取：golden */
 
 const GOLDEN_SELECT =
-  'id, product_id, name, status, template_version, source_file, source_sheet, input, settings_snapshot, expected_cost, expected_price, tolerance, last_result, last_diff, last_run_at, approved_by, approved_at'
+  'id, product_id, name, status, template_version, source_file, source_sheet, audit_note, input, settings_snapshot, expected_cost, expected_price, tolerance, last_result, last_diff, last_run_at, approved_by, approved_at'
 
 type GoldenDbRow = {
   id: string; product_id: string; name: string; status: string
   template_version: string | null; source_file: string | null; source_sheet: string | null
+  audit_note?: string | null
   input: unknown; settings_snapshot: unknown
   expected_cost: number | string; expected_price: number | string; tolerance: number | string | null
   last_result: string | null; last_diff: unknown; last_run_at: string | null
@@ -478,6 +480,7 @@ function mapGoldenRow(r: GoldenDbRow): GoldenRow {
     template_version: r.template_version,
     source_file: r.source_file,
     source_sheet: r.source_sheet,
+    audit_note: r.audit_note ?? null,
     input: r.input,
     settings_snapshot: r.settings_snapshot,
     expected_cost: Number(r.expected_cost),

@@ -860,7 +860,14 @@ function GoldenRows({ g, diff, isOpen, busy, onToggle, onAct }: {
   return (
     <>
       <tr className="hover:bg-slate-800/40">
-        <td className={`${TD_CLS} font-bold text-white min-w-[220px]`}>{g.name}</td>
+        <td className={`${TD_CLS} min-w-[260px] max-w-[420px]`}>
+          <div className="font-bold text-white">{g.name}</div>
+          {g.audit_note && (
+            <div className={`mt-1 text-[11px] leading-4 whitespace-normal ${/不建議|不要核可/.test(g.audit_note) ? 'text-amber-400' : /可信度：高/.test(g.audit_note) ? 'text-emerald-400/90' : 'text-slate-400'}`}>
+              {g.audit_note}
+            </div>
+          )}
+        </td>
         <td className={TD_CLS}><Badge value={g.status} /></td>
         <td className={`${TD_CLS} text-xs text-slate-400`}>
           <div>{g.template_version ?? '—'}</div>

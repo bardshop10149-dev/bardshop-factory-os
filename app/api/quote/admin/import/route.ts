@@ -257,6 +257,8 @@ async function handleApply(request: NextRequest, updatedBy: string) {
           template_version: g.template_version || null,
           source_file: fileName,
           source_sheet: g.sheet || null,
+          // 匯入的案例還沒人稽核過：先標明，核可前後台看得到
+          audit_note: `由後台 Excel 匯入（${fileName}／${g.sheet || '主产品'}），尚未稽核${g.warnings?.length ? `；解析警告 ${g.warnings.length} 則` : ''}`,
           input: g.input,
           settings_snapshot: g.settings_snapshot,
           expected_cost: g.expected_cost,

@@ -29,6 +29,8 @@ export interface GoldenCase {
   source_file: string
   source_sheet: string
   same_as?: string
+  /** 稽核備註：來源檔可信度、手改處、核可建議（後台核可時顯示） */
+  audit_note?: string
   input?: AcrylicInput
   input_override?: {
     qty?: number
