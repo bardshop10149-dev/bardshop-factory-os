@@ -467,8 +467,8 @@
           "defaultOn": false
         }
       ],
-      "scrapPct": 10,
-      "costRatio": 0.72,
+      "scrapPct": 15,
+      "costRatio": 0.73,
       "packCapacityPerHour": 100
     }
   },
@@ -955,8 +955,8 @@
           "defaultOn": false
         }
       ],
-      "scrapPct": 10,
-      "costRatio": 0.7,
+      "scrapPct": 15,
+      "costRatio": 0.73,
       "packCapacityPerHour": 120,
       "defaultPrintSides": 2,
       "petSides": 1
@@ -1112,8 +1112,8 @@
           "defaultOn": true
         }
       ],
-      "scrapPct": 10,
-      "costRatio": 0.65,
+      "scrapPct": 15,
+      "costRatio": 0.73,
       "packCapacityPerHour": 100
     }
   }

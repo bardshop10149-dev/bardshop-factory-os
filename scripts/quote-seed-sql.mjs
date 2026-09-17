@@ -156,6 +156,7 @@ create table if not exists public.quote_golden_cases (
   template_version   text,
   source_file        text,
   source_sheet       text,
+  audit_note         text,
   input              jsonb not null,
   settings_snapshot  jsonb,
   expected_cost      numeric not null,
@@ -281,7 +282,7 @@ for (const c of golden.cases) {
   }
   goldenRows.push(
     row([
-      q(productId), q(name), q('proposed'), q(c.template_version), q(c.source_file), q(c.source_sheet),
+      q(productId), q(name), q('proposed'), q(c.template_version), q(c.source_file), q(c.source_sheet), q(c.audit_note ?? null),
       j(input), j(snap), n(c.expected.cost), n(c.expected.price), n(0.01),
     ]),
   )
@@ -294,7 +295,7 @@ const goldenSql = `
 ${goldenNotes.map((s) => `--    ※ ${s}`).join('\n')}
 -- ----------------------------------------------------------------------------
 insert into public.quote_golden_cases
-  (product_id, name, status, template_version, source_file, source_sheet, input, settings_snapshot, expected_cost, expected_price, tolerance)
+  (product_id, name, status, template_version, source_file, source_sheet, audit_note, input, settings_snapshot, expected_cost, expected_price, tolerance)
 values
 ${goldenRows.join(',\n')}
 on conflict (product_id, name) do nothing;
