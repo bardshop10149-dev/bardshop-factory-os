@@ -26,6 +26,10 @@
       "schedule": "10 9 * * *"
     },
     {
+      "path": "/api/cron/auto-doc-creation",
+      "schedule": "35 9 * * *"
+    },
+    {
       "path": "/api/cron/sara-wip-sync",
       "schedule": "0 1,4,7,10,13 * * *"
     },

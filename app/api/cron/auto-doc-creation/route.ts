@@ -3,11 +3,19 @@ import { getSupabaseAdminClient, formatSupabaseAdminError } from '@/lib/supabase
 import { argoConfigured, argoQuery, argoImport } from '@/lib/argoQuery'
 import { recordSheetHistory } from '@/lib/argoerp/sheetHistory'
 
-// 每天 17:10（台北時間，2026-09-08 由 17:01 延後）自動轉單：當天出單表的委外列→請購單（IFAF105）、
+// 每天 17:10 與 17:35（台北時間）自動轉單：當天出單表的委外列→請購單（IFAF105）、
 // 常平列→採購單（IFAF024）。邏輯完整搬自兩個手動頁面（order-batch-export-pr /
 // order-batch-export-c），表頭全部用頁面的固定預設值；設計決策（2026-08-24 與使用者確認）：
 //   * 常平採購單價一律 0
 //   * 序號比對不到的常平列：跳過 + 記錄，不送出
+//
+// 為什麼跑兩輪（2026-09-18 新增 17:35 這輪）：
+//   17:10 那輪只看得到「當下已經在出單表裡」的列。2026-09-18 就發生過——常平那列
+//   17:14 才貼進出單表，17:10 的排程判定「無待轉常平列」直接跳過，結果不只採購單沒開，
+//   連帶 17:30/17:40 的工序產生排程也撈不到單號，整條線趕不上塔台 18:00 來拉。
+//   補一輪 17:35，晚進來的列還能趕上 17:40 那輪工序排程，兩層保險都保得住。
+//   這輪只會處理「還沒有單號」的列——已轉好的列不在待轉清單裡，不會重複開單；
+//   當天沒有漏網的列時它就是一次 skipped，成本近乎零。
 //
 // 防重複建單：詳見 sql/20260824_auto_doc_runs.sql——ARGO 已建單但回寫失敗的紀錄
 // （status='imported'）會擋住後續所有自動執行，直到人工確認並標記 resolved。
