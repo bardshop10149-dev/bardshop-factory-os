@@ -6,7 +6,11 @@ import { supabase } from '../../../lib/supabaseClient'
 
 interface ProductItem { item_code: string; item_name: string; quantity: string }
 
-/** 送出後追加的備註事項（只能新增，不能改寫；見 sql/20260911_schedule_inquiry_notes.sql） */
+/**
+ * 送出後追加的備註事項。
+ * 2026-09-18 起兩段式：生管確認前作者可以編輯，確認後鎖定
+ * （見 sql/20260918_schedule_inquiry_note_confirm.sql）。
+ */
 interface InquiryNote {
   id: number
   inquiry_id: number
@@ -14,6 +18,9 @@ interface InquiryNote {
   author_name: string | null
   author_email: string | null
   created_at: string
+  updated_at?: string | null
+  confirmed_at?: string | null
+  confirmed_by_name?: string | null
 }
 
 interface Inquiry {
@@ -102,6 +109,9 @@ export default function ScheduleInquiryPage() {
   const [errorMessage, setErrorMessage] = useState('')
   const [showForm, setShowForm] = useState(false)
   const [submitting, setSubmitting] = useState(false)
+  // 編輯中的詢問單 id（null = 新增模式）。只有生管尚未確認的單能進編輯模式，
+  // 伺服器端另有把關（planner_reply 有值就擋下內容更新）。
+  const [editingId, setEditingId] = useState<number | null>(null)
   const [currentUser, setCurrentUser] = useState<{ real_name: string; department: string; email: string } | null>(null)
   const [notifyPreview, setNotifyPreview] = useState<string | null>(null)
   const [copied, setCopied] = useState(false)
@@ -239,6 +249,7 @@ export default function ScheduleInquiryPage() {
     setFormExpectedDate('')
     setFormPlannedOrderDate('')
     setFormRemark('')
+    setEditingId(null)
     setShowForm(false)
   }
 
@@ -323,15 +334,23 @@ export default function ScheduleInquiryPage() {
     }
 
     try {
-      // 送出後不可更改（僅訂單編號可於清單上補填），故只有新增、沒有編輯
+      // 生管確認前可以改（editingId 有值＝編輯既有單），確認後伺服器端會擋下
       const res = await fetch('/api/production/schedule-confirm', {
-        method: 'POST',
+        method: editingId ? 'PATCH' : 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
+        body: JSON.stringify(editingId ? { id: editingId, fields: payload } : payload),
       })
       const json = await res.json()
       if (!json?.success) {
-        alert('送出失敗: ' + (json?.error ?? '未知錯誤'))
+        alert((editingId ? '儲存失敗: ' : '送出失敗: ') + (json?.error ?? '未知錯誤'))
+        setSubmitting(false)
+        return
+      }
+
+      // 編輯既有單不再跳 LINE 通知預覽——那是「新登記了一張單」才需要通知的東西
+      if (editingId) {
+        resetForm()
+        fetchRecords()
         setSubmitting(false)
         return
       }
@@ -409,6 +428,50 @@ export default function ScheduleInquiryPage() {
 
   const isAuthor = (record: Inquiry) => !!currentUser?.email && currentUser.email === record.author_email
 
+  // 生管確認（planner_reply 有值）之前才可以編輯內容；確認之後只能補備註事項。
+  const canEditContent = (record: Inquiry) => !record.planner_reply && isAuthor(record)
+
+  const openEdit = (record: Inquiry) => {
+    setEditingId(record.id)
+    setFormDate(record.inquiry_date ?? new Date().toISOString().slice(0, 10))
+    setFormSalesperson(record.salesperson ?? '')
+    setFormCustomer(record.customer_name ?? '')
+    setFormOrderNo(record.order_no ?? '')
+    setFormItems(record.items?.length ? record.items.map(it => ({ ...it })) : [{ ...DEFAULT_ITEM }])
+    setFormExpectedDate(record.expected_date ?? '')
+    setFormPlannedOrderDate(record.planned_order_date ?? '')
+    setFormRemark(record.remark ?? '')
+    setShowForm(true)
+  }
+
+  // ── 備註事項：生管確認前可以改 ──────────────────────────────────
+  const [noteEditId, setNoteEditId] = useState<number | null>(null)
+  const [noteEditText, setNoteEditText] = useState('')
+  const [savingNoteEdit, setSavingNoteEdit] = useState(false)
+  const canEditNote = (n: InquiryNote) =>
+    !n.confirmed_at && !!currentUser?.email && currentUser.email === n.author_email
+  const saveNoteEdit = async () => {
+    const text = noteEditText.trim()
+    if (!noteEditId || !text) { alert('備註內容不可為空'); return }
+    setSavingNoteEdit(true)
+    try {
+      const res = await fetch('/api/production/schedule-confirm/notes', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: noteEditId, note: text }),
+      })
+      const json = await res.json()
+      if (!json?.success) throw new Error(json?.error ?? '未知錯誤')
+      setNoteEditId(null)
+      setNoteEditText('')
+      fetchRecords()
+    } catch (e) {
+      alert('備註修改失敗: ' + (e instanceof Error ? e.message : String(e)))
+    } finally {
+      setSavingNoteEdit(false)
+    }
+  }
+
   // 全文搜尋：涵蓋客戶/訂單編號/承辦業務/填單人/部門/品項（編碼+品名+數量）/
   // 日期/備註/回覆狀態，全部欄位都比對得到
   const [searchTerm, setSearchTerm] = useState('')
@@ -470,7 +533,7 @@ export default function ScheduleInquiryPage() {
                   <div className="w-9 h-9 rounded-[11px] bg-amber-500/15 border border-amber-500/35 text-amber-400 flex items-center justify-center">
                     <svg className="w-[18px] h-[18px]" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.2}><path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" /></svg>
                   </div>
-                  <h3 className="text-[17px] font-bold text-[#f3f6fb]">新增詢問 / 預留單</h3>
+                  <h3 className="text-[17px] font-bold text-[#f3f6fb]">{editingId ? '編輯詢問 / 預留單' : '新增詢問 / 預留單'}</h3>
                 </div>
                 <button onClick={resetForm} className="w-8 h-8 rounded-[9px] flex items-center justify-center text-[#5f7290] hover:text-white transition-colors">
                   <svg className="w-[17px] h-[17px]" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
@@ -635,7 +698,7 @@ export default function ScheduleInquiryPage() {
                     disabled={submitting}
                     className="px-6 py-2.5 rounded-[10px] bg-gradient-to-b from-amber-400 to-amber-500 disabled:opacity-40 disabled:cursor-not-allowed text-[#241a04] text-[13.5px] font-bold transition-colors"
                   >
-                    {submitting ? '處理中...' : '送出詢問'}
+                    {submitting ? '處理中...' : editingId ? '儲存修改' : '送出詢問'}
                   </button>
                 </div>
               </div>
@@ -834,17 +897,61 @@ export default function ScheduleInquiryPage() {
                     {/* 備註事項：送出後才補的內容，只能往下加，不能改也不能刪 */}
                     <div className="mt-4">
                       <div className="text-[10px] font-mono uppercase tracking-wider text-[#5f7290] mb-1.5">
-                        備註事項（{record.notes?.length ?? 0}）<span className="ml-1 normal-case tracking-normal">送出後補充，生管後台同步看得到</span>
+                        備註事項（{record.notes?.length ?? 0}）<span className="ml-1 normal-case tracking-normal">生管確認前可修改，確認後鎖定</span>
                       </div>
 
                       {(record.notes?.length ?? 0) > 0 && (
                         <div className="flex flex-col gap-1.5 mb-2">
                           {record.notes!.map(n => (
-                            <div key={n.id} className="rounded-[8px] border border-[#1c2739] bg-[#0b1220] px-3 py-2">
-                              <div className="text-[13px] text-[#e7edf5] whitespace-pre-wrap break-words">{n.note}</div>
-                              <div className="text-[11px] text-[#5f7290] mt-1">
-                                {n.author_name || '—'}・{new Date(n.created_at).toLocaleString('zh-TW', { timeZone: 'Asia/Taipei', hour12: false })}
-                              </div>
+                            <div key={n.id} className={`rounded-[8px] border px-3 py-2 ${
+                              n.confirmed_at ? 'border-emerald-500/25 bg-emerald-500/[0.06]' : 'border-[#1c2739] bg-[#0b1220]'
+                            }`}>
+                              {noteEditId === n.id ? (
+                                <div className="flex flex-col gap-2">
+                                  <textarea
+                                    value={noteEditText}
+                                    onChange={e => setNoteEditText(e.target.value)}
+                                    rows={3}
+                                    className="w-full bg-[#08101c] border border-[#1e2a3f] rounded-[8px] px-3 py-2 text-[13px] text-[#e7edf5] focus:outline-none focus:border-sky-500/70 resize-y"
+                                  />
+                                  <div className="flex items-center gap-2">
+                                    <button
+                                      onClick={() => void saveNoteEdit()}
+                                      disabled={savingNoteEdit || !noteEditText.trim()}
+                                      className="px-3 py-1.5 rounded-[8px] text-xs font-bold border border-sky-500/40 bg-sky-500/15 text-sky-300 hover:bg-sky-500/25 disabled:opacity-40 transition-colors"
+                                    >{savingNoteEdit ? '儲存中…' : '儲存'}</button>
+                                    <button
+                                      onClick={() => { setNoteEditId(null); setNoteEditText('') }}
+                                      className="px-3 py-1.5 rounded-[8px] text-xs font-bold border border-[#26344a] text-[#93a4c0] hover:bg-white/5 transition-colors"
+                                    >取消</button>
+                                  </div>
+                                </div>
+                              ) : (
+                                <>
+                                  <div className="text-[13px] text-[#e7edf5] whitespace-pre-wrap break-words">{n.note}</div>
+                                  <div className="text-[11px] text-[#5f7290] mt-1 flex items-center gap-2 flex-wrap">
+                                    <span>
+                                      {n.author_name || '—'}・{new Date(n.created_at).toLocaleString('zh-TW', { timeZone: 'Asia/Taipei', hour12: false })}
+                                      {n.updated_at && <span className="ml-1 text-[#445064]">(已修改)</span>}
+                                    </span>
+                                    {n.confirmed_at ? (
+                                      <span className="px-1.5 py-0.5 rounded border border-emerald-500/40 text-emerald-400 text-[10px] font-bold">
+                                        ✅ 生管已確認{n.confirmed_by_name ? `・${n.confirmed_by_name}` : ''}
+                                      </span>
+                                    ) : (
+                                      <span className="px-1.5 py-0.5 rounded border border-amber-500/40 text-amber-400 text-[10px] font-bold">
+                                        待生管確認
+                                      </span>
+                                    )}
+                                    {canEditNote(n) && (
+                                      <button
+                                        onClick={() => { setNoteEditId(n.id); setNoteEditText(n.note) }}
+                                        className="text-[11px] text-sky-400 hover:text-sky-300 underline underline-offset-2"
+                                      >編輯</button>
+                                    )}
+                                  </div>
+                                </>
+                              )}
                             </div>
                           ))}
                         </div>
@@ -856,7 +963,7 @@ export default function ScheduleInquiryPage() {
                           onChange={e => setNoteDrafts(prev => ({ ...prev, [record.id]: e.target.value }))}
                           onKeyDown={e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) void addNote(record) }}
                           rows={2}
-                          placeholder="補充備註事項…（Ctrl+Enter 送出，送出後不可修改）"
+                          placeholder="補充備註事項…（Ctrl+Enter 送出，生管確認前都還可以修改）"
                           className="flex-1 bg-[#08101c] border border-[#1e2a3f] rounded-[8px] px-3 py-2 text-[13px] text-[#e7edf5] placeholder-[#445064] focus:outline-none focus:border-sky-500/70 transition-colors resize-y"
                         />
                         <button
@@ -881,6 +988,22 @@ export default function ScheduleInquiryPage() {
                         {copiedId === record.id ? '✅ 已複製！可貼到 LINE 群組' : '📋 複製通知訊息'}
                       </button>
                       <span className="text-[11px] text-[#5f7290]">複製後可直接貼到 LINE 群組通知相關人員</span>
+
+                      {/* 編輯：生管確認前才開放；確認後改用備註事項補充（伺服器端同樣把關） */}
+                      {canEditContent(record) && (
+                        <button
+                          onClick={() => openEdit(record)}
+                          title="生管尚未確認，內容還可以修改"
+                          className="px-3 py-1.5 rounded-[8px] text-xs font-bold border border-sky-500/40 bg-sky-500/10 text-sky-300 hover:bg-sky-500/20 transition-colors"
+                        >
+                          ✏️ 編輯此單
+                        </button>
+                      )}
+                      {isAuthor(record) && record.planner_reply && (
+                        <span className="text-[11px] text-[#5f7290]">
+                          🔒 生管已確認，內容不可修改——要補充請用上面的「備註事項」
+                        </span>
+                      )}
 
                       {/* 刪除：僅填單本人可見（伺服器端另有把關，管理員/生管也可刪） */}
                       {isAuthor(record) && (
