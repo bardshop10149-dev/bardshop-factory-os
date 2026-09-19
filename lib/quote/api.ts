@@ -303,16 +303,33 @@ export interface ImportGoldenProposal {
   warnings: string[]
 }
 
+/** 「用這份 Excel 建立新品項」的提案：從主产品分頁反推的品項設定＋找到的類似品項＋合理性檢查 */
+export interface ImportProductProposal {
+  suggestedName: string
+  /** 主产品分頁名（設定從哪一頁來） */
+  fromSheet: string
+  config: ProductConfig
+  /** 這個品項會查到的價格名稱；exists=false 的會在套用時一併新增（用 Excel 上的價） */
+  referencedPrices: { name: string; group: string; unit: string; price: number; attrs: Record<string, number> | null; exists: boolean }[]
+  notes: string[]
+  similar: { id: string; name: string; why: string }[]
+  checks: { level: 'warn' | 'info'; field: string; message: string }[]
+}
+
 export interface ImportPreviewResponse {
   fileName: string
   templateVersion: string
   priceDiff: ImportPriceDiff[]
   goldenProposals: ImportGoldenProposal[]
   notes: string[]
+  productProposal?: ImportProductProposal
 }
 
 export interface ImportApplyRequest {
   fileName: string
-  priceUpdates: { name: string; group: string; price: number }[]
+  /** unit／attrs 只在「新增」時用（既有項目只改價）；板材新增要帶 attrs.layout_w_cm／layout_h_cm */
+  priceUpdates: { name: string; group: string; price: number; unit?: string; attrs?: Record<string, number> | null }[]
   goldenCases: (ImportGoldenProposal & { productId: string })[]
+  /** 一併建立新品項（draft）；goldenCases 裡 productId 可指到這個新 id */
+  newProduct?: { id: string; name: string; category: string; config: ProductConfig }
 }

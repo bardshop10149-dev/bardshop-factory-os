@@ -15,6 +15,7 @@
  * 所以 `node --experimental-strip-types scripts/quote-import-test.mjs` 可以直接載入自我驗證。
  */
 import * as XLSX from 'xlsx'
+import { checkDerivedProduct, deriveProductFromInput, type KnownItem, type ReferenceProduct } from './deriveProduct'
 import type { ImportGoldenProposal, ImportPreviewResponse, ImportPriceDiff } from './api'
 import type {
   AcrylicInput,
@@ -820,16 +821,46 @@ export function buildImportPreview(
   baseSettings: AcrylicSettings,
   currentPrices: Map<string, number>,
   extraNotes: string[] = [],
+  /** 建立新品項用：價格表現況（分組／attrs）與既有品項（找類似、核異常） */
+  ctx: { knownItems?: Map<string, KnownItem>; referenceProducts?: ReferenceProduct[] } = {},
 ): ImportPreviewResponse {
   // Node ESM 載入 CJS 的 xlsx 時 named export 由 cjs-module-lexer 偵測；保險起見 fallback 到 default
   const lib = ((XLSX as unknown as { default?: typeof XLSX }).default ?? XLSX) as typeof XLSX
   const wb = lib.read(data, { type: 'buffer', cellFormula: true, cellNF: false })
   const parsed = parseQuoteWorkbook(wb, fileName, baseSettings)
-  return {
+  const out: ImportPreviewResponse = {
     fileName,
     templateVersion: parsed.templateVersion,
     priceDiff: diffPrices(parsed.priceItems, currentPrices),
     goldenProposals: parsed.goldenProposals,
     notes: [...extraNotes, ...parsed.notes],
   }
+
+  // 「用這份 Excel 建立新品項」：設定從主产品那頁反推（沒有主产品就用第一個成本分頁）
+  const base = parsed.goldenProposals.find((g) => g.sheet === '主产品') ?? parsed.goldenProposals[0]
+  if (base && base.input) {
+    try {
+      const known = new Map<string, KnownItem>(ctx.knownItems ?? [])
+      // 价格表分頁裡的品名也算「已知」（套用時價格差異那段會新增它們），只是 attrs 未知
+      for (const p of parsed.priceItems) if (p.price != null && !known.has(p.name)) known.set(p.name, { group: p.group, attrs: null })
+      const input = base.input as AcrylicInput
+      const productName = base.name.split('｜')[0].replace(/^BA\d+\s*/i, '').trim()
+      const derived = deriveProductFromInput(input, known, { productName, fileName })
+      const knownPrices = new Map<string, number>(currentPrices)
+      for (const p of parsed.priceItems) if (p.price != null && !knownPrices.has(p.name)) knownPrices.set(p.name, p.price)
+      const { checks, similar } = checkDerivedProduct(derived, input, base.warnings, ctx.referenceProducts ?? [], knownPrices)
+      out.productProposal = {
+        suggestedName: derived.suggestedName,
+        fromSheet: base.sheet,
+        config: derived.config,
+        referencedPrices: derived.referencedPrices,
+        notes: derived.notes,
+        similar,
+        checks,
+      }
+    } catch (e) {
+      out.notes.push(`無法從這份表反推品項設定：${e instanceof Error ? e.message : String(e)}`)
+    }
+  }
+  return out
 }
