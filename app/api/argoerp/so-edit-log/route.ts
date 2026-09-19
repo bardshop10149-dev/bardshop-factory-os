@@ -52,7 +52,7 @@ const FIELD_LABEL: Record<string, string> = {
   sales_name: '業務員',
   customer_remark: '訂單備註',
   invoice_format: '發票型態',
-  tpn_part_no: '客戶單號',
+  tpn_part_no: '前置單號',
   grade: '等級',
   mbp_ver: '料號版本',
   begin_date: '訂單日期',
@@ -659,6 +659,12 @@ export async function GET(request: NextRequest) {
       const editDate = at.slice(0, 10).replace(/\//g, '-')
       // 出單表只有日期沒有時刻，同日分不出先後 → 從嚴視為發單後（寧可多通知）
       const editedAfterDispatch = dispatchDate !== null && editDate >= dispatchDate
+      const rawImpact = impacts.get(`${log.doc_no}|${log.sub_no ?? ''}`) ?? EMPTY_IMPACT
+      // 「未發單」其實是「ERP 查無這張單的任何製令」。常平／委外單不開 MOT 製令，
+      // 永遠查不到，但出單表明明已經發了——有發單日時狀態以出單表為準，顯示「已發單」。
+      const impact = rawImpact.dispatchState === '未發單' && dispatchDate
+        ? { ...rawImpact, dispatchState: '已發單' }
+        : rawImpact
       const common = {
         groupKey: `${log.doc_no}|${empNo}|${at}`,
         at,
@@ -669,7 +675,7 @@ export async function GET(request: NextRequest) {
         salesName,
         approximate,
         detectedAt: log.created_at,
-        impact: impacts.get(`${log.doc_no}|${log.sub_no ?? ''}`) ?? EMPTY_IMPACT,
+        impact,
         dispatchDate,
         editedAfterDispatch,
       }

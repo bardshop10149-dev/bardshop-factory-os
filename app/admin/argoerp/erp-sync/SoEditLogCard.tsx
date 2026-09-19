@@ -76,6 +76,8 @@ const PAGE_SIZE = 100
 /** 發單狀態的顏色：愈後面代表改單的殺傷力愈大 */
 const STATE_STYLE: Record<string, string> = {
   未發單: 'bg-slate-800 text-slate-400 border-slate-700',
+  // 出單表有發單日但 ERP 查無製令（常平／委外單不開 MOT）
+  已發單: 'bg-amber-900/50 text-amber-300 border-amber-700/50',
   該單已發單: 'bg-slate-800 text-slate-300 border-slate-600',
   已開製令: 'bg-sky-900/60 text-sky-300 border-sky-700/50',
   已發單上傳: 'bg-amber-900/50 text-amber-300 border-amber-700/50',
@@ -85,7 +87,7 @@ const STATE_STYLE: Record<string, string> = {
 
 /** 排序權重：愈危險排愈前面 */
 const STATE_RANK: Record<string, number> = {
-  生產中: 5, 已備料: 4, 已發單上傳: 3, 已開製令: 2, 該單已發單: 1, 未發單: 0,
+  生產中: 5, 已備料: 4, 已發單上傳: 3, 已開製令: 2, 已發單: 2, 該單已發單: 1, 未發單: 0,
 }
 
 /** 一次操作超過這麼多筆變更就預設收起來 */
@@ -375,21 +377,36 @@ export default function SoEditLogCard({ onInspectOrder, onOpenOrder }: Props) {
         </p>
       )}
 
-      {/* LOG 條列 */}
-      <div className="overflow-x-auto rounded-xl border border-slate-800">
+      {/* LOG 條列。
+          表格自己是捲動容器（限高 75vh），sticky 表頭才有東西可以貼著；
+          若只用 overflow-x-auto，容器在垂直方向不捲動、sticky 等於沒作用，
+          改成 overflow-x-clip 又會在窄畫面把右側欄位裁掉且無法捲回來。 */}
+      <div className="max-h-[75vh] overflow-auto rounded-xl border border-slate-800">
         <table className="w-full text-sm">
+          {/* 表頭固定：往下捲時仍看得到欄位名稱。
+              sticky 元素要貼在 th 上（thead/tr 的 sticky 在部分瀏覽器不生效），
+              且必須有自己的底色，否則捲動時會透出下方的列。 */}
           <thead>
-            <tr className="border-b border-slate-700 bg-slate-900">
-              <th className="whitespace-nowrap px-3 py-3 text-left text-xs text-slate-300">異動時間</th>
-              <th className="whitespace-nowrap px-3 py-3 text-left text-xs text-slate-300">工號 / 姓名</th>
-              <th className="whitespace-nowrap py-3 pl-1 pr-2 text-left text-xs text-slate-300">動作</th>
-              <th className="whitespace-nowrap px-3 py-3 text-left text-xs text-slate-300">訂單 / 行號</th>
-              <th className="whitespace-nowrap px-3 py-3 text-left text-xs text-slate-300">修改位置</th>
-              <th className="px-3 py-3 text-left text-xs text-slate-300">原內容 → 新內容</th>
-              <th className="whitespace-nowrap px-3 py-3 text-left text-xs text-slate-300">發單日</th>
-              <th className="whitespace-nowrap px-3 py-3 text-left text-xs text-slate-300">發單狀態</th>
-              <th className="whitespace-nowrap px-3 py-3 text-left text-xs text-slate-300">影響單位</th>
-              <th className="whitespace-nowrap py-3 pl-6 pr-3 text-left text-xs text-slate-300">應通知</th>
+            <tr className="border-b border-slate-700">
+              {[
+                ['異動時間', 'whitespace-nowrap px-3'],
+                ['工號 / 姓名', 'whitespace-nowrap px-3'],
+                ['動作', 'whitespace-nowrap pl-1 pr-2'],
+                ['訂單 / 行號', 'whitespace-nowrap px-3'],
+                ['修改位置', 'whitespace-nowrap px-3'],
+                ['原內容 → 新內容', 'px-3'],
+                ['發單日', 'whitespace-nowrap px-3'],
+                ['發單狀態', 'whitespace-nowrap px-3'],
+                ['影響單位', 'whitespace-nowrap px-3'],
+                ['應通知', 'whitespace-nowrap pl-6 pr-3'],
+              ].map(([label, cls]) => (
+                <th
+                  key={label}
+                  className={`sticky top-0 z-10 border-b border-slate-700 bg-slate-900 py-3 text-left text-xs text-slate-300 ${cls}`}
+                >
+                  {label}
+                </th>
+              ))}
             </tr>
           </thead>
           <tbody>
@@ -706,6 +723,10 @@ export default function SoEditLogCard({ onInspectOrder, onOpenOrder }: Props) {
           未發單 → 已開製令 → 已發單上傳 → 已備料（料已領出去）→
           <span className="text-red-300">生產中</span>（機台正在做）。愈後面代表改單的殺傷力愈大。
           百分比是塔台的整批進度。
+          其中
+          <span className="mx-1 rounded border border-amber-700/50 bg-amber-900/50 px-1.5 text-amber-300">已發單</span>
+          代表出單表已經發了、但 ERP 查不到製令——<span className="text-slate-300">常平廠與委外單不開製令</span>
+          （走採購單），屬正常現象，不是漏資料。
         </p>
         <p>
           <span className="text-slate-300">發單前 / 發單後</span>的判定則看時間先後：
