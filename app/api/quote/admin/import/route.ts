@@ -1,9 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getSupabaseAdminClient, describeError } from '@/lib/supabaseAdmin'
 import { guardQuote } from '@/lib/quote/guard'
-import { buildImportPreview } from '@/lib/quote/excelImport'
+import { buildImportPreview, SETTING_LABELS } from '@/lib/quote/excelImport'
 import type { KnownItem, ReferenceProduct } from '@/lib/quote/deriveProduct'
-import { validateProductConfig } from '@/lib/quote/data'
+import { createQuoteCtx, loadSettings, validateAcrylicSettings, validateProductConfig } from '@/lib/quote/data'
 import type { ImportApplyRequest, ImportGoldenProposal } from '@/lib/quote/api'
 import type { AcrylicSettings, ProductConfig } from '@/lib/quote/types'
 import seedSettings from '@/lib/quote/seed/settings.json'
@@ -175,7 +175,26 @@ function validateApply(body: unknown): { ok: true; value: ImportApplyRequest } |
     }
     goldenCases.push(proposal)
   }
-  return { ok: true, value: { fileName, priceUpdates, goldenCases, ...(newProduct ? { newProduct } : {}) } }
+  const settingsUpdates: NonNullable<ImportApplyRequest['settingsUpdates']> = []
+  if (b.settingsUpdates != null) {
+    if (!Array.isArray(b.settingsUpdates)) return { ok: false, error: 'settingsUpdates 必須是陣列' }
+    for (const u of b.settingsUpdates) {
+      const path = typeof u?.path === 'string' ? u.path : ''
+      if (!(path in SETTING_LABELS)) return { ok: false, error: `settingsUpdates 不允許的路徑：${path || '?'}` }
+      settingsUpdates.push({ path, value: u.value })
+    }
+  }
+  return { ok: true, value: { fileName, priceUpdates, goldenCases, ...(newProduct ? { newProduct } : {}), ...(settingsUpdates.length ? { settingsUpdates } : {}) } }
+}
+
+function setPath(obj: Record<string, unknown>, path: string, value: unknown) {
+  const keys = path.split('.')
+  let cur: Record<string, unknown> = obj
+  for (const k of keys.slice(0, -1)) {
+    if (typeof cur[k] !== 'object' || cur[k] === null) cur[k] = {}
+    cur = cur[k] as Record<string, unknown>
+  }
+  cur[keys[keys.length - 1]] = value
 }
 
 async function handleApply(request: NextRequest, updatedBy: string) {
@@ -187,8 +206,8 @@ async function handleApply(request: NextRequest, updatedBy: string) {
   }
   const v = validateApply(raw)
   if (!v.ok) return fail(400, v.error)
-  const { fileName, priceUpdates, goldenCases, newProduct } = v.value
-  if (priceUpdates.length === 0 && goldenCases.length === 0 && !newProduct) return fail(400, '沒有勾選任何要套用的項目')
+  const { fileName, priceUpdates, goldenCases, newProduct, settingsUpdates = [] } = v.value
+  if (priceUpdates.length === 0 && goldenCases.length === 0 && !newProduct && settingsUpdates.length === 0) return fail(400, '沒有勾選任何要套用的項目')
   // 本機 seed 模式：.env.local 有正式 Supabase 金鑰，不擋的話「套用」會直接寫進正式庫
   if (process.env.QUOTE_DEV_SEED === '1') return fail(400, '目前為開發 seed 模式（QUOTE_DEV_SEED=1），只能預覽、不會寫入；要真的套用請到正式站', )
 
@@ -338,7 +357,23 @@ async function handleApply(request: NextRequest, updatedBy: string) {
       }
     }
 
-    return NextResponse.json({ success: true, pricesUpdated, pricesInserted, goldenInserted, goldenSkipped, productCreated })
+    /* ---- 全域參數：勾了的葉子套進 acrylic_settings 整包存回（全品項共用，所以預設不勾） ---- */
+    let settingsUpdated = 0
+    if (settingsUpdates.length > 0) {
+      const ctx = createQuoteCtx()
+      const current = await loadSettings(ctx)
+      const merged = JSON.parse(JSON.stringify(current.acrylic_settings)) as Record<string, unknown>
+      for (const u of settingsUpdates) setPath(merged, u.path, u.value)
+      const err = validateAcrylicSettings(merged as unknown as AcrylicSettings)
+      if (err) return fail(400, `全域參數套用後不合法：${err}`)
+      const { error } = await supabase
+        .from('quote_settings')
+        .upsert({ key: 'acrylic_settings', value: merged, updated_by: `${updatedBy}（Excel 匯入：${fileName}）`, updated_at: now }, { onConflict: 'key' })
+      if (error) throw new Error(`更新全域參數失敗：${error.message}`)
+      settingsUpdated = settingsUpdates.length
+    }
+
+    return NextResponse.json({ success: true, pricesUpdated, pricesInserted, goldenInserted, goldenSkipped, productCreated, settingsUpdated })
   } catch (e) {
     const msg = describeError(e)
     if (isMissingTable(msg)) return fail(503, TABLE_MISSING_MSG)

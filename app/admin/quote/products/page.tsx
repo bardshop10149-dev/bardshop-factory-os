@@ -13,7 +13,6 @@ import { Suspense, useCallback, useEffect, useMemo, useState } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import type { PackingMode, Plant, PrintMethod, ProductConfig, ProductStatus, Sides } from '@/lib/quote/types'
 import type { AdminPriceRow, AdminProductRow, AdminProductsAction, GoldenRow, VerifyCaseResult, VerifyResponse } from '@/lib/quote/api'
-import seedProducts from '@/lib/quote/seed/products.json'
 import { adminFetch, cloneJson, fmtDateTime, fmtNum, fmtPct, pickArray, pickObject, sameJson } from '../_shared/api'
 import {
   Badge, Btn, Check, Field, INPUT_CLS, JsonView, LoadingBlock, MONO, NotReadyBanner, Notice, NumInput, PageHeader, SaveBar, Section, TD_CLS, TH_CLS,
@@ -36,22 +35,6 @@ const SEGMENT_LABEL: Record<string, string> = { material: '材料', print: '印�
 const SEGMENT_ORDER = ['material', 'print', 'cut', 'packLabor', 'packMaterial']
 
 /** 新品項的 config 範本：直接拿 seed 鑰匙圈的設定（真實價格表品名），建立後再改 */
-const TEMPLATE_CONFIG: ProductConfig = (seedProducts as unknown as { config: ProductConfig }[])[0]?.config ?? {
-  boards: { options: [], defaultItem: '', sides: 1 },
-  extraBoards: [],
-  printMethods: ['7151', 'none'],
-  defaultPrintMethod: '7151',
-  petByMethod: {},
-  kPet: 2,
-  laminate: [{ item: '贴合', platesFrom: ['main'] }],
-  wash: { item: '清洗', platesFrom: 'main' },
-  cut: { t1: 12, t2: 0, t3: 0 },
-  accessories: [],
-  packing: [],
-  scrapPct: 10,
-  costRatio: 0.72,
-  packCapacityPerHour: 100,
-}
 
 const isNum = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v)
 
@@ -133,7 +116,6 @@ function ProductsInner() {
   const [products, setProducts] = useState<AdminProductRow[]>([])
   const [goldensByProduct, setGoldensByProduct] = useState<Record<string, GoldenRow[] | undefined>>({})
   const [prices, setPrices] = useState<AdminPriceRow[]>([])
-  const [showCreate, setShowCreate] = useState(false)
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -212,7 +194,7 @@ function ProductsInner() {
           selected ? (
             <Btn onClick={() => select(null)}>← 回列表</Btn>
           ) : (
-            <Btn variant="primary" onClick={() => setShowCreate((v) => !v)} disabled={!!notReady || loading}>＋ 新增品項</Btn>
+            <span className="text-xs text-slate-500">新品項請由「Excel 匯入」上傳該品項的常平報價表建立（會自動帶設定與驗證案例）</span>
           )
         }
       />
@@ -237,21 +219,6 @@ function ProductsInner() {
         />
       ) : (
         <>
-          {showCreate && (
-            <CreatePanel
-              onCancel={() => setShowCreate(false)}
-              onCreate={async (draft) => {
-                setError(null)
-                const res = await post({ action: 'create', product: draft })
-                if (!res) return
-                setShowCreate(false)
-                setOkMsg(`已建立「${draft.name}」（草稿）。接著編輯設定、匯入 golden、跑驗證。`)
-                await load()
-                const created = pickObject<AdminProductRow>(res, ['product', 'row', 'data'])
-                if (created?.id) select(created.id)
-              }}
-            />
-          )}
           <ProductList products={products} goldensByProduct={goldensByProduct} onEdit={(id) => select(id)} />
         </>
       )}
@@ -268,7 +235,7 @@ function ProductList({ products, goldensByProduct, onEdit }: {
 }) {
   const sorted = useMemo(() => [...products].sort((a, b) => a.sort_order - b.sort_order || a.name.localeCompare(b.name, 'zh-Hant')), [products])
   if (!sorted.length) {
-    return <div className="text-center text-slate-500 py-16 border border-dashed border-slate-700 rounded-xl">還沒有品項。按右上「＋ 新增品項」建立第一個（MVP：壓克力鑰匙圈）。</div>
+    return <div className="text-center text-slate-500 py-16 border border-dashed border-slate-700 rounded-xl">還沒有品項。到「Excel 匯入」上傳該品項的常平報價表，勾「建立新品項」。</div>
   }
   return (
     <div className="bg-slate-900/50 border border-slate-700 rounded-xl overflow-hidden">
@@ -309,49 +276,6 @@ function ProductList({ products, goldensByProduct, onEdit }: {
         </table>
       </div>
     </div>
-  )
-}
-
-/* ================================================================ 新增 */
-
-type CreateDraft = Omit<AdminProductRow, 'id' | 'version' | 'updated_by' | 'updated_at' | 'published_at'>
-
-function CreatePanel({ onCancel, onCreate }: { onCancel: () => void; onCreate: (d: CreateDraft) => Promise<void> }) {
-  const [name, setName] = useState('')
-  const [category, setCategory] = useState('壓克力')
-  const [plant, setPlant] = useState<Plant>('changping')
-  const [sortOrder, setSortOrder] = useState(100)
-  const [busy, setBusy] = useState(false)
-  return (
-    <Section title="新增品項" desc="以 seed 鑰匙圈的設定當範本建立（狀態 draft），建立後再逐項調整。品項是資料不是程式：壓克力家族內新增品項不改 code。">
-      <div className="grid grid-cols-2 md:grid-cols-5 gap-4 items-end">
-        <Field label="品項名稱 *" className="md:col-span-2"><input className={INPUT_CLS} value={name} onChange={(e) => setName(e.target.value)} placeholder="例：鑰匙圈" /></Field>
-        <Field label="分類"><input className={INPUT_CLS} value={category} onChange={(e) => setCategory(e.target.value)} /></Field>
-        <Field label="廠別">
-          <select className={INPUT_CLS} value={plant} onChange={(e) => setPlant(e.target.value as Plant)}>
-            {(Object.keys(PLANT_LABEL) as Plant[]).map((k) => <option key={k} value={k}>{PLANT_LABEL[k]}</option>)}
-          </select>
-        </Field>
-        <Field label="排序"><NumInput value={sortOrder} step={1} onChange={setSortOrder} /></Field>
-      </div>
-      <div className="flex gap-2 mt-4 justify-end">
-        <Btn onClick={onCancel} disabled={busy}>取消</Btn>
-        <Btn
-          variant="primary"
-          disabled={busy || !name.trim()}
-          onClick={async () => {
-            setBusy(true)
-            await onCreate({
-              family: 'acrylic', category: category.trim() || '壓克力', name: name.trim(), plant, status: 'draft',
-              config: cloneJson(TEMPLATE_CONFIG), sort_order: isNum(sortOrder) ? sortOrder : 100,
-            })
-            setBusy(false)
-          }}
-        >
-          {busy ? '建立中…' : '建立'}
-        </Btn>
-      </div>
-    </Section>
   )
 }
 

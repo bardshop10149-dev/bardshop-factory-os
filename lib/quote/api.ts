@@ -316,6 +316,14 @@ export interface ImportProductProposal {
   checks: { level: 'warn' | 'info'; field: string; message: string }[]
 }
 
+/** Excel 的全域參數（人工／折舊／刀費／包裝人力／拼板間距）跟後台現值不同的地方；path 是 acrylic_settings 的葉子路徑 */
+export interface ImportSettingDiff {
+  path: string
+  label: string
+  current: unknown
+  incoming: unknown
+}
+
 export interface ImportPreviewResponse {
   fileName: string
   templateVersion: string
@@ -323,6 +331,7 @@ export interface ImportPreviewResponse {
   goldenProposals: ImportGoldenProposal[]
   notes: string[]
   productProposal?: ImportProductProposal
+  settingsDiff: ImportSettingDiff[]
 }
 
 export interface ImportApplyRequest {
@@ -332,4 +341,6 @@ export interface ImportApplyRequest {
   goldenCases: (ImportGoldenProposal & { productId: string })[]
   /** 一併建立新品項（draft）；goldenCases 裡 productId 可指到這個新 id */
   newProduct?: { id: string; name: string; category: string; config: ProductConfig }
+  /** 勾選要套用到全域參數的差異（預設全不勾；套用即改 quote_settings.acrylic_settings，全品項共用） */
+  settingsUpdates?: { path: string; value: unknown }[]
 }

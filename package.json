@@ -8,7 +8,8 @@
     "start": "next start",
     "lint": "eslint",
     "quote:golden": "node --experimental-strip-types scripts/quote-golden.mjs",
-    "quote:seed-sql": "node --experimental-strip-types scripts/quote-seed-sql.mjs"
+    "quote:seed-sql": "node --experimental-strip-types scripts/quote-seed-sql.mjs",
+    "quote:import-test": "node --experimental-strip-types --import ./scripts/ts-resolve.mjs scripts/quote-import-test.mjs"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",

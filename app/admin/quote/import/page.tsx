@@ -8,7 +8,7 @@ import type { ImportApplyRequest, ImportGoldenProposal, ImportPreviewResponse, I
 //   預設勾 new/up/down、不勾 same/invalid；golden 預設全勾、品項預設第一個 published/draft 品項
 
 type ProductOption = { id: string; name: string; category?: string; status?: string }
-type ApplyResult = { pricesUpdated: number; pricesInserted: number; goldenInserted: number; goldenSkipped: string[]; productCreated?: { id: string; name: string } | null }
+type ApplyResult = { pricesUpdated: number; pricesInserted: number; goldenInserted: number; goldenSkipped: string[]; productCreated?: { id: string; name: string } | null; settingsUpdated?: number }
 
 const STATUS_LABEL: Record<ImportPriceDiff['status'], string> = {
   new: '新增',
@@ -33,6 +33,9 @@ function suggestProductId(): string {
   return `p-${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}`
 }
 
+/** 全域參數值：數字直接印、陣列（機台／人力整組）壓成一行 */
+const fmtSetting = (v: unknown) => (typeof v === 'number' ? v.toLocaleString('zh-TW', { maximumFractionDigits: 4 }) : Array.isArray(v) ? v.map((x) => (x && typeof x === 'object' ? Object.values(x as Record<string, unknown>).join(' ') : String(x))).join('；') : String(v ?? '—'))
+
 const fmtPrice = (v: number | null) => (v == null || !Number.isFinite(v) ? '—' : v.toLocaleString('zh-TW', { maximumFractionDigits: 4 }))
 
 export default function QuoteImportPage() {
@@ -54,6 +57,8 @@ export default function QuoteImportPage() {
   const [newProductId, setNewProductId] = useState('')
   const [newProductName, setNewProductName] = useState('')
   const [newProductCategory, setNewProductCategory] = useState('壓克力')
+  /** 全域參數差異：預設全不勾（改了是全品項共用） */
+  const [settingChecked, setSettingChecked] = useState<Set<number>>(new Set())
 
   // 品項清單（給 golden 提案選 productId）；讀不到就退回手打
   const loadProducts = useCallback(async () => {
@@ -102,6 +107,7 @@ export default function QuoteImportPage() {
       setNewProductName(json.productProposal?.suggestedName ?? '')
       setNewProductId(suggestProductId())
       setNewProductCategory('壓克力')
+      setSettingChecked(new Set())
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
     } finally {
@@ -183,7 +189,8 @@ export default function QuoteImportPage() {
       const have = new Set(priceUpdates.map((p) => p.name))
       for (const r of missingPrices) if (!have.has(r.name)) priceUpdates.push({ name: r.name, group: r.group, price: r.price, unit: r.unit, attrs: r.attrs })
     }
-    if (priceUpdates.length === 0 && goldenCases.length === 0 && !createProduct) {
+    const settingsUpdates = (preview.settingsDiff ?? []).filter((_, i) => settingChecked.has(i)).map((d) => ({ path: d.path, value: d.incoming }))
+    if (priceUpdates.length === 0 && goldenCases.length === 0 && !createProduct && settingsUpdates.length === 0) {
       setError('沒有勾選任何要套用的項目')
       return
     }
@@ -192,7 +199,7 @@ export default function QuoteImportPage() {
       setError(`有 ${missing.length} 筆驗證案例沒有選品項`)
       return
     }
-    if (!confirm(`${createProduct ? `將建立新品項「${newProductName.trim()}」（${newProductId}，草稿）、` : '將'}套用 ${priceUpdates.length} 筆價格、寫入 ${goldenCases.length} 筆驗證案例（proposed），是否繼續？`)) return
+    if (!confirm(`${createProduct ? `將建立新品項「${newProductName.trim()}」（${newProductId}，草稿）、` : '將'}套用 ${priceUpdates.length} 筆價格${settingsUpdates.length ? `、改 ${settingsUpdates.length} 項全域參數（全品項共用）` : ''}、寫入 ${goldenCases.length} 筆驗證案例（proposed），是否繼續？`)) return
 
     setApplying(true)
     setError(null)
@@ -202,6 +209,7 @@ export default function QuoteImportPage() {
         priceUpdates,
         goldenCases,
         ...(createProduct && proposal ? { newProduct: { id: newProductId, name: newProductName.trim(), category: newProductCategory.trim() || '壓克力', config: proposal.config } } : {}),
+        ...(settingsUpdates.length ? { settingsUpdates } : {}),
       }
       const res = await fetch('/api/quote/admin/import?apply=1', {
         method: 'POST',
@@ -213,7 +221,7 @@ export default function QuoteImportPage() {
         setError(('error' in json && json.error) || `套用失敗（HTTP ${res.status}）`)
         return
       }
-      setResult({ pricesUpdated: json.pricesUpdated, pricesInserted: json.pricesInserted, goldenInserted: json.goldenInserted, goldenSkipped: json.goldenSkipped ?? [], productCreated: json.productCreated ?? null })
+      setResult({ pricesUpdated: json.pricesUpdated, pricesInserted: json.pricesInserted, goldenInserted: json.goldenInserted, goldenSkipped: json.goldenSkipped ?? [], productCreated: json.productCreated ?? null, settingsUpdated: json.settingsUpdated ?? 0 })
       if (json.productCreated) void loadProducts()
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
@@ -264,7 +272,7 @@ export default function QuoteImportPage() {
 
       {result && (
         <div className="mb-6 rounded border border-green-800 bg-green-900/30 px-4 py-3 text-sm text-green-300">
-          套用完成：{result.productCreated && <span>已建立品項「{result.productCreated.name}」（{result.productCreated.id}，草稿）；</span>}價格更新 {result.pricesUpdated} 筆、新增 {result.pricesInserted} 筆；驗證案例寫入 {result.goldenInserted} 筆（proposed）
+          套用完成：{result.productCreated && <span>已建立品項「{result.productCreated.name}」（{result.productCreated.id}，草稿）；</span>}價格更新 {result.pricesUpdated} 筆、新增 {result.pricesInserted} 筆{result.settingsUpdated ? `；全域參數改 ${result.settingsUpdated} 項` : ''}；驗證案例寫入 {result.goldenInserted} 筆（proposed）
           {result.goldenSkipped.length > 0 && (
             <span className="text-yellow-300">；同名已存在略過 {result.goldenSkipped.length} 筆：{result.goldenSkipped.join('、')}</span>
           )}
@@ -375,6 +383,36 @@ export default function QuoteImportPage() {
             </div>
           )}
 
+          {/* 全域參數差異 */}
+          {preview.settingsDiff.length > 0 && (
+            <div className="bg-slate-900/50 rounded-xl border border-slate-700 p-6 mb-6">
+              <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 border-b border-slate-700 pb-2 mb-4">
+                <h2 className="text-sm font-bold text-orange-500 uppercase tracking-wider">2c. 全域參數差異（已勾 {settingChecked.size} / {preview.settingsDiff.length}）</h2>
+                <span className="text-xs text-yellow-300/90">人工／折舊／刀費是全品項共用，預設不勾；勾了才會改後台「全域參數」，沒勾的維持現值（這份表自己的 golden 仍用它的常數驗證）</span>
+              </div>
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="text-xs text-slate-500 border-b border-slate-700">
+                    <th className="text-left py-2 pr-2 w-8"></th>
+                    <th className="text-left py-2 pr-2">參數</th>
+                    <th className="text-left py-2 pr-2">後台現值</th>
+                    <th className="text-left py-2 pr-2">Excel 值</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {preview.settingsDiff.map((d, i) => (
+                    <tr key={d.path} className={`border-b border-slate-800 ${settingChecked.has(i) ? 'bg-yellow-950/20' : 'hover:bg-slate-800/40'}`}>
+                      <td className="py-1.5 pr-2"><input type="checkbox" checked={settingChecked.has(i)} onChange={() => setSettingChecked((prev) => { const n = new Set(prev); if (n.has(i)) n.delete(i); else n.add(i); return n })} className="accent-orange-500" /></td>
+                      <td className="py-1.5 pr-2 text-slate-200">{d.label}<div className="text-[10px] text-slate-500 font-mono">{d.path}</div></td>
+                      <td className="py-1.5 pr-2 font-mono text-xs text-slate-400 break-all">{fmtSetting(d.current)}</td>
+                      <td className="py-1.5 pr-2 font-mono text-xs text-white break-all">{fmtSetting(d.incoming)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+
           {/* 價格差異 */}
           <div className="bg-slate-900/50 rounded-xl border border-slate-700 p-6 mb-6">
             <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 border-b border-slate-700 pb-2 mb-4">
@@ -470,8 +508,8 @@ export default function QuoteImportPage() {
             <span className="text-xs text-slate-500">價格 {selectedPriceCount} 筆 · 驗證案例 {selectedGoldenCount} 筆</span>
             <button
               onClick={handleApply}
-              disabled={applying || (selectedPriceCount === 0 && selectedGoldenCount === 0 && !createProduct)}
-              className={`px-6 py-2 rounded font-bold text-sm transition-all ${applying || (selectedPriceCount === 0 && selectedGoldenCount === 0 && !createProduct) ? 'bg-slate-800 border border-slate-700 text-slate-500 cursor-not-allowed' : 'bg-orange-600 hover:bg-orange-500 text-white shadow-lg shadow-orange-900/50'}`}
+              disabled={applying || (selectedPriceCount === 0 && selectedGoldenCount === 0 && !createProduct && settingChecked.size === 0)}
+              className={`px-6 py-2 rounded font-bold text-sm transition-all ${applying || (selectedPriceCount === 0 && selectedGoldenCount === 0 && !createProduct && settingChecked.size === 0) ? 'bg-slate-800 border border-slate-700 text-slate-500 cursor-not-allowed' : 'bg-orange-600 hover:bg-orange-500 text-white shadow-lg shadow-orange-900/50'}`}
             >
               {applying ? '套用中...' : createProduct ? '建立品項並套用' : '套用勾選項目'}
             </button>
