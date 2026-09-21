@@ -6,43 +6,18 @@
 // operation_times 查詢與工時計算規則）→ 一鍵追加進交換區 CSV buffer。
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { supabase } from '../../../../lib/supabaseClient'
 import { buildSaraRow, type SaraRow } from '../../../../lib/sara/buildSaraRow'
-import { DEFAULT_PRIORITY_RULES, computePriorityFromDue, type PriorityRule } from '../../../../lib/sara/priorityRules'
-
-interface SheetHitRow {
-  sheet_date: string
-  order_number: string
-  item_code: string
-  item_name: string
-  quantity: number
-  due: string
-  pan_count: number
-  ref_number?: string      // 依廠區選擇的製令/採購/請購單號
-  line_seq?: string
-  customer?: string
-  factory?: 'T' | 'C' | 'O'
-  assigned_machine?: string
-}
-
-// 工時計算規則——與 process-gen 一致：轉運站固定 qty=1；包裝站用生產數量；
-// 其他站點盤數優先；不足 10 分鐘補至 10 分鐘
-const isPackagingStation = (s: string) => s.includes('包裝站')
-const isTransitStation = (s: string) => s.includes('轉運')
-const isPrintStation2F6F = (s: string) => s === '印刷站2F' || s === '印刷站6F'
-function calcEst(std: number, qty: number, panCount: number, station: string): number {
-  if (std === 0) return 0
-  const isPacking = isPackagingStation(station)
-  const isTransit = isTransitStation(station)
-  const effQty = isTransit ? 1 : (panCount > 0 && !isPacking) ? panCount : qty
-  return Math.max(10, Math.round(std * effQty * 10) / 10)
-}
-function fmtToday(): string {
-  const d = new Date()
-  return `${d.getFullYear()}/${String(d.getMonth() + 1).padStart(2, '0')}/${String(d.getDate()).padStart(2, '0')}`
-}
-
-const FACTORY_LABEL: Record<string, string> = { T: '台北', C: '常平', O: '委外' }
+import { DEFAULT_PRIORITY_RULES, type PriorityRule } from '../../../../lib/sara/priorityRules'
+// 出單表列 → SARA 工序列的解析與計算規則共用 lib/sara/clientRowGen.ts
+//（改單面板 OrderRouteChange 用同一套，避免兩邊各自維護造成漂移）
+import {
+  applyMachineAssignments,
+  generateSaraRows,
+  loadRouteMeta,
+  parseSheetHits,
+  FACTORY_LABEL,
+  type SheetHitRow,
+} from '../../../../lib/sara/clientRowGen'
 
 export default function SingleOrderConvert({ onAppended }: { onAppended: () => void }) {
   // 交期優先度規則（與 process-gen / 每日自動轉換共用同一份，見 /api/sara/priority-rules）
@@ -88,81 +63,15 @@ export default function SingleOrderConvert({ onAppended }: { onAppended: () => v
       const json = await res.json() as { success: boolean; error?: string; results?: Array<{ sheet_date: string; rows: Record<string, unknown>[] }> }
       if (!res.ok || !json.success) throw new Error(json.error || `HTTP ${res.status}`)
 
-      // 同一列（訂單號+序號+品號）可能出現在多個日期，只留最新日期那筆
-      const seen = new Set<string>()
-      const parsed: SheetHitRow[] = []
-      const sortedResults = [...(json.results ?? [])].sort((a, b) => b.sheet_date.localeCompare(a.sheet_date))
-      for (const sheet of sortedResults) {
-        for (const r of sheet.rows) {
-          const orderNo = String(r.order_number ?? '').trim()
-          const itemCode = String(r.item_code ?? '').trim()
-          if (!orderNo || !itemCode) continue
-          const lineSeq = String(r.line_no_input ?? '').trim() || String(r.match_line_no ?? '').trim()
-          const dedupeKey = `${orderNo}|${lineSeq}|${itemCode}`
-          if (seen.has(dedupeKey)) continue
-          seen.add(dedupeKey)
-          const qty = parseFloat(String(r.quantity ?? '').replace(/,/g, '')) || 0
-          if (qty <= 0) continue
-          const factory = ['T', 'C', 'O'].includes(String(r.factory ?? '')) ? String(r.factory) as 'T' | 'C' | 'O' : undefined
-          // 依廠區選擇對應單號：台北=製令 / 常平=採購單 / 委外=請購單（與 process-gen 一致）。
-          // 常平/委外一律加上「-行號」（po_sub_no/pr_sub_no）：採購/請購單是整張單共用、不分行，
-          // 同一張單同一品項可能開多筆銷售單序號，裸單號送給 SARA 會讓 Manufacturing Order
-          // Number + Product Name 完全相同、只留下最後一筆（見 process-gen 同一套邏輯）。
-          const poSubNo = String(r.po_sub_no ?? '').trim()
-          const prSubNo = String(r.pr_sub_no ?? '').trim()
-          const poNumber = String(r.po_number ?? '').trim()
-          const prNumber = String(r.pr_number ?? '').trim()
-          const refNumber =
-            factory === 'C' ? (poNumber ? `${poNumber}${poSubNo ? `-${poSubNo}` : ''}` : undefined) :
-            factory === 'O' ? (prNumber ? `${prNumber}${prSubNo ? `-${prSubNo}` : ''}` : undefined) :
-                              String(r.mo_number ?? '').trim() || undefined
-          parsed.push({
-            sheet_date: sheet.sheet_date,
-            order_number: orderNo,
-            item_code: itemCode,
-            item_name: String(r.item_name ?? r.note ?? '').trim(),
-            quantity: qty,
-            due: String(r.delivery_date ?? '').trim(),
-            pan_count: parseFloat(String(r.plate_count ?? '').replace(/,/g, '')) || 0,
-            ref_number: refNumber,
-            line_seq: lineSeq || undefined,
-            customer: String(r.customer ?? '').trim() || undefined,
-            factory,
-            assigned_machine: String(r.machine ?? r.assigned_machine ?? '').trim() || undefined,
-          })
-        }
-      }
+      const parsed = parseSheetHits(json.results ?? [])
       if (parsed.length === 0) {
         setSearchError(`出單表裡找不到符合「${q}」的訂單`)
         return
       }
-
-      // 台北廠製令機台：argoerp_mo_machine_assign 才是最新來源（與 process-gen 一致）
-      const tMoNums = [...new Set(parsed.filter(r => r.factory === 'T' && r.ref_number).map(r => r.ref_number!))]
-      if (tMoNums.length > 0) {
-        const { data: machineRows } = await supabase
-          .from('argoerp_mo_machine_assign')
-          .select('mo_number, machine')
-          .in('mo_number', tMoNums)
-        const moMachineMap = new Map((machineRows ?? []).filter(m => m.machine).map(m => [m.mo_number, m.machine as string]))
-        for (const r of parsed) {
-          if (r.factory === 'T' && r.ref_number) {
-            const fromTable = moMachineMap.get(r.ref_number)
-            if (fromTable) r.assigned_machine = fromTable
-          }
-        }
-      }
-
-      // 預設途程 + 全部途程清單（供更換工序的下拉）
-      const uniqueItems = [...new Set(parsed.map(r => r.item_code))]
-      const [{ data: irData }, { data: roData }] = await Promise.all([
-        supabase.from('item_routes').select('item_code, route_id').in('item_code', uniqueItems),
-        supabase.from('route_operations').select('route_id'),
-      ])
-      const irMap: Record<string, string> = {}
-      for (const r of (irData ?? []) as Array<{ item_code: string; route_id: string }>) irMap[r.item_code] = r.route_id
-      setDefaultRoutes(irMap)
-      setRouteOptions([...new Set(((roData ?? []) as Array<{ route_id: string }>).map(r => r.route_id))].sort())
+      await applyMachineAssignments(parsed)
+      const meta = await loadRouteMeta([...new Set(parsed.map(r => r.item_code))])
+      setDefaultRoutes(meta.defaultRoutes)
+      setRouteOptions(meta.routeOptions)
 
       setHitRows(parsed)
     } catch (e) {
@@ -183,75 +92,9 @@ export default function SingleOrderConvert({ onAppended }: { onAppended: () => v
     setGenWarns([])
     setSaraRows([])
     setAppendMsg('')
-    const warns: string[] = []
-    const today = fmtToday()
     try {
-      const routeIds = [...new Set(hitRows.map((r, i) => effectiveRoute(i, r)).filter(Boolean))]
-      const missingRouteRows = hitRows.filter((r, i) => !effectiveRoute(i, r))
-      if (missingRouteRows.length > 0) {
-        warns.push(`${missingRouteRows.length} 列沒有途程（item_routes 無對應且未手動指定），已跳過：${[...new Set(missingRouteRows.map(r => r.item_code))].slice(0, 4).join('、')}`)
-      }
-
-      type RoRow = { route_id: string; sequence: number; op_name: string }
-      const { data: roData } = routeIds.length
-        ? await supabase.from('route_operations').select('route_id,sequence,op_name').in('route_id', routeIds).order('sequence')
-        : { data: [] as RoRow[] }
-      const roMap = new Map<string, { sequence: number; op_name: string }[]>()
-      for (const r of (roData ?? []) as RoRow[]) {
-        const arr = roMap.get(r.route_id) ?? []
-        arr.push({ sequence: r.sequence, op_name: r.op_name })
-        roMap.set(r.route_id, arr)
-      }
-
-      const uniqueOps = [...new Set(((roData ?? []) as RoRow[]).map(r => r.op_name))]
-      type OtRow = { op_name: string; station: string; std_time_min: number }
-      const { data: otData } = uniqueOps.length
-        ? await supabase.from('operation_times').select('op_name,station,std_time_min').in('op_name', uniqueOps)
-        : { data: [] as OtRow[] }
-      const otMap = new Map<string, { station: string; std_time_min: number }>(
-        ((otData ?? []) as OtRow[]).map(r => [r.op_name, { station: r.station ?? '', std_time_min: Number(r.std_time_min ?? 0) }])
-      )
-
-      const out: SaraRow[] = []
-      hitRows.forEach((row, idx) => {
-        const routeId = effectiveRoute(idx, row)
-        if (!routeId) return
-        const ops = roMap.get(routeId) ?? []
-        if (ops.length === 0) {
-          warns.push(`途程「${routeId}」在 route_operations 沒有工序資料（${row.item_code}），已跳過`)
-          return
-        }
-        for (const op of ops) {
-          const ot = otMap.get(op.op_name)
-          const station = ot?.station ?? ''
-          const std = ot?.std_time_min ?? 0
-          const jobQty = (row.pan_count > 0 && !isPackagingStation(station)) ? row.pan_count : row.quantity
-          out.push({
-            order_number: row.order_number,
-            mfg_order_number: row.ref_number || row.order_number,
-            product_name: row.item_code,
-            product_desc: row.item_name,
-            lot_number: row.line_seq || row.order_number,
-            prod_qty: row.quantity,
-            due: row.due,
-            priority: computePriorityFromDue(row.due, prioRulesRef.current),
-            earliest_start: today,
-            job_seq: op.sequence,
-            workcenter: station,
-            job_name: op.op_name,
-            job_qty: jobQty,
-            outsourcing: '',
-            est_time: calcEst(std, row.quantity, row.pan_count, station),
-            time_unit: '分鐘',
-            bom: '',
-            mat_req_qty: '',
-            customer: row.customer,
-            assigned_machine: (row.factory === 'T' && isPrintStation2F6F(station) && row.assigned_machine) ? row.assigned_machine : '',
-            factory: row.factory,
-          })
-        }
-      })
-      setSaraRows(out)
+      const { rows, warns } = await generateSaraRows(hitRows, (row, idx) => effectiveRoute(idx, row), prioRulesRef.current)
+      setSaraRows(rows)
       setGenWarns(warns)
     } catch (e) {
       setGenWarns([`錯誤：${e instanceof Error ? e.message : String(e)}`])
