@@ -754,7 +754,8 @@ export default function HomePage() {
 
           {/* 8. 財會專區 (Slate / Disabled) - 黑霧特效
               2026-09-21 依需求先隱藏（功能還沒做，佔著版面）。整段保留不刪，
-              之後要開回來把下面的 false 改成 true 即可。 */}
+              之後要開回來把下面的 false 改成 true 即可——但要注意原本的 order-7
+              已經讓給下面的「塔台異常回報」，開回來時記得改一個沒被佔用的順序。 */}
           {false && (
           <div
             onMouseEnter={() => setIsHovered('finance')}
@@ -785,6 +786,35 @@ export default function HomePage() {
             </span>
           </div>
           )}
+
+          {/* 塔台異常回報 (Rose) — 佔用原本財會專區的第 7 格（財會已隱藏）。
+              不設權限：誰在塔台看到不對就誰回報，擋權限只會讓現場放棄回報。 */}
+          <Link href="/sara-anomaly"
+            onMouseEnter={() => setIsHovered('none')}
+            onMouseLeave={() => setIsHovered('none')}
+            className={`
+              group relative order-7 h-40 md:h-60 lg:h-64 rounded-2xl border border-slate-700 bg-slate-900/40 backdrop-blur-sm
+              flex flex-col items-center justify-center text-center p-3 md:p-6 transition-all duration-500 cursor-pointer
+              hover:border-rose-500 hover:bg-slate-800/60 hover:shadow-[0_0_30px_rgba(244,63,94,0.15)]
+            `}
+          >
+            <div className="absolute top-4 right-4 flex items-center gap-1.5 px-2 py-1 bg-rose-500/10 rounded border border-rose-500/20">
+              <span className="text-[10px] text-rose-400 font-bold uppercase tracking-wider">Anomaly</span>
+            </div>
+            <div className="mb-3 md:mb-6 p-3 md:p-4 rounded-full bg-slate-800 group-hover:bg-rose-900/50 text-slate-400 group-hover:text-rose-400 transition-colors">
+              <svg className="w-7 h-7 md:w-10 md:h-10" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
+              </svg>
+            </div>
+            <h2 className="text-base md:text-xl font-bold text-white mb-1 md:mb-2 group-hover:text-rose-400 transition-colors">塔台異常回報</h2>
+            <p className="text-slate-500 text-[10px] md:text-xs mb-3 md:mb-6 group-hover:text-slate-300 px-1 md:px-2 hidden md:block">
+              塔台工序有誤在這裡回報。<br/>(SARA Anomaly)
+            </p>
+            <span className="hidden md:inline-block px-4 py-2 rounded border border-slate-600 text-slate-300 text-xs font-mono group-hover:bg-rose-600 group-hover:border-rose-600 group-hover:text-white transition-all">
+              OPEN &rarr;
+            </span>
+          </Link>
+
 
           {/* 11. 發料/領料專區 (Yellow) */}
           <Link
@@ -939,34 +969,6 @@ export default function HomePage() {
             </span>
           </Link>
           )}
-
-          {/* 塔台異常回報 (Rose) — 印刷現場回報塔台上的工序異常，不設權限：
-              誰在塔台看到不對就誰回報，擋權限只會讓現場放棄回報。 */}
-          <Link href="/sara-anomaly"
-            onMouseEnter={() => setIsHovered('none')}
-            onMouseLeave={() => setIsHovered('none')}
-            className={`
-              group relative order-17 h-40 md:h-60 lg:h-64 rounded-2xl border border-slate-700 bg-slate-900/40 backdrop-blur-sm
-              flex flex-col items-center justify-center text-center p-3 md:p-6 transition-all duration-500 cursor-pointer
-              hover:border-rose-500 hover:bg-slate-800/60 hover:shadow-[0_0_30px_rgba(244,63,94,0.15)]
-            `}
-          >
-            <div className="absolute top-4 right-4 flex items-center gap-1.5 px-2 py-1 bg-rose-500/10 rounded border border-rose-500/20">
-              <span className="text-[10px] text-rose-400 font-bold uppercase tracking-wider">Anomaly</span>
-            </div>
-            <div className="mb-3 md:mb-6 p-3 md:p-4 rounded-full bg-slate-800 group-hover:bg-rose-900/50 text-slate-400 group-hover:text-rose-400 transition-colors">
-              <svg className="w-7 h-7 md:w-10 md:h-10" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
-              </svg>
-            </div>
-            <h2 className="text-base md:text-xl font-bold text-white mb-1 md:mb-2 group-hover:text-rose-400 transition-colors">塔台異常回報</h2>
-            <p className="text-slate-500 text-[10px] md:text-xs mb-3 md:mb-6 group-hover:text-slate-300 px-1 md:px-2 hidden md:block">
-              塔台工序有誤在這裡回報。<br/>(SARA Anomaly)
-            </p>
-            <span className="hidden md:inline-block px-4 py-2 rounded border border-slate-600 text-slate-300 text-xs font-mono group-hover:bg-rose-600 group-hover:border-rose-600 group-hover:text-white transition-all">
-              OPEN &rarr;
-            </span>
-          </Link>
 
           {/* 工程專區 (Orange) — 設備維護/維修登記，之後的工程相關功能都掛在這個入口底下 */}
           <Link href="/engineering"
