@@ -34,7 +34,15 @@ interface BufferRow {
   priority: string
 }
 
-export default function OrderRouteChange({ onChanged }: { onChanged: () => void }) {
+/**
+ * prefill：由「塔台異常回報」面板按下「帶入改單」時傳進來。
+ * token 每次都要換一個新值（用時間戳），否則同一筆連按兩次不會重新觸發查詢。
+ */
+export interface RouteChangePrefill { order: string; seq: string; token: number }
+
+export default function OrderRouteChange(
+  { onChanged, prefill }: { onChanged: () => void; prefill?: RouteChangePrefill | null }
+) {
   const prioRulesRef = useRef<PriorityRule[]>(DEFAULT_PRIORITY_RULES)
   useEffect(() => {
     void (async () => {
@@ -66,6 +74,7 @@ export default function OrderRouteChange({ onChanged }: { onChanged: () => void 
   const [generating, setGenerating] = useState(false)
   const [applying, setApplying] = useState(false)
   const [doneMsg, setDoneMsg] = useState('')
+  const searchRef = useRef<(() => void) | null>(null)
 
   const reset = () => {
     setCandidates([]); setPicked(null); setCurrentRows([])
@@ -128,6 +137,23 @@ export default function OrderRouteChange({ onChanged }: { onChanged: () => void 
       setSearching(false)
     }
   }, [orderInput, seqInput, pick])
+
+  // 異常回報「帶入改單」：把單號/序號填進來並自動查詢，
+  // 生管不用再手動抄一次（用 ref 追 token，避免把 handleSearch 放進 deps 造成迴圈）
+  const lastTokenRef = useRef(0)
+  useEffect(() => {
+    if (!prefill || prefill.token === lastTokenRef.current) return
+    lastTokenRef.current = prefill.token
+    setOrderInput(prefill.order)
+    setSeqInput(prefill.seq)
+    void (async () => {
+      // 等 state 寫進去再查，直接沿用 handleSearch 會讀到舊值
+      await new Promise(r => setTimeout(r, 0))
+      searchRef.current?.()
+    })()
+  }, [prefill])
+
+  useEffect(() => { searchRef.current = () => { void handleSearch() } }, [handleSearch])
 
   // ── 產生新工序預覽 ─────────────────────────────────────────────
   const handlePreview = useCallback(async () => {
