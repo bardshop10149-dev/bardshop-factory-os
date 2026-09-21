@@ -20,7 +20,9 @@ type LineBody = {
   note?: string | null         // 逐行手打備註（trim 後空字串視為清除；上限 500 字）
 }
 
-const NOTE_MAX_LEN = 500
+// 與 app/purchasing/page.tsx 的 NOTE_MAX_LEN 必須一致。
+// 原本 500 字：前端 textarea 的 maxLength 會靜默擋字，採購打長備註時會以為文字被系統吃掉。
+const NOTE_MAX_LEN = 2000
 type PaymentBody = { type: 'payment'; doc_no: string; payment_pct: PaymentPct }
 
 const isDateText = (s: string) => /^\d{4}-\d{2}-\d{2}$/.test(s)
