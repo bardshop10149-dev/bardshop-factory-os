@@ -100,6 +100,7 @@ export default function ItemApprovalPage() {
   const [error, setError] = useState('')
   const [statusFilter, setStatusFilter] = useState<'pending' | 'approved' | 'created' | 'rejected' | ''>('pending')
   const [openId, setOpenId] = useState<number | null>(null)
+  const [me, setMe] = useState('')
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -111,6 +112,7 @@ export default function ItemApprovalPage() {
       const json = await res.json()
       if (!res.ok || !json.success) throw new Error(json.error || `讀取失敗 (HTTP ${res.status})`)
       setRows(json.rows ?? [])
+      setMe(String(json.me ?? ''))
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
     } finally {
@@ -174,6 +176,7 @@ export default function ItemApprovalPage() {
             <ApprovalCard
               key={row.id}
               row={row}
+              me={me}
               open={openId === row.id}
               onToggle={() => setOpenId(openId === row.id ? null : row.id)}
               onDone={() => { setOpenId(null); void load() }}
@@ -186,9 +189,10 @@ export default function ItemApprovalPage() {
 }
 
 function ApprovalCard({
-  row, open, onToggle, onDone,
+  row, me, open, onToggle, onDone,
 }: {
   row: RequestRow
+  me: string
   open: boolean
   onToggle: () => void
   onDone: () => void
@@ -372,6 +376,11 @@ function ApprovalCard({
                 </button>
               </div>
 
+              {me && row.requester_email === me && (
+                <div className="mb-2 rounded-lg border border-amber-700/50 bg-amber-950/30 px-3 py-2 text-amber-200">
+                  ⚠ 這是你自己送出的申請。你有管理員權限所以可以核准，但軌跡會記下「自審」。
+                </div>
+              )}
               {pre?.needsConfirm && (
                 <label className="mb-2 flex cursor-pointer items-center gap-2 text-amber-300">
                   <input type="checkbox" checked={confirmed} onChange={e => setConfirmed(e.target.checked)} className="accent-amber-500" />

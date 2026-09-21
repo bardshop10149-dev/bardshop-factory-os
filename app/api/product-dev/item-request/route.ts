@@ -303,10 +303,16 @@ export async function PATCH(request: NextRequest) {
     const finalPart = part.toUpperCase()
 
     // 申請人不能核准自己送的單。擋的是自審，不是要求兩個人簽。
+    // admin 例外（Snow 2026-09-21 定）：他既是主管也會自己發需求，擋下來那張單就沒人能審了。
+    // 一般審核者仍受限——這條對他們才有防弊意義。
     const { data: own } = await getSupabaseAdminClient()
       .from(TABLE).select('requester_email').eq('id', id).maybeSingle()
-    if (own && String(own.requester_email) === guard.member.email) {
-      return NextResponse.json({ success: false, error: '不能核准自己送出的申請' }, { status: 403 })
+    const selfApprove = !!own && String(own.requester_email) === guard.member.email
+    if (selfApprove && !guard.member.isAdmin) {
+      return NextResponse.json({
+        success: false,
+        error: '不能核准自己送出的申請，請由其他有審查權限的主管處理',
+      }, { status: 403 })
     }
 
     // 送出前再查一次 ARGO——從審查到按下核准之間，這個編碼可能已經被別人用掉
@@ -388,7 +394,8 @@ export async function PATCH(request: NextRequest) {
   }
   const noteOf: Record<string, string> = {
     approved: '核准建檔，編碼定為 ' + String(data.approved_part ?? '-')
-      + '（審核工號 ' + String(data.approved_by_emp_no ?? '未設定') + '）',
+      + '（審核工號 ' + String(data.approved_by_emp_no ?? '未設定') + '）'
+      + (String(data.requester_email ?? '') === guard.member.email ? '［自審：申請人即核准人］' : ''),
     created: '完成建檔，編碼 ' + String(data.assigned_part ?? '-'),
     rejected: '退回：' + String(data.reject_reason ?? '-'),
     reopen: '救回待建檔（清掉原本的結案／退回紀錄）',
