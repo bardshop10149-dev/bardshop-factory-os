@@ -11,7 +11,7 @@ const TABLE = 'item_code_requests'
 
 /** 大類：ARGO PRODUCT_CATEGORY，同時也是料號第一碼 */
 const CATEGORIES = ['M', 'W', 'P', 'C', 'S', 'A', 'O'] as const
-const STATUSES = ['pending', 'created', 'rejected'] as const
+const STATUSES = ['pending', 'approved', 'created', 'rejected'] as const
 
 /** 只有這些欄位允許由前端寫入；申請人、單號、狀態一律由後端決定 */
 const INPUT_FIELDS = [
@@ -141,7 +141,11 @@ export async function GET(request: NextRequest) {
 
   const { searchParams } = new URL(request.url)
   const status = (searchParams.get('status') ?? '').trim()
-  const mine = searchParams.get('mine') === '1'
+  // 審查視角：看所有人的單，要有核准權限才給。沒帶 all=1 時一律只回自己送的，
+  // 這樣申請頁不必自己記得加 mine=1——預設就是安全的那邊。
+  const wantAll = searchParams.get('all') === '1'
+  const canApprove = guard.member.isAdmin || guard.member.permissions.includes('product_dev_approve')
+  const mine = !(wantAll && canApprove)
 
   const logsFor = Number(searchParams.get('logs') ?? 0)
   if (Number.isInteger(logsFor) && logsFor > 0) {
@@ -287,7 +291,55 @@ export async function PATCH(request: NextRequest) {
     updated_at: now,
   }
 
-  if (action === 'created') {
+  if (action === 'approved') {
+    // 核准＝主管審過、編碼也定案了，但 ARGO 還沒建（Phase 1 建檔仍人工）
+    if (!(guard.member.isAdmin || guard.member.permissions.includes('product_dev_approve'))) {
+      return NextResponse.json({ success: false, error: '沒有品項編碼審查權限' }, { status: 403 })
+    }
+    const part = str(body.approved_part)
+    if (!part) {
+      return NextResponse.json({ success: false, error: '請填寫核准的品項編碼' }, { status: 400 })
+    }
+    const finalPart = part.toUpperCase()
+
+    // 申請人不能核准自己送的單。擋的是自審，不是要求兩個人簽。
+    // admin 例外（Snow 2026-09-21 定）：他既是主管也會自己發需求，擋下來那張單就沒人能審了。
+    // 一般審核者仍受限——這條對他們才有防弊意義。
+    const { data: own } = await getSupabaseAdminClient()
+      .from(TABLE).select('requester_email').eq('id', id).maybeSingle()
+    const selfApprove = !!own && String(own.requester_email) === guard.member.email
+    if (selfApprove && !guard.member.isAdmin) {
+      return NextResponse.json({
+        success: false,
+        error: '不能核准自己送出的申請，請由其他有審查權限的主管處理',
+      }, { status: 403 })
+    }
+
+    // 送出前再查一次 ARGO——從審查到按下核准之間，這個編碼可能已經被別人用掉
+    try {
+      const dup = await getPartTemplate(finalPart)
+      if (dup) {
+        return NextResponse.json({
+          success: false,
+          error: `編碼 ${finalPart} 在 ARGO 已存在（${String(dup.PART_NAME ?? '')}），請改號`,
+        }, { status: 409 })
+      }
+    } catch (err) {
+      // ARGO 連不上時不放行——沒查到不等於不存在，這種時候寧可擋下來
+      console.error('[item-request] 核准前查重失敗:', err)
+      return NextResponse.json({
+        success: false, error: 'ARGO 查詢失敗，無法確認編碼是否重複，請稍後再試',
+      }, { status: 503 })
+    }
+
+    patch.status = 'approved'
+    patch.approved_part = finalPart
+    patch.approved_by = guard.member.email
+    patch.approved_by_name = guard.member.realName
+    patch.approved_by_emp_no = guard.member.employeeNo
+    patch.approved_at = now
+    patch.reject_reason = null
+  } else if (action === 'created') {
     const assigned = str(body.assigned_part)
     if (!assigned) {
       return NextResponse.json({ success: false, error: '請填寫實際建立的品項編碼' }, { status: 400 })
@@ -310,6 +362,12 @@ export async function PATCH(request: NextRequest) {
     patch.reject_reason = null
     patch.handled_by = null
     patch.handled_at = null
+    // 核准紀錄也要一起清，否則會出現「狀態是待審、卻顯示已被某人核准」的矛盾畫面
+    patch.approved_by = null
+    patch.approved_by_name = null
+    patch.approved_by_emp_no = null
+    patch.approved_at = null
+    patch.approved_part = null
   } else {
     return NextResponse.json({ success: false, error: '不支援的操作' }, { status: 400 })
   }
@@ -318,7 +376,7 @@ export async function PATCH(request: NextRequest) {
 
   // 先撈舊值，才記得出「從什麼變成什麼」——更新後就再也問不到了
   const { data: before } = await supabase
-    .from(TABLE).select('status, assigned_part, reject_reason').eq('id', id).maybeSingle()
+    .from(TABLE).select('status, assigned_part, reject_reason, approved_part').eq('id', id).maybeSingle()
 
   const { data, error } = await supabase.from(TABLE).update(patch).eq('id', id).select().single()
   if (error) {
@@ -329,12 +387,15 @@ export async function PATCH(request: NextRequest) {
   }
 
   const changes: Record<string, { before: unknown; after: unknown }> = {}
-  for (const key of ['status', 'assigned_part', 'reject_reason'] as const) {
+  for (const key of ['status', 'assigned_part', 'reject_reason', 'approved_part'] as const) {
     const b = (before as Record<string, unknown> | null)?.[key] ?? null
     const a = (data as Record<string, unknown>)[key] ?? null
     if (b !== a) changes[key] = { before: b, after: a }
   }
   const noteOf: Record<string, string> = {
+    approved: '核准建檔，編碼定為 ' + String(data.approved_part ?? '-')
+      + '（審核工號 ' + String(data.approved_by_emp_no ?? '未設定') + '）'
+      + (String(data.requester_email ?? '') === guard.member.email ? '［自審：申請人即核准人］' : ''),
     created: '完成建檔，編碼 ' + String(data.assigned_part ?? '-'),
     rejected: '退回：' + String(data.reject_reason ?? '-'),
     reopen: '救回待建檔（清掉原本的結案／退回紀錄）',

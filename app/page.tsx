@@ -291,6 +291,7 @@ export default function HomePage() {
   const canMaterial = hasFeaturePermission('material')
   const canArgoTool = hasFeaturePermission('argo_tool')
   const canProductDev = hasFeaturePermission('product_dev')
+  const canApproveItemCode = hasFeaturePermission('product_dev_approve')
   const canInfoBoard = hasFeaturePermission('info_board')
   const canPurchasing = hasFeaturePermission('purchasing')
   const canEngineering = hasFeaturePermission('engineering')
@@ -299,6 +300,18 @@ export default function HomePage() {
   const canChangpingShip = memberPermissions.includes('changping_ship')
   // 採購到期徽章：僅具權限者抓計數（API 端亦有 guardPermission 把關）
   const [purchasingDue, setPurchasingDue] = useState(0)
+  /** 待審的品項編碼申請張數；有審查權限才查，顯示在「商品開發」卡片上 */
+  const [itemApprovalDue, setItemApprovalDue] = useState(0)
+
+  // 待審張數：沒有審查權限的人不查，避免無謂的 403
+  useEffect(() => {
+    if (!hasFeaturePermission('product_dev_approve')) return
+    fetch('/api/product-dev/item-request?all=1&status=pending')
+      .then(r => r.json())
+      .then(json => { if (json?.success) setItemApprovalDue((json.rows ?? []).length) })
+      .catch(() => {})
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
   useEffect(() => {
     if (!canPurchasing) return
     fetch('/api/purchasing/list?count=1')
@@ -715,6 +728,12 @@ export default function HomePage() {
               ${isHovered !== 'none' && isHovered !== 'product_dev' ? 'opacity-50 scale-95 blur-[2px]' : 'opacity-100'}
             `}
           >
+            {/* 待審張數：審查會不會積著，關鍵是會不會忘記有東西要審 */}
+            {canApproveItemCode && itemApprovalDue > 0 && (
+              <div className="absolute top-4 left-4 px-2 py-1 rounded-full bg-rose-600 text-white text-[10px] font-bold" title={`${itemApprovalDue} 張品項編碼申請待審`}>
+                {itemApprovalDue}
+              </div>
+            )}
             <div className="absolute top-4 right-4 flex items-center gap-1.5 px-2 py-1 bg-green-500/10 rounded border border-green-500/20">
               <span className="text-[10px] text-green-400 font-bold uppercase tracking-wider">Product Dev</span>
             </div>
@@ -1144,6 +1163,26 @@ export default function HomePage() {
                   {downloadingProducts ? '下載中...' : '下載 →'}
                 </span>
               </button>
+              {canApproveItemCode && (
+                <button
+                  onClick={() => { setShowProductDevModal(false); router.push('/product-dev/item-approval'); }}
+                  className="bg-emerald-700/20 border border-emerald-600 rounded-xl p-5 cursor-pointer hover:bg-emerald-700/40 transition-all flex items-center gap-4 w-full text-left"
+                >
+                  <div className="text-3xl">✅</div>
+                  <div className="flex-1">
+                    <div className="text-emerald-300 font-bold text-lg mb-1">
+                      品項編碼審查
+                      {itemApprovalDue > 0 && (
+                        <span className="ml-2 px-2 py-0.5 rounded-full bg-rose-600 text-white text-xs align-middle">{itemApprovalDue}</span>
+                      )}
+                    </div>
+                    <div className="text-xs text-slate-300">核准或退回申請，系統會先幫你查重複與相似品項</div>
+                  </div>
+                  <span className="px-3 py-1 rounded border border-emerald-600 text-emerald-300 text-xs font-mono bg-emerald-900/30">
+                    前往審查 →
+                  </span>
+                </button>
+              )}
               <button
                 onClick={() => { setShowProductDevModal(false); router.push('/product-dev/item-request'); }}
                 className="bg-green-700/20 border border-green-600 rounded-xl p-5 cursor-pointer hover:bg-green-700/40 transition-all flex items-center gap-4 w-full text-left"
