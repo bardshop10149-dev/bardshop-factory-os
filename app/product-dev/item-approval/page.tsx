@@ -20,7 +20,7 @@ import Link from 'next/link'
 interface RequestRow {
   id: number
   request_no: string
-  status: 'pending' | 'approved' | 'created' | 'rejected'
+  status: 'pending' | 'approved' | 'created' | 'rejected' | 'failed'
   requester_email: string
   requester_name: string | null
   requested_at: string
@@ -64,6 +64,15 @@ interface Check {
   detail?: unknown
 }
 
+interface LogRow {
+  id: number
+  action: string
+  actor_email: string
+  actor_name: string | null
+  note: string | null
+  created_at: string
+}
+
 interface Precheck {
   part: string
   canApprove: boolean
@@ -77,6 +86,16 @@ const STATUS_META: Record<RequestRow['status'], { label: string; cls: string }> 
   approved: { label: '已核准待建檔', cls: 'bg-sky-900/50 text-sky-300 border-sky-700/60' },
   created: { label: '已建檔', cls: 'bg-emerald-900/50 text-emerald-300 border-emerald-700/60' },
   rejected: { label: '已退回', cls: 'bg-rose-900/50 text-rose-300 border-rose-700/60' },
+  failed: { label: '建檔失敗', cls: 'bg-orange-900/50 text-orange-300 border-orange-700/60' },
+}
+
+const LOG_ACTION_META: Record<string, { label: string; cls: string }> = {
+  submitted: { label: '送出申請', cls: 'bg-sky-900/50 text-sky-300 border-sky-700/60' },
+  approved: { label: '核准建檔', cls: 'bg-emerald-900/50 text-emerald-300 border-emerald-700/60' },
+  created: { label: '完成建檔', cls: 'bg-emerald-900/50 text-emerald-300 border-emerald-700/60' },
+  create_failed: { label: '建檔失敗', cls: 'bg-orange-900/50 text-orange-300 border-orange-700/60' },
+  rejected: { label: '退回', cls: 'bg-rose-900/50 text-rose-300 border-rose-700/60' },
+  reopen: { label: '救回待審', cls: 'bg-amber-900/50 text-amber-300 border-amber-700/60' },
 }
 
 const LEVEL_META: Record<Check['level'], { icon: string; cls: string }> = {
@@ -98,7 +117,7 @@ export default function ItemApprovalPage() {
   const [rows, setRows] = useState<RequestRow[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
-  const [statusFilter, setStatusFilter] = useState<'pending' | 'approved' | 'created' | 'rejected' | ''>('pending')
+  const [statusFilter, setStatusFilter] = useState<'pending' | 'approved' | 'created' | 'rejected' | 'failed' | ''>('pending')
   const [openId, setOpenId] = useState<number | null>(null)
   const [me, setMe] = useState('')
 
@@ -141,7 +160,7 @@ export default function ItemApprovalPage() {
 
         <div className="mb-4 flex flex-wrap items-center gap-2">
           {([
-            ['pending', '待審'], ['approved', '已核准待建檔'],
+            ['pending', '待審'], ['approved', '已核准待建檔'], ['failed', '建檔失敗'],
             ['created', '已建檔'], ['rejected', '已退回'], ['', '全部'],
           ] as const).map(([v, label]) => (
             <button
@@ -205,6 +224,21 @@ function ApprovalCard({
   const [reason, setReason] = useState(row.reject_reason ?? '')
   const [busy, setBusy] = useState(false)
   const [msg, setMsg] = useState('')
+  const [payload, setPayload] = useState<Record<string, unknown> | null>(null)
+  const [payloadMeta, setPayloadMeta] = useState<{ fieldCount: number; categoryVerified: boolean; category: string } | null>(null)
+  const [showPayload, setShowPayload] = useState(false)
+  const [logs, setLogs] = useState<LogRow[] | null>(null)
+
+  // 軌跡：展開才抓，處理完（row.updated_at 變動）自動重抓，失敗原因當場看得到
+  useEffect(() => {
+    if (!open) return
+    let cancelled = false
+    fetch('/api/product-dev/item-request?logs=' + row.id)
+      .then(r => r.json())
+      .then(j => { if (!cancelled) setLogs(j.success ? (j.logs ?? []) : []) })
+      .catch(() => { if (!cancelled) setLogs([]) })
+    return () => { cancelled = true }
+  }, [open, row.id, row.updated_at])
 
   // 預檢：展開時跑一次。編碼改了要重按「重新檢查」，不做即時查——
   // 每打一個字就打一次 ARGO，又慢又吵。
@@ -231,6 +265,25 @@ function ApprovalCard({
     if (open && !pre) void runPrecheck(part)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open])
+
+  // 乾跑：把要送給 ARGO 的完整欄位撈回來先看。寫進 ERP 的料件只能作廢不能刪，
+  // 按下去之前多看一眼的成本遠低於建錯。
+  const loadPayload = async () => {
+    setBusy(true)
+    setMsg('')
+    try {
+      const res = await fetch('/api/product-dev/item-request?payload=' + row.id)
+      const json = await res.json()
+      if (!res.ok || !json.success) throw new Error(json.error || '組不出 payload')
+      setPayload(json.payload)
+      setPayloadMeta({ fieldCount: json.fieldCount, categoryVerified: json.categoryVerified, category: json.category })
+      setShowPayload(true)
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBusy(false)
+    }
+  }
 
   const act = async (body: Record<string, unknown>) => {
     setBusy(true)
@@ -354,6 +407,34 @@ function ApprovalCard({
             )}
           </div>
 
+          {/* 異動軌跡：寫入 ARGO 失敗的原因就記在這裡 */}
+          <div className="mb-4 border-t border-slate-800 pt-3">
+            <div className="mb-2 text-[10px] text-slate-600">異動軌跡</div>
+            {logs === null ? (
+              <div className="text-slate-600">讀取中…</div>
+            ) : logs.length === 0 ? (
+              <div className="text-slate-600">沒有軌跡紀錄</div>
+            ) : (
+              <ol className="space-y-1.5">
+                {logs.map(lg => {
+                  const m = LOG_ACTION_META[lg.action] ?? { label: lg.action, cls: 'bg-slate-800 text-slate-300 border-slate-700' }
+                  return (
+                    <li key={lg.id} className="flex gap-2">
+                      <span className={`h-fit shrink-0 rounded border px-1.5 py-0.5 text-[10px] ${m.cls}`}>{m.label}</span>
+                      <div className="min-w-0">
+                        <div className="text-slate-400">
+                          {lg.actor_name || lg.actor_email}
+                          <span className="ml-2 text-slate-600">{fmtTime(lg.created_at)}</span>
+                        </div>
+                        {lg.note && <div className="break-all text-slate-500">{lg.note}</div>}
+                      </div>
+                    </li>
+                  )
+                })}
+              </ol>
+            )}
+          </div>
+
           {/* 處理動作 */}
           {row.status === 'pending' ? (
             <div className="border-t border-slate-800 pt-3">
@@ -424,6 +505,14 @@ function ApprovalCard({
                   </div>
                 </div>
               )}
+              {row.status === 'failed' && (
+                <div className="mb-2 text-orange-300">
+                  上次寫入 ARGO 失敗，這張單仍維持已核准、沒有建檔。
+                  <div className="mt-0.5 text-[11px] text-slate-500">
+                    失敗原因記在下方軌跡；修正後可按「重試寫入 ARGO」
+                  </div>
+                </div>
+              )}
               {row.status === 'rejected' && row.reject_reason && (
                 <div className="mb-2 text-rose-300">退回原因：{row.reject_reason}</div>
               )}
@@ -434,21 +523,69 @@ function ApprovalCard({
                 </div>
               )}
 
+              {/* 乾跑預覽：按下建檔之前，把要送進 ERP 的 40 幾個欄位攤開來看 */}
+              {(row.status === 'approved' || row.status === 'failed') && (
+                <div className="mb-3">
+                  <div className="mb-2 flex flex-wrap items-center gap-2">
+                    <button
+                      onClick={() => (showPayload ? setShowPayload(false) : void loadPayload())}
+                      disabled={busy}
+                      className="rounded-lg border border-slate-700 px-3 py-1.5 text-xs text-slate-300 hover:bg-slate-800 disabled:opacity-50"
+                    >
+                      {showPayload ? '收合' : '🔍 預覽將送給 ARGO 的內容'}
+                    </button>
+                    {payloadMeta && showPayload && (
+                      <span className="text-[11px] text-slate-500">
+                        共 {payloadMeta.fieldCount} 欄
+                        {payloadMeta.categoryVerified
+                          ? `・大類 ${payloadMeta.category} 已實測過`
+                          : `・⚠ 大類 ${payloadMeta.category} 尚未實測，失敗會標「建檔失敗」並保留原因`}
+                      </span>
+                    )}
+                  </div>
+                  {showPayload && payload && (
+                    <div className="max-h-64 overflow-y-auto rounded-lg border border-slate-800 bg-slate-950/60 p-3 font-mono text-[10px] leading-relaxed">
+                      {Object.entries(payload).map(([k, v]) => (
+                        <div key={k} className="flex gap-2">
+                          <span className="w-44 shrink-0 text-slate-500">{k}</span>
+                          <span className="text-slate-300">{String(v)}</span>
+                        </div>
+                      ))}
+                      <div className="mt-2 border-t border-slate-800 pt-2 text-slate-600">
+                        會計科目刻意不送——手動帶會被 ARGO 判科目類別衝突，只給 ACCOUNT_FLAG=Y
+                        讓它依料件類別自動帶。
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
               <div className="flex flex-wrap items-center gap-2">
+                {(row.status === 'approved' || row.status === 'failed') && (
+                  <button
+                    onClick={() => act({ action: 'create_in_argo' })}
+                    disabled={busy}
+                    className="rounded-lg bg-violet-600 px-4 py-1.5 text-xs font-bold text-white hover:bg-violet-500 disabled:opacity-40"
+                    title="透過 IFAF007 直接在 ARGO 建立料件主檔，成功後自動結案"
+                  >
+                    🚀 {row.status === 'failed' ? '重試寫入 ARGO' : '直接建進 ARGO'}
+                  </button>
+                )}
                 {row.status === 'approved' && (
                   <>
+                    <span className="text-slate-700">或手動建好後</span>
                     <input
                       value={part}
                       onChange={e => setPart(e.target.value.toUpperCase())}
                       placeholder="ARGO 實際建好的編碼"
-                      className="w-56 rounded-lg border border-slate-700 bg-slate-900 px-3 py-1.5 font-mono text-xs text-white placeholder:text-slate-600 focus:border-emerald-500 focus:outline-none"
+                      className="w-48 rounded-lg border border-slate-700 bg-slate-900 px-3 py-1.5 font-mono text-xs text-white placeholder:text-slate-600 focus:border-emerald-500 focus:outline-none"
                     />
                     <button
                       onClick={() => act({ action: 'created', assigned_part: part })}
                       disabled={busy || !part.trim()}
-                      className="rounded-lg bg-emerald-600 px-4 py-1.5 text-xs font-bold text-white hover:bg-emerald-500 disabled:opacity-40"
+                      className="rounded-lg border border-emerald-700 px-3 py-1.5 text-xs text-emerald-300 hover:bg-emerald-900/40 disabled:opacity-40"
                     >
-                      回填編碼結案
+                      回填結案
                     </button>
                   </>
                 )}

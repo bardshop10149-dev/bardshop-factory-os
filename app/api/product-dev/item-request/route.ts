@@ -3,6 +3,7 @@ import { getSupabaseAdminClient, formatSupabaseAdminError } from '@/lib/supabase
 import { guardPermission } from '@/lib/requireAuth'
 import { LOCKED_ERP_FIELDS, LOCKED_FIELD_FROM_ARGO, presetOf } from '@/lib/productDev/categoryPresets'
 import { getPartTemplate } from '@/lib/productDev/argoParts'
+import { buildPayload, createPart, VERIFIED_CATEGORIES } from '@/lib/productDev/ifaf007'
 
 export const dynamic = 'force-dynamic'
 export const maxDuration = 60
@@ -11,7 +12,7 @@ const TABLE = 'item_code_requests'
 
 /** 大類：ARGO PRODUCT_CATEGORY，同時也是料號第一碼 */
 const CATEGORIES = ['M', 'W', 'P', 'C', 'S', 'A', 'O'] as const
-const STATUSES = ['pending', 'approved', 'created', 'rejected'] as const
+const STATUSES = ['pending', 'approved', 'created', 'rejected', 'failed'] as const
 
 /** 只有這些欄位允許由前端寫入；申請人、單號、狀態一律由後端決定 */
 const INPUT_FIELDS = [
@@ -146,6 +147,33 @@ export async function GET(request: NextRequest) {
   const wantAll = searchParams.get('all') === '1'
   const canApprove = guard.member.isAdmin || guard.member.permissions.includes('product_dev_approve')
   const mine = !(wantAll && canApprove)
+
+  // 乾跑：組好要送給 ARGO 的完整欄位但不送，讓主管按下建檔前先看一眼
+  const payloadFor = Number(searchParams.get('payload') ?? 0)
+  if (Number.isInteger(payloadFor) && payloadFor > 0) {
+    if (!(guard.member.isAdmin || guard.member.permissions.includes('product_dev_approve'))) {
+      return NextResponse.json({ success: false, error: '沒有品項編碼審查權限' }, { status: 403 })
+    }
+    const sb = getSupabaseAdminClient()
+    const { data: row } = await sb.from(TABLE).select('*').eq('id', payloadFor).maybeSingle()
+    if (!row) return NextResponse.json({ success: false, error: '找不到這張申請單' }, { status: 404 })
+    const r = row as Record<string, unknown>
+    const part = String(r.approved_part ?? r.suggested_part ?? '').trim().toUpperCase()
+    if (!part) return NextResponse.json({ success: false, error: '尚未決定品項編碼' }, { status: 400 })
+    const category = String(r.product_category ?? '').toUpperCase()
+    const payload = buildPayload({
+      ...(r as unknown as Parameters<typeof buildPayload>[0]),
+      approved_part: part,
+      approved_by_emp_no: String(r.approved_by_emp_no ?? guard.member.employeeNo ?? ''),
+    })
+    return NextResponse.json({
+      success: true,
+      payload,
+      fieldCount: Object.keys(payload).length,
+      categoryVerified: (VERIFIED_CATEGORIES as readonly string[]).includes(category),
+      category,
+    })
+  }
 
   const logsFor = Number(searchParams.get('logs') ?? 0)
   if (Number.isInteger(logsFor) && logsFor > 0) {
@@ -339,6 +367,75 @@ export async function PATCH(request: NextRequest) {
     patch.approved_by_emp_no = guard.member.employeeNo
     patch.approved_at = now
     patch.reject_reason = null
+  } else if (action === 'create_in_argo') {
+    // 直接寫入 ARGO。這是整個系統唯一會動到 ERP 的地方。
+    if (!(guard.member.isAdmin || guard.member.permissions.includes('product_dev_approve'))) {
+      return NextResponse.json({ success: false, error: '沒有品項編碼審查權限' }, { status: 403 })
+    }
+    const sb0 = getSupabaseAdminClient()
+    const { data: row } = await sb0.from(TABLE).select('*').eq('id', id).maybeSingle()
+    if (!row) return NextResponse.json({ success: false, error: '找不到這張申請單' }, { status: 404 })
+    const r0 = row as Record<string, unknown>
+    // 只有已核准（或上次寫入失敗）的單能寫入——沒審過的東西不該進 ERP
+    if (!['approved', 'failed'].includes(String(r0.status))) {
+      return NextResponse.json({
+        success: false, error: `狀態是「${String(r0.status)}」，只有已核准或建檔失敗的單可以寫入 ARGO`,
+      }, { status: 409 })
+    }
+    const part = String(r0.approved_part ?? '').trim().toUpperCase()
+    if (!part) return NextResponse.json({ success: false, error: '這張單還沒有核准編碼' }, { status: 400 })
+
+    let outcome
+    try {
+      outcome = await createPart(buildPayload({
+        ...(r0 as unknown as Parameters<typeof buildPayload>[0]),
+        approved_part: part,
+        approved_by_emp_no: String(r0.approved_by_emp_no ?? guard.member.employeeNo ?? ''),
+      }))
+    } catch (err) {
+      // 連線層就掛掉：不改狀態，讓它留在 approved 可以重試。
+      // 標成 failed 會讓人以為 ARGO 拒絕了這筆資料，但其實只是網路不通。
+      const msg = err instanceof Error ? err.message : String(err)
+      await writeLog(sb0, {
+        request_id: id, request_no: String(r0.request_no), action: 'create_failed',
+        actor_email: guard.member.email, actor_name: guard.member.realName ?? null,
+        changes: null, note: 'ARGO 連線失敗，狀態未變更可重試：' + msg,
+      })
+      return NextResponse.json({ success: false, error: 'ARGO 連線失敗：' + msg }, { status: 503 })
+    }
+
+    const nowIso = new Date().toISOString()
+    if (!outcome.ok) {
+      await sb0.from(TABLE).update({ status: 'failed', updated_at: nowIso }).eq('id', id)
+      await writeLog(sb0, {
+        request_id: id, request_no: String(r0.request_no), action: 'create_failed',
+        actor_email: guard.member.email, actor_name: guard.member.realName ?? null,
+        changes: { status: { before: r0.status, after: 'failed' } },
+        note: outcome.message + (outcome.batchNo ? `（批號 ${outcome.batchNo}）` : ''),
+      })
+      return NextResponse.json({ success: false, error: outcome.message, outcome }, { status: 422 })
+    }
+
+    const { data: done, error: upErr } = await sb0.from(TABLE).update({
+      status: 'created', assigned_part: part,
+      handled_by: guard.member.email, handled_at: nowIso, updated_at: nowIso,
+    }).eq('id', id).select().single()
+    if (upErr) {
+      // ARGO 已經建好了，EIP 卻沒更新到——這種不一致要吵出來，不能靜默
+      console.error('[item-request] ARGO 已建檔但 EIP 更新失敗:', upErr.message)
+      return NextResponse.json({
+        success: false,
+        error: `ARGO 已成功建立 ${part}，但 EIP 狀態更新失敗（${upErr.message}），請重新整理確認`,
+      }, { status: 500 })
+    }
+    await writeLog(sb0, {
+      request_id: id, request_no: String(r0.request_no), action: 'created',
+      actor_email: guard.member.email, actor_name: guard.member.realName ?? null,
+      changes: { status: { before: r0.status, after: 'created' },
+                 assigned_part: { before: r0.assigned_part ?? null, after: part } },
+      note: `透過 IFAF007 寫入 ARGO 建檔成功（審核工號 ${String(r0.approved_by_emp_no ?? '-')}）`,
+    })
+    return NextResponse.json({ success: true, row: done, outcome })
   } else if (action === 'created') {
     const assigned = str(body.assigned_part)
     if (!assigned) {

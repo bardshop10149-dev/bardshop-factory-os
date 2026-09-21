@@ -22,7 +22,7 @@ interface RequestRow {
   /** 每次處理都會更新；用來當軌跡重抓的觸發點 */
   updated_at: string
   request_no: string
-  status: 'pending' | 'approved' | 'created' | 'rejected'
+  status: 'pending' | 'approved' | 'created' | 'rejected' | 'failed'
   requester_email: string
   requester_name: string | null
   requested_at: string
@@ -124,6 +124,7 @@ const ERP_FIELDS: { key: keyof FormState; label: string; erp: string; options?: 
 const STATUS_META: Record<RequestRow['status'], { label: string; cls: string }> = {
   pending: { label: '待審', cls: 'bg-amber-900/50 text-amber-300 border-amber-700/60' },
   approved: { label: '已核准待建檔', cls: 'bg-sky-900/50 text-sky-300 border-sky-700/60' },
+  failed: { label: '建檔失敗', cls: 'bg-orange-900/50 text-orange-300 border-orange-700/60' },
   created: { label: '已建檔', cls: 'bg-emerald-900/50 text-emerald-300 border-emerald-700/60' },
   rejected: { label: '已退回', cls: 'bg-rose-900/50 text-rose-300 border-rose-700/60' },
 }
@@ -852,6 +853,8 @@ function RequestRowView({
                 ? '這張單在等主管審查。'
                 : row.status === 'approved'
                 ? '已核准，等建檔人員在 ARGO 建立。'
+                : row.status === 'failed'
+                ? '已核准，但寫入 ARGO 時失敗，主管處理中。'
                 : row.status === 'rejected'
                 ? '已退回，請依退回原因修正後重新申請。'
                 : '已完成建檔。'}
