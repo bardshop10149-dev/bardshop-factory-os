@@ -30,6 +30,8 @@ export interface CheckRow {
   /** 階梯價：讓業務改單價 */
   tierPrice?: boolean
   priceOverride?: number | null
+  /** 階梯價的歷史參考（數量→單價，附案名）：紙卡這種每次尺寸數量都不同的，讓報價者看著填 */
+  history?: { qty: number; price: number; order: string; date?: string }[] | null
   /** 列下方補充（例如「約 250 箱（50,000 ÷ 200，無條件進位）」） */
   note?: string | null
 }
@@ -263,6 +265,22 @@ export function CheckList({
             </div>
             {row.on && row.note && (
               <p className="q-num pb-2 pl-8 text-[11px] leading-4 text-(--q-ink-3)">{row.note}</p>
+            )}
+            {row.on && row.tierPrice && onPrice && row.history && row.history.length > 0 && (
+              <div className="pb-2 pl-8 text-[11px] leading-4 text-(--q-ink-3)">
+                <span className="mr-2">歷史參考（點一下帶入）：</span>
+                {row.history.map((h, i) => (
+                  <button
+                    key={i}
+                    type="button"
+                    title={`${h.order}${h.date ? `（${h.date}）` : ''}`}
+                    onClick={() => onPrice(row.item, h.price)}
+                    className={`q-num mr-1.5 mb-1 inline-block rounded-(--q-radius) border border-(--q-line) px-1.5 py-px hover:border-(--q-ink) hover:text-(--q-ink) ${FOCUS_RING}`}
+                  >
+                    {fmtInt(h.qty)} → {fmtYen(h.price, h.price < 0.1 ? 4 : 2)}
+                  </button>
+                ))}
+              </div>
             )}
           </div>
         )
