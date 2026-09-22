@@ -2,12 +2,14 @@ import { NextRequest, NextResponse } from 'next/server'
 import { getSupabaseAdminClient, formatSupabaseAdminError } from '@/lib/supabaseAdmin'
 import { argoConfigured, argoQuery, argoImport } from '@/lib/argoQuery'
 import { recordSheetHistory } from '@/lib/argoerp/sheetHistory'
+import { ensureChangpingLeadTime } from '@/lib/argoerp/moExportShared'
 
 // 每天 17:10 與 17:35（台北時間）自動轉單：當天出單表的委外列→請購單（IFAF105）、
 // 常平列→採購單（IFAF024）。邏輯完整搬自兩個手動頁面（order-batch-export-pr /
 // order-batch-export-c），表頭全部用頁面的固定預設值；設計決策（2026-08-24 與使用者確認）：
 //   * 常平採購單價一律 0
 //   * 序號比對不到的常平列：跳過 + 記錄，不送出
+//   * 常平採購單交期至少給 5 個工作天（2026-09-22 需求，見 ensureChangpingLeadTime）
 //
 // 為什麼跑兩輪（2026-09-18 新增 17:35 這輪）：
 //   17:10 那輪只看得到「當下已經在出單表裡」的列。2026-09-18 就發生過——常平那列
@@ -367,7 +369,9 @@ async function runPoCreation(sb: Sb, sheetDate: string, allRows: SheetRowRec[]):
         ORDER_QTY_ORU: String(qtyOf(row.quantity)),
         UNIT_OF_MEASURE_ORU: soInfo?.uom || 'PCS',
         UNIT_PRICE_ORU: '0',   // 自動轉單一律單價 0（2026-08-24 與使用者確認）
-        DUEDATE: str(row.delivery_date),
+        // 常平交期下限：至少給常平 5 個工作天（2026-09-22 需求）。
+        // 出單表填得比較晚的維持原交期，只把太趕的往後推——見 ensureChangpingLeadTime。
+        DUEDATE: ensureChangpingLeadTime(str(row.delivery_date), beginDate),
         MBP_LOT_NO: str(row.order_number),
         SO_PROJECT_ID: str(row.order_number),
         TPN_PART_NO: seq,
