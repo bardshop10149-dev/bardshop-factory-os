@@ -9,6 +9,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
+import { ensureChangpingLeadTime } from '../../../../lib/argoerp/moExportShared'
 import * as XLSX from 'xlsx'
 import { supabase } from '../../../../lib/supabaseClient'
 
@@ -267,7 +268,9 @@ export default function PoBatchExportCPage() {
       rec['ORDER_QTY_ORU']               = String(row.quantity ?? '').replace(/,/g, '')
       rec['UNIT_OF_MEASURE_ORU']         = e.uom || 'PCS'
       rec['UNIT_PRICE_ORU']              = e.unit_price || '0'
-      rec['DUEDATE']                     = row.delivery_date
+      // 常平交期下限：至少給常平 5 個工作天（2026-09-22 需求）。
+      // 與自動轉單排程共用同一支 ensureChangpingLeadTime，兩條路徑算出來的交期一致。
+      rec['DUEDATE']                     = ensureChangpingLeadTime(row.delivery_date, header.begin_date)
       if ((e.lot_no ?? '').trim())              rec['MBP_LOT_NO']               = e.lot_no.trim()
       const remark = [row.item_name, row.note].filter(Boolean).join(' ')
       if (remark)                        rec['REMARK']                   = remark
@@ -1219,7 +1222,7 @@ export default function PoBatchExportCPage() {
                   ['ORDER_QTY_ORU', '數量'],
                   ['UNIT_OF_MEASURE_ORU', '採購單位（可逐列修改）'],
                   ['UNIT_PRICE_ORU', '單價（可逐列修改）'],
-                  ['DUEDATE', '交貨日期'],
+                  ['DUEDATE', '交貨日期（自動確保至少 5 個工作天，比下限早的會往後推）'],
                   ['REMARK', '品名規格+備註'],
                   ['SO_PROJECT_ID', '銷售訂單（工單編號）'],
                 ].map(([k, v]) => (

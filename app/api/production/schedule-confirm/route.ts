@@ -39,7 +39,7 @@ async function attachNotes(
 
   const { data, error } = await supabase
     .from('schedule_inquiry_notes')
-    .select('id,inquiry_id,note,author_name,author_email,created_at')
+    .select('*')  // 見 notes/route.ts：用 '*' 避免 migration 未套用時整包查詢失敗
     .in('inquiry_id', ids)
     .order('created_at', { ascending: true })
 
@@ -176,6 +176,46 @@ export async function PATCH(request: NextRequest) {
     }
 
     const supabase = getSupabaseAdminClient()
+
+    // ── 生管確認後鎖定內容（2026-09-18）──────────────────────────────
+    // 規則：生管未確認（planner_reply 為 null）前業務可自由編輯；一旦生管回覆
+    // （同意/拒絕/完成）就代表這張單的內容已被據以排程，業務不能再改，只能用
+    // 「備註事項」補充。鎖定在伺服器端實施，不只是把前端按鈕藏起來——前端擋得住
+    // 誤觸，擋不住直接打 API。
+    //
+    // 兩個刻意的例外：
+    //   1. 訂單編號：詢問通常早於接單，單號常常是事後才拿到，與登記內容本身無關，
+    //      維持既有的「隨時可後補」行為（見業務端 saveOrderNo 的說明）。
+    //   2. 生管本人（production_admin / 管理員）：生管後台本來就有編輯功能，
+    //      鎖的是業務端，不是生管自己的修正權。
+    const touchesContent = Object.keys(cleaned).some(k => k !== 'planner_reply' && k !== 'order_no' && k !== 'updated_at')
+    if (touchesContent) {
+      const { data: target, error: findErr } = await supabase
+        .from(TABLE)
+        .select('id, planner_reply, author_email')
+        .eq('id', id)
+        .maybeSingle()
+      if (findErr) {
+        return NextResponse.json({ success: false, error: formatSupabaseAdminError(findErr.message) }, { status: 500 })
+      }
+      if (!target) {
+        return NextResponse.json({ success: false, error: '找不到這筆詢問單' }, { status: 404 })
+      }
+      const canManage = guard.member.isAdmin || guard.member.permissions.includes('production_admin')
+      if (target.planner_reply && !canManage) {
+        return NextResponse.json(
+          { success: false, error: '生管已確認這筆詢問單，內容不可再編輯——如需補充請新增「備註事項」' },
+          { status: 409 }
+        )
+      }
+      const isOwner = !!guard.member.email && guard.member.email === target.author_email
+      if (!isOwner && !canManage) {
+        return NextResponse.json(
+          { success: false, error: '只有填單人本人或生產管理可以編輯這筆詢問單' },
+          { status: 403 }
+        )
+      }
+    }
     const { data, error } = await supabase
       .from(TABLE)
       .update(cleaned)

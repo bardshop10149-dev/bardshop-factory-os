@@ -81,6 +81,7 @@ export default function TeamPage() {
         { key: 'design', label: '美編天地 (Design Studio)' },
         { key: 'material', label: '發料/領料 (Material Dispatch)' },
         { key: 'product_dev', label: '商品開發 (Product Dev)' },
+        { key: 'product_dev_approve', label: '品項編碼審查 (核准建檔)' },
         { key: 'info_board', label: '業務資訊看板 (Info Board)' },
         { key: 'argo_tool', label: 'ARGO 外掛區 (ARGO Tool)' },
         { key: 'purchasing', label: '採購專區 (Purchasing)' },
@@ -521,6 +522,7 @@ export default function TeamPage() {
                     {member.permissions?.includes('design') && <span className="px-2 py-1 rounded bg-pink-900/30 text-pink-400 text-[10px] border border-pink-800">美編天地</span>}
                     {member.permissions?.includes('material') && <span className="px-2 py-1 rounded bg-yellow-900/30 text-yellow-400 text-[10px] border border-yellow-800">發料/領料</span>}
                     {member.permissions?.includes('product_dev') && <span className="px-2 py-1 rounded bg-green-900/30 text-green-400 text-[10px] border border-green-800">商品開發</span>}
+                    {member.permissions?.includes('product_dev_approve') && <span className="px-2 py-1 rounded bg-emerald-900/30 text-emerald-300 text-[10px] border border-emerald-700">編碼審查</span>}
                     {member.permissions?.includes('info_board') && <span className="px-2 py-1 rounded bg-amber-900/30 text-amber-400 text-[10px] border border-amber-800">業務資訊看板</span>}
                     {member.permissions?.includes('argo_tool') && <span className="px-2 py-1 rounded bg-cyan-900/30 text-cyan-300 text-[10px] border border-cyan-700">ARGO外掛區</span>}
                     {member.permissions?.includes('changping_ship') && <span className="px-2 py-1 rounded bg-amber-900/30 text-amber-300 text-[10px] border border-amber-700">常平訂單資料區</span>}

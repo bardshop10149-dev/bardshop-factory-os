@@ -263,3 +263,68 @@ export function mapPoExportRowsCO(srcRows: MoExportSourceRow[], matchResults: So
     return row
   })
 }
+
+// ── 常平採購單交期下限（2026-09-22 需求）────────────────────────────────
+//
+// 常平是委外的實體工廠，出單表上的交期常常直接抄客戶的希望交期，等採購單開出去
+// 才發現只剩兩三天——料還沒到、產線也排不進去。因此轉成採購單時強制拉出一段
+// 最低前置時間：交期至少是開立日之後的 5 個工作天（跳過六日），出單表本來就填
+// 得比較晚的就維持原交期，只把太趕的往後推。
+//
+// 5 這個數字與出單表的交期警示閾值一致（DUE_THRESHOLD_DEFAULTS.C = 5），
+// 差別在於那邊只跳警示、可以被忽略，這裡是實際寫進 ARGO 採購單的值。
+
+export const CHANGPING_MIN_LEAD_WORKDAYS = 5
+
+/** 從 from 起算往後推 n 個工作天（from 當天為第 0 天，跳過六日） */
+export function addWorkingDays(from: Date, n: number): Date {
+  const d = new Date(from)
+  let left = n
+  while (left > 0) {
+    d.setDate(d.getDate() + 1)
+    const dow = d.getDay()
+    if (dow !== 0 && dow !== 6) left--
+  }
+  return d
+}
+
+/** 解析 YYYY/M/D、YYYY-M-D、YYYYMMDD 三種寫法 */
+function parseAnyYmd(s: string): Date | null {
+  const t = String(s ?? '').trim()
+  if (!t) return null
+  let y: number, m: number, d: number
+  if (/^\d{8}$/.test(t)) {
+    y = +t.slice(0, 4); m = +t.slice(4, 6); d = +t.slice(6, 8)
+  } else {
+    const mm = t.match(/^(\d{4})[/-](\d{1,2})[/-](\d{1,2})/)
+    if (!mm) return null
+    y = +mm[1]; m = +mm[2]; d = +mm[3]
+  }
+  const dt = new Date(y, m - 1, d)
+  return Number.isNaN(dt.getTime()) ? null : dt
+}
+
+function fmtSlashDate(d: Date): string {
+  return `${d.getFullYear()}/${String(d.getMonth() + 1).padStart(2, '0')}/${String(d.getDate()).padStart(2, '0')}`
+}
+
+/**
+ * 常平採購單的交期：至少給常平 CHANGPING_MIN_LEAD_WORKDAYS 個工作天。
+ *
+ * @param deliveryDate 出單表上的交付日期（可為空）
+ * @param beginDate    採購單開立日
+ * @returns YYYY/MM/DD；beginDate 解析不出來時原樣回傳 deliveryDate（不亂動）
+ */
+export function ensureChangpingLeadTime(
+  deliveryDate: string,
+  beginDate: string,
+  workdays: number = CHANGPING_MIN_LEAD_WORKDAYS,
+): string {
+  const begin = parseAnyYmd(beginDate)
+  if (!begin) return String(deliveryDate ?? '').trim()
+  const earliest = addWorkingDays(begin, workdays)
+  const due = parseAnyYmd(deliveryDate)
+  // 交期沒填、或比下限還早 → 一律用下限
+  if (!due || due.getTime() < earliest.getTime()) return fmtSlashDate(earliest)
+  return fmtSlashDate(due)
+}

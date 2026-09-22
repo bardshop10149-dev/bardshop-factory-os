@@ -7,7 +7,11 @@ import { useCallback, useEffect, useState, type ReactNode } from 'react'
 
 interface ProductItem { item_code: string; item_name: string; quantity: string }
 
-/** 業務在送出後追加的備註事項（業務端只能新增不能改寫，這裡唯讀顯示） */
+/**
+ * 業務在送出後追加的備註事項。
+ * 2026-09-18 起要生管逐則確認：確認前業務還可以改，確認後雙方都鎖定
+ * （見 sql/20260918_schedule_inquiry_note_confirm.sql）。
+ */
 interface InquiryNote {
   id: number
   inquiry_id: number
@@ -15,6 +19,9 @@ interface InquiryNote {
   author_name: string | null
   author_email: string | null
   created_at: string
+  updated_at?: string | null
+  confirmed_at?: string | null
+  confirmed_by_name?: string | null
 }
 
 interface Inquiry {
@@ -220,6 +227,28 @@ export default function ScheduleInquiryPage() {
     }
   }
 
+  // ─── 備註事項確認 ─────────────────────────────────────────────────────────
+  // 確認＝這段補充我看過也認可了，之後業務不能再改。要改就先取消確認，
+  // 讓「被重新打開過」這件事在紀錄上留下痕跡。
+  const [confirmingNoteId, setConfirmingNoteId] = useState<number | null>(null)
+  const handleNoteConfirm = async (noteId: number, confirm: boolean) => {
+    setConfirmingNoteId(noteId)
+    try {
+      const res = await fetch('/api/production/schedule-confirm/notes', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: noteId, action: confirm ? 'confirm' : 'unconfirm' }),
+      })
+      const json = await res.json()
+      if (!json?.success) alert(`備註確認失敗：${json?.error ?? '未知錯誤'}`)
+      else await fetchRecords()
+    } catch (e) {
+      alert(`備註確認失敗：${e instanceof Error ? e.message : String(e)}`)
+    } finally {
+      setConfirmingNoteId(null)
+    }
+  }
+
   // ─── Delete ───────────────────────────────────────────────────────────────
 
   const handleDelete = async (id: number) => {
@@ -407,13 +436,41 @@ export default function ScheduleInquiryPage() {
                 {/* 業務送出後補的備註事項：與原始備註分開呈現，逐則帶作者與時間 */}
                 {(rec.notes?.length ?? 0) > 0 && (
                   <div className="rounded-[10px] border border-sky-500/25 bg-sky-500/[0.06] px-3.5 py-2.5">
-                    <div className="text-[11px] font-bold text-sky-300/90 mb-1.5">💬 業務補充的備註事項（{rec.notes!.length}）</div>
+                    <div className="text-[11px] font-bold text-sky-300/90 mb-1.5">
+                      💬 業務補充的備註事項（{rec.notes!.length}）
+                      {rec.notes!.some(n => !n.confirmed_at) && (
+                        <span className="ml-2 text-amber-400">
+                          {rec.notes!.filter(n => !n.confirmed_at).length} 則待確認
+                        </span>
+                      )}
+                    </div>
                     <div className="flex flex-col gap-2">
                       {rec.notes!.map(n => (
-                        <div key={n.id}>
+                        <div key={n.id} className={n.confirmed_at ? '' : 'border-l-2 border-amber-500/50 pl-2'}>
                           <div className="text-[13px] text-[#cdd8ea] leading-relaxed whitespace-pre-wrap break-words">{n.note}</div>
-                          <div className="text-[11px] text-[#5f7290] mt-0.5">
-                            {n.author_name || '—'}・{new Date(n.created_at).toLocaleString('zh-TW', { timeZone: 'Asia/Taipei', hour12: false })}
+                          <div className="text-[11px] text-[#5f7290] mt-0.5 flex items-center gap-2 flex-wrap">
+                            <span>
+                              {n.author_name || '—'}・{new Date(n.created_at).toLocaleString('zh-TW', { timeZone: 'Asia/Taipei', hour12: false })}
+                              {n.updated_at && <span className="ml-1 text-[#445064]">(已修改)</span>}
+                            </span>
+                            {n.confirmed_at ? (
+                              <>
+                                <span className="px-1.5 py-0.5 rounded border border-emerald-500/40 text-emerald-400 text-[10px] font-bold">
+                                  ✅ 已確認{n.confirmed_by_name ? `・${n.confirmed_by_name}` : ''}
+                                </span>
+                                <button
+                                  onClick={() => void handleNoteConfirm(n.id, false)}
+                                  disabled={confirmingNoteId === n.id}
+                                  className="text-[11px] text-[#5f7290] hover:text-[#93a4c0] underline underline-offset-2 disabled:opacity-40"
+                                >取消確認</button>
+                              </>
+                            ) : (
+                              <button
+                                onClick={() => void handleNoteConfirm(n.id, true)}
+                                disabled={confirmingNoteId === n.id}
+                                className="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-500/10 border border-emerald-500/35 text-emerald-400 hover:bg-emerald-500/20 disabled:opacity-40 transition-colors"
+                              >{confirmingNoteId === n.id ? '處理中…' : '確認此備註'}</button>
+                            )}
                           </div>
                         </div>
                       ))}

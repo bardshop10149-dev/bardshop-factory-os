@@ -102,6 +102,12 @@ export const NAV_GROUPS: Array<{ title: string; theme: string; items: MenuEntry[
         path: '/admin/sara/exchange',
         icon: 'M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4'
       },
+      {
+        // 前台（現場回報）；後台處理在「SARA 資料交換區」頁面的改單面板上方
+        name: '塔台異常回報',
+        path: '/sara-anomaly',
+        icon: 'M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z'
+      },
     ]
   },
   {

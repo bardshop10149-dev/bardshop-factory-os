@@ -3,6 +3,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { supabase } from '../../../../lib/supabaseClient'
 import SingleOrderConvert from './SingleOrderConvert'
+import OrderRouteChange, { type RouteChangePrefill } from './OrderRouteChange'
+import SaraAnomalyAdmin from './SaraAnomalyAdmin'
 
 const CSV_H1 = 'Order Number,Manufacturing Order Number,Product Name,Product Description,Lot Number,Production Quantity,Due,Priority Level,Earliest Start Time,Job Sequence,Workcenter,Job Name,Job Quantity,Out Sourcing,Est. Time,Time Unit,BOM Components,Material Required Quantity,customer_id,assigned_machine,Rule,Parameter 1'
 const CSV_H2 = '訂單編號,(必填)工單編號,(必填)品號,規格,生產批號,(必填)生產需求數量,(必填)需求日,排程優先等級(1-99),最早可開始時間,(必填)工序,(必填)站點,(必填)製程名稱,製程數量,製程委外,(必填)預估工時,工時單位,BOM元件品號,物料需求數量,客戶名稱,分配機台,規則,參數1'
@@ -87,6 +89,9 @@ export default function SaraExchangePage() {
   const [delMsg, setDelMsg]     = useState('')
 
   const [expandedId, setExpandedId] = useState<number | null>(null)
+
+  // 異常回報「帶入改單」→ 傳給下方改單面板（token 每次換新值才會重新觸發查詢）
+  const [routePrefill, setRoutePrefill] = useState<RouteChangePrefill | null>(null)
 
   // 載入 API Key（server-side env，僅管理員可見）
   const [apiKey, setApiKey] = useState<string | null>(null)
@@ -535,6 +540,18 @@ export default function SaraExchangePage() {
               </div>
             </div>
           </div>
+        </div>
+
+        {/* ── 塔台異常回報（後台）：就放在改單上方，處理動線接在一起 ── */}
+        <SaraAnomalyAdmin onPickForChange={(order, seq) => {
+          setRoutePrefill({ order, seq, token: Date.now() })
+          // 捲到改單面板，讓帶入的結果直接出現在眼前
+          document.getElementById('order-route-change')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+        }} />
+
+        {/* ── 改單（換工序）：刪舊+寫新一次完成 ── */}
+        <div id="order-route-change">
+          <OrderRouteChange onChanged={() => void loadCsvBuffer()} prefill={routePrefill} />
         </div>
 
         {/* ── 單張訂單轉換 ── */}

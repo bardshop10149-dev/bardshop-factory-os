@@ -22,7 +22,7 @@ interface RequestRow {
   /** 每次處理都會更新；用來當軌跡重抓的觸發點 */
   updated_at: string
   request_no: string
-  status: 'pending' | 'created' | 'rejected'
+  status: 'pending' | 'approved' | 'created' | 'rejected'
   requester_email: string
   requester_name: string | null
   requested_at: string
@@ -122,7 +122,8 @@ const ERP_FIELDS: { key: keyof FormState; label: string; erp: string; options?: 
 ]
 
 const STATUS_META: Record<RequestRow['status'], { label: string; cls: string }> = {
-  pending: { label: '待建檔', cls: 'bg-amber-900/50 text-amber-300 border-amber-700/60' },
+  pending: { label: '待審', cls: 'bg-amber-900/50 text-amber-300 border-amber-700/60' },
+  approved: { label: '已核准待建檔', cls: 'bg-sky-900/50 text-sky-300 border-sky-700/60' },
   created: { label: '已建檔', cls: 'bg-emerald-900/50 text-emerald-300 border-emerald-700/60' },
   rejected: { label: '已退回', cls: 'bg-rose-900/50 text-rose-300 border-rose-700/60' },
 }
@@ -844,48 +845,17 @@ function RequestRowView({
               )}
             </div>
 
-            {/* 處理動作 */}
-            {row.status === 'pending' ? (
-              <div className="flex flex-wrap items-center gap-2 pt-3 border-t border-slate-800">
-                <input
-                  value={assigned}
-                  onChange={e => setAssigned(e.target.value.toUpperCase())}
-                  placeholder="ARGO 建好的品項編碼"
-                  className="bg-slate-900 border border-slate-700 rounded-lg px-3 py-1.5 text-xs font-mono text-white placeholder:text-slate-600 focus:border-emerald-500 focus:outline-none"
-                />
-                <button
-                  onClick={() => act({ action: 'created', assigned_part: assigned })}
-                  disabled={busy || !assigned.trim()}
-                  className="px-3 py-1.5 rounded-lg bg-emerald-700/40 border border-emerald-600 text-emerald-300 hover:bg-emerald-700/60 disabled:opacity-40"
-                >
-                  標記已建檔
-                </button>
-                <span className="text-slate-700">|</span>
-                <input
-                  value={reason}
-                  onChange={e => setReason(e.target.value)}
-                  placeholder="退回原因"
-                  className="bg-slate-900 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-white placeholder:text-slate-600 focus:border-rose-500 focus:outline-none"
-                />
-                <button
-                  onClick={() => act({ action: 'rejected', reject_reason: reason })}
-                  disabled={busy || !reason.trim()}
-                  className="px-3 py-1.5 rounded-lg bg-rose-900/40 border border-rose-700 text-rose-300 hover:bg-rose-900/60 disabled:opacity-40"
-                >
-                  退回
-                </button>
-              </div>
-            ) : (
-              <div className="pt-3 border-t border-slate-800">
-                <button
-                  onClick={() => act({ action: 'reopen' })}
-                  disabled={busy}
-                  className="px-3 py-1.5 rounded-lg border border-slate-700 text-slate-400 hover:text-slate-200 disabled:opacity-40"
-                >
-                  改回待建檔
-                </button>
-              </div>
-            )}
+            {/* 處理動作已移到「品項編碼審查」頁（/product-dev/item-approval）。
+                核准與建檔集中在一處，避免兩邊都能改同一張單。這頁只負責「填申請、看自己的進度」。 */}
+            <div className="pt-3 border-t border-slate-800 text-slate-600">
+              {row.status === 'pending'
+                ? '這張單在等主管審查。'
+                : row.status === 'approved'
+                ? '已核准，等建檔人員在 ARGO 建立。'
+                : row.status === 'rejected'
+                ? '已退回，請依退回原因修正後重新申請。'
+                : '已完成建檔。'}
+            </div>
           </td>
         </tr>
       )}

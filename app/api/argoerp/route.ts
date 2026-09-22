@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { CHANGPING_MIN_LEAD_WORKDAYS, addWorkingDays } from '@/lib/argoerp/moExportShared'
 
 import { formatSupabaseAdminError, getSupabaseAdminClient } from '../../../lib/supabaseAdmin'
 import { guardAuth, guardPermission } from '@/lib/requireAuth'
@@ -82,10 +83,20 @@ function toNumber(value: unknown): number {
   return Number.isFinite(parsed) ? parsed : 0
 }
 
-// 交期規則：請購單／採購單匯入時，將交期往前推兩個「工作天」（跳過週六、週日）；
-// 若往前推兩個工作天後的日期小於今日，則維持原交期不變。
+// 交期規則：請購單／採購單匯入時，將交期往前推兩個「工作天」（跳過週六、週日），
+// 讓我方提早兩天追廠商。兩個不推的例外：
+//   1. 往前推兩個工作天後的日期小於今日 → 維持原交期（否則一進來就是逾期）
+//   2. beginDate 有給、且推完之後距離開立日不足 minLeadWorkdays 個工作天 → 維持原交期
+//      （2026-09-22 新增）常平採購單開單時已強制交期至少是「開立日 + 5 個工作天」
+//      ——那是常平的產能極限。顯示端再往前扣 2 天會把那 5 天吃掉，採購專區看到的
+//      會是 3 個工作天，比實際更急、也低於常平做得出來的下限。太趕的單就不扣，
+//      寬鬆的單照舊扣 2 天。
 // 支援格式：YYYYMMDD / YYYY/MM/DD / YYYY-MM-DD（含時間後綴），輸出維持與輸入相同的格式樣式。
-function shiftDueDateBackTwoWorkdays(raw: string | null | undefined): string | null {
+function shiftDueDateBackTwoWorkdays(
+  raw: string | null | undefined,
+  beginDate?: string | null,
+  minLeadWorkdays: number = CHANGPING_MIN_LEAD_WORKDAYS,
+): string | null {
   if (raw == null) return null
   const s = String(raw).trim()
   if (!s) return null
@@ -119,6 +130,17 @@ function shiftDueDateBackTwoWorkdays(raw: string | null | undefined): string | n
   const now = new Date()
   const todayUTC = new Date(Date.UTC(now.getFullYear(), now.getMonth(), now.getDate()))
   if (shifted.getTime() < todayUTC.getTime()) return s
+
+  // 推完之後距離開立日不足 minLeadWorkdays 個工作天 → 不扣，維持原交期
+  // （用 UTC 建日期與上面的 due/shifted 對齊，避免時區把日界算歪）
+  if (beginDate) {
+    const bm = String(beginDate).trim().match(/^(\d{4})[/-]?(\d{1,2})[/-]?(\d{1,2})/)
+    if (bm) {
+      const earliestLocal = addWorkingDays(new Date(+bm[1], +bm[2] - 1, +bm[3]), minLeadWorkdays)
+      const earliestUTC = Date.UTC(earliestLocal.getFullYear(), earliestLocal.getMonth(), earliestLocal.getDate())
+      if (shifted.getTime() < earliestUTC) return s
+    }
+  }
 
   const yy = shifted.getUTCFullYear()
   const mm = String(shifted.getUTCMonth() + 1).padStart(2, '0')
@@ -1116,7 +1138,11 @@ export async function POST(request: NextRequest) {
         unit:            String(getRecordValue(dtl, 'UNIT_OF_MEASURE_ORU') ?? '').trim() || null,
         status:          String(getRecordValue(hdr, 'HOLD_STATUS') ?? '').trim() || null,
         start_date:      String(getRecordValue(hdr, 'BEGIN_DATE') ?? '').trim() || null,
-        end_date:        shiftDueDateBackTwoWorkdays(String(getRecordValue(dtl, 'DUEDATE') ?? '').trim() || null),
+        // 帶入開立日：太趕的單（扣完不足 5 個工作天）就不往前扣，見 shiftDueDateBackTwoWorkdays
+        end_date:        shiftDueDateBackTwoWorkdays(
+                           String(getRecordValue(dtl, 'DUEDATE') ?? '').trim() || null,
+                           String(getRecordValue(hdr, 'BEGIN_DATE') ?? '').trim() || null,
+                         ),
         customer_vendor: String(getRecordValue(hdr, 'TPN_PARTNER_ID') ?? '').trim() || null,
         remark:          String(getRecordValue(dtl, 'REMARK2') ?? '').trim() || null,
         extra: {
