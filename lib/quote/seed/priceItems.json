@@ -3083,11 +3083,112 @@
     "price": 0.12,
     "currency": "RMB",
     "plant": "changping",
-    "attrs": null,
+    "attrs": {
+      "reference_history": [
+        {
+          "qty": 110,
+          "price": 0.4,
+          "order": "BA26080505 澄鑫 E款",
+          "sheet": "110",
+          "date": "2026-08-05"
+        },
+        {
+          "qty": 500,
+          "price": 0.36,
+          "order": "BA26080506 澄鑫 G款",
+          "sheet": "5.7 500 ",
+          "date": "2026-08-05"
+        },
+        {
+          "qty": 2200,
+          "price": 0.4,
+          "order": "BA26080505 澄鑫 E款",
+          "sheet": "550",
+          "date": "2026-08-05"
+        },
+        {
+          "qty": 4500,
+          "price": 0.15,
+          "order": "BA26080506 澄鑫 G款",
+          "sheet": "5.7 4500",
+          "date": "2026-08-05"
+        },
+        {
+          "qty": 5000,
+          "price": 0.1,
+          "order": "BA26080506 澄鑫 F款",
+          "sheet": "5千",
+          "date": "2026-08-05"
+        },
+        {
+          "qty": 12500,
+          "price": 0.1,
+          "order": "BA26080502 澄鑫 B款",
+          "sheet": "1.25万",
+          "date": "2026-08-05"
+        },
+        {
+          "qty": 12500,
+          "price": 0.1,
+          "order": "BA26080504 澄鑫 D款",
+          "sheet": "1.25万",
+          "date": "2026-08-05"
+        },
+        {
+          "qty": 12500,
+          "price": 0.12,
+          "order": "BA26080506 澄鑫 G款",
+          "sheet": "5.7 12500",
+          "date": "2026-08-05"
+        },
+        {
+          "qty": 21000,
+          "price": 0.1,
+          "order": "BA26080506 澄鑫 F款",
+          "sheet": "21000",
+          "date": "2026-08-05"
+        },
+        {
+          "qty": 25000,
+          "price": 0.1,
+          "order": "BA26080504 澄鑫 D款",
+          "sheet": "2.5万",
+          "date": "2026-08-05"
+        },
+        {
+          "qty": 50000,
+          "price": 0.1,
+          "order": "BA26080506 澄鑫 F款",
+          "sheet": "50000",
+          "date": "2026-08-05"
+        },
+        {
+          "qty": 75000,
+          "price": 0.1,
+          "order": "BA26080502 澄鑫 B款",
+          "sheet": "7.5万",
+          "date": "2026-08-05"
+        },
+        {
+          "qty": 125000,
+          "price": 0.1,
+          "order": "BA26080504 澄鑫 D款",
+          "sheet": "12.5万",
+          "date": "2026-08-05"
+        },
+        {
+          "qty": 250000,
+          "price": 0.1,
+          "order": "BA26080502 澄鑫 B款",
+          "sheet": "25万",
+          "date": "2026-08-05"
+        }
+      ]
+    },
     "argo_part_code": null,
     "effective_from": "2026-07-02",
     "source_file": "常平報價表全掃描 2026-09-20",
-    "note": "掃描新增；出現於 5 份表：BA26080502 澄鑫 B款_柯氏报价模板_v1.5.2.xlsx；BA26080504 澄鑫 D款_柯氏报价模板_v1.5.2.xlsx；BA26080505 澄鑫 E款_报价模板_v1.5.2.xlsx；BA26080506 澄鑫 F款_柯氏报价模板_v1.5.2.xlsx…",
+    "note": "單價依尺寸與數量每次不同：報價時參考歷史（數量→單價）自行填，這裡的單價只是最近一次的參考值",
     "erp_suggested_price": null,
     "erp_suggested_currency": null,
     "erp_suggested_at": null
