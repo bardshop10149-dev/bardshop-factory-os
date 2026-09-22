@@ -50,7 +50,9 @@ interface ImportBody {
   removed_keys?: string[]
 }
 
-const NOTE_MAX_LEN = 500
+// 與 app/api/purchasing/status/route.ts、app/purchasing/page.tsx 的 NOTE_MAX_LEN 一致。
+// 原本 500：常平同一格累寫多批出貨時，備註會被切在半句（POC2026082001#10 斷在「共5件43.73kg 顺」）。
+const NOTE_MAX_LEN = 2000
 const NOTE_TAG = '【常平出貨】'
 const IN_CHUNK = 200
 const UPDATED_BY = '常平出貨同步'
@@ -81,7 +83,7 @@ function deriveShipMethod(...texts: (string | null | undefined)[]): ShipMethod |
   return null
 }
 
-/** 既有備註 + 出貨資訊 → 新備註。只增/換自己的 NOTE_TAG 行,保留其他內容;總長壓在 500 內。 */
+/** 既有備註 + 出貨資訊 → 新備註。只增/換自己的 NOTE_TAG 行,保留其他內容;總長壓在 NOTE_MAX_LEN 內。 */
 function mergeNote(existing: string | null, shipInfo: string): { note: string; changed: boolean } {
   const keep = (existing ?? '')
     .split('\n')

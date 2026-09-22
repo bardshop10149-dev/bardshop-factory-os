@@ -151,6 +151,10 @@ function ReceiveCell({ l }: { l: PoTrackingLine }) {
   )
 }
 
+/** 備註字數上限。與 app/api/purchasing/status/route.ts 的 NOTE_MAX_LEN 必須一致——
+ *  前端放寬但後端沒放，超過的內容會在儲存時被打回 400。 */
+const NOTE_MAX_LEN = 2000
+
 /** 備註輸入格：手打、自動換行（textarea 原生換行）、高度自動貼合內容、右下角仍可拖拉；
  *  失焦才儲存（打字中不打 API），Escape 還原成上次儲存值 */
 function NoteCell({ value, saving, onSave }: { value: string | null; saving: boolean; onSave: (next: string) => void }) {
@@ -158,27 +162,39 @@ function NoteCell({ value, saving, onSave }: { value: string | null; saving: boo
   const boxRef = useRef<HTMLTextAreaElement | null>(null)
   // 重新查詢／他列儲存回寫後，同步外部值
   useEffect(() => { setDraft(value ?? '') }, [value])
-  // 高度貼合內容（常平出貨備註常 3~6 行，固定兩行會被截斷）；上限 240px，再長才捲動
+  // 高度貼合內容（常平出貨備註常 3~6 行，固定兩行會被截斷）；上限 420px，再長才捲動
   useEffect(() => {
     const el = boxRef.current
     if (!el) return
     el.style.height = 'auto'
-    el.style.height = `${Math.min(el.scrollHeight + 2, 240)}px`
+    el.style.height = `${Math.min(el.scrollHeight + 2, 420)}px`
   }, [draft])
+  // 接近上限才提示。textarea 的 maxLength 是「靜默」擋字的——打到上限畫面不會有任何
+  // 反應，使用者只會覺得「後面的字被系統吃掉」，所以一定要讓剩餘字數看得見。
+  const remaining = NOTE_MAX_LEN - draft.length
+  const nearLimit = remaining <= 100
   return (
-    <textarea
-      ref={boxRef}
-      value={draft}
-      onChange={e => setDraft(e.target.value)}
-      onBlur={() => { if (draft.trim() !== (value ?? '').trim()) onSave(draft) }}
-      onKeyDown={e => { if (e.key === 'Escape') setDraft(value ?? '') }}
-      placeholder="輸入備註…"
-      maxLength={500}
-      rows={2}
-      disabled={saving}
-      title="失焦自動儲存；Escape 還原；右下角可拖拉調整高度"
-      className="w-full min-h-[3em] px-2 py-1 rounded bg-slate-950/80 border border-slate-700/70 focus:border-cyan-600 focus:outline-none text-slate-200 text-xs leading-snug resize-y disabled:opacity-60 placeholder:text-slate-600"
-    />
+    <div className="relative">
+      <textarea
+        ref={boxRef}
+        value={draft}
+        onChange={e => setDraft(e.target.value)}
+        onBlur={() => { if (draft.trim() !== (value ?? '').trim()) onSave(draft) }}
+        onKeyDown={e => { if (e.key === 'Escape') setDraft(value ?? '') }}
+        placeholder="輸入備註…"
+        maxLength={NOTE_MAX_LEN}
+        rows={2}
+        disabled={saving}
+        title="失焦自動儲存；Escape 還原；右下角可拖拉調整高度"
+        className="w-full min-h-[3em] px-2 py-1 rounded bg-slate-950/80 border border-slate-700/70 focus:border-cyan-600 focus:outline-none text-slate-200 text-xs leading-snug resize-y disabled:opacity-60 placeholder:text-slate-600"
+      />
+      {nearLimit && (
+        <span className={`pointer-events-none absolute bottom-1.5 right-4 rounded bg-slate-950/90 px-1 text-[10px] ${
+          remaining <= 0 ? 'text-red-400' : 'text-amber-400'}`}>
+          {remaining <= 0 ? `已達上限 ${NOTE_MAX_LEN} 字` : `剩 ${remaining} 字`}
+        </span>
+      )}
+    </div>
   )
 }
 
