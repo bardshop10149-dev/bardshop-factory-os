@@ -470,11 +470,10 @@ export default function DailyOrderSheetPage() {
   // ---- 修改歷程面板（daily_order_sheet_history）----
   const [showHistory, setShowHistory] = useState(false)
 
-  // 快速查詢集合：含未確認改單的 project_id（供出單表列 badge 使用，僅限目前選取日期；詳細頁面請至「改單檢測」頁）
+  // 快速查詢集合：含未確認改單的 project_id，供出單表列上的「改單-未確認」badge 使用（僅限目前選取日期）。
+  // 2026-09-23 移除工具列的「改單檢測」分頁連結（使用者回報沒在用），列上的 badge 保留——
+  // 那是看著出單表時就看得到的提示，成本也只有目前這一天的查詢。
   const [soChangesUnconfirmedSet, setSoChangesUnconfirmedSet] = useState<Set<string>>(new Set())
-  // 全部出單表（不限目前選取日期）範圍內、未確認改單的訂單數 —— 供工具列上方 tab 的紅點計數，
-  // 避免只看今天這張表時，漏掉其他日期出單表裡已改單但還沒被回頭確認的訂單
-  const [soChangesTotalCount, setSoChangesTotalCount] = useState(0)
   // 自動補對旗標：解析後若有常平列，自動執行採購比對
   const [pendingAutoPoMatch, setPendingAutoPoMatch] = useState(false)
 
@@ -520,32 +519,6 @@ export default function DailyOrderSheetPage() {
         setSoChangesUnconfirmedSet(new Set((data ?? []).map((r: { project_id: string }) => r.project_id)))
       })
   }, [sheetRows])
-
-  // 頁面載入時掃一次「所有出單表（近 180 天）」涵蓋的訂單號，計算全域未確認改單數，
-  // 供工具列 tab 紅點顯示——不受目前選取日期限制，避免只看某一天時漏掉其他日期已改單的訂單
-  useEffect(() => {
-    void (async () => {
-      const { data: sheets } = await supabase
-        .from('daily_order_sheets')
-        .select('rows')
-        .order('sheet_date', { ascending: false })
-        .limit(180)
-      const allPids = new Set<string>()
-      for (const sheet of (sheets ?? []) as Array<{ rows?: unknown }>) {
-        const rows = Array.isArray(sheet.rows) ? (sheet.rows as Array<{ order_number?: string }>) : []
-        for (const row of rows) {
-          if (row.order_number) allPids.add(row.order_number)
-        }
-      }
-      if (allPids.size === 0) { setSoChangesTotalCount(0); return }
-      const { count } = await supabase
-        .from('so_change_notices')
-        .select('project_id', { count: 'exact', head: true })
-        .in('project_id', [...allPids].slice(0, 1000))
-        .is('confirmed_at', null)
-      setSoChangesTotalCount(count ?? 0)
-    })()
-  }, [])
 
   // ---- 常平 自動採購比對：解析後若有常平列自動觸發 ----
   useEffect(() => {
@@ -4005,16 +3978,6 @@ export default function DailyOrderSheetPage() {
             >
               🛠 改單專區
             </button>
-            <a
-              href="/admin/argoerp/so-change-notices"
-              title="ARGO 銷售訂單同步偵測到的改單（僅列出有在出單表裡的訂單，跨所有日期）"
-              className="px-5 py-2.5 text-sm font-medium rounded-t-lg transition-colors border-b-2 border-transparent text-slate-400 hover:text-red-300 hover:bg-slate-900/50 flex items-center gap-1"
-            >
-              ⚠️ 改單檢測
-              {soChangesTotalCount > 0 && (
-                <span className="px-1.5 py-0.5 rounded-full bg-red-500 text-white text-[10px] font-bold leading-none">{soChangesTotalCount}</span>
-              )}
-            </a>
           </div>
 
           {/* ===== 每日出單表分頁 ===== */}
