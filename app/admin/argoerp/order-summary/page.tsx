@@ -10,6 +10,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useRouter } from 'next/navigation'
+import { MoProgressCell, type SheetProgress } from '../../../../components/MoProgressCell'
 
 interface SummaryRow {
   sheet_date: string
@@ -17,6 +18,8 @@ interface SummaryRow {
   status_note: string
   last_report_at?: string
   matched_via_bare?: boolean
+  progress?: SheetProgress
+  pm_note?: string
   order_number?: string
   match_line_no?: string
   line_no_input?: string
@@ -226,15 +229,16 @@ export default function OrderSummaryPage() {
           <table className="w-full text-sm">
             <thead className="bg-slate-900 sticky top-0 z-10">
               <tr className="text-left text-xs text-slate-400">
-                <th className="px-3 py-2.5 whitespace-nowrap">出單日</th>
-                <th className="px-3 py-2.5 whitespace-nowrap">工單 / 廠別</th>
+                <th className="px-3 py-2.5 whitespace-nowrap">出單日 / 廠別</th>
+                <th className="px-3 py-2.5 whitespace-nowrap">工單 / 製令‧採購單號</th>
                 <th className="px-3 py-2.5 whitespace-nowrap">序號</th>
                 <th className="px-3 py-2.5 min-w-[280px]">客戶 / 品項編碼 / 品名規格</th>
                 <th className="px-3 py-2.5 whitespace-nowrap text-right">數量</th>
                 <th className="px-3 py-2.5 whitespace-nowrap text-right">盤數</th>
-                <th className="px-3 py-2.5 whitespace-nowrap">製令 / 採購單號</th>
-                <th className="px-3 py-2.5 whitespace-nowrap">交付日</th>
-                <th className="px-3 py-2.5 whitespace-nowrap">批備料</th>
+                <th className="px-3 py-2.5 whitespace-nowrap">PACKING</th>
+                <th className="px-3 py-2.5 min-w-[140px]">備註</th>
+                <th className="px-3 py-2.5 whitespace-nowrap min-w-[130px]">交付日 / 生產進度</th>
+                <th className="px-3 py-2.5 whitespace-nowrap text-center">批備料</th>
                 <th className="px-3 py-2.5 whitespace-nowrap">打樣/追加</th>
                 <th className="px-3 py-2.5 whitespace-nowrap">機台</th>
                 <th className="px-3 py-2.5 whitespace-nowrap">狀態</th>
@@ -242,7 +246,7 @@ export default function OrderSummaryPage() {
             </thead>
             <tbody>
               {rows.length === 0 && (
-                <tr><td colSpan={12} className="px-3 py-12 text-center text-slate-600 text-sm">
+                <tr><td colSpan={13} className="px-3 py-12 text-center text-slate-600 text-sm">
                   {loading ? '載入中…' : '沒有符合條件的資料'}
                 </td></tr>
               )}
@@ -252,10 +256,9 @@ export default function OrderSummaryPage() {
                 return (
                   <tr key={`${r.sheet_date}-${r.order_number}-${r.item_code}-${i}`}
                     className="border-t border-slate-800/60 hover:bg-slate-900/50 transition-colors">
-                    <td className="px-3 py-2 text-xs text-slate-500 whitespace-nowrap font-mono">{r.sheet_date}</td>
                     <td className="px-3 py-2 whitespace-nowrap">
-                      <div className="font-mono text-xs text-cyan-300">{r.order_number || '—'}</div>
-                      <div className="mt-0.5 flex items-center gap-1">
+                      <div className="font-mono text-xs text-slate-400">{r.sheet_date}</div>
+                      <div className="mt-0.5">
                         {r.doc_type?.includes('集單')
                           ? <span className="px-1.5 py-0.5 rounded border text-[10px] bg-pink-950/50 text-pink-300 border-pink-800/50">集單</span>
                           : r.factory
@@ -263,6 +266,13 @@ export default function OrderSummaryPage() {
                               {FACTORY_LABEL[r.factory] ?? r.factory}
                             </span>
                           : null}
+                      </div>
+                    </td>
+                    <td className="px-3 py-2 whitespace-nowrap">
+                      <div className="font-mono text-xs text-cyan-300">{r.order_number || '—'}</div>
+                      <div className="font-mono text-[11px] text-slate-400 mt-0.5">
+                        {docNo || <span className="text-slate-600">尚未轉單</span>}
+                        {r.mo_status === '已匯入製令' && <span className="ml-1 text-emerald-400">✓</span>}
                       </div>
                     </td>
                     <td className="px-3 py-2 text-xs font-mono text-slate-400 whitespace-nowrap">{seq || '—'}</td>
@@ -273,15 +283,25 @@ export default function OrderSummaryPage() {
                     </td>
                     <td className="px-3 py-2 text-right font-mono text-sm whitespace-nowrap">{r.quantity || '—'}</td>
                     <td className="px-3 py-2 text-right font-mono text-xs text-yellow-400/80 whitespace-nowrap">{r.plate_count || '—'}</td>
-                    <td className="px-3 py-2 whitespace-nowrap">
-                      <span className="font-mono text-xs text-slate-300">{docNo || <span className="text-slate-600">尚未轉單</span>}</span>
-                      {r.mo_status === '已匯入製令' && <span className="ml-1 text-[10px] text-emerald-400">✓</span>}
+                    <td className="px-3 py-2 text-xs text-slate-300 whitespace-nowrap">{r.packing || <span className="text-slate-600">—</span>}</td>
+                    <td className="px-3 py-2 text-[11px] text-slate-400 max-w-[200px]">
+                      <div className="line-clamp-2" title={r.note ?? ''}>{r.note || <span className="text-slate-700">—</span>}</div>
+                      {r.pm_note && <div className="text-amber-500/80 line-clamp-1" title={r.pm_note}>{r.pm_note}</div>}
                     </td>
-                    <td className="px-3 py-2 text-xs text-slate-400 whitespace-nowrap">{r.delivery_date || '—'}</td>
-                    <td className="px-3 py-2 text-xs whitespace-nowrap">
-                      {r.material_prep_status
-                        ? <span className="text-slate-300" title={r.argo_slip_no ?? ''}>{r.material_prep_status}</span>
-                        : <span className="text-slate-600">—</span>}
+                    <td className="px-3 py-2">
+                      <div className="text-slate-500 text-[11px] whitespace-nowrap mb-1">{r.delivery_date || '—'}</div>
+                      <MoProgressCell progress={r.progress} hasMo={!!docNo} factory={r.factory} onOpen={() => {}} />
+                    </td>
+                    <td className="px-3 py-2 text-center whitespace-nowrap">
+                      {(() => {
+                        // 已備料/已批備料打勾、無需備料打三角形、其餘打叉
+                        const st = r.material_prep_status
+                        if (st === '已備料' || st === '已批備料') {
+                          return <span className="text-emerald-400 text-base" title={st + (r.argo_slip_no ? '・' + r.argo_slip_no : '')}>✓</span>
+                        }
+                        if (st === '無需備料') return <span className="text-slate-400 text-base" title="無需備料">▲</span>
+                        return <span className="text-rose-500/80 text-base" title="尚未備料">✕</span>
+                      })()}
                     </td>
                     <td className="px-3 py-2 text-xs font-mono text-slate-400 whitespace-nowrap">{r.is_sample || '—'}</td>
                     <td className="px-3 py-2 text-xs text-slate-300 whitespace-nowrap">{r.machine || r.assigned_machine || '—'}</td>

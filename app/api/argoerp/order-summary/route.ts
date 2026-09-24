@@ -119,25 +119,57 @@ export async function GET(request: NextRequest) {
       const bare = bareOf(ref)
       if (bare !== ref) refs.add(bare)
     }
-    // mo → { any: 有無任何報工, packed: 包裝站有無報工, lastAt: 最後一次報工時間 }
-    const stat = new Map<string, { any: boolean; packed: boolean; lastAt: string | null }>()
+    // mo → { any, packed, lastAt, steps }
+    // steps 是給畫面上的進度條用的（欄位與 components/MoProgressCell 的 SheetProgressStep 對齊），
+    // 一道工序一格：排程先鋪骨架（含還沒開工的），再用報工覆蓋——報工是既成事實。
+    interface Step { sequence: number | null; station: string | null; jobName: string | null; status: 'finished' | 'running' | 'pause' | 'pending'; qty: number | null; endTime: string | null }
+    const stat = new Map<string, { any: boolean; packed: boolean; lastAt: string | null; steps: Map<number, Step> }>()
     const bump = (mo: string) => {
-      if (!stat.has(mo)) stat.set(mo, { any: false, packed: false, lastAt: null })
+      if (!stat.has(mo)) stat.set(mo, { any: false, packed: false, lastAt: null, steps: new Map() })
       return stat.get(mo)!
     }
+    const toStatus = (raw: string): Step['status'] => {
+      const v = raw.toLowerCase()
+      return v === 'finished' ? 'finished' : v === 'running' ? 'running' : v === 'pause' ? 'pause' : 'pending'
+    }
     for (const part of chunk([...refs], CHUNK)) {
-      const { data, error } = await supabase
-        .from('sara_wip_records')
-        .select('mo_nbr, workcenter_name, real_end_time, real_start_time')
-        .in('mo_nbr', part)
-      if (error) throw error
-      for (const x of (data ?? []) as Array<{ mo_nbr: string | null; workcenter_name: string | null; real_end_time: string | null; real_start_time: string | null }>) {
+      const [rec, sch] = await Promise.all([
+        supabase.from('sara_wip_records')
+          .select('mo_nbr, job_sequence, job_name, workcenter_name, status, wip_qty, real_end_time, real_start_time')
+          .in('mo_nbr', part),
+        supabase.from('sara_wip_schedule')
+          .select('mo_nbr, job_sequence, job_name, workcenter_name, system_status')
+          .in('mo_nbr', part),
+      ])
+      if (rec.error) throw rec.error
+      if (sch.error) throw sch.error
+
+      for (const x of (sch.data ?? []) as Array<{ mo_nbr: string | null; job_sequence: number | null; job_name: string | null; workcenter_name: string | null; system_status: string | null }>) {
         const mo = str(x.mo_nbr).toUpperCase(); if (!mo) continue
-        const st = bump(mo)
+        const st = bump(mo); const seq = x.job_sequence ?? -1
+        st.steps.set(seq, {
+          sequence: x.job_sequence, station: x.workcenter_name, jobName: x.job_name,
+          status: toStatus(str(x.system_status)), qty: null, endTime: null,
+        })
+      }
+      for (const x of (rec.data ?? []) as Array<{ mo_nbr: string | null; job_sequence: number | null; job_name: string | null; workcenter_name: string | null; status: string | null; wip_qty: number | null; real_end_time: string | null; real_start_time: string | null }>) {
+        const mo = str(x.mo_nbr).toUpperCase(); if (!mo) continue
+        const st = bump(mo); const seq = x.job_sequence ?? -1
         st.any = true
         if (str(x.workcenter_name).includes(FINAL_STATION)) st.packed = true
         const t = x.real_end_time ?? x.real_start_time
         if (t && (!st.lastAt || t > st.lastAt)) st.lastAt = t
+        const prev = st.steps.get(seq)
+        const reported = toStatus(str(x.status))
+        st.steps.set(seq, {
+          sequence: x.job_sequence ?? prev?.sequence ?? null,
+          station: x.workcenter_name ?? prev?.station ?? null,
+          jobName: x.job_name ?? prev?.jobName ?? null,
+          // 同一道工序可能報工多次（分批報）：數量加總、時間取最後一次、完成優先
+          status: prev?.status === 'finished' || reported === 'finished' ? 'finished' : reported,
+          qty: (prev?.qty ?? 0) + (x.wip_qty ?? 0) || null,
+          endTime: x.real_end_time && (!prev?.endTime || x.real_end_time > prev.endTime) ? x.real_end_time : (prev?.endTime ?? null),
+        })
       }
     }
 
@@ -175,6 +207,19 @@ export async function GET(request: NextRequest) {
       }
       if (st.lastAt) r.last_report_at = st.lastAt
       r.matched_via_bare = viaBare
+      // 進度條資料（欄位對齊 components/MoProgressCell 的 SheetProgress）
+      const steps = [...st.steps.values()].sort((a, b) => (a.sequence ?? 0) - (b.sequence ?? 0))
+      if (steps.length > 0) {
+        r.progress = {
+          doneCount: steps.filter(x => x.status === 'finished').length,
+          totalCount: steps.length,
+          runningCount: steps.filter(x => x.status === 'running').length,
+          percentage: null,
+          healthState: null,
+          lastReportAt: st.lastAt,
+          steps,
+        }
+      }
     }
 
     // ④ 篩選（狀態／單據／關鍵字都在伺服器端做完）
