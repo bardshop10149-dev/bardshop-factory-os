@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useCallback } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { supabase } from '../../../../lib/supabaseClient'
 
 // ===== CSV 欄位型別（對應 wip_record__ 匯出格式）=====
@@ -59,6 +59,11 @@ function refLabel(siteFilter: string): string {
   return '製令/採購/請購號'
 }
 
+// 判斷「上一次是哪一台機器做的」只看得出結果的站點。
+// 後加工／包裝的資源多半是「貼合機」「包裝A線」這種共用產線或預設資源，
+// 對『這批當初印在哪台機器』完全沒有鑑別力，列出來只是干擾。
+const MACHINE_STATIONS = ['印刷站2F', '印刷站6F', '雷切站']
+
 // ===== 各機台日報 =====
 // report_resources 是「機台, 人員」黏在同一個逗號分隔字串裡（順序不固定，兩種都出現過），
 // 無法單純用位置判斷；改用 sara_resources 裡登記的機台/產線清單來比對，抓出真正的機台名稱，
@@ -111,6 +116,14 @@ export default function SaraWipRecordsPage() {
   const [records, setRecords] = useState<WipRecord[]>([])
   const [loading, setLoading] = useState(false)
   const [wcFilter, setWcFilter] = useState('印刷站2F')
+  // 只看印刷＋雷切：用來判斷「上一次是哪一台機器生產」。開啟時蓋掉上面的站點輸入。
+  const [machineMode, setMachineMode] = useState(false)
+  // 已登記的機台／產線名稱（sara_resources），用來從 report_resources 把機台跟人名分開
+  const [machineNames, setMachineNames] = useState<Set<string>>(new Set())
+  useEffect(() => {
+    supabase.from('sara_resources').select('resource_name, resource_type').in('resource_type', ['Machine', 'Line'])
+      .then(({ data }) => setMachineNames(new Set((data ?? []).map((r: { resource_name: string }) => r.resource_name))))
+  }, [])
   const [statusFilter, setStatusFilter] = useState<string>('all')
   const [siteFilter, setSiteFilter] = useState<string>('all')
   const [search, setSearch] = useState('')
@@ -147,7 +160,8 @@ export default function SaraWipRecordsPage() {
         .order('real_end_time', { ascending: false })
         .limit(500)
 
-      if (wcFilter) query = query.eq('workcenter_name', wcFilter)
+      if (machineMode) query = query.in('workcenter_name', MACHINE_STATIONS)
+      else if (wcFilter) query = query.eq('workcenter_name', wcFilter)
       if (statusFilter !== 'all') query = query.eq('status', statusFilter)
       if (siteFilter !== 'all') query = query.eq('site_label', siteFilter)
       if (search.trim()) {
@@ -177,7 +191,7 @@ export default function SaraWipRecordsPage() {
     } finally {
       setLoading(false)
     }
-  }, [wcFilter, statusFilter, siteFilter, search])
+  }, [wcFilter, machineMode, statusFilter, siteFilter, search])
 
   const pageRecords = records.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE)
   const totalPages = Math.ceil(records.length / PAGE_SIZE)
@@ -317,12 +331,24 @@ export default function SaraWipRecordsPage() {
                 <label className="text-slate-400 text-sm whitespace-nowrap">站點</label>
                 <input
                   type="text"
-                  value={wcFilter}
+                  value={machineMode ? MACHINE_STATIONS.join('／') : wcFilter}
                   onChange={e => setWcFilter(e.target.value)}
+                  disabled={machineMode}
                   placeholder="印刷站2F"
-                  className="w-32 px-2 py-1.5 rounded bg-slate-800 border border-slate-700 text-slate-200 text-sm focus:outline-none focus:border-cyan-500/60"
+                  className="w-32 px-2 py-1.5 rounded bg-slate-800 border border-slate-700 text-slate-200 text-sm focus:outline-none focus:border-cyan-500/60 disabled:opacity-60 disabled:cursor-not-allowed"
                 />
               </div>
+              <button
+                onClick={() => setMachineMode(v => !v)}
+                title="只列出印刷站2F／印刷站6F／雷切站——判斷「上一次是哪一台機器做的」只有這三站看得出來，後加工與包裝多是共用產線或預設資源，沒有鑑別力"
+                className={`px-3 py-1.5 rounded text-sm font-medium border transition-colors whitespace-nowrap ${
+                  machineMode
+                    ? 'bg-cyan-600 border-cyan-500 text-white'
+                    : 'bg-slate-800 border-slate-700 text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                🔧 判斷機台（印刷＋雷切）
+              </button>
               <div className="flex items-center gap-2">
                 <label className="text-slate-400 text-sm whitespace-nowrap">狀態</label>
                 <select
@@ -352,6 +378,22 @@ export default function SaraWipRecordsPage() {
                 {loading ? '查詢中…' : '查詢'}
               </button>
             </div>
+
+            {/* 帶行號的單號：說明為什麼結果會包含同一張單的其他行號 */}
+            {/-\d+$/.test(search.trim()) && (
+              <div className="rounded-lg border border-amber-800/40 bg-amber-950/20 px-3 py-2 text-xs text-amber-200/90 leading-relaxed">
+                你搜的是帶行號的單號。塔台在 2026-09-04 之前存的是<span className="font-semibold">不帶行號的裸單號</span>，
+                所以已自動連裸號一起查——<span className="font-semibold">結果會包含同一張單其他行號的報工</span>，
+                無法分辨是哪一行做的。
+                {!machineMode && (
+                  <button onClick={() => setMachineMode(true)}
+                    className="ml-2 px-2 py-0.5 rounded bg-cyan-700 hover:bg-cyan-600 text-white font-medium">
+                    只看印刷＋雷切
+                  </button>
+                )}
+                <span className="ml-1 text-amber-200/60">判斷機台只需要這兩站，後加工與包裝是共用產線，看不出機器。</span>
+              </div>
+            )}
 
             {/* 分頁資訊 */}
             {records.length > 0 && (
@@ -392,6 +434,7 @@ export default function SaraWipRecordsPage() {
                       <th className="px-3 py-2.5 text-left text-slate-300 whitespace-nowrap">狀態</th>
                       <th className="px-3 py-2.5 text-left text-slate-300 whitespace-nowrap">報工結束</th>
                       <th className="px-3 py-2.5 text-left text-slate-300 whitespace-nowrap">廠區</th>
+                      <th className="px-3 py-2.5 text-left text-slate-300 whitespace-nowrap">機台</th>
                       <th className="px-3 py-2.5 text-left text-slate-300 whitespace-nowrap">人員</th>
                     </tr>
                   </thead>
@@ -426,7 +469,28 @@ export default function SaraWipRecordsPage() {
                             ? <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold ${SITE_BADGE[r.site_label as SiteLabel] ?? 'bg-slate-700 text-slate-300'}`}>{r.site_label}</span>
                             : <span className="text-slate-600">—</span>}
                         </td>
-                        <td className="px-3 py-2 text-slate-400 max-w-[120px] truncate" title={r.username}>{r.username}</td>
+                        <td className="px-3 py-2 whitespace-nowrap">
+                          {(() => {
+                            // report_resources 是「機台, 人員」黏在同一個逗號分隔字串裡（順序不固定），
+                            // 靠 sara_resources 登記的機台/產線清單挑出真正的機台，挑不到就顯示原字串供核對
+                            const pieces = String(r.report_resources ?? '').split(/[,、]/).map(x => x.trim()).filter(Boolean)
+                            const machines = pieces.filter(x => machineNames.has(x))
+                            if (machines.length > 0) {
+                              return machines.map(mName => (
+                                <span key={mName} className="inline-block mr-1 px-1.5 py-0.5 rounded bg-cyan-950/50 border border-cyan-800/50 text-cyan-200 text-[11px] font-mono">
+                                  {mName}
+                                </span>
+                              ))
+                            }
+                            const rest = pieces.join(' ')
+                            return rest
+                              ? <span className="text-slate-600 text-[11px]" title={`「${rest}」比對不到已登記的機台／產線，可能只記了人員`}>（未記機台）</span>
+                              : <span className="text-slate-700">—</span>
+                          })()}
+                        </td>
+                        <td className="px-3 py-2 text-slate-400 max-w-[120px] truncate" title={r.username}>
+                          {String(r.report_resources ?? '').split(/[,、]/).map(x => x.trim()).filter(x => x && !machineNames.has(x)).join('、') || r.username}
+                        </td>
                       </tr>
                     ))}
                   </tbody>
