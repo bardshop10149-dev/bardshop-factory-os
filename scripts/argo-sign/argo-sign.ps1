@@ -87,20 +87,33 @@ public class Win {
 }
 '@
 
+# ⚠ 2026-09-24 實測確認的視窗結構——這段決定了所有「等畫面」的寫法：
+#
+#   啟動器      程序 ArgoERP   標題「ArgoERP」
+#   登入後主視窗 程序 java      標題「啟盛國際股份有限公司(BARDSHOP):10149@BARDSHOP 2026/09/24 18:47 上線人數:5」
+#
+# 兩個關鍵限制：
+#   ① 登入後的標題含「即時時間 + 上線人數」，每分鐘都在變，只能用萬用字元比對，
+#      絕不能寫死整串。
+#   ② ARGO 是 MDI：登入畫面、主選單、原物料請購作業全都是「同一個 java 頂層視窗」
+#      裡面的子視窗。子視窗標題（APPF00061 v4.67、原物料請購作業–PJAF084 v4.23）
+#      在 EnumWindows / MainWindowTitle 裡看不到。
+#      => 靠頂層標題只能判斷「登入了沒」，判斷不出「現在停在哪一個作業畫面」。
+#         要分辨子畫面得靠 Java Access Bridge（UiPath 的 Java 活動或 pywinauto+JAB）。
 function Get-ArgoWindow {
-  param([string]$TitlePattern)
+  param([string]$TitlePattern, [string]$ProcessPattern = '.')
   Get-Process | Where-Object {
-    $_.MainWindowTitle -and $_.MainWindowTitle -like $TitlePattern
+    $_.MainWindowTitle -and $_.MainWindowTitle -like $TitlePattern -and $_.ProcessName -match $ProcessPattern
   } | Select-Object -First 1
 }
 
 # 等某個視窗出現——所有等待一律用「等條件成立」而不是固定 sleep。
 # ARGO 慢的時候固定等待一定會踩空，而且踩空的症狀是靜默的。
 function Wait-Window {
-  param([string]$TitlePattern, [int]$TimeoutSec = $WindowTimeoutSec, [string]$What = '視窗')
+  param([string]$TitlePattern, [int]$TimeoutSec = $WindowTimeoutSec, [string]$What = '視窗', [string]$ProcessPattern = '.')
   $deadline = (Get-Date).AddSeconds($TimeoutSec)
   while ((Get-Date) -lt $deadline) {
-    $p = Get-ArgoWindow $TitlePattern
+    $p = Get-ArgoWindow $TitlePattern $ProcessPattern
     if ($p) { return $p }
     Start-Sleep -Milliseconds 400
   }
@@ -123,8 +136,9 @@ function Send-Keys {
 # ── 登入：每次執行都要做，因為 ARGO 閒置 15 分鐘就斷線 ────────────────────
 function Start-Argo {
   # 已經開著就直接用（手動測試時常見），否則啟動
-  $form = Get-ArgoWindow '*請購*'
-  if ($form) { Write-Log 'ARGO 已在「原物料請購作業」，沿用現有視窗'; Focus-Window $form; return $form }
+  # 已經登入就沿用（登入後的主視窗屬於 java 程序，標題帶公司別與上線人數）
+  $logged = Get-ArgoWindow '*BARDSHOP*' 'java'
+  if ($logged) { Write-Log ('ARGO 已登入：' + $logged.MainWindowTitle); Focus-Window $logged; return $logged }
 
   if (-not $ArgoPath) { throw '未設定 ARGO_SIGN_EXE（ARGO 啟動器路徑），無法自動登入' }
   if (-not (Test-Path $ArgoPath)) { throw "ARGO 啟動器不存在：$ArgoPath" }
@@ -133,14 +147,15 @@ function Start-Argo {
   Start-Process -FilePath $ArgoPath | Out-Null
 
   # ① 啟動器視窗 → 選公司別
-  $launcher = Wait-Window '*Argo*' -What '啟動器'
+  $launcher = Wait-Window 'ArgoERP' -What '啟動器' -ProcessPattern 'ArgoERP'
   Focus-Window $launcher
   # ▼ 校準點 1：選公司別。啟動器上是 BARDSHOP / TEST 兩顆按鈕。
   #   若可用鍵盤（Tab 移動 + Enter）就用鍵盤；不行的話這裡要改成依座標或 UI 元素點擊。
   Send-Keys '{ENTER}'   # ← 預設按鈕通常就是第一顆（BARDSHOP），校準後視情況調整
 
   # ② 登入視窗 → 送出
-  $login = Wait-Window '*APPF00061*' -What '登入視窗'
+  # 登入畫面是 java 頂層視窗裡的 MDI 子視窗，頂層標題此時還是「Argo」
+  $login = Wait-Window '*Argo*' -What '登入視窗' -ProcessPattern 'java|Argo'
   Focus-Window $login
   # 帳密留空＝沿用 ARGO 的 Remember me（建議做法：密碼不要進腳本、不要進環境變數）
   if ($ArgoUser) {
@@ -151,7 +166,8 @@ function Start-Argo {
   Send-Keys '{ENTER}'   # ← 校準點 3：送出登入（Enter 或點 Login）
 
   # ③ 主選單 → 我的最愛「原物料請購作業」
-  $menu = Wait-Window '*APPF00061*' -What '主選單'
+  # 登入成功的判斷：頂層標題換成「…(BARDSHOP):帳號@BARDSHOP 日期 時間 上線人數:N」
+  $menu = Wait-Window '*BARDSHOP*' -What '主選單（登入完成）' -ProcessPattern 'java'
   Focus-Window $menu
   # ▼ 校準點 4：開啟「原物料請購作業」。它在右側「我的最愛」第一項。
   #   Oracle Forms 的選單通常可用鍵盤巡覽；若不行，這裡改用 UI Automation 依文字點擊
@@ -159,16 +175,18 @@ function Start-Argo {
   Send-Keys '{TAB}{ENTER}'   # ← 佔位，務必校準
 
   # ④ 等表單真的開起來
-  $form = Wait-Window '*請購*' -What '原物料請購作業表單'
+  # ⚠ 注意：這裡沒辦法用標題確認「原物料請購作業」真的開了——它是 MDI 子視窗，
+  # 頂層標題不會變。目前只能確認「已登入」，子畫面是否正確要靠後續的逐張驗證兜底。
+  $form = Wait-Window '*BARDSHOP*' -What '主視窗' -ProcessPattern 'java'
   Focus-Window $form
-  Write-Log '已進入「原物料請購作業」'
+  Write-Log '已登入（無法由標題確認子畫面，改由每張單的傳簽結果驗證）'
   return $form
 }
 
 function Stop-Argo {
   if ($KeepOpen) { Write-Log 'KeepOpen：保留 ARGO 視窗'; return }
   Get-Process | Where-Object {
-    $_.MainWindowTitle -and ($_.MainWindowTitle -like '*請購*' -or $_.MainWindowTitle -like '*APPF00061*' -or $_.MainWindowTitle -like '*Argo*')
+    $_.ProcessName -match '^(ArgoERP|java|javaw)$'
   } | ForEach-Object {
     try { $_.CloseMainWindow() | Out-Null } catch { }
   }
@@ -178,7 +196,7 @@ function Stop-Argo {
 # ── 單張傳簽 ──────────────────────────────────────────────────────────────
 function Sign-OneDoc {
   param([string]$DocNo)
-  $form = Wait-Window '*請購*' -TimeoutSec 15 -What '原物料請購作業表單'
+  $form = Wait-Window '*BARDSHOP*' -TimeoutSec 15 -What 'ARGO 主視窗' -ProcessPattern 'java'
   Focus-Window $form
 
   # ▼▼▼ 校準點 5～8：查詢單號並按傳簽。ARGO 是 Oracle Forms，優先用快捷鍵 ▼▼▼
