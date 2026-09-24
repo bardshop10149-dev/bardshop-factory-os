@@ -34,7 +34,7 @@ param(
   [switch]$KeepOpen,
   [int]$StepDelayMs  = 700,
   [int]$QueryWaitMs  = 2500,           # F8 查詢後等多久才開始 Tab
-  [string]$ActivateKey = ' ',        # 按下傳簽用的鍵（空白鍵；真的不行再試 '{ENTER}'）
+  [string]$ActivateKey = '{ENTER}',  # 按下傳簽用的鍵（現場實際用 Enter；備案是空白鍵 ' '）
   [int]$WindowTimeoutSec = 60
 )
 
@@ -208,9 +208,16 @@ function Sign-OneDoc {
   #   Tab × 15 移到「傳簽」按鈕
   #   空白鍵按下去
   #
-  # 為什麼用空白鍵而不是 Enter：Java 介面裡空白鍵只會觸發「目前有焦點的」按鈕，
-  # Enter 則可能觸發畫面的預設按鈕——萬一 Tab 數錯，Enter 會去按到別的東西
-  # （這個畫面上就有「作廢」），空白鍵頂多沒反應。失敗要往安全的方向倒。
+  # 按下傳簽用 Enter——這是現場實際的操作方式（2026-09-24 操作人員確認）。
+  #
+  # 我原本想用空白鍵：Java 介面裡空白鍵只觸發「目前有焦點的」按鈕，Enter 則可能
+  # 觸發畫面的預設按鈕，萬一 Tab 數錯就會按到別的東西（這畫面上就有「作廢」）。
+  # 但現場用 Enter 是行得通的事實，猜測讓位給實測。
+  #
+  # 代價要記著：這條路對「Tab 次數」的正確性比較敏感。如果 ARGO 改版讓欄位增減、
+  # Tab 15 下落在別的按鈕上，Enter 會直接按下去。所以每張單按完一定要驗證
+  # （下面的 Get-DocStatus），而且驗證失敗就立刻停、不要繼續按下一張。
+  # 真要保守可用 -ActivateKey ' ' 改回空白鍵。
   Send-Keys '{F7}'
   Send-Keys $DocNo
   Send-Keys '{F8}'
