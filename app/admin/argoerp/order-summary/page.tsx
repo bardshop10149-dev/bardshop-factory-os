@@ -20,6 +20,7 @@ interface SummaryRow {
   matched_via_bare?: boolean
   overdue?: boolean
   idle?: boolean
+  qty_num?: number
   progress?: SheetProgress
   pm_note?: string
   order_number?: string
@@ -64,6 +65,8 @@ const STATUSES = [
 const ALERTS = [
   { key: '遲交', label: '⏰ 遲交', hint: '已經過了交付日、狀態還不是已完成' },
   { key: '閒置', label: '💤 閒置', hint: '發單後超過 5 個工作天，狀態還停在未開始' },
+  { key: '量>500', label: '📦 量 > 500', hint: '單列數量超過 500（含超過 1000 的）' },
+  { key: '量>1000', label: '📦 量 > 1000', hint: '單列數量超過 1000' },
 ] as const
 
 const FACTORIES = [
@@ -229,7 +232,7 @@ export default function OrderSummaryPage() {
               <span className="ml-1.5 opacity-70">{(counts[a.key] ?? 0).toLocaleString()}</span>
             </button>
           ))}
-          <span className="text-[11px] text-slate-600">兩者都不含「無資料」的舊單</span>
+          <span className="text-[11px] text-slate-600">遲交／閒置不含「無資料」的舊單；數量篩選不分狀態</span>
         </div>
 
         {/* 單據別 */}

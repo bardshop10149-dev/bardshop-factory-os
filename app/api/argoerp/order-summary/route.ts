@@ -77,6 +77,8 @@ interface SummaryRow extends Record<string, unknown> {
   overdue?: boolean
   /** 閒置：發單後超過 IDLE_WORKDAYS 個工作天，狀態還是未開始 */
   idle?: boolean
+  /** 數量（已去掉千分位），供大量單篩選用 */
+  qty_num?: number
   /** 狀態的判斷依據，滑鼠移上去看得到為什麼是這個狀態 */
   status_note: string
 }
@@ -296,6 +298,8 @@ function respond(
       return `${m[1]}/${String(+m[2]).padStart(2, '0')}/${String(+m[3]).padStart(2, '0')}`
     }
     for (const r of flat) {
+      // 數量：出單表存的是字串，可能帶千分位
+      r.qty_num = parseFloat(str(r.quantity).replace(/,/g, '')) || 0
       if (r.row_status === '無資料') { r.overdue = false; r.idle = false; continue }
       const due = normDate(r.delivery_date)
       r.overdue = !!due && due < todayStr && r.row_status !== '已完成'
@@ -327,6 +331,9 @@ function respond(
       無資料: out.filter(r => r.row_status === '無資料').length,
       遲交: out.filter(r => r.overdue).length,
       閒置: out.filter(r => r.idle).length,
+      // 大量單：500 以上那組本來就涵蓋 1000 以上，兩個各自獨立計數不互斥
+      '量>500': out.filter(r => (r.qty_num ?? 0) > 500).length,
+      '量>1000': out.filter(r => (r.qty_num ?? 0) > 1000).length,
     }
     if (statusFilter !== 'all') {
       // 未完成＝未開始＋進行中。「無資料」刻意不計入：那是我們沒有紀錄，
@@ -335,6 +342,8 @@ function respond(
         ? out.filter(r => r.row_status === '未開始' || r.row_status === '進行中')
         : statusFilter === '遲交' ? out.filter(r => r.overdue)
         : statusFilter === '閒置' ? out.filter(r => r.idle)
+        : statusFilter === '量>500' ? out.filter(r => (r.qty_num ?? 0) > 500)
+        : statusFilter === '量>1000' ? out.filter(r => (r.qty_num ?? 0) > 1000)
         : out.filter(r => r.row_status === statusFilter)
     }
     if (keyword) out = out.filter(r => rowMatchesKeyword(r, keyword))
