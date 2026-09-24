@@ -114,6 +114,8 @@ export async function GET(request: NextRequest) {
     const sp = request.nextUrl.searchParams
     const statusFilter = sp.get('status') ?? '未完成'
     const factoryFilter = sp.get('factory') ?? 'ALL'
+    // 注意標籤可複選，彼此 AND；與狀態、單據別也是 AND
+    const alertFilters = (sp.get('alerts') ?? '').split(',').map(x => x.trim()).filter(Boolean)
     const keyword = (sp.get('keyword') ?? '').trim()
     const limit = Math.min(Number(sp.get('limit') ?? 4000) || 4000, 10000)
 
@@ -121,7 +123,7 @@ export async function GET(request: NextRequest) {
     const fresh = sp.get('refresh') === '1'
 
     if (!fresh && cache && Date.now() - cache.at < CACHE_TTL_MS) {
-      return respond(cache.flat, cache.firstSyncDate, cache.sheetCount, { statusFilter, factoryFilter, keyword, limit, cached: true })
+      return respond(cache.flat, cache.firstSyncDate, cache.sheetCount, { statusFilter, factoryFilter, alertFilters, keyword, limit, cached: true })
     }
 
     // 第一次同步塔台報工的日期——比這更早的出單表，查無報工只代表「我們沒有資料」，
@@ -265,7 +267,7 @@ export async function GET(request: NextRequest) {
     }
 
     cache = { at: Date.now(), flat, firstSyncDate, sheetCount: (sheets ?? []).length }
-    return respond(flat, firstSyncDate, (sheets ?? []).length, { statusFilter, factoryFilter, keyword, limit, cached: false })
+    return respond(flat, firstSyncDate, (sheets ?? []).length, { statusFilter, factoryFilter, alertFilters, keyword, limit, cached: false })
   } catch (e) {
     const msg = e instanceof Error ? formatSupabaseAdminError(e.message) : String(e)
     return NextResponse.json({ success: false, error: msg }, { status: 500 })
@@ -277,9 +279,9 @@ function respond(
   flat: SummaryRow[],
   firstSyncDate: string,
   sheetCount: number,
-  opts: { statusFilter: string; factoryFilter: string; keyword: string; limit: number; cached: boolean },
+  opts: { statusFilter: string; factoryFilter: string; alertFilters: string[]; keyword: string; limit: number; cached: boolean },
 ) {
-  const { statusFilter, factoryFilter, keyword, limit, cached } = opts
+  const { statusFilter, factoryFilter, alertFilters, keyword, limit, cached } = opts
   {
     // ③-2 遲交／閒置
     //
@@ -315,37 +317,49 @@ function respond(
       }
     }
 
-    // ④ 篩選（狀態／單據／關鍵字都在伺服器端做完）
+    // ④ 篩選：單據別 → 注意標籤（可複選，AND）→ 狀態 → 關鍵字，全部在伺服器端做完
     const isJidan = (r: SummaryRow) => str(r.doc_type).includes('集單')
-    let out = flat
-    if (factoryFilter !== 'ALL') {
-      out = factoryFilter === 'G'
-        ? out.filter(isJidan)
-        : out.filter(r => !isJidan(r) && str(r.factory) === factoryFilter)
+    const base = factoryFilter === 'ALL'
+      ? flat
+      : factoryFilter === 'G'
+        ? flat.filter(isJidan)
+        : flat.filter(r => !isJidan(r) && str(r.factory) === factoryFilter)
+
+    const ALERT_PREDS: Record<string, (r: SummaryRow) => boolean> = {
+      遲交: r => !!r.overdue,
+      閒置: r => !!r.idle,
+      // 大量單：500 以上那組本來就涵蓋 1000 以上，兩個獨立不互斥
+      '量>500': r => (r.qty_num ?? 0) > 500,
+      '量>1000': r => (r.qty_num ?? 0) > 1000,
     }
-    const counts = {
-      全部: out.length,
-      未開始: out.filter(r => r.row_status === '未開始').length,
-      進行中: out.filter(r => r.row_status === '進行中').length,
-      已完成: out.filter(r => r.row_status === '已完成').length,
-      無資料: out.filter(r => r.row_status === '無資料').length,
-      遲交: out.filter(r => r.overdue).length,
-      閒置: out.filter(r => r.idle).length,
-      // 大量單：500 以上那組本來就涵蓋 1000 以上，兩個各自獨立計數不互斥
-      '量>500': out.filter(r => (r.qty_num ?? 0) > 500).length,
-      '量>1000': out.filter(r => (r.qty_num ?? 0) > 1000).length,
-    }
-    if (statusFilter !== 'all') {
+    const activeAlerts = alertFilters.filter(a => a in ALERT_PREDS)
+    const passAlerts = (r: SummaryRow) => activeAlerts.every(a => ALERT_PREDS[a](r))
+    const passStatus = (r: SummaryRow) =>
+      statusFilter === 'all' ? true
       // 未完成＝未開始＋進行中。「無資料」刻意不計入：那是我們沒有紀錄，
       // 不是還沒做完，混進來只會讓這份清單失去可信度。
-      out = statusFilter === '未完成'
-        ? out.filter(r => r.row_status === '未開始' || r.row_status === '進行中')
-        : statusFilter === '遲交' ? out.filter(r => r.overdue)
-        : statusFilter === '閒置' ? out.filter(r => r.idle)
-        : statusFilter === '量>500' ? out.filter(r => (r.qty_num ?? 0) > 500)
-        : statusFilter === '量>1000' ? out.filter(r => (r.qty_num ?? 0) > 1000)
-        : out.filter(r => r.row_status === statusFilter)
+      : statusFilter === '未完成' ? (r.row_status === '未開始' || r.row_status === '進行中')
+      : r.row_status === statusFilter
+
+    // 計數採 faceted 算法：每一顆按鈕的數字，是「其他條件維持現況、只切換這一顆」的結果。
+    // 這樣疊加篩選時數字才對得上——否則使用者會看到「顯示 0 列，但按鈕寫 753」。
+    const afterAlerts = base.filter(passAlerts)
+    const afterStatus = base.filter(passStatus)
+    const counts = {
+      全部: afterAlerts.length,
+      未開始: afterAlerts.filter(r => r.row_status === '未開始').length,
+      進行中: afterAlerts.filter(r => r.row_status === '進行中').length,
+      已完成: afterAlerts.filter(r => r.row_status === '已完成').length,
+      無資料: afterAlerts.filter(r => r.row_status === '無資料').length,
     }
+    const alertCounts: Record<string, number> = {}
+    for (const [k, pred] of Object.entries(ALERT_PREDS)) {
+      // 該標籤本身不計入條件，其餘已選的標籤仍要套用
+      const others = activeAlerts.filter(a => a !== k)
+      alertCounts[k] = afterStatus.filter(r => others.every(a => ALERT_PREDS[a](r)) && pred(r)).length
+    }
+
+    let out = base.filter(r => passAlerts(r) && passStatus(r))
     if (keyword) out = out.filter(r => rowMatchesKeyword(r, keyword))
 
     const total = out.length
@@ -355,6 +369,8 @@ function respond(
       total,
       truncated: total > limit,
       counts,
+      alert_counts: alertCounts,
+      active_alerts: activeAlerts,
       first_sync_date: firstSyncDate,
       sheet_count: sheetCount,
       all_count: flat.length,

@@ -108,6 +108,7 @@ export default function OrderSummaryPage() {
   const router = useRouter()
   const [rows, setRows] = useState<SummaryRow[]>([])
   const [counts, setCounts] = useState<Record<string, number>>({})
+  const [alertCounts, setAlertCounts] = useState<Record<string, number>>({})
   const [total, setTotal] = useState(0)
   const [truncated, setTruncated] = useState(false)
   const [meta, setMeta] = useState<{ sheets: number; all: number; firstSync: string }>({ sheets: 0, all: 0, firstSync: '' })
@@ -118,6 +119,9 @@ export default function OrderSummaryPage() {
   const PAGE_SIZE = 20
 
   const [status, setStatus] = useState<string>('未完成')
+  // 注意標籤可複選；與狀態、單據別三者疊加（AND）
+  const [alerts, setAlerts] = useState<string[]>([])
+  const toggleAlert = (k: string) => setAlerts(prev => prev.includes(k) ? prev.filter(x => x !== k) : [...prev, k])
   const [factory, setFactory] = useState<string>('ALL')
   const [keyword, setKeyword] = useState('')
   const [appliedKeyword, setAppliedKeyword] = useState('')
@@ -126,11 +130,13 @@ export default function OrderSummaryPage() {
     setLoading(true); setError('')
     try {
       const qs = new URLSearchParams({ status, factory })
+      if (alerts.length > 0) qs.set('alerts', alerts.join(','))
       if (appliedKeyword.trim()) qs.set('keyword', appliedKeyword.trim())
       const res = await fetch(`/api/argoerp/order-summary?${qs}`, { cache: 'no-store' })
       const j = await res.json() as {
         success: boolean; rows?: SummaryRow[]; total?: number; truncated?: boolean
-        counts?: Record<string, number>; sheet_count?: number; all_count?: number
+        counts?: Record<string, number>; alert_counts?: Record<string, number>
+        sheet_count?: number; all_count?: number
         first_sync_date?: string; error?: string
       }
       if (!j.success) throw new Error(j.error)
@@ -139,11 +145,12 @@ export default function OrderSummaryPage() {
       setTotal(j.total ?? 0)
       setTruncated(!!j.truncated)
       setCounts(j.counts ?? {})
+      setAlertCounts(j.alert_counts ?? {})
       setMeta({ sheets: j.sheet_count ?? 0, all: j.all_count ?? 0, firstSync: j.first_sync_date ?? '' })
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
     } finally { setLoading(false) }
-  }, [status, factory, appliedKeyword])
+  }, [status, factory, alerts, appliedKeyword])
 
   useEffect(() => { void load() }, [load])
 
@@ -152,6 +159,11 @@ export default function OrderSummaryPage() {
 
   const unfinished = useMemo(() => (counts['未開始'] ?? 0) + (counts['進行中'] ?? 0), [counts])
   const countOf = (k: string) => k === '未完成' ? unfinished : k === 'all' ? (counts['全部'] ?? 0) : (counts[k] ?? 0)
+  const activeDesc = [
+    status === 'all' ? null : status,
+    ...alerts,
+    factory === 'ALL' ? null : (FACTORIES.find(f => f.key === factory)?.label ?? factory),
+  ].filter(Boolean).join('　+　')
 
   return (
     <div className="min-h-screen bg-slate-950 text-white p-4 md:p-6">
@@ -224,15 +236,21 @@ export default function OrderSummaryPage() {
         <div className="flex items-center gap-2 mb-2 flex-wrap">
           <span className="text-xs text-slate-500 w-10">注意</span>
           {ALERTS.map(a => (
-            <button key={a.key} onClick={() => setStatus(a.key)} title={a.hint}
+            <button key={a.key} onClick={() => toggleAlert(a.key)} title={a.hint}
               className={`px-3 py-1.5 rounded-full text-xs font-medium border transition-colors ${
-                status === a.key ? 'bg-rose-600 border-rose-500 text-white' : 'bg-slate-900 border-rose-900/50 text-rose-300/80 hover:text-rose-200'
+                alerts.includes(a.key) ? 'bg-rose-600 border-rose-500 text-white' : 'bg-slate-900 border-rose-900/50 text-rose-300/80 hover:text-rose-200'
               }`}>
-              {a.label}
-              <span className="ml-1.5 opacity-70">{(counts[a.key] ?? 0).toLocaleString()}</span>
+              {alerts.includes(a.key) && '✓ '}{a.label}
+              <span className="ml-1.5 opacity-70">{(alertCounts[a.key] ?? 0).toLocaleString()}</span>
             </button>
           ))}
-          <span className="text-[11px] text-slate-600">遲交／閒置不含「無資料」的舊單；數量篩選不分狀態</span>
+          {alerts.length > 0 && (
+            <button onClick={() => setAlerts([])}
+              className="px-2 py-1.5 text-xs text-slate-500 hover:text-slate-300 underline underline-offset-2">
+              清除
+            </button>
+          )}
+          <span className="text-[11px] text-slate-600">可複選，與上方狀態、下方單據別疊加；遲交／閒置不含「無資料」的舊單</span>
         </div>
 
         {/* 單據別 */}
@@ -248,6 +266,7 @@ export default function OrderSummaryPage() {
           ))}
           <div className="flex-1" />
           <span className="text-xs text-slate-400">
+            {activeDesc && <span className="text-slate-500 mr-2">條件：{activeDesc}</span>}
             顯示 {rows.length.toLocaleString()} / {total.toLocaleString()} 列
             {truncated && <span className="text-amber-400 ml-1">（超過上限，請再縮小條件）</span>}
           </span>
