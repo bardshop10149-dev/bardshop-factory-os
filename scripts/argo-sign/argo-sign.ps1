@@ -8,7 +8,7 @@
 #
 #  ⚠ ARGO 閒置 15 分鐘會自動斷線，所以這支**每次執行都要自己完整登入**，
 #  不能假設 ARGO 已經開著——排程在 17:40 跑的時候，它一定早就斷了。
-#  流程：啟動器 → 選公司別 → 登入 → 我的最愛「原物料請購作業」→ 逐張傳簽 → 關閉。
+#  流程：啟動器 → 點公司別 → 登入 → 打程式代號進原物料請購作業 → 逐張傳簽 → 關閉。
 #
 #  設計原則只有一條：**每按一張就向 ARGO 驗證一張，錯了立刻停。**
 #  桌面自動化的失敗幾乎都是靜默的——視窗沒開、欄位沒對焦、按鈕位置跑掉，
@@ -19,27 +19,33 @@
 #    .\argo-sign.ps1 -DryRun           只列出要處理的單號，完全不碰 ARGO
 #    .\argo-sign.ps1 -Date 2026-09-24  指定日期補跑
 #    .\argo-sign.ps1 -KeepOpen         跑完不關 ARGO（校準時方便看畫面）
+#    .\argo-sign.ps1 -LoginOnly -KeepOpen
+#        只跑「登入 + 開啟原物料請購作業」就停，完全不按傳簽。
+#        用來在有人看著畫面的時候驗證登入流程，不必等到真的有單要簽。
 # ============================================================================
 
 [CmdletBinding()]
 param(
   [string]$BaseUrl   = $env:ARGO_SIGN_BASE_URL,   # 例：https://bardshop-eip.vercel.app
-  [string]$Secret    = $env:ARGO_SIGN_SECRET,     # 與伺服器的 WEBHOOK_SECRET 相同
+  [string]$Secret    = $env:ARGO_SIGN_SECRET,     # 這支腳本專屬的鑰匙
   [string]$ArgoPath  = $env:ARGO_SIGN_EXE,        # ARGO 啟動器的完整路徑
-  [string]$Company   = 'BARDSHOP',                # 啟動器上的公司別按鈕
-  [string]$ArgoUser  = $env:ARGO_SIGN_USER,       # 留空＝沿用 Remember me 記住的帳號
-  [string]$ArgoPass  = $env:ARGO_SIGN_PASSWORD,   # 留空＝沿用 Remember me 記住的密碼
+  [string]$Company   = 'BARDSHOP',                # 啟動器上的公司別按鈕文字
   [string]$Date      = '',
   [switch]$DryRun,
+  [switch]$LoginOnly,
   [switch]$KeepOpen,
   [int]$StepDelayMs  = 700,
-  [int]$QueryWaitMs  = 2500,           # F8 查詢後等多久才開始 Tab
-  [string]$ActivateKey = '{ENTER}',  # 按下傳簽用的鍵（現場實際用 Enter；備案是空白鍵 ' '）
+  [int]$QueryWaitMs  = 2500,            # F8 查詢後等多久才開始 Tab
+  [int]$LoginWaitMs  = 4000,            # 登入畫面讀完資料才吃得到按鍵，要先等
+  [int]$FormWaitMs   = 4000,            # 送出程式代號後等作業畫面開起來
+  [string]$ProgramCode = 'PJAF084',     # 原物料請購作業的程式代號
+  [string]$ActivateKey = '{ENTER}',     # 按下傳簽用的鍵（現場實際用 Enter；備案是空白鍵 ' '）
   [int]$WindowTimeoutSec = 60
 )
 
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
 
 $LogDir  = Join-Path $PSScriptRoot 'logs'
 $LogFile = Join-Path $LogDir ("argo-sign-{0}.log" -f (Get-Date -Format 'yyyyMMdd'))
@@ -86,6 +92,16 @@ public class Win {
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
   [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hWnd);
   [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+  [DllImport("user32.dll")] public static extern bool SetCursorPos(int X, int Y);
+  [DllImport("user32.dll")] public static extern void mouse_event(uint f, uint dx, uint dy, uint d, int extra);
+  const uint LEFTDOWN = 0x0002, LEFTUP = 0x0004;
+  public static void ClickAt(int x, int y) {
+    SetCursorPos(x, y);
+    System.Threading.Thread.Sleep(120);
+    mouse_event(LEFTDOWN, 0, 0, 0, 0);
+    System.Threading.Thread.Sleep(60);
+    mouse_event(LEFTUP, 0, 0, 0, 0);
+  }
 }
 '@
 
@@ -135,54 +151,106 @@ function Send-Keys {
   Start-Sleep -Milliseconds $DelayMs
 }
 
+# 啟動器上的公司別按鈕只能用滑鼠點。2026-09-24 實測：它是 WinForms 按鈕
+# （class WindowsForms10.BUTTON…），但 UI Automation 把它歸類成 Pane，
+# 而且不支援任何 pattern——沒有 InvokePattern 可以「直接觸發」，鍵盤也走不到。
+#
+# 不過這裡刻意不寫死座標：中心點是執行當下用 UI Automation 查出來的，
+# 所以視窗被移動、解析度改變、按鈕排列調整都還是點得到。
+# 寫死座標的版本明天換個螢幕就會靜默點空，那正是這支腳本最要避免的失敗模式。
+function Invoke-ElementClick {
+  param($Proc, [string]$Name, [int]$TimeoutSec = 20)
+  $deadline = (Get-Date).AddSeconds($TimeoutSec)
+  while ((Get-Date) -lt $deadline) {
+    try {
+      $root = [System.Windows.Automation.AutomationElement]::FromHandle($Proc.MainWindowHandle)
+      if ($root) {
+        $cond = New-Object System.Windows.Automation.PropertyCondition(
+          [System.Windows.Automation.AutomationElement]::NameProperty, $Name)
+        $el = $root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $cond)
+        if ($el -and $el.Current.IsEnabled) {
+          $r = $el.Current.BoundingRectangle
+          if ($r.Width -gt 0 -and $r.Height -gt 0) {
+            $x = [int]($r.X + $r.Width / 2)
+            $y = [int]($r.Y + $r.Height / 2)
+            Write-Log ("  點擊「{0}」於 ({1},{2})" -f $Name, $x, $y)
+            [Win]::ClickAt($x, $y)
+            return
+          }
+        }
+      }
+    } catch { }
+    Start-Sleep -Milliseconds 400
+  }
+  throw "找不到可點擊的元件「$Name」（已等 $TimeoutSec 秒）"
+}
+
 # ── 登入：每次執行都要做，因為 ARGO 閒置 15 分鐘就斷線 ────────────────────
-function Start-Argo {
-  # 已經開著就直接用（手動測試時常見），否則啟動
-  # 已經登入就沿用（登入後的主視窗屬於 java 程序，標題帶公司別與上線人數）
+# 各步驟的按鍵序列都是 2026-09-24 由現場操作人員實測提供，不是猜的。
+function Connect-Argo {
+  # 手動測試時 ARGO 常常已經開著並登入好了，這種情況直接沿用，不要重開一份
   $logged = Get-ArgoWindow '*BARDSHOP*' 'java'
-  if ($logged) { Write-Log ('ARGO 已登入：' + $logged.MainWindowTitle); Focus-Window $logged; return $logged }
+  if ($logged) {
+    Write-Log ('ARGO 已登入，沿用現有視窗：' + $logged.MainWindowTitle)
+    Focus-Window $logged
+    return $logged
+  }
 
   if (-not $ArgoPath) { throw '未設定 ARGO_SIGN_EXE（ARGO 啟動器路徑），無法自動登入' }
   if (-not (Test-Path $ArgoPath)) { throw "ARGO 啟動器不存在：$ArgoPath" }
 
+  # 斷線後 ArgoERP.exe 不一定會自己結束，可能留下沒有視窗的殘留程序。
+  # 不清掉的話下面找「啟動器視窗」會抓到殘留的那個，然後一直等不到按鈕。
+  $stale = @(Get-Process ArgoERP -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -eq 0 })
+  if ($stale.Count -gt 0) {
+    Write-Log ("清掉 {0} 個沒有視窗的殘留 ArgoERP 程序" -f $stale.Count)
+    foreach ($z in $stale) { try { $z.Kill() } catch { } }
+    Start-Sleep -Milliseconds 800
+  }
+
   Write-Log "啟動 ARGO：$ArgoPath"
   Start-Process -FilePath $ArgoPath | Out-Null
 
-  # ① 啟動器視窗 → 選公司別
+  # ① 啟動器 → 點公司別（只能用滑鼠，見 Invoke-ElementClick 的說明）
   $launcher = Wait-Window 'ArgoERP' -What '啟動器' -ProcessPattern 'ArgoERP'
   Focus-Window $launcher
-  # ▼ 待校準 A：選公司別。啟動器上是 BARDSHOP / TEST 兩顆按鈕。
-  #   若可用鍵盤（Tab 移動 + Enter）就用鍵盤；不行的話這裡要改成依座標或 UI 元素點擊。
-  Send-Keys '{ENTER}'   # ← 預設按鈕通常就是第一顆（BARDSHOP），校準後視情況調整
+  Invoke-ElementClick -Proc $launcher -Name $Company
 
-  # ② 登入視窗 → 送出
-  # 登入畫面是 java 頂層視窗裡的 MDI 子視窗，頂層標題此時還是「Argo」
-  $login = Wait-Window '*Argo*' -What '登入視窗' -ProcessPattern 'java|Argo'
+  # ② 登入畫面 → Tab×3 + Enter
+  #    帳密不必輸入：ARGO 的 Remember me 會把上次的帳號密碼帶好（也因此密碼
+  #    不用進腳本、不用進環境變數）。但畫面要先把資料讀出來才吃得到按鍵，
+  #    太早送 Tab 會全部掉進虛空，所以固定等 $LoginWaitMs。
+  #
+  #    這裡用「有標題的 java 視窗」而不是比對標題文字：登入前的頂層標題
+  #    含「Argo」，但啟動器自己也叫 ArgoERP，用 '*Argo*' 比對會抓到啟動器。
+  #    這台機器上 java 只有 ARGO 在用，所以「任何 java 視窗」就是準確的條件。
+  $login = Wait-Window '*' -What '登入畫面' -ProcessPattern 'java'
   Focus-Window $login
-  # 帳密留空＝沿用 ARGO 的 Remember me（建議做法：密碼不要進腳本、不要進環境變數）
-  if ($ArgoUser) {
-    # ▼ 待校準 B：把焦點移到「使用者」欄再輸入（用 Remember me 就不會走到這）
-    Send-Keys $ArgoUser
-    if ($ArgoPass) { Send-Keys '{TAB}'; Send-Keys $ArgoPass }
-  }
-  Send-Keys '{ENTER}'   # ← 待校準 C：送出登入（Enter 或點 Login）
+  Write-Log ("  等登入畫面載入（{0:N1} 秒）…" -f ($LoginWaitMs / 1000))
+  Start-Sleep -Milliseconds $LoginWaitMs
+  Focus-Window $login
+  Send-Keys '{TAB 3}'
+  Send-Keys '{ENTER}'
 
-  # ③ 主選單 → 我的最愛「原物料請購作業」
-  # 登入成功的判斷：頂層標題換成「…(BARDSHOP):帳號@BARDSHOP 日期 時間 上線人數:N」
-  $menu = Wait-Window '*BARDSHOP*' -What '主選單（登入完成）' -ProcessPattern 'java'
+  # ③ 等登入完成——依據是頂層標題換成「…(BARDSHOP):帳號@BARDSHOP … 上線人數:N」
+  $menu = Wait-Window '*BARDSHOP*' -What '主選單（登入完成）' -ProcessPattern 'java' -TimeoutSec 90
   Focus-Window $menu
-  # ▼ 待校準 D：開啟「原物料請購作業」。它在右側「我的最愛」第一項。
-  #   Oracle Forms 的選單通常可用鍵盤巡覽；若不行，這裡改用 UI Automation 依文字點擊
-  #   （需先啟用 Java Access Bridge：jabswitch -enable 後重開機）。
-  Send-Keys '{TAB}{ENTER}'   # ← 佔位，務必校準
+  Write-Log ('  已登入：' + $menu.MainWindowTitle)
+  return $menu
+}
 
-  # ④ 等表單真的開起來
-  # ⚠ 注意：這裡沒辦法用標題確認「原物料請購作業」真的開了——它是 MDI 子視窗，
-  # 頂層標題不會變。目前只能確認「已登入」，子畫面是否正確要靠後續的逐張驗證兜底。
-  $form = Wait-Window '*BARDSHOP*' -What '主視窗' -ProcessPattern 'java'
-  Focus-Window $form
-  Write-Log '已登入（無法由標題確認子畫面，改由每張單的傳簽結果驗證）'
-  return $form
+# 從主選單進「原物料請購作業」。
+# 直接打程式代號，而不是點右側「我的最愛」：不受清單順序與捲動位置影響，
+# 也不需要滑鼠，是這套流程裡最不容易壞的一步。
+function Open-Program {
+  param($Proc)
+  Focus-Window $Proc
+  Send-Keys $ProgramCode
+  Send-Keys '{ENTER}'
+  Start-Sleep -Milliseconds $FormWaitMs
+  # ⚠ 沒辦法用標題確認作業畫面真的開了——它是 MDI 子視窗，頂層標題不會變。
+  # 由每張單按完的驗證兜底：沒開成功，第一張就會驗不過而停下。
+  Write-Log ("已送出程式代號 {0}（子畫面無法由標題確認，改由逐張驗證兜底）" -f $ProgramCode)
 }
 
 function Stop-Argo {
@@ -206,7 +274,7 @@ function Sign-OneDoc {
   #   貼上單號
   #   F8 執行查詢
   #   Tab × 15 移到「傳簽」按鈕
-  #   空白鍵按下去
+  #   Enter 按下去
   #
   # 按下傳簽用 Enter——這是現場實際的操作方式（2026-09-24 操作人員確認）。
   #
@@ -234,6 +302,23 @@ function Sign-OneDoc {
 
 # ── 主流程 ────────────────────────────────────────────────────────────────
 Write-Log '===== 開始 ====='
+
+# LoginOnly：只驗證「登入 + 開作業畫面」這段，不查清單也不按任何鍵。
+# 刻意排在查清單之前——登入流程跟今天有沒有單要簽無關，不該為了測登入
+# 先等 30 秒去問 ARGO。今天的單已經人工簽完的日子也照樣測得起來。
+if ($LoginOnly) {
+  try {
+    $main = Connect-Argo
+    Open-Program -Proc $main
+  } catch {
+    Write-Log "LoginOnly 失敗：$($_.Exception.Message)" 'ERROR'
+    exit 4
+  }
+  Write-Log 'LoginOnly：已停在原物料請購作業，未按任何傳簽。請看畫面確認停在正確的作業上。'
+  Stop-Argo
+  exit 0
+}
+
 $query = if ($Date) { "?date=$Date" } else { '' }
 $list = Invoke-Api $query
 if (-not $list.success) { Write-Log "取得待傳簽清單失敗：$($list.error)" 'ERROR'; exit 3 }
@@ -247,9 +332,10 @@ if ($DryRun)              { Write-Log 'DryRun：只列清單，不碰 ARGO。'; 
 
 $ok = 0; $failed = @()
 try {
-  Start-Argo | Out-Null
+  $main = Connect-Argo
+  Open-Program -Proc $main
 } catch {
-  Write-Log "登入 ARGO 失敗：$($_.Exception.Message)" 'ERROR'
+  Write-Log "登入 ARGO 或開啟請購作業失敗：$($_.Exception.Message)" 'ERROR'
   exit 4
 }
 
