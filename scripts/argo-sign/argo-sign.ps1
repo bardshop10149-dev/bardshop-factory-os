@@ -33,6 +33,8 @@ param(
   [switch]$DryRun,
   [switch]$KeepOpen,
   [int]$StepDelayMs  = 700,
+  [int]$QueryWaitMs  = 2500,           # F8 查詢後等多久才開始 Tab
+  [string]$ActivateKey = ' ',        # 按下傳簽用的鍵（空白鍵；真的不行再試 '{ENTER}'）
   [int]$WindowTimeoutSec = 60
 )
 
@@ -149,7 +151,7 @@ function Start-Argo {
   # ① 啟動器視窗 → 選公司別
   $launcher = Wait-Window 'ArgoERP' -What '啟動器' -ProcessPattern 'ArgoERP'
   Focus-Window $launcher
-  # ▼ 校準點 1：選公司別。啟動器上是 BARDSHOP / TEST 兩顆按鈕。
+  # ▼ 待校準 A：選公司別。啟動器上是 BARDSHOP / TEST 兩顆按鈕。
   #   若可用鍵盤（Tab 移動 + Enter）就用鍵盤；不行的話這裡要改成依座標或 UI 元素點擊。
   Send-Keys '{ENTER}'   # ← 預設按鈕通常就是第一顆（BARDSHOP），校準後視情況調整
 
@@ -159,17 +161,17 @@ function Start-Argo {
   Focus-Window $login
   # 帳密留空＝沿用 ARGO 的 Remember me（建議做法：密碼不要進腳本、不要進環境變數）
   if ($ArgoUser) {
-    # ▼ 校準點 2：把焦點移到「使用者」欄再輸入。欄位順序：使用者 → 密碼 → 公司別 → 資料庫
+    # ▼ 待校準 B：把焦點移到「使用者」欄再輸入（用 Remember me 就不會走到這）
     Send-Keys $ArgoUser
     if ($ArgoPass) { Send-Keys '{TAB}'; Send-Keys $ArgoPass }
   }
-  Send-Keys '{ENTER}'   # ← 校準點 3：送出登入（Enter 或點 Login）
+  Send-Keys '{ENTER}'   # ← 待校準 C：送出登入（Enter 或點 Login）
 
   # ③ 主選單 → 我的最愛「原物料請購作業」
   # 登入成功的判斷：頂層標題換成「…(BARDSHOP):帳號@BARDSHOP 日期 時間 上線人數:N」
   $menu = Wait-Window '*BARDSHOP*' -What '主選單（登入完成）' -ProcessPattern 'java'
   Focus-Window $menu
-  # ▼ 校準點 4：開啟「原物料請購作業」。它在右側「我的最愛」第一項。
+  # ▼ 待校準 D：開啟「原物料請購作業」。它在右側「我的最愛」第一項。
   #   Oracle Forms 的選單通常可用鍵盤巡覽；若不行，這裡改用 UI Automation 依文字點擊
   #   （需先啟用 Java Access Bridge：jabswitch -enable 後重開機）。
   Send-Keys '{TAB}{ENTER}'   # ← 佔位，務必校準
@@ -199,12 +201,26 @@ function Sign-OneDoc {
   $form = Wait-Window '*BARDSHOP*' -TimeoutSec 15 -What 'ARGO 主視窗' -ProcessPattern 'java'
   Focus-Window $form
 
-  # ▼▼▼ 校準點 5～8：查詢單號並按傳簽。ARGO 是 Oracle Forms，優先用快捷鍵 ▼▼▼
-  Send-Keys '{F7}'      # 進入查詢模式（Forms 慣例）
-  Send-Keys $DocNo      # 輸入請購單號（F7 後焦點若不在單號欄，補 {TAB} / +{TAB}）
-  Send-Keys '{F8}'      # 執行查詢
-  Send-Keys '%{F12}'    # 按「傳簽」← 佔位，務必校準
-  # ▲▲▲ 校準區結束 ▲▲▲
+  # ── 實測校準（2026-09-24 由現場操作人員提供）────────────────────────
+  #   F7 進入查詢模式（焦點直接落在「請購單號」欄，不需再 Tab）
+  #   貼上單號
+  #   F8 執行查詢
+  #   Tab × 15 移到「傳簽」按鈕
+  #   空白鍵按下去
+  #
+  # 為什麼用空白鍵而不是 Enter：Java 介面裡空白鍵只會觸發「目前有焦點的」按鈕，
+  # Enter 則可能觸發畫面的預設按鈕——萬一 Tab 數錯，Enter 會去按到別的東西
+  # （這個畫面上就有「作廢」），空白鍵頂多沒反應。失敗要往安全的方向倒。
+  Send-Keys '{F7}'
+  Send-Keys $DocNo
+  Send-Keys '{F8}'
+
+  # 查詢要跑一下才會把資料帶出來；這裡多等一點，
+  # 沒查到資料就 Tab 過去按傳簽 = 對著空白單按，會出事
+  Start-Sleep -Milliseconds $QueryWaitMs
+
+  Send-Keys '{TAB 15}'
+  Send-Keys $ActivateKey
 
   Start-Sleep -Seconds 2   # 等 ARGO 送出並回寫
 }
