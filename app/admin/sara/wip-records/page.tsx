@@ -152,7 +152,20 @@ export default function SaraWipRecordsPage() {
       if (siteFilter !== 'all') query = query.eq('site_label', siteFilter)
       if (search.trim()) {
         const q = search.trim()
-        query = query.or(`mo_nbr.ilike.%${q}%,doc_nbr.ilike.%${q}%,product_description.ilike.%${q}%,username.ilike.%${q}%`)
+        // 常平／委外的單號後備比對：出單表上的工單號帶「-行號」（POC2026082001-1），
+        // 但塔台在 2026-09-04（commit 193f422 加上行號）之前存的是不帶行號的裸單號，
+        // 直接拿出單表的單號來搜會整批查不到——實測 8 月以來有 502 列卡在這個格式差異。
+        // 因此帶行號的搜尋一律連裸單號一起找（裸號本身是子字串，也會把同單其他行號一併帶出來）。
+        const terms = [q]
+        const bare = q.replace(/-\d+$/, '')
+        if (bare !== q && bare) terms.push(bare)
+        const ors = terms.flatMap(t => [
+          `mo_nbr.ilike.%${t}%`,
+          `doc_nbr.ilike.%${t}%`,
+          `product_description.ilike.%${t}%`,
+          `username.ilike.%${t}%`,
+        ])
+        query = query.or(ors.join(','))
       }
 
       const { data, error } = await query

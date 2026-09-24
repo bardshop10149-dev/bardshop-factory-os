@@ -4595,6 +4595,7 @@ export default function DailyOrderSheetPage() {
                               <div className="text-slate-500 text-[11px] whitespace-nowrap mb-1">{row.delivery_date || '—'}</div>
                               <MoProgressCell
                                 hasMo={row.factory === 'T' && !!row.mo_number}
+                                factory={row.factory}
                                 progress={row.mo_number ? moProgress[row.mo_number.trim().toUpperCase()] : undefined}
                                 onOpen={() => row.mo_number && setMoModalId(row.mo_number)}
                               />

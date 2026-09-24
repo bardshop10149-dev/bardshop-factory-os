@@ -68,13 +68,29 @@ function tooltipOf(progress: SheetProgress): string {
 export function MoProgressCell({
   progress,
   hasMo,
+  factory,
   onOpen,
 }: {
   progress: SheetProgress | undefined
   /** 這一列是否有台北製令——沒有製令（常平採購／委外請購）塔台本來就不會有進度 */
   hasMo: boolean
+  /** 廠區：常平(C) 直接標示在常平廠生產，不用去對塔台的逐道工序 */
+  factory?: string
   onOpen: () => void
 }) {
+  // 常平列：貨是在常平廠做的，塔台上只有轉運／包裝這類少數工序會報工，
+  // 逐道工序的進度條對常平沒有意義（而且 9/4 以前的常平工單號在塔台是不帶行號的
+  // 裸單號，本來就對不起來）。直接標示「常平廠生產」比顯示一個「—」有用。
+  if (factory === 'C') {
+    return (
+      <span
+        title="這一列走常平廠的途程，實際生產在常平；塔台上不會有完整的逐道工序報工"
+        className="inline-block px-1.5 py-0.5 rounded text-[10px] font-medium bg-amber-950/40 text-amber-300 border border-amber-800/50"
+      >
+        常平廠生產
+      </span>
+    )
+  }
   if (!hasMo) return <span className="text-slate-600">—</span>
   if (!progress || progress.totalCount === 0) {
     return (
