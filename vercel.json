@@ -30,6 +30,10 @@
       "schedule": "35 9 * * *"
     },
     {
+      "path": "/api/cron/pr-sign-check",
+      "schedule": "50 9 * * *"
+    },
+    {
       "path": "/api/cron/sara-wip-sync",
       "schedule": "0 1,4,7,10,13 * * *"
     },
