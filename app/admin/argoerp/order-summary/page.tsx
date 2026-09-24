@@ -261,12 +261,11 @@ export default function OrderSummaryPage() {
               <tr className="text-left text-xs text-slate-400">
                 <th className="px-2 py-2.5 whitespace-nowrap">出單日 / 廠別</th>
                 <th className="px-2 py-2.5 whitespace-nowrap">工單 / 製令‧採購單號</th>
-                <th className="px-2 py-2.5 min-w-[240px]">客戶 / 品項編碼 / 品名規格</th>
+                <th className="px-2 py-2.5 w-[210px] max-w-[210px]">客戶 / 品項編碼 / 品名規格</th>
                 <th className="px-2 py-2.5 whitespace-nowrap text-right">數量</th>
                 <th className="px-2 py-2.5 whitespace-nowrap text-right">盤數</th>
                 <th className="px-2 py-2.5 whitespace-nowrap min-w-[130px]">交付日 / 生產進度</th>
-                <th className="px-2 py-2.5 w-[72px]">PACKING</th>
-                <th className="px-2 py-2.5 min-w-[120px]">備註</th>
+                <th className="px-2 py-2.5 min-w-[220px]">PACKING / 備註</th>
                 <th className="px-2 py-2.5 whitespace-nowrap text-center">批備料</th>
                 <th className="px-2 py-2.5 whitespace-nowrap">打樣/追加</th>
                 <th className="px-2 py-2.5 whitespace-nowrap">機台 / 狀態</th>
@@ -274,7 +273,7 @@ export default function OrderSummaryPage() {
             </thead>
             <tbody>
               {rows.length === 0 && (
-                <tr><td colSpan={11} className="px-3 py-12 text-center text-slate-600 text-sm">
+                <tr><td colSpan={10} className="px-3 py-12 text-center text-slate-600 text-sm">
                   {loading ? '載入中…' : '沒有符合條件的資料'}
                 </td></tr>
               )}
@@ -306,10 +305,10 @@ export default function OrderSummaryPage() {
                         {r.mo_status === '已匯入製令' && <span className="ml-1 text-emerald-400">✓</span>}
                       </div>
                     </td>
-                    <td className="px-2 py-2">
-                      {r.customer && <div className="text-[11px] text-purple-300">{r.customer}</div>}
-                      <div className="font-mono text-xs text-white">{r.item_code || '—'}</div>
-                      <div className="text-[11px] text-slate-400 line-clamp-2">{r.item_name || r.note || ''}</div>
+                    <td className="px-2 py-2 w-[210px] max-w-[210px]">
+                      {r.customer && <div className="text-[11px] text-purple-300 truncate" title={r.customer}>{r.customer}</div>}
+                      <div className="font-mono text-xs text-white break-all">{r.item_code || '—'}</div>
+                      <div className="text-[11px] text-slate-400 line-clamp-2 break-words" title={r.item_name ?? ''}>{r.item_name || ''}</div>
                     </td>
                     <td className="px-2 py-2 text-right font-mono text-sm whitespace-nowrap">{r.quantity || '—'}</td>
                     <td className="px-2 py-2 text-right font-mono text-xs text-yellow-400/80 whitespace-nowrap">{r.plate_count || '—'}</td>
@@ -319,10 +318,16 @@ export default function OrderSummaryPage() {
                       </div>
                       <MoProgressCell progress={r.progress} hasMo={!!docNo} factory={r.factory} onOpen={() => {}} />
                     </td>
-                    <td className="px-2 py-2 text-[11px] text-slate-300 leading-tight break-words w-[72px]">{r.packing || <span className="text-slate-600">—</span>}</td>
-                    <td className="px-2 py-2 text-[11px] text-slate-400 max-w-[180px]">
-                      <div className="line-clamp-2" title={r.note ?? ''}>{r.note || <span className="text-slate-700">—</span>}</div>
-                      {r.pm_note && <div className="text-amber-500/80 line-clamp-1" title={r.pm_note}>{r.pm_note}</div>}
+                    <td className="px-2 py-2 text-[11px] min-w-[220px] leading-snug">
+                      <div className="text-slate-300 break-words" title={r.packing ?? ''}>
+                        {r.packing || <span className="text-slate-700">—</span>}
+                      </div>
+                      <div className="text-slate-400 break-words mt-0.5" title={r.note ?? ''}>
+                        {r.note || <span className="text-slate-700">—</span>}
+                      </div>
+                      {r.pm_note && (
+                        <div className="text-amber-500/80 break-words mt-0.5" title={r.pm_note}>{r.pm_note}</div>
+                      )}
                     </td>
                     <td className="px-2 py-2 text-center whitespace-nowrap">
                       {(() => {
