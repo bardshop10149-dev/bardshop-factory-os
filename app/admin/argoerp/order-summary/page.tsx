@@ -261,11 +261,11 @@ export default function OrderSummaryPage() {
               <tr className="text-left text-xs text-slate-400">
                 <th className="px-2 py-2.5 whitespace-nowrap">出單日 / 廠別</th>
                 <th className="px-2 py-2.5 whitespace-nowrap">工單 / 製令‧採購單號</th>
-                <th className="px-2 py-2.5 w-[210px] max-w-[210px]">客戶 / 品項編碼 / 品名規格</th>
+                <th className="px-2 py-2.5 min-w-[220px]">客戶 / 品項編碼 / 品名規格</th>
                 <th className="px-2 py-2.5 whitespace-nowrap text-right">數量</th>
                 <th className="px-2 py-2.5 whitespace-nowrap text-right">盤數</th>
                 <th className="px-2 py-2.5 whitespace-nowrap min-w-[130px]">交付日 / 生產進度</th>
-                <th className="px-2 py-2.5 min-w-[220px]">PACKING / 備註</th>
+                <th className="px-2 py-2.5 w-[210px] max-w-[210px]">PACKING / 備註</th>
                 <th className="px-2 py-2.5 whitespace-nowrap text-center">批備料</th>
                 <th className="px-2 py-2.5 whitespace-nowrap">打樣/追加</th>
                 <th className="px-2 py-2.5 whitespace-nowrap">機台 / 狀態</th>
@@ -305,7 +305,7 @@ export default function OrderSummaryPage() {
                         {r.mo_status === '已匯入製令' && <span className="ml-1 text-emerald-400">✓</span>}
                       </div>
                     </td>
-                    <td className="px-2 py-2 w-[210px] max-w-[210px]">
+                    <td className="px-2 py-2 min-w-[220px]">
                       {r.customer && <div className="text-[11px] text-purple-300 truncate" title={r.customer}>{r.customer}</div>}
                       <div className="font-mono text-xs text-white break-all">{r.item_code || '—'}</div>
                       <div className="text-[11px] text-slate-400 line-clamp-2 break-words" title={r.item_name ?? ''}>{r.item_name || ''}</div>
@@ -318,7 +318,7 @@ export default function OrderSummaryPage() {
                       </div>
                       <MoProgressCell progress={r.progress} hasMo={!!docNo} factory={r.factory} onOpen={() => {}} />
                     </td>
-                    <td className="px-2 py-2 text-[11px] min-w-[220px] leading-snug">
+                    <td className="px-2 py-2 text-[11px] w-[210px] max-w-[210px] leading-snug">
                       <div className="text-slate-300 break-words" title={r.packing ?? ''}>
                         {r.packing || <span className="text-slate-700">—</span>}
                       </div>
