@@ -9,7 +9,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { ensureChangpingLeadTime } from '../../../../lib/argoerp/moExportShared'
+import { CHANGPING_HOLIDAYS_KEY, CHANGPING_MIN_LEAD_WORKDAYS, ensureChangpingLeadTime, toHolidaySet } from '../../../../lib/argoerp/moExportShared'
 import * as XLSX from 'xlsx'
 import { supabase } from '../../../../lib/supabaseClient'
 
@@ -136,6 +136,57 @@ export default function PoBatchExportCPage() {
   const [lineEdits, setLineEdits]   = useState<LineEdit[]>([])
   const [header, setHeader]         = useState<PoHeader>(makeDefaultHeader)
   const [headerOpen, setHeaderOpen] = useState(true)
+
+  // ── 常平例假日 ──────────────────────────────────────────────────────
+  // 常平在中國，放假跟台灣不一樣（國慶連假、春節長度都不同），光跳過六日不夠。
+  // 這份清單存在 app_settings.changping_holidays，自動轉單排程與 ERP 同步端也讀同一份，
+  // 交期的工作天計算與落點都會避開這些日子。
+  const [holidayList, setHolidayList] = useState<string[]>([])
+  const [holidayOpen, setHolidayOpen] = useState(false)
+  const [holidayInput, setHolidayInput] = useState('')
+  const [holidaySaving, setHolidaySaving] = useState(false)
+  const [holidayMsg, setHolidayMsg] = useState('')
+  const holidaySet = useMemo(() => toHolidaySet(holidayList), [holidayList])
+
+  useEffect(() => {
+    fetch(`/api/app-settings?key=${CHANGPING_HOLIDAYS_KEY}`)
+      .then(r => r.json())
+      .then((j: { value?: unknown }) => { if (Array.isArray(j.value)) setHolidayList(j.value.map(String)) })
+      .catch(() => {})
+  }, [])
+
+  const saveHolidays = useCallback(async (next: string[]) => {
+    setHolidaySaving(true); setHolidayMsg('')
+    try {
+      const res = await fetch('/api/app-settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key: CHANGPING_HOLIDAYS_KEY, value: next }),
+      })
+      const j = await res.json() as { ok?: boolean; error?: string }
+      if (!j.ok) throw new Error(j.error ?? '儲存失敗')
+      setHolidayList(next)
+      setHolidayMsg('✅ 已儲存')
+      setTimeout(() => setHolidayMsg(''), 3000)
+    } catch (e) {
+      setHolidayMsg(`❌ ${e instanceof Error ? e.message : String(e)}`)
+    } finally { setHolidaySaving(false) }
+  }, [])
+
+  const addHolidays = useCallback(() => {
+    // 支援一次貼多天：換行、逗號、空白分隔皆可
+    const parts = holidayInput.split(/[\s,、]+/).map(t => t.trim()).filter(Boolean)
+    const norm: string[] = []
+    for (const t of parts) {
+      const m = t.match(/^(\d{4})[/-]?(\d{1,2})[/-]?(\d{1,2})$/)
+      if (!m) continue
+      norm.push(`${m[1]}-${String(+m[2]).padStart(2, '0')}-${String(+m[3]).padStart(2, '0')}`)
+    }
+    if (norm.length === 0) { setHolidayMsg('❌ 沒有可辨識的日期（例：2026-10-01 或 2026/10/1）'); return }
+    const next = [...new Set([...holidayList, ...norm])].sort()
+    setHolidayInput('')
+    void saveHolidays(next)
+  }, [holidayInput, holidayList, saveHolidays])
 
   const [availDates, setAvailDates]       = useState<{ sheet_date: string; row_count: number; pending_c_count?: number }[]>([])
   const [datesLoading, setDatesLoading]   = useState(false)
@@ -270,7 +321,7 @@ export default function PoBatchExportCPage() {
       rec['UNIT_PRICE_ORU']              = e.unit_price || '0'
       // 常平交期下限：至少給常平 5 個工作天（2026-09-22 需求）。
       // 與自動轉單排程共用同一支 ensureChangpingLeadTime，兩條路徑算出來的交期一致。
-      rec['DUEDATE']                     = ensureChangpingLeadTime(row.delivery_date, header.begin_date)
+      rec['DUEDATE']                     = ensureChangpingLeadTime(row.delivery_date, header.begin_date, { holidays: holidaySet })
       if ((e.lot_no ?? '').trim())              rec['MBP_LOT_NO']               = e.lot_no.trim()
       const remark = [row.item_name, row.note].filter(Boolean).join(' ')
       if (remark)                        rec['REMARK']                   = remark
@@ -282,7 +333,7 @@ export default function PoBatchExportCPage() {
       }
       return rec
     })
-  }, [sourceRows, lineEdits, header])
+  }, [sourceRows, lineEdits, header, holidaySet])
 
   // ── Export CSV / XLSX ──
   const doExport = useCallback(() => {
@@ -1058,6 +1109,87 @@ export default function PoBatchExportCPage() {
                   placeholder="0.05 / 0.13 / 0"
                   className="w-full px-3 py-1.5 rounded-lg bg-slate-800 border border-slate-600 text-white text-sm focus:outline-none focus:border-orange-400" />
               </div>
+            </div>
+          )}
+        </div>
+
+        {/* ── 常平例假日設定 ── */}
+        <div className="mb-6 bg-slate-900 border border-rose-900/50 rounded-lg overflow-hidden">
+          <button onClick={() => setHolidayOpen(v => !v)}
+            className="w-full flex items-center justify-between px-4 py-3 hover:bg-slate-800/50 transition-colors">
+            <span className="text-sm font-semibold text-rose-300">
+              🗓 常平例假日設定
+              <span className="ml-2 text-xs font-normal text-slate-400">
+                已設定 {holidayList.length} 天・交期會自動避開
+              </span>
+            </span>
+            <span className="text-slate-400 text-sm">{holidayOpen ? '▲ 收起' : '▼ 展開'}</span>
+          </button>
+
+          {holidayOpen && (
+            <div className="px-4 pb-4 space-y-3 border-t border-slate-800 pt-3">
+              <p className="text-xs text-slate-400 leading-relaxed">
+                常平在中國，放假跟我們不一樣（國慶連假、春節長度都不同）。設定後，
+                轉採購單時的交期會這樣算：
+                <br />
+                ① 工作天計算跳過六日<span className="text-rose-300">與這裡設定的例假日</span>，
+                確保常平真的有 {CHANGPING_MIN_LEAD_WORKDAYS} 個工作天；
+                <br />
+                ② 交期若正好落在例假日，<span className="text-rose-300">先試著往前移</span>到最近的上班日
+                （早一天拿到貨對我們有利）；往前移會不滿 {CHANGPING_MIN_LEAD_WORKDAYS} 個工作天時才往後移。
+                <br />
+                這份清單自動轉單排程（每天 17:10 / 17:35）與採購專區的交期顯示也會一起套用。
+              </p>
+
+              <div className="flex items-end gap-2 flex-wrap">
+                <div className="flex-1 min-w-[16rem]">
+                  <label className="text-xs text-slate-400 block mb-1">新增例假日（可一次貼多天，用空白、逗號或換行分隔）</label>
+                  <input value={holidayInput} onChange={e => setHolidayInput(e.target.value)}
+                    onKeyDown={e => { if (e.key === 'Enter') addHolidays() }}
+                    placeholder="2026-10-01 2026-10-02 2026/10/5"
+                    className="w-full px-3 py-1.5 rounded-lg bg-slate-800 border border-slate-600 text-white text-sm focus:outline-none focus:border-rose-400 font-mono" />
+                </div>
+                <button onClick={addHolidays} disabled={holidaySaving || !holidayInput.trim()}
+                  className="px-4 py-1.5 rounded-lg bg-rose-700 hover:bg-rose-600 disabled:bg-slate-700 disabled:text-slate-500 text-white text-sm font-medium transition-colors">
+                  {holidaySaving ? '儲存中…' : '新增'}
+                </button>
+                {holidayMsg && (
+                  <span className={`text-xs ${holidayMsg.startsWith('✅') ? 'text-emerald-400' : 'text-red-400'}`}>{holidayMsg}</span>
+                )}
+              </div>
+
+              {holidayList.length === 0 ? (
+                <div className="text-xs text-slate-600">尚未設定任何例假日——目前只會跳過週六、週日。</div>
+              ) : (
+                <div className="flex flex-wrap gap-1.5">
+                  {holidayList.map(d => {
+                    const dt = new Date(d + 'T00:00:00')
+                    const dow = Number.isNaN(dt.getTime()) ? '' : '日一二三四五六'[dt.getDay()]
+                    const past = d < new Date().toISOString().slice(0, 10)
+                    return (
+                      <span key={d}
+                        className={`inline-flex items-center gap-1.5 px-2 py-1 rounded border text-xs font-mono ${
+                          past ? 'border-slate-700 bg-slate-800/50 text-slate-600' : 'border-rose-700/50 bg-rose-950/30 text-rose-200'
+                        }`}>
+                        {d}{dow && <span className="text-[10px] opacity-70">週{dow}</span>}
+                        <button onClick={() => void saveHolidays(holidayList.filter(x => x !== d))}
+                          disabled={holidaySaving}
+                          title="移除這天"
+                          className="text-slate-500 hover:text-red-300 disabled:opacity-40">✕</button>
+                      </span>
+                    )
+                  })}
+                </div>
+              )}
+
+              {holidayList.some(d => d < new Date().toISOString().slice(0, 10)) && (
+                <button
+                  onClick={() => void saveHolidays(holidayList.filter(d => d >= new Date().toISOString().slice(0, 10)))}
+                  disabled={holidaySaving}
+                  className="text-xs text-slate-500 hover:text-slate-300 underline underline-offset-2 disabled:opacity-40">
+                  清掉已經過去的日期
+                </button>
+              )}
             </div>
           )}
         </div>

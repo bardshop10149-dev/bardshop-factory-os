@@ -264,27 +264,62 @@ export function mapPoExportRowsCO(srcRows: MoExportSourceRow[], matchResults: So
   })
 }
 
-// ── 常平採購單交期下限（2026-09-22 需求）────────────────────────────────
+// ── 常平採購單交期規則（2026-09-22 下限 / 2026-09-24 例假日）────────────
 //
 // 常平是委外的實體工廠，出單表上的交期常常直接抄客戶的希望交期，等採購單開出去
 // 才發現只剩兩三天——料還沒到、產線也排不進去。因此轉成採購單時強制拉出一段
-// 最低前置時間：交期至少是開立日之後的 5 個工作天（跳過六日），出單表本來就填
-// 得比較晚的就維持原交期，只把太趕的往後推。
+// 最低前置時間：交期至少是開立日之後的 5 個工作天。
+//
+// 例假日：常平在中國，放假日跟台灣不一樣（國慶連假、春節長度都不同），光跳過
+// 六日不夠。可在「出單表→常平採購」頁面維護一份常平的例假日清單，存在
+// app_settings.changping_holidays；這裡的工作天計算與交期落點都會避開那些日子。
 //
 // 5 這個數字與出單表的交期警示閾值一致（DUE_THRESHOLD_DEFAULTS.C = 5），
 // 差別在於那邊只跳警示、可以被忽略，這裡是實際寫進 ARGO 採購單的值。
 
 export const CHANGPING_MIN_LEAD_WORKDAYS = 5
+export const CHANGPING_HOLIDAYS_KEY = 'changping_holidays'
 
-/** 從 from 起算往後推 n 個工作天（from 當天為第 0 天，跳過六日） */
-export function addWorkingDays(from: Date, n: number): Date {
+/** 例假日清單（任意寫法）→ 以 YYYY-MM-DD 為鍵的 Set */
+export function toHolidaySet(list: unknown): Set<string> {
+  const out = new Set<string>()
+  if (!Array.isArray(list)) return out
+  for (const raw of list) {
+    const d = parseAnyYmd(String(raw ?? ''))
+    if (d) out.add(ymdKey(d))
+  }
+  return out
+}
+
+function ymdKey(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+
+/** 六日或名單內的例假日都算「常平沒上班」 */
+export function isNonWorkingDay(d: Date, holidays?: Set<string>): boolean {
+  const dow = d.getDay()
+  if (dow === 0 || dow === 6) return true
+  return !!holidays?.has(ymdKey(d))
+}
+
+/** 從 from 起算往後推 n 個工作天（from 當天為第 0 天，跳過六日與例假日） */
+export function addWorkingDays(from: Date, n: number, holidays?: Set<string>): Date {
   const d = new Date(from)
   let left = n
-  while (left > 0) {
+  // 上限保險：避免例假日清單填成整年造成無窮迴圈
+  let guard = 0
+  while (left > 0 && guard++ < 3650) {
     d.setDate(d.getDate() + 1)
-    const dow = d.getDay()
-    if (dow !== 0 && dow !== 6) left--
+    if (!isNonWorkingDay(d, holidays)) left--
   }
+  return d
+}
+
+/** 往前 / 往後找最近的非例假日（含當天） */
+function nearestWorkingDay(from: Date, dir: -1 | 1, holidays?: Set<string>): Date {
+  const d = new Date(from)
+  let guard = 0
+  while (isNonWorkingDay(d, holidays) && guard++ < 3650) d.setDate(d.getDate() + dir)
   return d
 }
 
@@ -309,22 +344,35 @@ function fmtSlashDate(d: Date): string {
 }
 
 /**
- * 常平採購單的交期：至少給常平 CHANGPING_MIN_LEAD_WORKDAYS 個工作天。
+ * 常平採購單的交期。兩條規則：
+ *   1. 下限：至少給常平 workdays 個工作天（跳過六日與例假日）
+ *   2. 落點：交期不可以落在常平的例假日——先試著「往前」移到最近的上班日，
+ *      往前移之後若仍滿足下限就用它（對我們比較有利，早一天拿到貨）；
+ *      不滿足才「往後」移到最近的上班日。
  *
- * @param deliveryDate 出單表上的交付日期（可為空）
- * @param beginDate    採購單開立日
  * @returns YYYY/MM/DD；beginDate 解析不出來時原樣回傳 deliveryDate（不亂動）
  */
 export function ensureChangpingLeadTime(
   deliveryDate: string,
   beginDate: string,
-  workdays: number = CHANGPING_MIN_LEAD_WORKDAYS,
+  opts: { holidays?: Set<string>; workdays?: number } = {},
 ): string {
+  const { holidays, workdays = CHANGPING_MIN_LEAD_WORKDAYS } = opts
   const begin = parseAnyYmd(beginDate)
   if (!begin) return String(deliveryDate ?? '').trim()
-  const earliest = addWorkingDays(begin, workdays)
+
+  // 下限本身一定落在上班日（addWorkingDays 只會停在上班日）
+  const earliest = addWorkingDays(begin, workdays, holidays)
   const due = parseAnyYmd(deliveryDate)
-  // 交期沒填、或比下限還早 → 一律用下限
+
+  // 交期沒填、或早於下限 → 用下限
   if (!due || due.getTime() < earliest.getTime()) return fmtSlashDate(earliest)
-  return fmtSlashDate(due)
+
+  // 交期本身就是上班日 → 直接用
+  if (!isNonWorkingDay(due, holidays)) return fmtSlashDate(due)
+
+  // 落在例假日：往前移仍滿足下限就往前，否則往後
+  const back = nearestWorkingDay(due, -1, holidays)
+  if (back.getTime() >= earliest.getTime()) return fmtSlashDate(back)
+  return fmtSlashDate(nearestWorkingDay(due, 1, holidays))
 }

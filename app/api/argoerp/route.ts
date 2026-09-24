@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { CHANGPING_MIN_LEAD_WORKDAYS, addWorkingDays } from '@/lib/argoerp/moExportShared'
+import { CHANGPING_HOLIDAYS_KEY, CHANGPING_MIN_LEAD_WORKDAYS, addWorkingDays, toHolidaySet } from '@/lib/argoerp/moExportShared'
 
 import { formatSupabaseAdminError, getSupabaseAdminClient } from '../../../lib/supabaseAdmin'
 import { guardAuth, guardPermission } from '@/lib/requireAuth'
@@ -95,6 +95,7 @@ function toNumber(value: unknown): number {
 function shiftDueDateBackTwoWorkdays(
   raw: string | null | undefined,
   beginDate?: string | null,
+  holidays?: Set<string>,
   minLeadWorkdays: number = CHANGPING_MIN_LEAD_WORKDAYS,
 ): string | null {
   if (raw == null) return null
@@ -136,7 +137,7 @@ function shiftDueDateBackTwoWorkdays(
   if (beginDate) {
     const bm = String(beginDate).trim().match(/^(\d{4})[/-]?(\d{1,2})[/-]?(\d{1,2})/)
     if (bm) {
-      const earliestLocal = addWorkingDays(new Date(+bm[1], +bm[2] - 1, +bm[3]), minLeadWorkdays)
+      const earliestLocal = addWorkingDays(new Date(+bm[1], +bm[2] - 1, +bm[3]), minLeadWorkdays, holidays)
       const earliestUTC = Date.UTC(earliestLocal.getFullYear(), earliestLocal.getMonth(), earliestLocal.getDate())
       if (shifted.getTime() < earliestUTC) return s
     }
@@ -1116,6 +1117,16 @@ export async function POST(request: NextRequest) {
 
       const poSyncedAt = new Date().toISOString()
 
+      // 常平例假日：交期下限的工作天計算要跳過這些日子，否則「-2 天不得吃掉 5 個工作天」
+      // 的保護會用錯的天數判斷。讀失敗就當沒有假日（保護仍在，只是改用六日計算）。
+      const poHolidays = await (async () => {
+        try {
+          const { data } = await getSupabaseAdminClient()
+            .from('app_settings').select('value').eq('key', CHANGPING_HOLIDAYS_KEY).maybeSingle()
+          return toHolidaySet(data?.value)
+        } catch { return toHolidaySet(null) }
+      })()
+
       // 合併：只保留 hdrMap 裡有 PO 表頭的明細（=只要 PO，排除其他 project type）
       // 去重 pjt_project_id + line_no
       const poDedupe = new Map<string, { dtl: Record<string, unknown>; hdr: Record<string, unknown> }>()
@@ -1142,6 +1153,7 @@ export async function POST(request: NextRequest) {
         end_date:        shiftDueDateBackTwoWorkdays(
                            String(getRecordValue(dtl, 'DUEDATE') ?? '').trim() || null,
                            String(getRecordValue(hdr, 'BEGIN_DATE') ?? '').trim() || null,
+                           poHolidays,
                          ),
         customer_vendor: String(getRecordValue(hdr, 'TPN_PARTNER_ID') ?? '').trim() || null,
         remark:          String(getRecordValue(dtl, 'REMARK2') ?? '').trim() || null,

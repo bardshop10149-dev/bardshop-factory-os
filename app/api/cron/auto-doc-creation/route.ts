@@ -2,14 +2,15 @@ import { NextRequest, NextResponse } from 'next/server'
 import { getSupabaseAdminClient, formatSupabaseAdminError } from '@/lib/supabaseAdmin'
 import { argoConfigured, argoQuery, argoImport } from '@/lib/argoQuery'
 import { recordSheetHistory } from '@/lib/argoerp/sheetHistory'
-import { ensureChangpingLeadTime } from '@/lib/argoerp/moExportShared'
+import { CHANGPING_HOLIDAYS_KEY, ensureChangpingLeadTime, toHolidaySet } from '@/lib/argoerp/moExportShared'
 
 // 每天 17:10 與 17:35（台北時間）自動轉單：當天出單表的委外列→請購單（IFAF105）、
 // 常平列→採購單（IFAF024）。邏輯完整搬自兩個手動頁面（order-batch-export-pr /
 // order-batch-export-c），表頭全部用頁面的固定預設值；設計決策（2026-08-24 與使用者確認）：
 //   * 常平採購單價一律 0
 //   * 序號比對不到的常平列：跳過 + 記錄，不送出
-//   * 常平採購單交期至少給 5 個工作天（2026-09-22 需求，見 ensureChangpingLeadTime）
+//   * 常平採購單交期至少給 5 個工作天，且避開常平的例假日
+//     （2026-09-22 / 2026-09-24 需求，見 ensureChangpingLeadTime）
 //
 // 為什麼跑兩輪（2026-09-18 新增 17:35 這輪）：
 //   17:10 那輪只看得到「當下已經在出單表裡」的列。2026-09-18 就發生過——常平那列
@@ -346,6 +347,12 @@ async function runPoCreation(sb: Sb, sheetDate: string, allRows: SheetRowRec[]):
     const pid = `${prefix}${String(maxSeq + 1).padStart(2, '0')}`
     await logRun(sb, runId, { doc_no: pid })
 
+    // 常平例假日（app_settings.changping_holidays，由「出單表→常平採購」頁面維護）。
+    // 讀失敗就當作沒有假日——寧可算出偏保守的交期，也不要讓整批轉單失敗。
+    const { data: holidayRow } = await sb
+      .from('app_settings').select('value').eq('key', CHANGPING_HOLIDAYS_KEY).maybeSingle()
+    const holidays = toHolidaySet(holidayRow?.value)
+
     const payload = rows.map((row, i) => {
       const seq = lineSeqs[i]
       const soInfo = soLineInfoMap.get(`${str(row.order_number)}|${seq}`)
@@ -371,7 +378,7 @@ async function runPoCreation(sb: Sb, sheetDate: string, allRows: SheetRowRec[]):
         UNIT_PRICE_ORU: '0',   // 自動轉單一律單價 0（2026-08-24 與使用者確認）
         // 常平交期下限：至少給常平 5 個工作天（2026-09-22 需求）。
         // 出單表填得比較晚的維持原交期，只把太趕的往後推——見 ensureChangpingLeadTime。
-        DUEDATE: ensureChangpingLeadTime(str(row.delivery_date), beginDate),
+        DUEDATE: ensureChangpingLeadTime(str(row.delivery_date), beginDate, { holidays }),
         MBP_LOT_NO: str(row.order_number),
         SO_PROJECT_ID: str(row.order_number),
         TPN_PART_NO: seq,

@@ -5,7 +5,7 @@ import { guardAuth } from '@/lib/requireAuth'
 export const dynamic = 'force-dynamic'
 
 // Allowlist of keys that client pages may read/write via this route.
-const ALLOWED_KEYS = new Set(['due_date_thresholds', 'material_prep_plate_prefixes', 'material_prep_overrides'])
+const ALLOWED_KEYS = new Set(['due_date_thresholds', 'material_prep_plate_prefixes', 'material_prep_overrides', 'changping_holidays'])
 
 // GET /api/app-settings?key=<key>
 export async function GET(request: NextRequest) {
