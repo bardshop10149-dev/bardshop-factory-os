@@ -20,7 +20,12 @@ export const dynamic = 'force-dynamic'
 // ② 是這整套的關鍵。桌面自動化的失敗幾乎都是靜默的：視窗沒開、欄位沒對焦、
 // 按鈕位置跑掉，腳本照樣回報成功。每按一張就驗一張，錯了立刻停，不要繼續空按。
 //
-// 認證：本機腳本用 Bearer WEBHOOK_SECRET（與 cron 同一把）；瀏覽器開則走登入。
+// 認證：本機腳本用 Bearer ARGO_SIGN_SECRET——這支腳本專屬的鑰匙，刻意不共用
+// WEBHOOK_SECRET。理由有二：
+//   ① 最小權限：這把只開得了「讀待傳簽清單／查單張狀態」，觸發不了任何排程端點。
+//      腳本跑在辦公室的個人電腦上，萬一外流，損害範圍差很多。
+//   ② Vercel 把 WEBHOOK_SECRET 設成 Sensitive，存進去就讀不出來了，沒辦法複製到本機。
+// 仍相容 WEBHOOK_SECRET / CRON_SECRET，方便從伺服器端或既有工具呼叫。
 //
 // GET /api/argoerp/pending-sign              今天待傳簽的單號
 // GET /api/argoerp/pending-sign?date=...     指定日期
@@ -55,9 +60,12 @@ async function statusOf(docNo: string): Promise<{ status: string; signFlag: stri
 export async function GET(request: NextRequest) {
   // 本機腳本走 secret；人用瀏覽器開則要求登入
   const bearer = (request.headers.get('Authorization') ?? '').replace(/^Bearer\s+/i, '').trim()
-  const webhookSecret = process.env.WEBHOOK_SECRET ?? ''
-  const cronSecret = process.env.CRON_SECRET ?? ''
-  const bySecret = !!bearer && ((webhookSecret && bearer === webhookSecret) || (cronSecret && bearer === cronSecret))
+  const accepted = [
+    process.env.ARGO_SIGN_SECRET,   // 這支腳本專屬
+    process.env.WEBHOOK_SECRET,     // 既有工具
+    process.env.CRON_SECRET,
+  ].map(v => (v ?? '').trim()).filter(v => v.length > 0)
+  const bySecret = !!bearer && accepted.includes(bearer)
   if (!bySecret) {
     const guard = await guardAuth()
     if (!guard.ok) return guard.res
