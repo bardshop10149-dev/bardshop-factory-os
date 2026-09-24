@@ -38,6 +38,30 @@ export const dynamic = 'force-dynamic'
 
 const SHEET_TABLE = 'daily_order_sheets'
 const CHUNK = 200
+/** 同時最多幾個 chunk 查詢——序列跑 70 次要 9 秒，平行化是這支最大的加速來源 */
+const CONCURRENCY = 8
+/**
+ * 算好的結果快取 60 秒。
+ * 切換狀態／單據／關鍵字只是重新篩選同一份資料，沒必要每次都重讀 6MB 的出單表
+ * 再打 70 次塔台查詢——那是這頁「換個篩選就要等十秒」的主因。
+ * 出單表本來就是一天更新幾次的東西，60 秒的資料延遲可以接受。
+ */
+let cache: { at: number; flat: SummaryRow[]; firstSyncDate: string; sheetCount: number } | null = null
+const CACHE_TTL_MS = 60_000
+
+/** 有限併發地跑一批非同步工作 */
+async function mapLimit<T, R>(items: T[], limit: number, fn: (x: T) => Promise<R>): Promise<R[]> {
+  const out: R[] = new Array(items.length)
+  let next = 0
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (true) {
+      const i = next++
+      if (i >= items.length) return
+      out[i] = await fn(items[i])
+    }
+  }))
+  return out
+}
 /** 途程的最後一站——完成與否就看這一站有沒有報工 */
 const FINAL_STATION = '包裝站'
 
@@ -85,6 +109,11 @@ export async function GET(request: NextRequest) {
     const limit = Math.min(Number(sp.get('limit') ?? 4000) || 4000, 10000)
 
     const supabase = getSupabaseAdminClient()
+    const fresh = sp.get('refresh') === '1'
+
+    if (!fresh && cache && Date.now() - cache.at < CACHE_TTL_MS) {
+      return respond(cache.flat, cache.firstSyncDate, cache.sheetCount, { statusFilter, factoryFilter, keyword, limit, cached: true })
+    }
 
     // 第一次同步塔台報工的日期——比這更早的出單表，查無報工只代表「我們沒有資料」，
     // 不代表沒做。查不到就退回一個保守的預設，寧可標成無資料也不要誤報未開始。
@@ -132,7 +161,8 @@ export async function GET(request: NextRequest) {
       const v = raw.toLowerCase()
       return v === 'finished' ? 'finished' : v === 'running' ? 'running' : v === 'pause' ? 'pause' : 'pending'
     }
-    for (const part of chunk([...refs], CHUNK)) {
+    const parts = chunk([...refs], CHUNK)
+    const fetched = await mapLimit(parts, CONCURRENCY, async (part) => {
       const [rec, sch] = await Promise.all([
         supabase.from('sara_wip_records')
           .select('mo_nbr, job_sequence, job_name, workcenter_name, status, wip_qty, real_end_time, real_start_time')
@@ -143,6 +173,9 @@ export async function GET(request: NextRequest) {
       ])
       if (rec.error) throw rec.error
       if (sch.error) throw sch.error
+      return { rec, sch }
+    })
+    for (const { rec, sch } of fetched) {
 
       for (const x of (sch.data ?? []) as Array<{ mo_nbr: string | null; job_sequence: number | null; job_name: string | null; workcenter_name: string | null; system_status: string | null }>) {
         const mo = str(x.mo_nbr).toUpperCase(); if (!mo) continue
@@ -222,6 +255,23 @@ export async function GET(request: NextRequest) {
       }
     }
 
+    cache = { at: Date.now(), flat, firstSyncDate, sheetCount: (sheets ?? []).length }
+    return respond(flat, firstSyncDate, (sheets ?? []).length, { statusFilter, factoryFilter, keyword, limit, cached: false })
+  } catch (e) {
+    const msg = e instanceof Error ? formatSupabaseAdminError(e.message) : String(e)
+    return NextResponse.json({ success: false, error: msg }, { status: 500 })
+  }
+}
+
+/** 篩選＋計數＋回傳（狀態／單據／關鍵字都在伺服器端算完） */
+function respond(
+  flat: SummaryRow[],
+  firstSyncDate: string,
+  sheetCount: number,
+  opts: { statusFilter: string; factoryFilter: string; keyword: string; limit: number; cached: boolean },
+) {
+  const { statusFilter, factoryFilter, keyword, limit, cached } = opts
+  {
     // ④ 篩選（狀態／單據／關鍵字都在伺服器端做完）
     const isJidan = (r: SummaryRow) => str(r.doc_type).includes('集單')
     let out = flat
@@ -254,11 +304,9 @@ export async function GET(request: NextRequest) {
       truncated: total > limit,
       counts,
       first_sync_date: firstSyncDate,
-      sheet_count: (sheets ?? []).length,
+      sheet_count: sheetCount,
       all_count: flat.length,
+      cached,
     }, { headers: { 'Cache-Control': 'no-store' } })
-  } catch (e) {
-    const msg = e instanceof Error ? formatSupabaseAdminError(e.message) : String(e)
-    return NextResponse.json({ success: false, error: msg }, { status: 500 })
   }
 }

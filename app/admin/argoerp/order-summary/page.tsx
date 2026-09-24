@@ -103,6 +103,9 @@ export default function OrderSummaryPage() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
 
+  const [page, setPage] = useState(0)
+  const PAGE_SIZE = 20
+
   const [status, setStatus] = useState<string>('未完成')
   const [factory, setFactory] = useState<string>('ALL')
   const [keyword, setKeyword] = useState('')
@@ -121,6 +124,7 @@ export default function OrderSummaryPage() {
       }
       if (!j.success) throw new Error(j.error)
       setRows(j.rows ?? [])
+      setPage(0)
       setTotal(j.total ?? 0)
       setTruncated(!!j.truncated)
       setCounts(j.counts ?? {})
@@ -131,6 +135,9 @@ export default function OrderSummaryPage() {
   }, [status, factory, appliedKeyword])
 
   useEffect(() => { void load() }, [load])
+
+  const pageRows = useMemo(() => rows.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE), [rows, page])
+  const totalPages = Math.max(1, Math.ceil(rows.length / PAGE_SIZE))
 
   const unfinished = useMemo(() => (counts['未開始'] ?? 0) + (counts['進行中'] ?? 0), [counts])
   const countOf = (k: string) => k === '未完成' ? unfinished : k === 'all' ? (counts['全部'] ?? 0) : (counts[k] ?? 0)
@@ -229,34 +236,32 @@ export default function OrderSummaryPage() {
           <table className="w-full text-sm">
             <thead className="bg-slate-900 sticky top-0 z-10">
               <tr className="text-left text-xs text-slate-400">
-                <th className="px-3 py-2.5 whitespace-nowrap">出單日 / 廠別</th>
-                <th className="px-3 py-2.5 whitespace-nowrap">工單 / 製令‧採購單號</th>
-                <th className="px-3 py-2.5 whitespace-nowrap">序號</th>
-                <th className="px-3 py-2.5 min-w-[280px]">客戶 / 品項編碼 / 品名規格</th>
-                <th className="px-3 py-2.5 whitespace-nowrap text-right">數量</th>
-                <th className="px-3 py-2.5 whitespace-nowrap text-right">盤數</th>
-                <th className="px-3 py-2.5 whitespace-nowrap">PACKING</th>
-                <th className="px-3 py-2.5 min-w-[140px]">備註</th>
-                <th className="px-3 py-2.5 whitespace-nowrap min-w-[130px]">交付日 / 生產進度</th>
-                <th className="px-3 py-2.5 whitespace-nowrap text-center">批備料</th>
-                <th className="px-3 py-2.5 whitespace-nowrap">打樣/追加</th>
-                <th className="px-3 py-2.5 whitespace-nowrap">機台</th>
-                <th className="px-3 py-2.5 whitespace-nowrap">狀態</th>
+                <th className="px-2 py-2.5 whitespace-nowrap">出單日 / 廠別</th>
+                <th className="px-2 py-2.5 whitespace-nowrap">工單 / 製令‧採購單號</th>
+                <th className="px-2 py-2.5 min-w-[240px]">客戶 / 品項編碼 / 品名規格</th>
+                <th className="px-2 py-2.5 whitespace-nowrap text-right">數量</th>
+                <th className="px-2 py-2.5 whitespace-nowrap text-right">盤數</th>
+                <th className="px-2 py-2.5 whitespace-nowrap min-w-[130px]">交付日 / 生產進度</th>
+                <th className="px-2 py-2.5 w-[72px]">PACKING</th>
+                <th className="px-2 py-2.5 min-w-[120px]">備註</th>
+                <th className="px-2 py-2.5 whitespace-nowrap text-center">批備料</th>
+                <th className="px-2 py-2.5 whitespace-nowrap">打樣/追加</th>
+                <th className="px-2 py-2.5 whitespace-nowrap">機台 / 狀態</th>
               </tr>
             </thead>
             <tbody>
               {rows.length === 0 && (
-                <tr><td colSpan={13} className="px-3 py-12 text-center text-slate-600 text-sm">
+                <tr><td colSpan={11} className="px-3 py-12 text-center text-slate-600 text-sm">
                   {loading ? '載入中…' : '沒有符合條件的資料'}
                 </td></tr>
               )}
-              {rows.map((r, i) => {
+              {pageRows.map((r, i) => {
                 const docNo = docNoOf(r)
                 const seq = r.match_line_no || r.line_no_input || ''
                 return (
                   <tr key={`${r.sheet_date}-${r.order_number}-${r.item_code}-${i}`}
                     className="border-t border-slate-800/60 hover:bg-slate-900/50 transition-colors">
-                    <td className="px-3 py-2 whitespace-nowrap">
+                    <td className="px-2 py-2 whitespace-nowrap">
                       <div className="font-mono text-xs text-slate-400">{r.sheet_date}</div>
                       <div className="mt-0.5">
                         {r.doc_type?.includes('集單')
@@ -268,31 +273,33 @@ export default function OrderSummaryPage() {
                           : null}
                       </div>
                     </td>
-                    <td className="px-3 py-2 whitespace-nowrap">
-                      <div className="font-mono text-xs text-cyan-300">{r.order_number || '—'}</div>
+                    <td className="px-2 py-2 whitespace-nowrap">
+                      <div className="font-mono text-xs text-cyan-300">
+                        {r.order_number || '—'}
+                        {seq && <span className="text-cyan-500/80">-{seq}</span>}
+                      </div>
                       <div className="font-mono text-[11px] text-slate-400 mt-0.5">
                         {docNo || <span className="text-slate-600">尚未轉單</span>}
                         {r.mo_status === '已匯入製令' && <span className="ml-1 text-emerald-400">✓</span>}
                       </div>
                     </td>
-                    <td className="px-3 py-2 text-xs font-mono text-slate-400 whitespace-nowrap">{seq || '—'}</td>
-                    <td className="px-3 py-2">
+                    <td className="px-2 py-2">
                       {r.customer && <div className="text-[11px] text-purple-300">{r.customer}</div>}
                       <div className="font-mono text-xs text-white">{r.item_code || '—'}</div>
                       <div className="text-[11px] text-slate-400 line-clamp-2">{r.item_name || r.note || ''}</div>
                     </td>
-                    <td className="px-3 py-2 text-right font-mono text-sm whitespace-nowrap">{r.quantity || '—'}</td>
-                    <td className="px-3 py-2 text-right font-mono text-xs text-yellow-400/80 whitespace-nowrap">{r.plate_count || '—'}</td>
-                    <td className="px-3 py-2 text-xs text-slate-300 whitespace-nowrap">{r.packing || <span className="text-slate-600">—</span>}</td>
-                    <td className="px-3 py-2 text-[11px] text-slate-400 max-w-[200px]">
-                      <div className="line-clamp-2" title={r.note ?? ''}>{r.note || <span className="text-slate-700">—</span>}</div>
-                      {r.pm_note && <div className="text-amber-500/80 line-clamp-1" title={r.pm_note}>{r.pm_note}</div>}
-                    </td>
-                    <td className="px-3 py-2">
+                    <td className="px-2 py-2 text-right font-mono text-sm whitespace-nowrap">{r.quantity || '—'}</td>
+                    <td className="px-2 py-2 text-right font-mono text-xs text-yellow-400/80 whitespace-nowrap">{r.plate_count || '—'}</td>
+                    <td className="px-2 py-2">
                       <div className="text-slate-500 text-[11px] whitespace-nowrap mb-1">{r.delivery_date || '—'}</div>
                       <MoProgressCell progress={r.progress} hasMo={!!docNo} factory={r.factory} onOpen={() => {}} />
                     </td>
-                    <td className="px-3 py-2 text-center whitespace-nowrap">
+                    <td className="px-2 py-2 text-[11px] text-slate-300 leading-tight break-words w-[72px]">{r.packing || <span className="text-slate-600">—</span>}</td>
+                    <td className="px-2 py-2 text-[11px] text-slate-400 max-w-[180px]">
+                      <div className="line-clamp-2" title={r.note ?? ''}>{r.note || <span className="text-slate-700">—</span>}</div>
+                      {r.pm_note && <div className="text-amber-500/80 line-clamp-1" title={r.pm_note}>{r.pm_note}</div>}
+                    </td>
+                    <td className="px-2 py-2 text-center whitespace-nowrap">
                       {(() => {
                         // 已備料/已批備料打勾、無需備料打三角形、其餘打叉
                         const st = r.material_prep_status
@@ -303,13 +310,15 @@ export default function OrderSummaryPage() {
                         return <span className="text-rose-500/80 text-base" title="尚未備料">✕</span>
                       })()}
                     </td>
-                    <td className="px-3 py-2 text-xs font-mono text-slate-400 whitespace-nowrap">{r.is_sample || '—'}</td>
-                    <td className="px-3 py-2 text-xs text-slate-300 whitespace-nowrap">{r.machine || r.assigned_machine || '—'}</td>
-                    <td className="px-3 py-2 whitespace-nowrap">
-                      <span title={r.status_note}
-                        className={`px-2 py-0.5 rounded-full text-[11px] border ${STATUS_STYLE[r.row_status]}`}>
-                        {r.row_status}
-                      </span>
+                    <td className="px-2 py-2 text-[11px] font-mono text-slate-400 whitespace-nowrap">{r.is_sample || '—'}</td>
+                    <td className="px-2 py-2 whitespace-nowrap">
+                      <div className="text-[11px] text-slate-300">{r.machine || r.assigned_machine || <span className="text-slate-600">—</span>}</div>
+                      <div className="mt-0.5">
+                        <span title={r.status_note}
+                          className={`px-2 py-0.5 rounded-full text-[11px] border ${STATUS_STYLE[r.row_status]}`}>
+                          {r.row_status}
+                        </span>
+                      </div>
                       {r.last_report_at && (
                         <div className="text-[10px] text-slate-600 mt-0.5">{shortTime(r.last_report_at)}</div>
                       )}
@@ -323,6 +332,23 @@ export default function OrderSummaryPage() {
             </tbody>
           </table>
         </div>
+
+        {rows.length > PAGE_SIZE && (
+          <div className="flex items-center justify-center gap-2 mt-3 text-xs">
+            <button onClick={() => setPage(0)} disabled={page === 0}
+              className="px-2 py-1 rounded bg-slate-800 border border-slate-700 text-slate-400 hover:text-white disabled:opacity-30">« 第一頁</button>
+            <button onClick={() => setPage(p => Math.max(0, p - 1))} disabled={page === 0}
+              className="px-2 py-1 rounded bg-slate-800 border border-slate-700 text-slate-400 hover:text-white disabled:opacity-30">‹ 上一頁</button>
+            <span className="text-slate-400 px-2">
+              第 {page + 1} / {totalPages} 頁
+              <span className="text-slate-600 ml-2">（每頁 {PAGE_SIZE} 筆，共 {rows.length.toLocaleString()} 列）</span>
+            </span>
+            <button onClick={() => setPage(p => Math.min(totalPages - 1, p + 1))} disabled={page >= totalPages - 1}
+              className="px-2 py-1 rounded bg-slate-800 border border-slate-700 text-slate-400 hover:text-white disabled:opacity-30">下一頁 ›</button>
+            <button onClick={() => setPage(totalPages - 1)} disabled={page >= totalPages - 1}
+              className="px-2 py-1 rounded bg-slate-800 border border-slate-700 text-slate-400 hover:text-white disabled:opacity-30">最後頁 »</button>
+          </div>
+        )}
 
         <p className="text-xs text-slate-600 mt-3 leading-relaxed">
           狀態判定：<span className="text-slate-500">已完成</span>＝這張工單在「包裝站」有報工紀錄（161 條途程的最後一道工序都在包裝站）；
