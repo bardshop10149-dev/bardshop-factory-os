@@ -59,11 +59,22 @@ if (-not $BaseUrl -or -not $Secret) {
 
 # ── 與系統溝通 ────────────────────────────────────────────────────────────
 function Invoke-Api {
-  param([string]$Query)
-  Invoke-RestMethod -Uri "$BaseUrl/api/argoerp/pending-sign$Query" `
-    -Headers @{ Authorization = "Bearer $Secret" } -TimeoutSec 60
+  param([string]$Query, [string]$What = '查詢')
+  # 這支 API 要逐張問 ARGO，正常就要幾秒到十幾秒。沒有任何輸出的話，
+  # 使用者會以為腳本當掉而中途 Ctrl+C，所以一定要先講一聲再等。
+  Write-Host ("  {0}中…（要向 ARGO 逐張查詢，請稍候）" -f $What) -ForegroundColor DarkGray
+  $sw = [Diagnostics.Stopwatch]::StartNew()
+  try {
+    $r = Invoke-RestMethod -Uri "$BaseUrl/api/argoerp/pending-sign$Query" `
+      -Headers @{ Authorization = "Bearer $Secret" } -TimeoutSec 120
+    Write-Host ("  完成，耗時 {0:N1} 秒" -f $sw.Elapsed.TotalSeconds) -ForegroundColor DarkGray
+    return $r
+  } catch {
+    Write-Log ("呼叫 API 失敗（耗時 {0:N1} 秒）：{1}" -f $sw.Elapsed.TotalSeconds, $_.Exception.Message) 'ERROR'
+    throw
+  }
 }
-function Get-DocStatus { param([string]$DocNo) Invoke-Api "?verify=$DocNo" }
+function Get-DocStatus { param([string]$DocNo) Invoke-Api "?verify=$DocNo" -What "驗證 $DocNo" }
 
 # ── 視窗工具 ──────────────────────────────────────────────────────────────
 Add-Type @'
