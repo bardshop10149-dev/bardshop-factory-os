@@ -18,6 +18,8 @@ interface SummaryRow {
   status_note: string
   last_report_at?: string
   matched_via_bare?: boolean
+  overdue?: boolean
+  idle?: boolean
   progress?: SheetProgress
   pm_note?: string
   order_number?: string
@@ -56,6 +58,12 @@ const STATUSES = [
   { key: '已完成', label: '已完成', hint: '包裝站已報工' },
   { key: '無資料', label: '無資料', hint: '出單日早於塔台報工同步起點，塔台上已無紀錄，無從判斷' },
   { key: 'all', label: '全部', hint: '' },
+] as const
+
+/** 另一組切角：不是生產狀態，而是「該注意的單」 */
+const ALERTS = [
+  { key: '遲交', label: '⏰ 遲交', hint: '已經過了交付日、狀態還不是已完成' },
+  { key: '閒置', label: '💤 閒置', hint: '發單後超過 5 個工作天，狀態還停在未開始' },
 ] as const
 
 const FACTORIES = [
@@ -209,6 +217,21 @@ export default function OrderSummaryPage() {
           ))}
         </div>
 
+        {/* 警示切角 */}
+        <div className="flex items-center gap-2 mb-2 flex-wrap">
+          <span className="text-xs text-slate-500 w-10">注意</span>
+          {ALERTS.map(a => (
+            <button key={a.key} onClick={() => setStatus(a.key)} title={a.hint}
+              className={`px-3 py-1.5 rounded-full text-xs font-medium border transition-colors ${
+                status === a.key ? 'bg-rose-600 border-rose-500 text-white' : 'bg-slate-900 border-rose-900/50 text-rose-300/80 hover:text-rose-200'
+              }`}>
+              {a.label}
+              <span className="ml-1.5 opacity-70">{(counts[a.key] ?? 0).toLocaleString()}</span>
+            </button>
+          ))}
+          <span className="text-[11px] text-slate-600">兩者都不含「無資料」的舊單</span>
+        </div>
+
         {/* 單據別 */}
         <div className="flex items-center gap-2 mb-4 flex-wrap">
           <span className="text-xs text-slate-500 w-10">單據</span>
@@ -291,7 +314,9 @@ export default function OrderSummaryPage() {
                     <td className="px-2 py-2 text-right font-mono text-sm whitespace-nowrap">{r.quantity || '—'}</td>
                     <td className="px-2 py-2 text-right font-mono text-xs text-yellow-400/80 whitespace-nowrap">{r.plate_count || '—'}</td>
                     <td className="px-2 py-2">
-                      <div className="text-slate-500 text-[11px] whitespace-nowrap mb-1">{r.delivery_date || '—'}</div>
+                      <div className={`text-[11px] whitespace-nowrap mb-1 ${r.overdue ? 'text-rose-400 font-semibold' : 'text-slate-500'}`}>
+                        {r.delivery_date || '—'}{r.overdue && ' ⏰'}
+                      </div>
                       <MoProgressCell progress={r.progress} hasMo={!!docNo} factory={r.factory} onOpen={() => {}} />
                     </td>
                     <td className="px-2 py-2 text-[11px] text-slate-300 leading-tight break-words w-[72px]">{r.packing || <span className="text-slate-600">—</span>}</td>
@@ -318,6 +343,10 @@ export default function OrderSummaryPage() {
                           className={`px-2 py-0.5 rounded-full text-[11px] border ${STATUS_STYLE[r.row_status]}`}>
                           {r.row_status}
                         </span>
+                        {r.idle && (
+                          <span className="ml-1 px-1.5 py-0.5 rounded-full text-[10px] border border-rose-700/50 bg-rose-950/40 text-rose-300"
+                            title="發單後超過 5 個工作天還沒開工">💤 閒置</span>
+                        )}
                       </div>
                       {r.last_report_at && (
                         <div className="text-[10px] text-slate-600 mt-0.5">{shortTime(r.last_report_at)}</div>

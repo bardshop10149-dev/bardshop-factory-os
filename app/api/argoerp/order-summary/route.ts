@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { getSupabaseAdminClient, formatSupabaseAdminError } from '@/lib/supabaseAdmin'
 import { guardPermission } from '@/lib/requireAuth'
 import { rowMatchesKeyword } from '@/lib/argoerp/dailyOrderSheetShared'
+import { addWorkingDays } from '@/lib/argoerp/moExportShared'
 
 export const dynamic = 'force-dynamic'
 
@@ -64,12 +65,18 @@ async function mapLimit<T, R>(items: T[], limit: number, fn: (x: T) => Promise<R
 }
 /** 途程的最後一站——完成與否就看這一站有沒有報工 */
 const FINAL_STATION = '包裝站'
+/** 閒置判定：發單後超過幾個工作天還是未開始 */
+const IDLE_WORKDAYS = 5
 
 export type RowStatus = '未開始' | '進行中' | '已完成' | '無資料'
 
 interface SummaryRow extends Record<string, unknown> {
   sheet_date: string
   row_status: RowStatus
+  /** 遲交：已過交付日、而且還沒完成 */
+  overdue?: boolean
+  /** 閒置：發單後超過 IDLE_WORKDAYS 個工作天，狀態還是未開始 */
+  idle?: boolean
   /** 狀態的判斷依據，滑鼠移上去看得到為什麼是這個狀態 */
   status_note: string
 }
@@ -272,6 +279,38 @@ function respond(
 ) {
   const { statusFilter, factoryFilter, keyword, limit, cached } = opts
   {
+    // ③-2 遲交／閒置
+    //
+    // 兩個都刻意排除「無資料」的列：那是我們沒有塔台紀錄、判斷不出做完沒的舊單，
+    // 把它們算成遲交或閒置只會灌出幾千筆假警報（詳見上面「無資料」的說明）。
+    const todayStr = (() => {
+      const d = new Date(Date.now() + 8 * 3600 * 1000)
+      return `${d.getUTCFullYear()}/${String(d.getUTCMonth() + 1).padStart(2, '0')}/${String(d.getUTCDate()).padStart(2, '0')}`
+    })()
+    /** 出單表的交付日寫法不一（2026/9/30、2026-09-30、20260930），統一成 YYYY/MM/DD 好比大小 */
+    const normDate = (v: unknown): string => {
+      const t = str(v)
+      if (!t) return ''
+      const m = /^(\d{4})[/-]?(\d{1,2})[/-]?(\d{1,2})/.exec(t)
+      if (!m) return ''
+      return `${m[1]}/${String(+m[2]).padStart(2, '0')}/${String(+m[3]).padStart(2, '0')}`
+    }
+    for (const r of flat) {
+      if (r.row_status === '無資料') { r.overdue = false; r.idle = false; continue }
+      const due = normDate(r.delivery_date)
+      r.overdue = !!due && due < todayStr && r.row_status !== '已完成'
+
+      const sheet = normDate(r.sheet_date)
+      if (r.row_status === '未開始' && sheet) {
+        const [y, m, d] = sheet.split('/').map(Number)
+        const deadline = addWorkingDays(new Date(y, m - 1, d), IDLE_WORKDAYS)
+        const deadlineStr = `${deadline.getFullYear()}/${String(deadline.getMonth() + 1).padStart(2, '0')}/${String(deadline.getDate()).padStart(2, '0')}`
+        r.idle = todayStr > deadlineStr
+      } else {
+        r.idle = false
+      }
+    }
+
     // ④ 篩選（狀態／單據／關鍵字都在伺服器端做完）
     const isJidan = (r: SummaryRow) => str(r.doc_type).includes('集單')
     let out = flat
@@ -286,12 +325,16 @@ function respond(
       進行中: out.filter(r => r.row_status === '進行中').length,
       已完成: out.filter(r => r.row_status === '已完成').length,
       無資料: out.filter(r => r.row_status === '無資料').length,
+      遲交: out.filter(r => r.overdue).length,
+      閒置: out.filter(r => r.idle).length,
     }
     if (statusFilter !== 'all') {
       // 未完成＝未開始＋進行中。「無資料」刻意不計入：那是我們沒有紀錄，
       // 不是還沒做完，混進來只會讓這份清單失去可信度。
       out = statusFilter === '未完成'
         ? out.filter(r => r.row_status === '未開始' || r.row_status === '進行中')
+        : statusFilter === '遲交' ? out.filter(r => r.overdue)
+        : statusFilter === '閒置' ? out.filter(r => r.idle)
         : out.filter(r => r.row_status === statusFilter)
     }
     if (keyword) out = out.filter(r => rowMatchesKeyword(r, keyword))
