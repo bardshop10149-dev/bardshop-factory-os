@@ -480,6 +480,7 @@ export default function QuoteCalculatorPage() {
               qtyMode: 'k' as const,
               qtyValue: st.k,
               tierPrice: !!a.tierPrices,
+              history: a.tierPrices ? ((p?.attrs?.reference_history as CheckRow['history']) ?? null) : null,
               priceOverride: st.price,
               note:
                 total !== null && qtyNum !== null

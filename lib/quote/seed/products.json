@@ -203,6 +203,24 @@
           "tierPrices": true
         },
         {
+          "item": "纸卡",
+          "k": 1,
+          "defaultOn": false,
+          "tierPrices": true
+        },
+        {
+          "item": "纸卡无印刷",
+          "k": 1,
+          "defaultOn": false,
+          "tierPrices": true
+        },
+        {
+          "item": "标签贴纸",
+          "k": 1,
+          "defaultOn": false,
+          "tierPrices": true
+        },
+        {
           "item": "龍蝦扣 + C環 + 八字扣【淺金】 [自訂]",
           "k": 1,
           "defaultOn": false
@@ -686,6 +704,24 @@
         },
         {
           "item": "纸卡 4c",
+          "k": 1,
+          "defaultOn": false,
+          "tierPrices": true
+        },
+        {
+          "item": "纸卡",
+          "k": 1,
+          "defaultOn": false,
+          "tierPrices": true
+        },
+        {
+          "item": "纸卡无印刷",
+          "k": 1,
+          "defaultOn": false,
+          "tierPrices": true
+        },
+        {
+          "item": "标签贴纸",
           "k": 1,
           "defaultOn": false,
           "tierPrices": true

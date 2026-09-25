@@ -1176,3 +1176,46 @@ export function validateProductConfig(cfg: unknown): string | null {
   if (p == null || p <= 0) return 'config.packCapacityPerHour 必須大於 0'
   return null
 }
+
+/** 引擎常數的形狀檢查：只擋掉會讓引擎算出 NaN 的東西，不做業務合理性判斷 */
+export function validateAcrylicSettings(s: AcrylicSettings): string | null {
+  const num = (v: unknown, label: string, min = 0): string | null =>
+    typeof v === 'number' && Number.isFinite(v) && v >= min ? null : `${label} 必須是 ≥ ${min} 的數字`
+  const checks: (string | null)[] = [
+    num(s.nesting?.gapCm, 'nesting.gapCm'),
+    num(s.nesting?.marginCm, 'nesting.marginCm'),
+    num(s.cut?.hoursPerDay, 'cut.hoursPerDay', 1),
+    num(s.cut?.machines, 'cut.machines', 1),
+    num(s.cut?.shiftFactor, 'cut.shiftFactor'),
+    num(s.cut?.efficiency, 'cut.efficiency'),
+    num(s.cut?.workDays, 'cut.workDays', 1),
+    num(s.cut?.outlineTimeFactor, 'cut.outlineTimeFactor'),
+    num(s.cut?.laborMonthly, 'cut.laborMonthly'),
+    num(s.cut?.knifeOutlineMonthly, 'cut.knifeOutlineMonthly'),
+    num(s.cut?.knifeGrooveMonthly, 'cut.knifeGrooveMonthly'),
+    num(s.cut?.knifeCoverMonthly, 'cut.knifeCoverMonthly'),
+    num(s.packLabor?.hoursPerDay, 'packLabor.hoursPerDay', 1),
+    num(s.packLabor?.workDays, 'packLabor.workDays', 1),
+    num(s.koshi?.allowancePct, 'koshi.allowancePct'),
+    num(s.koshi?.trialSheets, 'koshi.trialSheets'),
+    num(s.koshi?.extraFreeSheets, 'koshi.extraFreeSheets'),
+    num(s.koshi?.extraUnitPrice, 'koshi.extraUnitPrice'),
+  ]
+  const firstErr = checks.find((c) => c !== null)
+  if (firstErr) return firstErr
+  if (!Array.isArray(s.cut?.machinesMonthly)) return 'cut.machinesMonthly 必須是陣列'
+  for (const m of s.cut.machinesMonthly) {
+    if (!m || typeof m.name !== 'string' || num(m.monthly, 'cut.machinesMonthly[].monthly')) return 'cut.machinesMonthly 每項需要 name 與 monthly'
+  }
+  if (!Array.isArray(s.packLabor?.staff)) return 'packLabor.staff 必須是陣列'
+  for (const st of s.packLabor.staff) {
+    if (!st || typeof st.name !== 'string') return 'packLabor.staff 每項需要 name'
+    if (st.monthly == null && st.hourly == null) return `packLabor.staff「${st.name}」需要 monthly 或 hourly`
+    if (num(st.share, 'share')) return `packLabor.staff「${st.name}」的 share 必須是數字`
+  }
+  const f = s.flags
+  if (!f || typeof f.outlineScrapFactorFixed !== 'boolean' || typeof f.secondBoardExcludedFromCut !== 'boolean' || typeof f.fixedFeeScrapApplied !== 'boolean') {
+    return 'flags 三個旗標都必須是布林值'
+  }
+  return null
+}

@@ -1,6 +1,7 @@
 // Excel 匯入解析自我驗證（設計書 §8-④）。
 // 跑法（Node ≥ 22.6，不需要 tsx；node_modules 要有 xlsx）：
-//   node --experimental-strip-types scripts/quote-import-test.mjs [Excel 目錄]
+//   npm run quote:import-test  （= node --experimental-strip-types --import ./scripts/ts-resolve.mjs scripts/quote-import-test.mjs；
+//    excelImport.ts 有 runtime 相對匯入，strip-types 要靠 ts-resolve.mjs 補 .ts 副檔名）
 // 對 golden.json 已知的四份檔案跑 parseQuoteWorkbook，把每頁產出的 input 餵 calcAcrylic
 // （settings = seed acrylic_settings 深合併 settings_snapshot），成本要對到該頁 B5（誤差 < 0.5%）。
 import { readFileSync, readdirSync } from 'node:fs'

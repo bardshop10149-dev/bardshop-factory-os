@@ -15,7 +15,8 @@
  * 所以 `node --experimental-strip-types scripts/quote-import-test.mjs` 可以直接載入自我驗證。
  */
 import * as XLSX from 'xlsx'
-import type { ImportGoldenProposal, ImportPreviewResponse, ImportPriceDiff } from './api'
+import { checkDerivedProduct, deriveProductFromInput, type KnownItem, type ReferenceProduct } from './deriveProduct'
+import type { ImportGoldenProposal, ImportPreviewResponse, ImportPriceDiff, ImportSettingDiff } from './api'
 import type {
   AcrylicInput,
   AcrylicSettings,
@@ -813,6 +814,47 @@ export function parseQuoteWorkbook(wb: XLSX.WorkBook, fileName: string, baseSett
   return { fileName, templateVersion: version.templateVersion, priceItems, goldenProposals, notes }
 }
 
+/** 可從 Excel 帶進後台的全域參數葉子（旗標刻意不在內）；陣列整組比較、整組套用 */
+export const SETTING_LABELS: Record<string, string> = {
+  'nesting.gapCm': '拼板間距（cm）',
+  'nesting.marginCm': '拼板邊距（cm）',
+  'cut.hoursPerDay': '切割：每日工時',
+  'cut.machines': '切割：機台數',
+  'cut.shiftFactor': '切割：班次係數',
+  'cut.efficiency': '切割：效率',
+  'cut.workDays': '每月工作天',
+  'cut.outlineTimeFactor': '外形銑時間係數',
+  'cut.machinesMonthly': '機台月折舊（整組）',
+  'cut.laborMonthly': '切割人工月薪',
+  'cut.knifeOutlineMonthly': '外形刀月費',
+  'cut.knifeGrooveMonthly': '銑槽刀月費',
+  'cut.knifeCoverMonthly': '蓋板刀月費',
+  'packLabor.hoursPerDay': '包裝：每日工時',
+  'packLabor.workDays': '包裝：每月工作天',
+  'packLabor.staff': '包裝人力（整組）',
+  'koshi.allowancePct': '柯式 PET 放數 %',
+  'koshi.trialSheets': '柯式試機張數',
+  'koshi.extraFreeSheets': '柯式加印免費張數',
+  'koshi.extraUnitPrice': '柯式加印單價',
+}
+
+function getPath(obj: unknown, path: string): unknown {
+  return path.split('.').reduce<unknown>((o, k) => (isPlainObject(o) ? o[k] : undefined), obj)
+}
+
+/** 把 diffSettings 的結果攤成有標籤的葉子清單（只列 SETTING_LABELS 有的路徑） */
+export function flattenSettingsDiff(base: AcrylicSettings, file: AcrylicSettings): ImportSettingDiff[] {
+  const out: ImportSettingDiff[] = []
+  for (const path of Object.keys(SETTING_LABELS)) {
+    const a = getPath(base, path)
+    const b = getPath(file, path)
+    if (b === undefined) continue
+    if (diffSettings(a, b) === undefined) continue
+    out.push({ path, label: SETTING_LABELS[path], current: a, incoming: b })
+  }
+  return out
+}
+
 /** route 用：Buffer → 預覽回應 */
 export function buildImportPreview(
   data: Uint8Array,
@@ -820,16 +862,51 @@ export function buildImportPreview(
   baseSettings: AcrylicSettings,
   currentPrices: Map<string, number>,
   extraNotes: string[] = [],
+  /** 建立新品項用：價格表現況（分組／attrs）與既有品項（找類似、核異常） */
+  ctx: { knownItems?: Map<string, KnownItem>; referenceProducts?: ReferenceProduct[] } = {},
 ): ImportPreviewResponse {
   // Node ESM 載入 CJS 的 xlsx 時 named export 由 cjs-module-lexer 偵測；保險起見 fallback 到 default
   const lib = ((XLSX as unknown as { default?: typeof XLSX }).default ?? XLSX) as typeof XLSX
   const wb = lib.read(data, { type: 'buffer', cellFormula: true, cellNF: false })
   const parsed = parseQuoteWorkbook(wb, fileName, baseSettings)
-  return {
+  const out: ImportPreviewResponse = {
     fileName,
     templateVersion: parsed.templateVersion,
     priceDiff: diffPrices(parsed.priceItems, currentPrices),
     goldenProposals: parsed.goldenProposals,
     notes: [...extraNotes, ...parsed.notes],
+    settingsDiff: [],
   }
+
+  // 全域參數差異：拿主产品那頁讀到的常數跟後台現值比（人工／折舊／刀費會在這裡冒出來）
+  const settingsBase = parsed.goldenProposals.find((g) => g.sheet === '主产品') ?? parsed.goldenProposals[0]
+  if (settingsBase?.settings_snapshot) out.settingsDiff = flattenSettingsDiff(baseSettings, settingsBase.settings_snapshot as AcrylicSettings)
+
+  // 「用這份 Excel 建立新品項」：設定從主产品那頁反推（沒有主产品就用第一個成本分頁）
+  const base = parsed.goldenProposals.find((g) => g.sheet === '主产品') ?? parsed.goldenProposals[0]
+  if (base && base.input) {
+    try {
+      const known = new Map<string, KnownItem>(ctx.knownItems ?? [])
+      // 价格表分頁裡的品名也算「已知」（套用時價格差異那段會新增它們），只是 attrs 未知
+      for (const p of parsed.priceItems) if (p.price != null && !known.has(p.name)) known.set(p.name, { group: p.group, attrs: null })
+      const input = base.input as AcrylicInput
+      const productName = base.name.split('｜')[0].replace(/^BA\d+\s*/i, '').trim()
+      const derived = deriveProductFromInput(input, known, { productName, fileName })
+      const knownPrices = new Map<string, number>(currentPrices)
+      for (const p of parsed.priceItems) if (p.price != null && !knownPrices.has(p.name)) knownPrices.set(p.name, p.price)
+      const { checks, similar } = checkDerivedProduct(derived, input, base.warnings, ctx.referenceProducts ?? [], knownPrices)
+      out.productProposal = {
+        suggestedName: derived.suggestedName,
+        fromSheet: base.sheet,
+        config: derived.config,
+        referencedPrices: derived.referencedPrices,
+        notes: derived.notes,
+        similar,
+        checks,
+      }
+    } catch (e) {
+      out.notes.push(`無法從這份表反推品項設定：${e instanceof Error ? e.message : String(e)}`)
+    }
+  }
+  return out
 }
