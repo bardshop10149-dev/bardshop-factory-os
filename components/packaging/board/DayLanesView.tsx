@@ -11,10 +11,11 @@
 //   │19:00═╪═════════════════════╪═══════════╪═══════════│
 //   │24:00 │                     │ 超出上限  │           │
 //
-// 每條線的卡＝day.cards 依 laneId 篩出（順序沿用伺服器 §3.6 固定排序），layoutLane 以該線 LaneScale 換算；
+// 每條線的卡＝day.cards 依 laneId 篩出（順序＝伺服器排好的 D74 線內順序），layoutLane 以該線 LaneScale 換算；
 // 所有線本體同高（取各線最後一張卡底部與 24:00 的最大值），格線才對得齊。
 // 寬度 < 1024px（手機／平板，不能拖）→ 各線上下堆疊、不畫時間尺（lines.md §5.2）。
 // 換日載入中（stale）所有 droppable 關閉：遮罩只擋畫面、擋不住 dnd-kit。
+// D74 同一條線內上下拖曳＝重排：插入線位置由 BoardLayout 算（reorderHint），這裡只轉交給對應的 LaneColumn。
 
 import { useMemo, type ReactNode } from 'react'
 import { useDroppable } from '@dnd-kit/core'
@@ -113,6 +114,7 @@ function buildLaneModels(day: BoardDay): LaneModel[] {
 export default function DayLanesView({
   day, today, prevDate, nextDate, dragRule, dragging, editable, canDrag, canResize, stale, stacked, hideCompleted,
   defaultLineName, handlersFor, onOpenOrder, onOpenDetail, onEditCapacity, onGoDate, onResize, onResizing, loadingOverlay,
+  reorderHint, ownLaneKey,
 }: {
   day: BoardDay
   today: YMD
@@ -142,6 +144,10 @@ export default function DayLanesView({
   /** 拉下緣開始／結束（暫停輪詢、略過 Undo 快捷鍵） */
   onResizing?: (active: boolean) => void
   loadingOverlay?: ReactNode
+  /** D74 拖曳中的插入線：laneKey＝`${date}:${lineId}` */
+  reorderHint?: { laneKey: string; topPx: number; mode: 'insert' | 'append' } | null
+  /** 被拖的排定卡所在的線（`${date}:${lineId}`）：同線重排不套日期限制 */
+  ownLaneKey?: string | null
 }) {
   const handlerMap = useHandlerMap(day.cards, handlersFor)
   const models = useMemo(() => buildLaneModels(day), [day])
@@ -287,6 +293,8 @@ export default function DayLanesView({
                   onResize={onResize}
                   onResizing={onResizing}
                   onEditCapacity={onEditCapacity}
+                  dropLine={reorderHint?.laneKey === `${day.date}:${m.lane.lineId}` ? reorderHint : null}
+                  ownLane={ownLaneKey === `${day.date}:${m.lane.lineId}`}
                 />
               ))}
             </div>

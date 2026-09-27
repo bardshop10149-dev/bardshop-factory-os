@@ -91,6 +91,18 @@ export const LANE_CARD_COMPACT_PX = 56
 /** D69：卡片詳情「修改歷程」一次最多取幾筆 */
 export const ADJUSTMENTS_LIST_LIMIT = 100
 
+// ── D73／D74（sql/20260928_packaging_sales_and_order.sql）──
+
+/**
+ * D74 線內順序 sort_index 的範圍：numeric(12,4) → 整數部分最多 8 位、小數最多 4 位。
+ * 新排入的卡＝「2026-01-01 起的分鐘數」（2026-09 約 39 萬），上限約可用到 2216 年。
+ */
+export const SORT_INDEX_ABS_MAX = 99_999_999
+export const SORT_INDEX_DECIMALS = 4
+/** D73 銷貨增量同步預設看近幾天（依 ARGO IO_DATE）；API 參數 days 可調 1～31 */
+export const SALES_SYNC_DEFAULT_DAYS = 3
+export const SALES_SYNC_MAX_DAYS = 31
+
 /**
  * D22：可以拖進日期欄（排定／預排）的待排池區塊。
  * - '3'（常平未寄出且交期緊張）：D22 明文「不預排、僅提醒」。
@@ -146,6 +158,11 @@ export interface PlacementRow {
   minutes_override_by?: string | null
   minutes_override_by_name?: string | null
   minutes_override_at?: string | null
+  /**
+   * D74：同一天同一條線內的上下順序（小的在上；null＝排在該線最上面、依固定排序）。
+   * 只影響顯示順序，不影響數量守恆。sql/20260928 套用前這欄不存在（讀不到＝null、寫入時自動略過）。
+   */
+  sort_index?: number | null
 }
 
 export type PlacementSource = 'manual' | 'ai'
@@ -325,6 +342,8 @@ export interface Placement {
   lineId?: number | null
   /** D69：主管覆寫的工時（以本列 qty 為準）；null／省略＝用標準估計 */
   minutesOverride?: MinutesOverride | null
+  /** D74：線內順序（規則見 lib/packaging/laneOrder.ts）；待排區一律 null */
+  sortIndex?: number | null
 }
 
 /** D69 覆寫工時（分鐘）與誰何時改的 */
@@ -376,6 +395,8 @@ export interface PlacementSnapshotRow {
   lineId?: number | null
   /** D69 覆寫工時（schemaVersion 2 起） */
   estMinutesOverride?: number | null
+  /** D74 線內順序（schemaVersion 3 起；v1／v2 快照沒有 → 還原後排在該線最上面、依固定排序） */
+  sortIndex?: number | null
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -588,6 +609,11 @@ export interface BoardCard {
   minutesOverride?: MinutesOverride | null
   /** D66：手動加入區塊來的卡（卡片標「手動・誰・何時」） */
   manual?: ManualInclusionMeta | null
+  /**
+   * D74：線內順序（DB sort_index；待排區 null）。day.cards 已依 laneOrder.compareLaneOrder 排好（null 在上、依固定排序；
+   * 其後依 sortIndex 由小到大）；前端重排時用它算中間值。
+   */
+  sortIndex?: number | null
 }
 
 /** 分線：日期欄裡的一條線（D67／D68；日檢視＝時間尺上的一欄，週／兩週＝日期欄內的小欄） */
@@ -599,7 +625,7 @@ export interface BoardLane {
   capacity: EffectiveLineCapacity
   /**
    * 這條線的卡數。卡片本身不重複放在 lane 裡（避免回應大小翻倍）：
-   * 前端以 day.cards.filter(c => c.laneId === lane.lineId) 取得，順序沿用 day.cards 的 §3.6 排序；日檢視依此順序沿時間往下疊。
+   * 前端以 day.cards.filter(c => c.laneId === lane.lineId) 取得，順序沿用 day.cards 的排序（D74 線內順序）；日檢視依此順序沿時間往下疊。
    */
   cardCount: number
   /** 已排工時（分鐘，含已完成、不含工時未知） */
@@ -624,7 +650,10 @@ export interface BoardDay {
   /** 例：'9/29（二）' */
   label: string
   capacity: EffectiveCapacity
-  /** 依 §3.6 排序：延誤 → 打樣 → 交期 → 建立時間 */
+  /**
+   * D74 排序（lib/packaging/laneOrder.ts compareLaneOrder）：sortIndex 為 null 的卡與延誤卡在前、依固定排序
+   * （延誤 → 預排到期 → 打樣 → 交期 → 建立時間）；其後依 sortIndex 由小到大。前端依 laneId 篩出即為各線順序。
+   */
   cards: BoardCard[]
   /** 已排工時（分鐘，含已完成、不含工時未知的卡） */
   usedMinutes: number
@@ -664,6 +693,8 @@ export interface BoardSkipped {
   manualSoGone?: number
   /** D66：手動加入的品項已回到正常區塊（不重複出手動卡） */
   manualBackInPool?: number
+  /** D73：手動加入的品項在 ARGO 已全數銷貨 → 不出卡（紀錄保留） */
+  manualSoldOut?: number
 }
 
 export interface BoardViewer {
@@ -732,8 +763,10 @@ export type PlacementOp =
   /**
    * 移到別天或待排區（null）；AI 卡被移動後 source 變 manual。
    * 分線：lineId 省略＝沿用原線（原線無效或原本在待排區 → line_required）；同一天換線＝同 toDate＋新 lineId。
+   * D74：sortIndex 省略＝換到別的「天×線」時放在該線最後（appendSortIndex）、顯示位置沒變時保留原順序、移到待排區清成 null；
+   *   有帶（含 null）＝直接用它（Undo「移回原線」時還原原本的上下位置）。
    */
-  | { op: 'move'; id: string; version: number; toDate: YMD | null; lineId?: number | null }
+  | { op: 'move'; id: string; version: number; toDate: YMD | null; lineId?: number | null; sortIndex?: number | null }
   /**
    * 拆卡（D7）：原卡留 keepQty，其餘各成新卡；keepQty + Σparts.qty 必須等於原 qty。
    * 分線：part.lineId 省略＝同原卡的線。D69：原卡有覆寫工時時依數量比例分給各張（lines.md §三.6）。
@@ -771,6 +804,13 @@ export type PlacementOp =
        */
       restoreMeta?: { by: string; byName: string | null; at: string } | null
     }
+  /**
+   * D74 線內上下排序：只改這張卡的 sort_index（不改日期、線、數量 → 必定「同日同線內」、數量守恆不受影響）。
+   * sortIndex：numeric(12,4) 範圍內；null＝回到「固定排序」群組。待排區的卡沒有線內順序 → bad_request。
+   * 已完成的卡也可以調（它仍佔時間尺位置，別的卡要能排到它前後）。反向操作＝reorder 回原值。
+   * 前端一次拖曳可能送多個 reorder（該線有 null 的卡時整條線重新編號），同一批送出＝一步 Undo。
+   */
+  | { op: 'reorder'; id: string; version: number; sortIndex: number | null }
 
 export type PlacementOpKind = PlacementOp['op']
 
@@ -916,10 +956,10 @@ export type VersionSource = 'manual' | 'auto_before_ai' | 'auto_after_ai' | 'aut
 
 export interface ScheduleSnapshot {
   /**
-   * 1＝P1 原版；2＝分線輪起（列多了 lineId、estMinutesOverride）。parseSnapshot 兩版都收；
-   * v1 快照還原時，排進日期的列落到預設線（lines.md §八）。
+   * 1＝P1 原版；2＝分線輪起（列多了 lineId、estMinutesOverride）；3＝D74 起（列多了 sortIndex）。parseSnapshot 三版都收；
+   * v1 快照還原時，排進日期的列落到預設線（lines.md §八）；v1／v2 還原後 sortIndex＝null（該線最上面、固定排序）。
    */
-  schemaVersion: 1 | 2
+  schemaVersion: 1 | 2 | 3
   takenAt: string
   today: YMD
   /** 只存未完成的擺放（完成是事實不是計畫，還原不動它） */
@@ -1099,6 +1139,7 @@ export type ManualAbsenceCode =
   | 'tower_closed'       // D43 塔台批已結案（含 D47 製令號解碼命中）
   | 'packaged_done'      // D45 塔台包裝站已報完工
   | 'sheet_stale'        // D44 發單超過 30 天仍未上塔台
+  | 'sold_out'           // D73 ARGO 已全數銷貨（出貨）：不可勾選（加入後也會被排除）
   | 'waiting_source'     // 有採購／製令來源但尚未達進池條件（常平未寄且不緊張、委外未到交期、前站未開工…）
   | 'unknown'            // 以上皆非（可能尚未發單、資料未同步）
 
@@ -1245,6 +1286,44 @@ export type AdjustmentsResponse =
       sameItem: { itemCode: string | null; count: number; avgPerUnitAfter: number | null; recent: TimeAdjustment[] }
     }
   | { success: false; error: string; code?: 'forbidden' | 'bad_request' | 'migration_required' | 'db_error' }
+
+// ─────────────────────────────────────────────────────────────────────
+// D73 銷貨同步（GET /api/packaging/sales-sync；lib/packaging/salesSync.ts）
+// ─────────────────────────────────────────────────────────────────────
+
+/**
+ * full＝erp_so_lines 中全部（未結案）SO 分批重算覆蓋，並清掉已不在 erp_so_lines 的 SO 的鏡像列；
+ * incremental＝近 N 天（IO_DATE）有銷貨的 SO ∪ 鏡像中近 N 天有銷貨的 SO（抓近期作廢）重算覆蓋。
+ */
+export type SalesSyncMode = 'full' | 'incremental'
+
+export interface SalesSyncStats {
+  mode: SalesSyncMode
+  /** incremental 的回看天數；full 為 null */
+  days: number | null
+  /** full 分片（shards > 1 時只處理 index % shards == shard 的 SO） */
+  shard: number
+  shards: number
+  /** 本次要重算的 SO 數、批數（每批 ≤ 60 張，ARGO 動態 WHERE 有 4000 字上限） */
+  soCount: number
+  batches: number
+  batchesDone: number
+  /** ARGO 回來的銷貨明細列數 */
+  argoRows: number
+  /** 寫入 erp_so_sales：upsert 列數、刪除的（SO, 品號）列數（作廢／改品號）、整張 SO 清空數（ARGO 已無任何銷貨） */
+  upserted: number
+  deleted: number
+  clearedSos: number
+  /** full：已不在 erp_so_lines（結案）而清掉鏡像的 SO 數 */
+  closedSosPurged: number
+  /** 時間預算用完（maxDuration 300 秒）而沒做完的批數；> 0 時 last_full_at 不更新 */
+  skippedBatches: number
+  elapsedMs: number
+}
+
+export type SalesSyncResponse =
+  | ({ success: true; partial: boolean; errors: string[] } & SalesSyncStats)
+  | { success: false; error: string; code?: 'unauthorized' | 'forbidden' | 'bad_request' | 'argo_unconfigured' | 'busy' | 'migration_required' | 'db_error' | 'argo_error' }
 
 // ─────────────────────────────────────────────────────────────────────
 // D68／D70 日檢視時間尺（純函式 lib/packaging/laneTimeline.ts，lines.md §三.7）

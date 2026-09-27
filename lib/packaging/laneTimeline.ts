@@ -2,7 +2,7 @@
 //
 // 座標：鐘面一律用「從 00:00 起的分鐘」（D70：一天＝00:00～24:00 完整時間軸，畫面只顯示 10:00～24:00，可調）。
 // 每條線各自換算（D68）：排滿該線正常工時＝19:00、排滿加班上限＝24:00；同一條橫線在不同線代表的累計工時不同。
-// 卡片位置由固定排序決定（D5 修正後仍不排時段），不是由放下的 y 座標決定。
+// 卡片位置由「線內順序」決定（D74：null 在上依固定排序、其後依 sort_index；見 laneOrder.ts），長度＝工時；仍不排時段（D5）。
 // 不 import supabase、不讀時鐘；相對路徑 import、不用 enum（node --experimental-strip-types 可直接測）。
 
 import {
@@ -103,7 +103,7 @@ export interface LaneLayoutOpts {
 
 /**
  * D68 卡片沿時間往下疊、長度＝工時（lines.md §3.7 layoutLane）：
- * cards 的順序＝day.cards 依 laneId 篩出的順序（§3.6 固定排序）。
+ * cards 的順序＝day.cards 依 laneId 篩出的順序（D74 線內順序）。
  * - 工時未知（minutes null）→ 只佔最小高度、累計工時不前進（zone unknown）
  * - 高度至少 minPx（28）；被前一張的最小高度往下推 → shifted（位置不再精確對應時間）
  * - 高度 < compactPx（56）→ compact（只顯示單號＋品名）

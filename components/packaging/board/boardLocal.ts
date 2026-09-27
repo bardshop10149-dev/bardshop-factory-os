@@ -6,6 +6,8 @@
 //   所以這裡不重做 allocateLine 等規則，只搬卡、改數量、重算欄頭已排分鐘。
 // - 分線輪起改用 lib/packaging 的純函式（scheduleLines／scheduleMinutes／scheduleCapacity.dayLoad）：
 //   自動選線（D72）、工時覆寫換算（D69）、各線負荷顏色要和伺服器同一套規則，拖放後畫面才不會「先跳一條線、重抓又跳回來」。
+// - D74 線內順序同理用 lib/packaging/laneOrder.ts：樂觀更新後各欄依同一規則重排（null 在上、其後依 sortIndex），
+//   新排入的卡給「現在」的 appendSortIndex（伺服器寫入時用它自己的時間，兩者都比既有的大 → 一樣落在最後）。
 
 import {
   MIN_CARD_MINUTES,
@@ -26,6 +28,8 @@ import type { PackagingCard, PoolBlock, PoolBlockId } from '@/lib/packaging/type
 import { dayLoad } from '@/lib/packaging/scheduleCapacity'
 import { activeLinesOf, laneRemaining, laneStopped, pickAutoLane, resolveLaneId } from '@/lib/packaging/scheduleLines'
 import { effectiveMinutes, mergeOverride, overrideFromEffective, splitOverride } from '@/lib/packaging/scheduleMinutes'
+import { appendSortIndex, insertIndexAt, planLaneReorder, sortByLaneOrder, type ReorderChange } from '@/lib/packaging/laneOrder'
+import { laneScale, layoutLane } from '@/lib/packaging/laneTimeline'
 
 export type BoardOk = Extract<BoardResponse, { success: true; unchanged?: false }>
 
@@ -229,7 +233,8 @@ export function rebaseOpVersions(ops: PlacementOp[], known: ReadonlyMap<string, 
       case 'setQty':
       case 'complete':
       case 'uncomplete':
-      case 'setMinutes': {
+      case 'setMinutes':
+      case 'reorder': {
         const v = cur(op.id, op.version)
         sim.set(op.id, v + 1)
         out.push({ ...op, version: v })
@@ -273,8 +278,11 @@ export function rebaseOpVersions(ops: PlacementOp[], known: ReadonlyMap<string, 
 export type LocalAction =
   /** lineId：toDate 非 null 時的線（前端已決定好的明確值，D72） */
   | { t: 'place'; id: string; qty: number; toDate: YMD | null; poolCard: PackagingCard; lineId: number | null }
-  /** lineId 省略＝沿用原線（同伺服器 move） */
-  | { t: 'move'; id: string; toDate: YMD | null; lineId?: number | null }
+  /**
+   * lineId 省略＝沿用原線（同伺服器 move）。
+   * sortIndex 省略＝同伺服器規則（換到別的天×線放最後、顯示位置沒變保留、進待排區清空）；有帶＝直接用
+   */
+  | { t: 'move'; id: string; toDate: YMD | null; lineId?: number | null; sortIndex?: number | null }
   | { t: 'unplace'; id: string }
   /** lineId：待排區的卡勾完成時放哪條線（伺服器省略＝預設線） */
   | { t: 'complete'; id: string; by: string; byName: string | null; atIso: string; lineId?: number | null }
@@ -284,6 +292,13 @@ export type LocalAction =
   | { t: 'merge'; targetId: string; sourceIds: string[] }
   /** D69 改工時：minutes＝以本列 qty 為準的覆寫值（null＝回到標準估計） */
   | { t: 'setMinutes'; id: string; minutes: number | null; by: string; byName: string | null; atIso: string }
+  /** D74 線內上下排序：只改 sortIndex，各欄重排後就是新順序 */
+  | { t: 'reorder'; id: string; sortIndex: number | null }
+
+/** D74 樂觀更新用的「放在該線最後」（伺服器會用寫入當下的時間，兩者都比既有的大） */
+function localAppend(seq = 0): number {
+  return appendSortIndex(new Date().toISOString(), seq)
+}
 
 /**
  * 改數量（拆卡、合併）後的卡：override＝新數量下「以 qty 為準」的覆寫值（null＝標準估計）。
@@ -338,6 +353,8 @@ function tempCardFromPool(
     minutesStd: minutes,
     minutesOverride: null,
     manual: meta?.manual ?? null,
+    // D74：新排入的卡放在該線最後；待排區沒有順序
+    sortIndex: toDate == null ? null : localAppend(),
   }
 }
 
@@ -437,8 +454,13 @@ export function applyLocal(d: BoardOk, a: LocalAction): BoardOk {
         if (c.placementId !== a.id) return c
         const lineId = a.toDate == null ? null : a.lineId !== undefined ? a.lineId : (c.lineId ?? null)
         const laneId = laneOf(d, lineId, a.toDate)
+        // D74：同伺服器 applyOps move 的規則
+        const sortIndex = a.toDate == null ? null
+          : a.sortIndex !== undefined ? a.sortIndex
+            : a.toDate === c.displayDate && lineId === (c.lineId ?? null) ? (c.sortIndex ?? null) : localAppend()
         return {
           ...c,
+          sortIndex,
           planDate: a.toDate,
           displayDate: a.toDate,
           originalDate: c.originalDate ?? a.toDate,
@@ -463,6 +485,8 @@ export function applyLocal(d: BoardOk, a: LocalAction): BoardOk {
         const planDate = c.planDate == null || c.planDate < d.today ? d.rollTarget : c.planDate
         return {
           ...c,
+          // D74：待排區卡勾完成＝排進 rollTarget 那條線 → 放最後
+          sortIndex: fromHolding ? localAppend() : (c.sortIndex ?? null),
           completed: { at: a.atIso, by: a.by, byName: a.byName, poolQtyAt: null },
           // 延誤卡／待排區卡勾完成 → 伺服器改到 rollTarget（實際完成日）
           displayDate: c.displayDate ?? d.rollTarget,
@@ -493,6 +517,8 @@ export function applyLocal(d: BoardOk, a: LocalAction): BoardOk {
           lineId,
           laneId: laneOf(d, lineId, p.toDate),
           flags: orig.flags.filter(f => f.code !== 'delayed' || p.toDate === orig.displayDate),
+          // D74：拆出的新卡放在該線最後
+          sortIndex: p.toDate == null ? null : localAppend(i),
         }
       })
       cards = [...cards.map(c => c.placementId === a.id ? withQty(c, a.keepQty, ov.keep) : c), ...parts]
@@ -528,6 +554,9 @@ export function applyLocal(d: BoardOk, a: LocalAction): BoardOk {
         }
       })
       break
+    case 'reorder':
+      cards = cards.map(c => (c.placementId === a.id ? { ...c, sortIndex: a.sortIndex } : c))
+      break
   }
 
   // 依 displayDate 重新分配到各欄；視窗外（之後的日期）暫時算進 later
@@ -542,8 +571,8 @@ export function applyLocal(d: BoardOk, a: LocalAction): BoardOk {
     arr.push(c)
     byDate.set(c.displayDate, arr)
   }
-  // 視窗內原本就在的卡維持原順序，新來的接在後面（欄內順序沒有意義，D5；重抓後依伺服器排序）
-  const days = d.days.map(day => recomputeDay(day, byDate.get(day.date) ?? []))
+  // D74：各欄依線內順序重排（穩定排序：sortIndex 為 null 或相同的卡保留伺服器排好的固定排序）；重抓後以伺服器為準
+  const days = d.days.map(day => recomputeDay(day, sortByLaneOrder(byDate.get(day.date) ?? [])))
   return {
     ...d,
     days,
@@ -551,6 +580,68 @@ export function applyLocal(d: BoardOk, a: LocalAction): BoardOk {
     pool,
     later: laterAdd > 0 ? { ...d.later, count: d.later.count + laterAdd } : d.later,
   }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// D74 線內上下排序（日檢視拖曳）
+// ─────────────────────────────────────────────────────────────────────
+
+/** 某天某條線的卡（順序＝day.cards；不在任何 lane 的卡歸第一條線，同 DayLanesView） */
+export function laneCardsOf(day: Pick<BoardDay, 'cards' | 'lanes'>, laneId: number): BoardCard[] {
+  const lanes = day.lanes ?? []
+  if (lanes.length === 0) return []
+  const ids = new Set(lanes.map(l => l.lineId))
+  const first = lanes[0].lineId
+  return day.cards.filter(c => (c.laneId != null && ids.has(c.laneId) ? c.laneId : first) === laneId)
+}
+
+/**
+ * 拖曳到日檢視某條線時「會放在哪裡」（插入線的位置與放下後排在哪張卡之前）。
+ * moving：被拖的排定卡（同一條線內＝重排，它自己不算插入點）；待排池卡或別條線的卡＝null（放到最後，D74）。
+ * yBodyPx：游標相對於該線時間軸本體頂端的 y；null＝不看位置、一律放最後。
+ * 卡片版面與 DayLanesView 相同（全部卡含已完成一起疊；隱藏已完成時它們照樣佔位，只是不能當插入點）。
+ * 延誤卡釘在最上面（laneOrder.ts）：插入點不能在延誤卡上面，游標在那裡時插入線畫在最後一張延誤卡下面。
+ */
+export function laneDropPlan(
+  day: Pick<BoardDay, 'cards' | 'lanes'>,
+  laneId: number,
+  movingId: string | null,
+  yBodyPx: number | null,
+  hideCompleted: boolean,
+): { beforeId: string | null; topPx: number; index: number; visibleCount: number } {
+  const lane = day.lanes?.find(l => l.lineId === laneId)
+  const cards = laneCardsOf(day, laneId)
+  if (!lane || cards.length === 0) return { beforeId: null, topPx: 0, index: 0, visibleCount: 0 }
+  const layouts = layoutLane(cards.map(c => ({ placementId: c.placementId, minutes: c.minutes })), laneScale(lane.capacity))
+  const visible = cards
+    .map((c, i) => ({ c, l: layouts[i] }))
+    .filter(x => x.c.placementId !== movingId && !(hideCompleted && x.c.completed))
+  let pinned = visible.findIndex(x => !isPinned(x.c))
+  if (pinned < 0) pinned = visible.length
+  const index = yBodyPx == null || movingId == null
+    ? visible.length
+    : Math.max(pinned, insertIndexAt(visible.map(x => ({ topPx: x.l.topPx, heightPx: x.l.heightPx })), yBodyPx))
+  const at = visible[index]
+  const last = visible[visible.length - 1]
+  return {
+    beforeId: at ? at.c.placementId : null,
+    topPx: at ? at.l.topPx : last ? last.l.topPx + last.l.heightPx : 0,
+    index,
+    visibleCount: visible.length,
+  }
+}
+
+/** 延誤卡（D50 順延進來、還沒被主管重排）：釘在最上面、不看 sortIndex（laneOrder.effectiveSortIndex） */
+const isPinned = (c: Pick<BoardCard, 'delayWorkdays' | 'completed'>): boolean => !c.completed && c.delayWorkdays > 0
+
+/**
+ * 同一條線內把 moving 拖到 beforeId 之前（null＝最後）要改的 sort_index（D74）。
+ * 該線全部卡（含已完成、隱藏的已完成）依目前顯示順序傳給 planLaneReorder；回空陣列＝位置沒變。
+ * replan 的那一筆＝被拖的是延誤卡：呼叫端送 move（排到目前顯示的那天、解除延誤）＋ sortIndex，不是 reorder。
+ */
+export function laneReorderChanges(day: Pick<BoardDay, 'cards' | 'lanes'>, laneId: number, movingId: string, beforeId: string | null): ReorderChange[] {
+  const lane = laneCardsOf(day, laneId).map(c => ({ placementId: c.placementId, version: c.version, sortIndex: c.sortIndex ?? null, pinned: isPinned(c) }))
+  return planLaneReorder(lane, movingId, beforeId)?.changes ?? []
 }
 
 /** 從工作台資料建立「id → 版本」表（送出前重算版本號用） */

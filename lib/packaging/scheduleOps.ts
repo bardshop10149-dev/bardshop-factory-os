@@ -8,6 +8,9 @@
 //
 // 分線輪（lines.md §3.8）：排進日期的卡一定屬於某條線（D72）、主管可改工時（D69 setMinutes）。
 // 線只是「同一天內放在哪一欄」：守恆（D7）、分配、順延（D50）、預排（D22）都不看線。
+// D74（lines.md 第十三章）：線內上下順序 sort_index——reorder 只改它；新排入某個「天×線」的卡（place、move 換線／換天、
+//   split 拆出的新卡、待排區卡勾完成）放在該線最後（appendSortIndex）；顯示位置沒變的操作保留原順序；進待排區清成 null。
+//   順序只影響顯示，守恆與分配照舊不看它。
 
 import {
   ADJUST_REASON_MAX,
@@ -27,6 +30,7 @@ import { displayDateOf, isBoardDay, isValidYmd, rollTarget, shortDate } from './
 import { allocateLine, isPlaceableBlock, r3 } from './scheduleAllocate'
 import { toSnapshotRow } from './scheduleSnapshot'
 import { isValidOverride, mergeOverride, splitOverride } from './scheduleMinutes'
+import { appendSortIndex, isValidSortIndex } from './laneOrder'
 
 export interface OpsState {
   /** 至少包含 ops 觸及的 SO 行的「全部」擺放（含已完成），守恆檢查才算得準 */
@@ -147,8 +151,11 @@ export function parseOps(
       case 'move': {
         if (!isUuid(o.id) || !isVersion(o.version) || !isDateOrNull(o.toDate ?? null)) return bad('move 欄位不完整')
         if (!isLineIdOrNull(o.lineId)) return bad('lineId 須為正整數')
+        if (o.sortIndex !== undefined && o.sortIndex !== null && typeof o.sortIndex !== 'number') return bad('sortIndex 須為數字或 null')
         const mv: Extract<PlacementOp, { op: 'move' }> = { op, id: o.id, version: o.version, toDate: (o.toDate as YMD | null | undefined) ?? null }
         if (o.lineId != null) mv.lineId = o.lineId as number
+        // D74：有帶（含 null）才放進去——省略與 null 語意不同（省略＝依規則決定、null＝清成固定排序）
+        if (o.sortIndex !== undefined) mv.sortIndex = o.sortIndex as number | null
         out.push(mv)
         break
       }
@@ -207,6 +214,7 @@ export function parseOps(
         if (!isOriginCardId(r.originCardId)) return bad(`restore.row.originCardId 須為 ${ORIGIN_CARD_ID_MAX} 字以內的字串`)
         if (!isLineIdOrNull(r.lineId)) return bad('restore.row.lineId 須為正整數')
         if (r.estMinutesOverride != null && typeof r.estMinutesOverride !== 'number') return bad('restore.row.estMinutesOverride 須為數字')
+        if (r.sortIndex != null && typeof r.sortIndex !== 'number') return bad('restore.row.sortIndex 須為數字')
         out.push({
           op, row: {
             id: r.id, soLineKey: r.soLineKey, qty: r.qty,
@@ -215,6 +223,7 @@ export function parseOps(
             source: r.source, originCardId: (r.originCardId as string | null | undefined) ?? null,
             lineId: (r.lineId as number | null | undefined) ?? null,
             estMinutesOverride: (r.estMinutesOverride as number | null | undefined) ?? null,
+            sortIndex: (r.sortIndex as number | null | undefined) ?? null,
           },
         })
         break
@@ -247,6 +256,13 @@ export function parseOps(
         out.push(sm)
         break
       }
+      case 'reorder': {
+        // D74：sortIndex 必帶（null＝回到固定排序群組）；範圍在 applyOps 驗
+        if (!isUuid(o.id) || !isVersion(o.version) || !('sortIndex' in o)) return bad('reorder 欄位不完整')
+        if (o.sortIndex !== null && typeof o.sortIndex !== 'number') return bad('sortIndex 須為數字或 null')
+        out.push({ op, id: o.id, version: o.version, sortIndex: o.sortIndex as number | null })
+        break
+      }
       default:
         return bad(`不認得的操作 ${String(o.op)}`)
     }
@@ -263,7 +279,7 @@ export function touchedKeys(ops: readonly PlacementOp[]): { lineKeys: Set<string
       case 'place': lineKeys.add(o.soLineKey); break
       case 'restore': lineKeys.add(o.row.soLineKey); break
       case 'merge': ids.add(o.targetId); for (const s of o.sources) ids.add(s.id); break
-      default: ids.add(o.id) // move／split／unplace／setQty／complete／uncomplete／setMinutes（D69）
+      default: ids.add(o.id) // move／split／unplace／setQty／complete／uncomplete／setMinutes（D69）／reorder（D74）
     }
   }
   return { lineKeys, ids }
@@ -294,7 +310,7 @@ export function rebaseVersions(ops: readonly PlacementOp[], byId: ReadonlyMap<st
         for (const p of o.parts) ver.set(p.id, 1)
         return { ...o, version: v }
       }
-      default: { // move / setQty / complete / uncomplete / setMinutes（D69：一般更新，version+1）
+      default: { // move / setQty / complete / uncomplete / setMinutes（D69）/ reorder（D74）：一般更新，version+1
         const v = cur(o.id, o.version)
         ver.set(o.id, v + 1)
         return { ...o, version: v }
@@ -358,7 +374,12 @@ export function applyOps(state: OpsState, ops: readonly PlacementOp[], ctx: OpsC
     updatedAt: ctx.nowIso, updatedBy: ctx.actor.email, updatedByName: ctx.actor.name,
     lineId: r.planDate == null ? null : (r.lineId ?? null),
     minutesOverride: override !== undefined ? override : overrideNow(r.estMinutesOverride),
+    // D74：待排區沒有線內順序
+    sortIndex: r.planDate == null ? null : (r.sortIndex ?? null),
   })
+  /** D74「放在該線最後」：同一批依操作先後遞增（拆卡一次拆出多張時保持先後） */
+  let appendSeq = 0
+  const nextAppend = (): number => appendSortIndex(ctx.nowIso, appendSeq++)
   const pastLimit = (() => {
     const t = Date.UTC(+today.slice(0, 4), +today.slice(5, 7) - 1, +today.slice(8, 10)) - PAST_MOVE_LIMIT_DAYS * 86_400_000
     return new Date(t).toISOString().slice(0, 10)
@@ -463,6 +484,8 @@ export function applyOps(state: OpsState, ops: readonly PlacementOp[], ctx: OpsC
         next.set(op.id, fresh({
           id: op.id, soLineKey: op.soLineKey, qty: r3(op.qty), planDate: op.toDate, originalDate: op.toDate,
           source: 'manual', originCardId: op.originCardId ?? null, lineId: op.toDate != null ? op.lineId ?? null : null,
+          // D74：新排入的卡放在該線最後
+          sortIndex: op.toDate != null ? nextAppend() : null,
         }, null))
         const cErr = checkConserve(i, op.soLineKey) ?? checkLineCount(i, op.soLineKey) ?? checkPre(i, op.id)
         if (cErr) return cErr
@@ -485,19 +508,34 @@ export function applyOps(state: OpsState, ops: readonly PlacementOp[], ctx: OpsC
           const lErr = checkLine(i, lineId, false)
           if (lErr) return lErr
         }
+        // D74 線內順序：有帶 sortIndex（Undo 還原原位置）就用它；移到待排區清成 null；
+        // 「顯示位置」沒變（同一天同一條線，例：延誤卡移到它目前顯示的今天）保留原順序；換到別的天×線 → 放該線最後
+        if (op.sortIndex != null && !isValidSortIndex(op.sortIndex)) return fail('bad_request', i, 'sortIndex 超出範圍（numeric(12,4)）')
+        let sortIndex: number | null
+        if (op.toDate == null) sortIndex = null
+        else if (op.sortIndex !== undefined) sortIndex = op.sortIndex
+        else {
+          const shownOn = displayDateOf(row, today, openWeekends).date
+          sortIndex = shownOn === op.toDate && rowLine === lineId ? (row.sortIndex ?? null) : nextAppend()
+        }
         // D50：主管手動挪過的卡以主管安排為準 → source 變 manual；original_date 只在第一次排上日期時補
         next.set(op.id, stamp(row, {
           planDate: op.toDate,
           originalDate: row.originalDate ?? op.toDate,
           source: 'manual',
           lineId,
+          sortIndex,
         }))
         // D22 只擋「把預排卡往前挪到預估可包日之前」；同一天只換線（toDate＝原日期）日期沒變，不再擋
         // （資料變動後已落在預估可包日之前的卡，主管仍可在當天換線，畫面照舊標 before_est_ready 提醒）
         const sameDayLineChange = op.toDate != null && op.toDate === row.planDate
         const pErr = sameDayLineChange ? null : checkPre(i, op.id)
         if (pErr) return pErr
-        const inv: Extract<PlacementOp, { op: 'move' }> = { op: 'move', id: op.id, version: row.version + 1, toDate: row.planDate }
+        // 反向：回原日期＋原線＋原順序（sortIndex 一律帶，Undo 才會回到原本的上下位置）
+        const inv: Extract<PlacementOp, { op: 'move' }> = {
+          op: 'move', id: op.id, version: row.version + 1, toDate: row.planDate,
+          sortIndex: row.planDate == null ? null : (row.sortIndex ?? null),
+        }
         if (row.planDate != null && rowLine != null) inv.lineId = rowLine
         invGroups.push([inv])
         break
@@ -539,6 +577,8 @@ export function applyOps(state: OpsState, ops: readonly PlacementOp[], ctx: OpsC
           next.set(p.id, fresh({
             id: p.id, soLineKey: row.soLineKey, qty: r3(p.qty), planDate: d,
             originalDate: row.originalDate ?? d, source: row.source, originCardId: row.originCardId, lineId,
+            // D74：拆出的新卡放在該線最後（原卡留在原位置）
+            sortIndex: d != null ? nextAppend() : null,
           }, overrideKeepMeta(so.parts[k], row.minutesOverride)))
         }
         const nErr = checkLineCount(i, row.soLineKey)
@@ -630,6 +670,7 @@ export function applyOps(state: OpsState, ops: readonly PlacementOp[], ctx: OpsC
         if (!isDateOrNull(r.planDate) || !isDateOrNull(r.originalDate)) return fail('date_invalid', i, '日期格式錯誤')
         if (!isOriginCardId(r.originCardId)) return fail('bad_request', i, `originCardId 須為 ${ORIGIN_CARD_ID_MAX} 字以內`)
         if (r.estMinutesOverride != null && !isValidOverride(r.estMinutesOverride)) return fail('minutes_invalid', i, '工時須為 1～6000 分鐘、最多 1 位小數')
+        if (r.sortIndex != null && !isValidSortIndex(r.sortIndex)) return fail('bad_request', i, 'sortIndex 超出範圍（numeric(12,4)）')
         // Undo 用：日期同 move（允許 400 天內的過去日期、不可超過 maxDate、未來須為工作台日期）；原排定日只是紀錄，只擋超過 maxDate
         const dErr = checkDate(i, r.planDate, true)
         if (dErr) return dErr
@@ -670,6 +711,8 @@ export function applyOps(state: OpsState, ops: readonly PlacementOp[], ctx: OpsC
         next.set(row.id, stamp(row, {
           planDate, qty, lineId,
           completed: { at: ctx.nowIso, by: ctx.actor.email, byName: ctx.actor.name, poolQtyAt: supply.total },
+          // D74：待排區的卡勾完成＝排進 rollTarget 那條線 → 放最後；已在日期欄的卡（含延誤卡，本來就顯示在 rollTarget）保留原順序
+          sortIndex: row.planDate == null ? nextAppend() : (row.sortIndex ?? null),
         }))
         const inv: Extract<PlacementOp, { op: 'uncomplete' }> = { op: 'uncomplete', id: row.id, version: row.version + 1 }
         if (planDate !== row.planDate) inv.prevPlanDate = row.planDate
@@ -694,7 +737,10 @@ export function applyOps(state: OpsState, ops: readonly PlacementOp[], ctx: OpsC
           const lErr = checkLine(i, lineId, true)
           if (lErr) return lErr
         }
-        const reopen = (qty: number) => next.set(row.id, stamp(row, { completed: null, planDate, qty, lineId }))
+        // D74：回到待排區 → 沒有線內順序；其他保留原順序
+        const reopen = (qty: number) => next.set(row.id, stamp(row, {
+          completed: null, planDate, qty, lineId, sortIndex: planDate == null ? null : (row.sortIndex ?? null),
+        }))
         const want = op.prevQty !== undefined ? r3(op.prevQty) : row.qty
         reopen(want)
         let cErr = checkConserve(i, row.soLineKey)
@@ -734,6 +780,18 @@ export function applyOps(state: OpsState, ops: readonly PlacementOp[], ctx: OpsC
         const inv: Extract<PlacementOp, { op: 'setMinutes' }> = { op: 'setMinutes', id: op.id, version: row.version + 1, minutes: prev, via: 'undo' }
         if (row.minutesOverride) inv.restoreMeta = { by: row.minutesOverride.by, byName: row.minutesOverride.byName, at: row.minutesOverride.at }
         invGroups.push([inv])
+        break
+      }
+
+      case 'reorder': {
+        // D74 線內上下排序：只改 sort_index（日期、線、數量都不動 → 必定在同日同線內、守恆不受影響）。
+        // 已完成的卡也可以（它仍佔時間尺的位置，其他卡要能排到它前後）；待排區的卡沒有線 → 不接受。
+        const row = getRow(i, op.id, op.version)
+        if (isFail(row)) return row
+        if (row.planDate == null) return fail('bad_request', i, '待排區的卡沒有線內順序，請先排進日期', row)
+        if (op.sortIndex !== null && !isValidSortIndex(op.sortIndex)) return fail('bad_request', i, 'sortIndex 超出範圍（numeric(12,4)）')
+        next.set(op.id, stamp(row, { sortIndex: op.sortIndex }))
+        invGroups.push([{ op: 'reorder', id: op.id, version: row.version + 1, sortIndex: row.sortIndex ?? null }])
         break
       }
 

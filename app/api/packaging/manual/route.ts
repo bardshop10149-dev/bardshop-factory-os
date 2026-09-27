@@ -16,6 +16,8 @@ import { guardPackaging, noStore, readJson, requireJson } from '@/lib/packaging/
 import { getPool, POOL_READ_MAX_AGE_MS, POOL_WRITE_MAX_AGE_MS } from '@/lib/packaging/poolCache'
 import { isLineKey, isQty } from '@/lib/packaging/scheduleOps'
 import { explainManualLines } from '@/lib/packaging/manualLookup'
+import { allocateSoldToLines } from '@/lib/packaging/salesAlloc'
+import { loadSalesForSos } from '@/lib/packaging/salesSync'
 import { manualBlockedReason, manualMetaOf, manualRecordEnded, normalPoolLineKeys, soLineNoStr } from '@/lib/packaging/manualPool'
 import { invalidateManualCache } from '@/lib/packaging/manualCache'
 import {
@@ -91,17 +93,20 @@ export async function GET(request: NextRequest) {
   const today = todayTaipei()
   try {
     const sb = getSupabaseAdminClient()
-    const [data, active, pool] = await Promise.all([
+    const [data, active, pool, soSales] = await Promise.all([
       loadManualLookupData(sb, so, today),
       loadActiveInclusionsBySo(sb, so),
       getPool({ maxAgeMs: POOL_READ_MAX_AGE_MS }),
+      // D73：這張 SO 的銷貨鏡像（表不存在／讀取失敗 → null，不判 sold_out）
+      loadSalesForSos(sb, [so]),
     ])
     const poolCards = pool.blocks.flatMap((b) => b.cards).filter((c) => c.soLineKey.toUpperCase().startsWith(`${so}-`))
     const manual = new Map<string, ManualInclusionMeta>(active.map((i) => [i.soLineKey, manualMetaOf(i)]))
     // 已全數完成的手動紀錄另外標出（待排池已無卡，畫面才能提示改由查詢結果移出）
     const placements = active.length > 0 ? await loadPlacementsByLines(sb, active.map((i) => i.soLineKey)) : []
     const manualDone = new Set(active.filter((i) => manualRecordEnded(i, placements, true) === 'done').map((i) => i.soLineKey))
-    const lines = explainManualLines({ so, today, poolCards, manual, manualDone, ...data })
+    const sold = soSales ? allocateSoldToLines(data.soLines, soSales).byLine : null
+    const lines = explainManualLines({ so, today, poolCards, manual, manualDone, ...data, sold })
     return noStore<ManualLookupResponse>({
       success: true,
       so,

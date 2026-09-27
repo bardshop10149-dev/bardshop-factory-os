@@ -71,6 +71,8 @@ export type DangerFlagCode =
   | 'hours_unknown' | 'calendar_fallback'
   | 'po_exceeds_so' | 'merged_into_mo' | 'ship_confirm_early'
   | 'not_on_sara'
+  /** D73：這個 SO 品項行在 ARGO 已部分銷貨（出貨）；卡片數量已扣成「未出貨量」 */
+  | 'partial_sold'
 
 export interface DangerFlag {
   code: DangerFlagCode
@@ -195,6 +197,11 @@ export interface PoolFreshness {
   /** 常平黃底同步（po_line_tracking updated_by='常平出貨同步' 的最新 updated_at） */
   changping: string | null
   orderSheet: string | null
+  /**
+   * D73：ARGO 銷貨鏡像（erp_so_sales）最後一次「成功」同步的時間（erp_so_sales_sync.last_ok_at）。
+   * null＝銷貨同步尚未啟用（新表未建）或還沒成功跑過——這時待排池不排除已銷貨品項（notes 另有說明）。
+   */
+  soSales: string | null
 }
 
 /** 未進池的計數（畫面頁尾顯示） */
@@ -216,6 +223,11 @@ export interface PoolExcluded {
    * 也不是出單表 30 天內已發單、尚未上塔台的 SO 行（D44）→ 不列入。以「卡」計（範圍判定在出卡之後）。
    */
   saraClosedOrAbsent: number
+  /**
+   * D73：ARGO 已全數銷貨（出貨）的 SO 品項行（以 SO 品項行計）：銷貨量依項次順序分配到同品號各行後，
+   * 未出貨量 ≤ 0 → 該行不出卡。銷貨同步尚未啟用時為 0。
+   */
+  soldOut: number
 }
 
 /** D44：出單日超過 30 天、ERP SO 行仍未結案、卻比對不到任何塔台批的一列（異常清單，給生管／Snow 追查） */

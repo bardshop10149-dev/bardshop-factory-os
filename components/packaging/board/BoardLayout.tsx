@@ -19,6 +19,10 @@
 //   lane:${date}:${lineId}＝指定線；day:${date}（週／兩週欄頭）＝自動選線（pickAutoLane，剩餘工時最多）；
 //   日檢視前後一天的 day:${date} 那天沒載入、算不出剩餘 → 排定卡沿用原線、待排池的卡放預設線（autoLane 的 fallback）；
 //   holding＝待排區（沒有線）；pool＝放回待排池。伺服器不自動選線，前端一律送明確 lineId，樂觀更新與伺服器結果才一致。
+// D74 線內上下排序：日檢視把排定卡拖回「它自己的那條線」＝重排（不改日期與線）：
+//   拖曳中追蹤游標 y → boardLocal.laneDropPlan 算出插入位置，LaneColumn 畫插入線；放下 → laneReorderChanges 算出要改的
+//   sort_index（其他卡都有值時只改一張；還有 null 時整條線重新編號），同一批送出＝一步 Undo（Ctrl+Z）。
+//   從別處拖進來（待排池、別條線、別天）一律放在該線最後（插入線畫在最後）。週／兩週不支援重排，順序與日檢視相同。
 //
 // 資料一律經 /api/packaging/*（瀏覽器端 Supabase 是 anon，不直接查表）。
 // 每次操作立即送出（自動儲存）；唯讀者與沒有編輯鎖的人看得到但不能拖、不能勾。
@@ -35,9 +39,11 @@ import {
   useSensor,
   useSensors,
   type DragEndEvent,
+  type DragMoveEvent,
   type DragStartEvent,
 } from '@dnd-kit/core'
 import {
+  MAX_OPS_PER_REQUEST,
   MINUTES_SNAP,
   type BoardCard,
   type PlacementOp,
@@ -59,7 +65,10 @@ import { isWeekend } from '@/lib/packaging/scheduleCalendar'
 import type { PackagingCard as PackagingCardData } from '@/lib/packaging/types'
 import PackagingOrderModal from '@/components/packaging/PackagingOrderModal'
 import { fmtQty } from '@/components/packaging/poolStyles'
-import { autoLaneFor, boardActiveLines, mergeCandidates, newId, parseDropId, ruleForBoardCard, ruleForPoolCard, type DragRule } from './boardLocal'
+import {
+  autoLaneFor, boardActiveLines, laneDropPlan, laneReorderChanges, mergeCandidates, newId, parseDropId, ruleForBoardCard, ruleForPoolCard,
+  type BoardOk, type DragRule, type LocalAction,
+} from './boardLocal'
 import { ago, clock, hours, md, mdw } from './boardFormat'
 import { useUndo } from './useUndo'
 import { useEditLock } from './useEditLock'
@@ -102,6 +111,24 @@ function writeLS(key: string, v: string) {
 type ActiveDrag =
   | { kind: 'pool'; card: PackagingCardData; rule: DragRule }
   | { kind: 'placement'; bc: BoardCard; rule: DragRule }
+
+/** D74 拖曳中的插入線（日檢視）：laneKey＝`${date}:${lineId}`；topPx＝該線時間軸本體內的位置 */
+type ReorderHint = { laneKey: string; topPx: number; mode: 'insert' | 'append' }
+
+/** 游標的 client y：優先用視窗 pointermove 追到的最新值；沒有時退回 dnd-kit 的起點＋位移（容器捲動過會有誤差） */
+function pointerClientY(tracked: { y: number } | null, e: { activatorEvent: Event | null; delta: { y: number } }): number | null {
+  if (tracked) return tracked.y
+  const a = e.activatorEvent as (Event & { clientY?: number; touches?: TouchList }) | null
+  const y0 = typeof a?.clientY === 'number' ? a.clientY : a?.touches?.[0]?.clientY
+  return typeof y0 === 'number' ? y0 + e.delta.y : null
+}
+
+/** 游標在某條線時間軸本體內的 y（本體＝LaneColumn 的 data-lane-body；量不到回 null＝放最後） */
+function laneBodyY(laneKey: string, clientY: number | null): number | null {
+  if (clientY == null || typeof document === 'undefined') return null
+  const el = document.querySelector(`[data-lane-body="${laneKey}"]`)
+  return el ? clientY - el.getBoundingClientRect().top : null
+}
 
 type Dialog =
   | { t: 'split'; bc: BoardCard }
@@ -147,6 +174,21 @@ export default function BoardLayout() {
   // 兩個同時開著時訂單詳情會被壓在後面看不到
   const openOrder = useCallback((so: string) => { setDetail(null); setOrderSo(so) }, [])
   const [activeDrag, setActiveDrag] = useState<ActiveDrag | null>(null)
+  const [reorderHint, setReorderHint] = useState<ReorderHint | null>(null)
+  /** 拖曳中游標的最新位置（D74 算插入點；dnd-kit 的 delta 含容器捲動量，不能直接當游標位置） */
+  const pointerRef = useRef<{ x: number; y: number } | null>(null)
+  const dragging = activeDrag != null
+  useEffect(() => {
+    if (!dragging) { pointerRef.current = null; return }
+    const onPointer = (e: PointerEvent) => { pointerRef.current = { x: e.clientX, y: e.clientY } }
+    const onTouch = (e: TouchEvent) => { const t = e.touches[0]; if (t) pointerRef.current = { x: t.clientX, y: t.clientY } }
+    window.addEventListener('pointermove', onPointer, { capture: true, passive: true })
+    window.addEventListener('touchmove', onTouch, { capture: true, passive: true })
+    return () => {
+      window.removeEventListener('pointermove', onPointer, { capture: true })
+      window.removeEventListener('touchmove', onTouch, { capture: true })
+    }
+  }, [dragging])
   const [hideDone, setHideDone] = useState<boolean>(() => {
     try { return typeof window !== 'undefined' && window.localStorage.getItem(HIDE_DONE_KEY) === '1' } catch { return false }
   })
@@ -318,6 +360,32 @@ export default function BoardLayout() {
     )
   }, [submit])
 
+  /**
+   * D74 同一條線內上下重排：beforeId＝放在哪張卡之前（null＝最後）。
+   * 只送 sort_index 有變的卡（其他卡都有值時只有被拖的這張）；一次拖曳＝一批＝一步 Undo。
+   * 被拖的是延誤卡（釘在最上面）→ 那一筆改送 move：排到它目前顯示的那天、解除延誤（D50「拖到任何一天即解除」）＋指定位置。
+   */
+  const reorderInLane = useCallback((d: BoardOk, bc: BoardCard, date: YMD, lineId: number, clientY: number | null) => {
+    const day = d.days.find(x => x.date === date)
+    if (!day) return
+    const plan = laneDropPlan(day, lineId, bc.placementId, laneBodyY(`${date}:${lineId}`, clientY), hideDone)
+    const changes = laneReorderChanges(day, lineId, bc.placementId, plan.beforeId)
+    if (changes.length === 0) return
+    if (changes.length > MAX_OPS_PER_REQUEST) {
+      showToast('warn', `這條線的卡太多（要重新編號 ${changes.length} 張，一次最多 ${MAX_OPS_PER_REQUEST} 張），無法調整順序`)
+      return
+    }
+    submit(
+      changes.map((c): PlacementOp => (c.replan
+        ? { op: 'move', id: c.id, version: c.version, toDate: date, lineId, sortIndex: c.sortIndex }
+        : { op: 'reorder', id: c.id, version: c.version, sortIndex: c.sortIndex })),
+      `調整順序 ${lineLabel(bc.card)}（${lineName(lineId)} 第 ${plan.index + 1} 張${changes.some(c => c.replan) ? '，解除延誤' : ''}）`,
+      changes.map((c): LocalAction => (c.replan
+        ? { t: 'move', id: c.id, toDate: date, lineId, sortIndex: c.sortIndex }
+        : { t: 'reorder', id: c.id, sortIndex: c.sortIndex })),
+    )
+  }, [hideDone, lineName, showToast, submit])
+
   const handlersFor = useCallback((bc: BoardCard, siblings: BoardCard[]): CardMenuHandlers => {
     const others = mergeCandidates(siblings, bc)
     return {
@@ -397,21 +465,44 @@ export default function BoardLayout() {
   )
 
   const onDragStart = (e: DragStartEvent) => {
+    setReorderHint(null)
     const d = e.active.data.current as { kind?: string; card?: PackagingCardData | null; bc?: BoardCard } | undefined
     if (d?.kind === 'pool' && d.card) setActiveDrag({ kind: 'pool', card: d.card, rule: ruleForPoolCard(d.card) })
     else if (d?.kind === 'placement' && d.bc) setActiveDrag({ kind: 'placement', bc: d.bc, rule: ruleForBoardCard(d.bc) })
     board.setDragging(true)
   }
 
+  /** D74 拖曳中（日檢視）：算插入線的位置；只有位置真的變了才 setState（每次滑鼠移動都重畫整個工作台太重） */
+  const onDragMove = (e: DragMoveEvent) => {
+    const drag = activeDrag
+    const t = e.over ? parseDropId(String(e.over.id)) : null
+    const day = view === 'day' && drag && data && t?.kind === 'lane' ? data.days.find(x => x.date === t.date) : undefined
+    if (!drag || !day || t?.kind !== 'lane') { setReorderHint(h => (h ? null : h)); return }
+    const laneKey = `${t.date}:${t.lineId}`
+    const own = drag.kind === 'placement' && drag.bc.displayDate === t.date && drag.bc.laneId === t.lineId
+    const y = own ? laneBodyY(laneKey, pointerClientY(pointerRef.current, e)) : null
+    const plan = laneDropPlan(day, t.lineId, own && drag.kind === 'placement' ? drag.bc.placementId : null, y, hideDone)
+    const next: ReorderHint = { laneKey, topPx: Math.round(plan.topPx), mode: own ? 'insert' : 'append' }
+    setReorderHint(h => (h && h.laneKey === next.laneKey && h.topPx === next.topPx && h.mode === next.mode ? h : next))
+  }
+
   const onDragEnd = (e: DragEndEvent) => {
     const drag = activeDrag
+    const clientY = pointerClientY(pointerRef.current, e)
     setActiveDrag(null)
+    setReorderHint(null)
     board.setDragging(false)
     if (!drag || !e.over || !data) return
     const target = parseDropId(String(e.over.id))
     if (!target) return
     // 擺放卡拖回待排池＝放回
     if (target.kind === 'pool') { if (drag.kind === 'placement') unplaceCard(drag.bc); return }
+    // D74：日檢視拖回自己的那條線＝上下重排（不改日期、線，所以不套 D22 的日期限制）
+    if (view === 'day' && drag.kind === 'placement' && target.kind === 'lane'
+      && drag.bc.displayDate === target.date && drag.bc.laneId === target.lineId) {
+      reorderInLane(data, drag.bc, target.date, target.lineId, clientY)
+      return
+    }
     if (drag.rule.blocked) return
     const toDate: YMD | null = target.kind === 'holding' ? null : target.date
     if (toDate && drag.rule.minDate && toDate < drag.rule.minDate) return
@@ -429,6 +520,7 @@ export default function BoardLayout() {
 
   const onDragCancel = () => {
     setActiveDrag(null)
+    setReorderHint(null)
     board.setDragging(false)
   }
 
@@ -557,6 +649,7 @@ export default function BoardLayout() {
               ・待排池彙整 {clock(data.pool.generatedAt, nowMs)}（{ago(data.pool.generatedAt, nowMs + lk.offsetMs)}）
               {board.lastLoadedAt ? `・畫面更新 ${clock(board.lastLoadedAt, nowMs)}` : ''}
             </span>
+            <SalesFreshness iso={data.freshness.soSales ?? null} nowMs={nowMs + lk.offsetMs} />
           </p>
           <div className="flex-1" />
           <button type="button" onClick={() => void board.reload(true)} disabled={board.loading || board.pending > 0}
@@ -641,7 +734,7 @@ export default function BoardLayout() {
         )}
       </header>
 
-      <DndContext sensors={sensors} collisionDetection={pointerWithin} onDragStart={onDragStart} onDragEnd={onDragEnd} onDragCancel={onDragCancel}>
+      <DndContext sensors={sensors} collisionDetection={pointerWithin} onDragStart={onDragStart} onDragMove={onDragMove} onDragEnd={onDragEnd} onDragCancel={onDragCancel}>
         <main className="flex flex-col gap-4 px-4 pb-4 lg:min-h-0 lg:flex-1 lg:flex-row lg:gap-1">
           {/* ─── 左：待排池＋待排區 ───
                寬度：使用者拖過分隔線 → 用記住的寬度（CSS 變數，只在 lg 生效；手機仍上下堆疊全寬），
@@ -729,6 +822,9 @@ export default function BoardLayout() {
                   onResize={resizeMinutes}
                   onResizing={board.setDragging}
                   loadingOverlay={loadingOverlay}
+                  reorderHint={reorderHint}
+                  ownLaneKey={activeDrag?.kind === 'placement' && activeDrag.bc.displayDate != null && activeDrag.bc.laneId != null
+                    ? `${activeDrag.bc.displayDate}:${activeDrag.bc.laneId}` : null}
                 />
               ) : (
                 <div className="flex h-40 items-center justify-center rounded-xl border border-dashed border-slate-800 text-xs text-slate-500">載入中…</div>
@@ -904,6 +1000,23 @@ export default function BoardLayout() {
   )
 }
 
+/**
+ * D73「銷貨資料更新於 xx:xx」（erp_so_sales_sync.last_ok_at）：取不到＝銷貨同步未啟用（待排池暫不排除已銷貨）；
+ * 超過 3 小時變橘（排程由 P3 設定，上班時間應每 30 分鐘一次）。
+ */
+function SalesFreshness({ iso, nowMs }: { iso: string | null; nowMs: number }) {
+  if (!iso) {
+    return <span className="text-slate-500" title="ARGO 銷貨同步尚未啟用或尚未成功跑過：待排池暫不排除已銷貨的品項">・銷貨同步未啟用</span>
+  }
+  const t = Date.parse(iso)
+  const stale = Number.isFinite(t) && nowMs - t > 3 * 3600_000
+  return (
+    <span className={stale ? 'text-amber-400' : 'text-slate-500'} title="ARGO 銷貨鏡像（erp_so_sales）最後一次成功同步；全數銷貨的品項行不列入待排池（D73）">
+      ・銷貨資料更新於 {clock(iso, nowMs)}{stale ? ' ⚠' : ''}
+    </span>
+  )
+}
+
 /** 左欄底部：略過的卡、異常清單筆數、規則說明 */
 function BoardFooter({ data }: { data: NonNullable<ReturnType<typeof useBoard>['data']> }) {
   const s = data.skipped
@@ -911,6 +1024,9 @@ function BoardFooter({ data }: { data: NonNullable<ReturnType<typeof useBoard>['
   // D66 手動加入：伺服器已算好但不出卡的兩種情況（沒寫出來的話，手動卡「悄悄消失」主管不知道原因）
   const manualGone = s.manualSoGone ?? 0
   const manualBack = s.manualBackInPool ?? 0
+  // D73：ARGO 已全數銷貨（整行不列入待排池）
+  const soldOut = data.excluded.soldOut ?? 0
+  const manualSold = s.manualSoldOut ?? 0
   return (
     <details className="rounded-xl border border-slate-800 bg-slate-950/40 px-3 py-2 text-[11px] text-slate-400">
       <summary className="cursor-pointer text-slate-300">
@@ -919,7 +1035,9 @@ function BoardFooter({ data }: { data: NonNullable<ReturnType<typeof useBoard>['
         {manualGone > 0 && <span className="ml-1 text-slate-500">（手動加入隱藏 {manualGone} 行）</span>}
       </summary>
       <ul className="mt-2 list-disc space-y-1 pl-4">
-        {hidden > 0 && <li>{hidden} 張已排的卡因訂單已完成或結案（塔台結案、包裝報完工、SO 結案）而隱藏（資料保留）。</li>}
+        {hidden > 0 && <li>{hidden} 張已排的卡因訂單已完成或結案（塔台結案、包裝報完工、ARGO 已全數銷貨、SO 結案）而隱藏（資料保留）。</li>}
+        {soldOut > 0 && <li>{soldOut} 個品項行在 ARGO 已全數銷貨（出貨），不列入待排池（D73）。</li>}
+        {manualSold > 0 && <li>{manualSold} 行手動加入在 ARGO 已全數銷貨，不再出卡（手動加入紀錄保留）。</li>}
         {manualGone > 0 && <li>{manualGone} 行手動加入因 ERP 訂單結案（該行已不在 ERP 資料）而隱藏（手動加入紀錄保留）。</li>}
         {manualBack > 0 && <li>{manualBack} 行手動加入已回到自動待排池，改用正常區塊的卡（手動卡讓位，不重複出現）。</li>}
         {s.consumedPast > 0 && <li>{s.consumedPast} 張過去日期的卡已由待排池扣完（多半是塔台已報包裝完工），不顯示。</li>}

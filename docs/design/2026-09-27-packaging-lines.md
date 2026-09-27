@@ -289,7 +289,7 @@ clockText(clockMin: number): string                                 // '13:30'�
 
 ```
 cursorWork = 0; prevBottomPx = 0
-for card in cards（順序＝day.cards 依 laneId 篩出，§3.6 固定排序）:
+for card in cards（順序＝day.cards 依 laneId 篩出；D74 起為線內順序，見 §十三.2）:
   w = card.minutes ?? 0                                  // 工時未知 → 0，只佔最小高度
   naturalTop = px(workToClock(cursorWork)); naturalBottom = px(workToClock(cursorWork + w))
   top = max(naturalTop, prevBottomPx)                    // 被前一張的最小高度推下去 → shifted
@@ -301,7 +301,7 @@ for card in cards（順序＝day.cards 依 laneId 篩出，§3.6 固定排序）
 
 - 已完成的卡照樣佔位（計入已排工時，p1.md §3.4 變灰），「隱藏已完成」時**不**從累計中扣掉（位置不跳動），只是不畫；**解讀**，待確認。
 - 欄高＝max(24:00 的 px, 最後一張卡底部)；超過 24:00 的區域畫紅色斜線底紋與「超出上限 X h」。
-- 卡片位置由固定排序決定，**不是**由放下的 y 座標決定（D5 修正後仍不排時段；拖進某條線＝加到那條線，位置照排序）。
+- 卡片「順序」決定位置、長度＝工時（仍不排時段，D5）。D74 起順序可由主管在日檢視上下拖曳調整；從別處拖進某條線＝放在該線最後（§十三.2）。
 
 **拉卡片下緣改工時（D69）**
 
@@ -712,7 +712,7 @@ I/O（新 `lib/packaging/manualDb.ts` `loadManualLookupData(sb, so)`，全部唯
 1. **無交易**：產能 PUT「先線列、後 daily」、學習紀錄在工時寫入之後，中途失敗的影響已設計成偏安全（週末偏「沒開」、紀錄失敗有提示），但不是原子。
 2. **自動選線只看當下剩餘**：D72 是「放下那一刻」的選擇，之後別的卡移動不會重新分配（主管安排為準）。
 3. **每條線各自換算時間尺**：同一條橫線在不同線代表不同的累計工時；跨線比對「誰先做完」要看線頭的已排／可用數字，不是看卡片高低。
-4. **卡片位置由固定排序決定**，拖放時的 y 座標不影響順序（D5 仍不排時段）；要調整線內順序需另開決策（p1 版面待決第 1 題）。
+4. ~~卡片位置由固定排序決定~~ → D74 已開放線內上下排序（§十三.2）；拖到別條線／別天仍一律放在該線最後，放下的 y 座標只在「同一條線內重排」時有意義。
 5. **覆寫工時在被修剪時等比縮小**：待排池減少（塔台報工）時，主管改過的工時跟著數量等比例變小，可能與主管原意不同。
 6. **手動卡一律視為可包（實線）**，沒有預估可包日；未到貨的東西也能被手動加入並排在今天。
 7. **舊版穩定站改產能不會進各線表**（§九）。
@@ -756,6 +756,99 @@ I/O（新 `lib/packaging/manualDb.ts` `loadManualLookupData(sb, so)`，全部唯
 | `explainManualLines` | 費用行不可勾；在池內顯示區塊；只在素材單/包裝單 → non_schedule_doc；D47 解碼命中已結案 → tower_closed；包裝站已報完工 → packaged_done；出單 31 天未上塔台 → sheet_stale；建議途程類型不外露廠商 |
 | `buildManualBlock` | 正常區塊已有 → 不出卡（backInPool）；ERP 查無 → soGone；工時用 routeType 估；cardId `#mn` |
 | `assembleBoard` | lanes 彙總與 day 加總一致；延誤卡保留原線；停用線卡回退預設線＋line_inactive；手動卡排定後待排池剩餘正確、勾完成後剩 0 不出卡 |
+
+---
+
+## 十三、D73 待排池排除已銷貨／D74 線內上下排序（2026-09-28）
+
+依據 `包裝排程計畫/需求決策紀錄.md` **D73、D74**。Migration：`sql/20260928_packaging_sales_and_order.sql`（冪等、單一交易；前提＝已套用 20260927 與 20260927b；套用前先備份）。
+
+### 13.1 D73 待排池排除已銷貨
+
+**資料模型**
+
+| 表 | 一列代表 | 欄位 |
+| --- | --- | --- |
+| `erp_so_sales`（新） | 一張 SO × 一個品號在 ARGO 的銷貨合計 | PK(`so`,`item_code`)、`sold_qty numeric(14,3)`（Σ QTY，QTY 空或 0 用 PRICE_QTY）、`last_sale_date`、`slip_count`（不重複銷貨單數）、`synced_at` |
+| `erp_so_sales_sync`（新，單列 id＝1） | 同步狀態 | `last_incremental_at`、`last_full_at`、`last_ok_at`、`last_error`（中文摘要 ≤ 500 字）、`rows_upserted`、`updated_at` |
+
+兩表 RLS 開、只有 `service_role` policy、`revoke all … from anon, authenticated`（同 20260927b 第 8 段）。
+
+**同步（`lib/packaging/salesSync.ts`，server-only；ARGO 只讀）**
+
+- 來源：ARGO `IV_INVENTORYIODETAIL`，`IO_TYPE='O'`、`IO_ACTION='SELL'`，欄 `SLIP_NO,IO_DATE,PDL_PJT_PROJECT_ID（來源 SO）,ISM_MBP_PART（品號）,QTY,PRICE_QTY`（同 argo-tool `sales_data.fetch_shipment_lines`）。
+- **整張 SO 重算覆蓋**：ARGO 作廢銷貨單會連明細一起刪除 → 每次把一批 SO（≤ 60 張，Oracle 動態 WHERE 4000 字上限）的全部銷貨重新彙總（`aggregateSalesDetail`），先 upsert、再刪掉 ARGO 已不存在的（SO, 品號）；整張 SO 已無任何銷貨 → 刪掉該 SO 全部列（純函式 `planMirrorWrite`）。先寫後刪：中途失敗寧可留舊列，不讓已銷貨的卡跑回待排池。
+- `mode=full`：`erp_so_lines` 全部 SO（2026-09-28 約 2,386 張＝40 批）。完整跑完（未分片）才清掉「已不在 `erp_so_lines`」（結案）SO 的鏡像列；`erp_so_lines` 讀到 0 列時不清（同步異常保護）。一次跑不完可用 `shard／shards` 分片。
+- `mode=incremental`（預設 `days=3`）：ARGO 近 N 天（IO_DATE）有銷貨的 SO ∪ **鏡像裡** `last_sale_date` 在近 N 天的 SO（近期作廢的單在 ARGO 已查不到，要靠鏡像找回來重算）∩ 未結案 SO。較舊的作廢由每晚 full 補。
+- ARGO 很慢（2026-09-28 實測 S_APIKEY 27 秒，另有整段無回應）：`argoQueryStrict`（`lib/argoQuery.ts` 新增）每次查詢有逾時（min(90 秒, 剩餘時間)），網路／逾時／5xx 最多試 3 次，整體預算 250 秒（route `maxDuration 300`），時間不夠的批略過並回 `partial`。
+- **「查無資料」與「ARGO 回錯誤」一定分開**：回應必須有 `RESULT` 陣列（可為空），有 `ERROR`／`STATUS` 失敗／缺 `RESULT` 一律當錯誤——若把錯誤當成空結果，整批 SO 的鏡像會被清掉、已出貨的卡全部跑回待排池。
+- SO 號拼進 Oracle `IN (…)` 前先過白名單 `^[A-Z0-9][A-Z0-9-]{2,39}$` 並把單引號加倍。
+- 狀態：完整成功才寫 `last_ok_at` 與 `last_incremental_at`／`last_full_at`（分片的 full 不更新 `last_full_at`）；未完成寫 `last_error`。
+
+**API `GET /api/packaging/sales-sync`**（`maxDuration 300`）
+
+- 驗證二擇一：`Authorization: Bearer <CRON_SECRET>`（或 `<WEBHOOK_SECRET>`，比照 `app/api/cron/*`；以 sha256＋`timingSafeEqual` 比對）；或已登入且具 `packaging_admin`（手動觸發，不需編輯鎖，同一實例 60 秒一次）。同一實例同時只跑一個同步（`busy` 409）。
+- 參數：`mode=full|incremental`、`days=1..31`、`shard`/`shards`（≤ 12）、`dry=1`（只查 ARGO 不寫，回前 50 列預覽）。
+- 回應 `SalesSyncResponse`：`{ success, partial, errors[], mode, days, shard, shards, soCount, batches, batchesDone, argoRows, upserted, deleted, clearedSos, closedSosPurged, skippedBatches, elapsedMs }`；錯誤碼 `unauthorized`（401）、`bad_request`（400）、`busy`（409／429）、`migration_required`（409）、`argo_unconfigured`（503）、`argo_error`（502）、`db_error`（500）。
+- GET 會寫入：Vercel Cron 只發 GET；寫的是 ARGO 鏡像、冪等，被跨站觸發也只是多同步一次。
+
+**待排池套用（純函式 `lib/packaging/salesAlloc.ts`）**
+
+1. `allocateSoldToLines(erp_so_lines, erp_so_sales)`：同一張 SO、同品號（不分大小寫）的行依項次由小到大扣，每行最多扣到自己的訂單量；超出全部訂單量（超額銷貨）算在最後一行。訂單量 ≤ 0 的行不分配。對不到任何行的銷貨（SO 上沒有這個品號）略過（`stats.sold_unmatched_rows`）。
+2. `applySoldToCards(cards, byLine, reestimate)`（`classifyPool` 在 D43 範圍之後、拆卡標示之前呼叫；D66 手動區塊 `buildManualBlock` 同樣呼叫）：
+   - 未出貨量 ≤ 0 → 整行不出卡，`excluded.soldOut`＋1（以 SO 品項行計；P0 頁尾「已全數銷貨」、工作台頁尾說明）。
+   - 部分銷貨 → 該行卡片合計以**上限**封頂：卡片合計 ≤ 訂單量時上限＝`min(卡片合計, 未出貨量)`；卡片合計 > 訂單量（包裝數量與訂單單位不同，例 30 張 vs 2100 件）時＝`卡片合計 × 未出貨量 ÷ 訂單量`。超出的量先扣可包量（區塊 2／5b／4／4x／mn…，出貨的一定是已就緒的貨），再扣未就緒量（預估可包日最晚／未知的先扣）；扣到 0 的卡不出；該行剩下的卡加 `partial_sold`（warn）「部分已出貨 X/Y」；數量有變的卡用同一個估算器重算工時。
+   - **為什麼封頂而不是相減**：待排池的數量可能已反映同一批貨（塔台已報包裝完工的量會先扣；採購只開了部分數量），相減會重複扣。
+3. 與分配守恆的交互（§3.3／§3.4 不改）：供給 S 變小 → 未完成卡依既有規則從最早修剪（旗標說明改為「ARGO 已部分銷貨出貨，或塔台已報包裝完工」）；已勾完成的量 U＝`clamp(C − (B − S))` 自動變小（已完成又出貨的不會重複扣）；整行不出卡時擺放計入 `skipped.lineGone*`。
+4. 鏡像表不存在（migration 未套用）或讀取失敗 → **不排除**、`notes` 最前面加說明（「銷貨同步尚未啟用」／「這次讀取失敗」）；表在但從沒成功同步過 → 照用已寫入的列（每張 SO 都是整張重算過的），另提示「尚未完整成功跑過一次」。
+5. 新鮮度：`PoolFreshness.soSales`＝`last_ok_at`。P0 頁「資料更新」列「ARGO 銷貨」（超過 180 分鐘變橘）；工作台標題列「銷貨資料更新於 xx:xx」（超過 3 小時變橘；null 顯示「銷貨同步未啟用」）。
+6. D66 手動查詢：新原因 `sold_out`（不可勾選；加入後也會被排除）。
+
+**上線排程建議（P3 設定 vercel.json；時間為 UTC）**
+
+| 路徑 | 建議 | 說明 |
+| --- | --- | --- |
+| `/api/packaging/sales-sync?mode=incremental&days=3` | `10,40 0-11 * * 1-6`（台北週一～六 08:10～19:40 每 30 分） | 白天出貨後 30 分內反映 |
+| `/api/packaging/sales-sync?mode=full` | `40 18 * * *`（台北每天 02:40） | 抓較舊的作廢、清結案 SO；若 ARGO 太慢跑不完，改成 `&shards=2&shard=0`／`&shard=1` 兩個時段 |
+
+**已知限制**：銷貨退回（銷退）不回補；同 SO 同品號多行時依項次分配，實際出的是哪一行 ARGO 銷貨明細看不出來；銷貨同步最多延遲一個排程週期（加上待排池快取 120 秒）；部分銷貨時扣的是「哪幾張卡」是推定（先扣可包量）。
+
+### 13.2 D74 線內上下排序
+
+**資料**：`packaging_placements.sort_index numeric(12,4)`（可 null；待排區一律 null）。只影響顯示順序，不影響數量守恆、分配、順延、預排。
+
+**排序規則（伺服器 `assembleBoard`、前端樂觀更新共用 `lib/packaging/laneOrder.ts`）**
+
+同一天同一條線內，由上往下：
+
+1. 「固定排序群組」：`sort_index` 為 null 的卡，**以及延誤卡**（D50 順延到今天、主管還沒重排的卡；它的 `sort_index` 是原本那天的值，不採用），依既有固定排序（延誤天數多 → 預排到期 → 打樣 → 交期 → 建立時間）→ 延誤卡一定在最上面；
+2. 其後是有 `sort_index` 的卡，由小到大（平手再用固定排序）。
+
+`day.cards` 整天一起依此排序，依 `laneId` 篩出就是各線順序；週／兩週檢視顯示順序與日檢視一致；待排區只用固定排序。
+
+**為什麼延誤卡不看 sort_index**：順延進來的卡帶著「原本那天」的順序值，和今天這條線的值比大小沒有意義（昨天的第 2 張會插在今天的第 2 張後面）；延誤＝該先處理的舊工作，釘在最上面最直覺。延誤卡被主管拖動時＝`move` 到它目前顯示的那天（解除延誤，同 D50「拖到任何一天即解除」）並帶指定位置的 `sortIndex`；別的卡不能插到延誤卡上面（插入點夾到延誤卡之後）。
+
+**為什麼 null 放上面（與需求提示的「null 放後面」不同，Snow 請確認）**：需求要求「新排入的卡預設放在該線最後」。若 null 放最後，在「從沒調整過順序、全是 null」的線上，新卡（有 sort_index）反而會跑到所有舊卡上面；null 放上面時新卡一律在最後，調整過的線也一樣。舊資料（migration 前的卡、舊版穩定站新增的卡）都是 null → 維持原本固定排序、排在最上面。
+
+**sort_index 的值**
+
+- 新排入（`place` 排進日期、`move` 換到別的「天×線」、`split` 拆出的新卡、待排區卡 `complete`）＝`appendSortIndex(now)`＝2026-01-01 起的分鐘數（同批每張 +0.001），一定大於既有值 → 在該線最後。
+- 顯示位置沒變的操作保留原值：同一天同一條線的 `move`（例：延誤卡移到它目前顯示的今天）、延誤卡勾完成、`merge` 的 target、`setQty`、`setMinutes`。移到待排區（`move toDate null`、`uncomplete` 回待排區）清成 null。
+- 主管上下拖曳：該線其他（非延誤）卡都有值 → 只改被拖的那張＝前後兩張的中間值（第一張非延誤＝下一張 − 1、最下＝上一張 + 1）；還有 null 的卡或間距不夠（平手、< 0.0001）→ 非延誤卡依新順序重新編號 1、2、3…（只送值有變的卡）。被拖的是延誤卡 → 那一筆送 `move`（見上）。
+
+**操作 `reorder`**（`PlacementOp`）：`{ op: 'reorder', id, version, sortIndex: number | null }`
+
+- 只改 `sort_index`（version＋1）→ 必定同日同線、守恆不受影響；已完成的卡也可以（仍佔時間尺位置）；待排區的卡 → `bad_request`；超出 numeric(12,4) → `bad_request`。需編輯鎖（同 `/api/packaging/placements`）。
+- 反向操作＝`reorder` 回原值（含 null）。一次拖曳可能送多個 reorder（重新編號），同一批送出＝一步 Undo；`parseOps`、`touchedKeys`（走 ids）、`rebaseVersions`、前端 `rebaseOpVersions` 都已納入。
+- `move` 可帶 `sortIndex`（有帶含 null＝直接用）：`move` 的反向操作一律帶原 `sortIndex`，Undo「換線／換天」會回到原本的上下位置。
+
+**畫面**：日檢視把排定卡拖回「它自己的那條線」＝重排：拖曳中追蹤游標 y，`laneDropPlan` 以卡片垂直中線算插入點（隱藏的已完成卡照樣佔位、不當插入點），`LaneColumn` 畫藍色插入線「放在這裡」；從待排池／別條線／別天拖進來畫在最後「放到最後」。放下送 `reorder`，Ctrl+Z 可還原。同線重排不改日期 → 不套 D22 日期限制（預排卡在自己的線也能重排）。卡片長度仍依工時（時間尺換算不變）。拉下緣改工時的把手 `stopPropagation`，不會觸發拖曳。延誤卡釘在最上面；拖動延誤卡＝排到今天（解除延誤）並放到指定位置。週／兩週不支援重排。一次最多送 `MAX_OPS_PER_REQUEST`（50）個 reorder，超過提示。
+
+**快照（D33）**：`schemaVersion 3`（列多 `sortIndex`）；`parseSnapshot` 收 1／2／3（v1／v2 → null）；還原時改放預設線的列清成 null。
+
+**Migration 未套用時**：讀取沒有這欄＝null；寫入遇到「找不到欄位 sort_index」（PGRST204／42703）→ 拿掉該欄重送一次（PostgREST 在欄位不存在時整個請求都不執行，重送安全），之後 60 秒內直接略過；只有 `reorder` 本身回「請先套用 sql/20260928…」。
+
+**已知限制**：延誤卡釘在最上面，想把今天的新卡排到延誤卡上面，要先拖動延誤卡（會解除延誤）；拆卡拆出的新卡放在最後而不是原卡正下方；舊版穩定站新增的卡為 null（排最上面）。
 
 ---
 

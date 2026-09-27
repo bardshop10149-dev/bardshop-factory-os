@@ -6,6 +6,7 @@
 // 絕不寫既有表（D4／D24）。
 // 分線輪（lines.md §4.2）：多讀線別（D72 驗 lineId）與 D66 手動區塊（併進待排池再算 supplyOf）；
 //   本批有值改變的 setMinutes → 寫入成功後插學習紀錄，失敗回 adjustmentLogFailed（工時已改成功）。
+// D74：reorder 只改 sort_index；sql/20260928 未套用（沒有這欄）時 reorder 回提示，其他操作照常（寫入時略過該欄）。
 
 import type { NextRequest, NextResponse } from 'next/server'
 import { describeError, getSupabaseAdminClient } from '@/lib/supabaseAdmin'
@@ -31,6 +32,8 @@ import {
   loadPlacementsByIds,
   loadPlacementsByLines,
   publicDbError,
+  sortIndexColumnMissing,
+  sortIndexMigrationMessage,
   verifyAndTouchLock,
   writeApplied,
 } from '@/lib/packaging/scheduleDb'
@@ -82,6 +85,8 @@ export async function handleApplyRequest(
   const parsed = parseOps(body.ops, opts.allowed)
   if (!parsed.ok) return failRes({ code: parsed.code, error: parsed.message, opIndex: parsed.opIndex })
   const ops = parsed.ops
+  const hasReorder = ops.some((o) => o.op === 'reorder')
+  if (hasReorder && sortIndexColumnMissing()) return failRes({ code: 'db_error', error: sortIndexMigrationMessage() })
 
   const actor = { email: g.member.email, name: g.member.realName }
   const nowMs = Date.now()
@@ -161,7 +166,7 @@ export async function handleApplyRequest(
       }
     }
 
-    const w = await writeApplied(sb, res)
+    const w = await writeApplied(sb, res, { requiresSortIndex: hasReorder })
     if (!w.ok) {
       console.error('[packaging/write] 寫入失敗:', w.code, w.message, w.partial ? '(partial)' : '')
       return failRes({ code: w.code, error: w.partial ? `${w.message}（部分操作已寫入，請重新載入）` : w.message, current: w.current, partial: w.partial, lock: lk.lock })

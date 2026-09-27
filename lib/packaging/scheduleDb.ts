@@ -58,6 +58,8 @@ export const TBL = {
 
 /** 分線輪 migration 檔名（錯誤訊息提示用） */
 export const LINES_MIGRATION_FILE = 'sql/20260927b_packaging_p1_extend.sql'
+/** D73／D74 migration 檔名（placements.sort_index 與銷貨鏡像表） */
+export const ORDER_MIGRATION_FILE = 'sql/20260928_packaging_sales_and_order.sql'
 
 const PAGE = 1000
 const IN_CHUNK = 100
@@ -113,6 +115,41 @@ export function publicDbError(e: unknown, what = '資料庫存取'): string {
   if (code && MISSING_TABLE_CODES.has(code)) return `找不到資料表（${code}），請先套用 migration（分線輪：${LINES_MIGRATION_FILE}）`
   if (code && MISSING_COLUMN_CODES.has(code)) return linesMigrationMessage(e)
   return `${what}失敗${code ? `（${code}）` : ''}，請稍後再試`
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// D74 sort_index 欄的「未套用降級」
+// ─────────────────────────────────────────────────────────────────────
+// 與分線輪不同，sort_index 缺了不影響數量與排程正確性（只是順序回到固定排序），所以新程式在 sql/20260928 套用前也要能寫：
+// 寫入遇到「找不到欄位 sort_index」（PGRST204／42703）→ 記下時間、拿掉這個鍵重送一次；之後 60 秒內的寫入直接先拿掉
+// （60 秒後再試一次，Snow 套用 migration 後最晚 1 分鐘恢復）。只有「調整線內順序（reorder）」本身沒有這欄就做不到 → 回錯誤提示。
+// PostgREST 在欄位不存在時「整個請求」就被拒絕、什麼都沒寫，所以重送是安全的。
+
+const SORT_INDEX_RECHECK_MS = 60_000
+let sortIndexMissingAt = 0
+
+/** 目前是否視為 sort_index 欄不存在（60 秒內遇過「找不到欄位」） */
+export function sortIndexColumnMissing(nowMs = Date.now()): boolean {
+  return sortIndexMissingAt > 0 && nowMs - sortIndexMissingAt < SORT_INDEX_RECHECK_MS
+}
+
+function isSortIndexMissingError(e: unknown): boolean {
+  const code = pgCodeOf(e)
+  const msg = e && typeof e === 'object' ? String((e as { message?: unknown }).message ?? '') : ''
+  return !!code && MISSING_COLUMN_CODES.has(code) && /sort_index/.test(msg)
+}
+
+/** 欄位不存在時拿掉 sort_index 鍵（其他情況原樣回傳） */
+function forWrite<T extends { sort_index?: unknown }>(row: T): T {
+  if (!sortIndexColumnMissing()) return row
+  const copy: Record<string, unknown> = { ...row }
+  delete copy.sort_index
+  return copy as T
+}
+
+/** reorder 需要 sort_index 欄時的提示（保留「找不到資料表或欄位」字樣，前端 isMissingTableMessage 認得） */
+export function sortIndexMigrationMessage(): string {
+  return `找不到資料表或欄位（sort_index），調整線內順序請先套用 ${ORDER_MIGRATION_FILE}`
 }
 
 type PgResult<T> = { data: T[] | null; error: unknown }
@@ -247,16 +284,23 @@ const mutablePatch = (p: Placement) => {
     minutes_override_by: r.minutes_override_by ?? null,
     minutes_override_by_name: r.minutes_override_by_name ?? null,
     minutes_override_at: r.minutes_override_at ?? null,
+    // D74：reorder、move 換線／換天（放最後）、Undo 還原順序
+    sort_index: r.sort_index ?? null,
   }
 }
 
 /**
  * 依 applyOps 的結果寫入：
  * 1. 刪除：or(and(id,version),…) 一個請求一塊，回傳筆數不符 → version_conflict
- * 2. 減量／不變量的更新（對「未完成總量」的貢獻沒有增加：move、split 原卡、complete、setQty 減少…）：逐列 eq(id).eq(version)
+ * 2. 減量／不變量的更新（對「未完成總量」的貢獻沒有增加：move、split 原卡、complete、setQty 減少、reorder…）：逐列 eq(id).eq(version)
  * 3. 新增（bulk insert；主鍵衝突 → id_exists）與增量更新（merge 目標、setQty 增加、uncomplete）
+ * requiresSortIndex：本批有 reorder（D74）——sort_index 欄不存在時不能「拿掉欄位照寫」（那等於什麼都沒改卻回成功）。
  */
-export async function writeApplied(sb: SupabaseAdmin, applied: ApplyOk): Promise<{ ok: true; rows: Placement[]; deletedIds: string[] } | WriteFail> {
+export async function writeApplied(
+  sb: SupabaseAdmin,
+  applied: ApplyOk,
+  opts: { requiresSortIndex?: boolean } = {},
+): Promise<{ ok: true; rows: Placement[]; deletedIds: string[] } | WriteFail> {
   let wrote = false
   const rows: Placement[] = []
   const deletedIds: string[] = []
@@ -278,9 +322,23 @@ export async function writeApplied(sb: SupabaseAdmin, applied: ApplyOk): Promise
   const decreasing = applied.updates.filter((u) => openContribution(u.after) <= openContribution(u.before))
   const increasing = applied.updates.filter((u) => openContribution(u.after) > openContribution(u.before))
 
+  /** sort_index 欄不存在時：記下並回 true（呼叫端拿掉欄位重送一次）；本批有 reorder 則改回錯誤 */
+  const sortIndexFallback = (error: unknown): 'retry' | WriteFail | null => {
+    if (!isSortIndexMissingError(error)) return null
+    sortIndexMissingAt = Date.now()
+    if (opts.requiresSortIndex) return { ok: false, code: 'db_error', message: sortIndexMigrationMessage(), partial: wrote }
+    return 'retry'
+  }
+
   const updateOne = async (u: { before: Placement; after: Placement }): Promise<WriteFail | null> => {
-    const { data, error } = await sb.from(TBL.placements).update(mutablePatch(u.after))
+    const send = () => sb.from(TBL.placements).update(forWrite(mutablePatch(u.after)))
       .eq('id', u.before.id).eq('version', u.before.version).select('*')
+    let { data, error } = await send()
+    if (error) {
+      const fb = sortIndexFallback(error)
+      if (fb === 'retry') ({ data, error } = await send())
+      else if (fb) return fb
+    }
     if (error) return dbFail(error, wrote)
     const got = (data ?? []) as PlacementRow[]
     if (got.length === 0) return conflict(u.before.id, '這張卡已被其他操作更新，請重新整理')
@@ -294,7 +352,13 @@ export async function writeApplied(sb: SupabaseAdmin, applied: ApplyOk): Promise
 
   // 3a. 新增
   for (const part of chunks(applied.inserts, INSERT_CHUNK)) {
-    const { data, error } = await sb.from(TBL.placements).insert(part.map(placementToRow)).select('*')
+    const send = () => sb.from(TBL.placements).insert(part.map((p) => forWrite(placementToRow(p)))).select('*')
+    let { data, error } = await send()
+    if (error) {
+      const fb = sortIndexFallback(error)
+      if (fb === 'retry') ({ data, error } = await send())
+      else if (fb) return fb
+    }
     if (error) {
       const code = (error as { code?: string }).code
       if (code === '23505') return { ok: false, code: 'id_exists', message: '卡片 id 重複，請重新整理', partial: wrote }
@@ -323,7 +387,13 @@ export async function deleteOpenPlacements(sb: SupabaseAdmin, ids: readonly stri
 export async function insertPlacements(sb: SupabaseAdmin, list: readonly Placement[]): Promise<Placement[]> {
   const out: Placement[] = []
   for (const part of chunks(list, INSERT_CHUNK)) {
-    const { data, error } = await sb.from(TBL.placements).insert(part.map(placementToRow)).select('*')
+    const send = () => sb.from(TBL.placements).insert(part.map((p) => forWrite(placementToRow(p)))).select('*')
+    let { data, error } = await send()
+    // D74 sort_index 欄尚未建立（sql/20260928 未套用）：拿掉欄位重送一次（快照還原的順序回到固定排序）
+    if (error && isSortIndexMissingError(error)) {
+      sortIndexMissingAt = Date.now()
+      ;({ data, error } = await send())
+    }
     if (error) throw new ScheduleDbError('寫入擺放', error)
     out.push(...((data ?? []) as PlacementRow[]).map(rowToPlacement))
   }

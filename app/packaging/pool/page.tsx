@@ -55,6 +55,8 @@ const FRESHNESS_ITEMS: { key: keyof PoolFreshness; label: string; staleMins: num
   { key: 'saraRecords', label: '塔台報工', staleMins: 240, tip: 'sara_wip_records 最後匯入時間（每 3 小時）' },
   { key: 'changping', label: '常平出貨', staleMins: 26 * 60, tip: '常平黃底同步（目前每晚 23:30 一次）' },
   { key: 'orderSheet', label: '出單表', staleMins: null, tip: 'daily_order_sheets 最後更新時間' },
+  // D73：ARGO 銷貨鏡像（erp_so_sales）最後一次成功同步；排程由 P3 設定（建議上班時間每 30 分增量、每晚全量）
+  { key: 'soSales', label: 'ARGO 銷貨', staleMins: 180, tip: '銷貨同步（erp_so_sales）最後一次成功的時間；取不到＝銷貨同步尚未啟用，待排池暫不排除已銷貨' },
 ]
 
 /**
@@ -63,6 +65,10 @@ const FRESHNESS_ITEMS: { key: keyof PoolFreshness; label: string; staleMins: num
  * 顯示順序＝物件鍵的順序。
  */
 const EXCLUDED_ITEMS: Record<keyof PoolExcluded, { label: string; desc: string }> = {
+  soldOut: {
+    label: '已全數銷貨',
+    desc: '以 SO 品項行計。ARGO 銷貨單已出貨完（銷貨量依項次由小到大分配到同品號各行，本行未出貨量 ≤ 0，D73）；部分銷貨的仍在池內，只留未出貨量並標「部分已出貨」。銷貨同步尚未啟用時為 0',
+  },
   saraClosedOrAbsent: {
     label: '塔台已結案或不在塔台',
     desc: '以卡計。卡片對不到塔台目前未結案的批（塔台已結案＝多半已出貨，D43），也不是出單表 30 天內已發單、尚未上塔台的品項；發單超過 30 天仍未上塔台的另列在上方清單',
@@ -112,7 +118,7 @@ const FALLBACK_NOTES = [
   '同 SO 行各採購單已入庫合計達訂單量時，其他採購行的未到量不另出卡，卡上標「可能重複開單」請採購確認。',
   '委外（MPO）在塔台只有 QC 工序，P0 沒有包裝完成訊號；已入庫的委外卡留到塔台批結案或 SO 結案。',
   '自製製令以塔台包裝工序完工代替 ARGO 繳庫（EIP 未同步繳庫量）。',
-  '「SO 行已全數銷貨」查不到（系統不查 ARGO 銷貨），以塔台結案與 SO 結案判斷。',
+  '已銷貨（D73）：EIP 定時把 ARGO 銷貨依「SO＋品號」同步成鏡像，待排池只讀鏡像；全數銷貨的品項行不列入，部分銷貨只留未出貨量並標「部分已出貨」。銷貨同步尚未啟用時不排除。',
   '常平出貨燈可能誤亮：同單同品號多行時黃底同步會把所有行都亮燈；配不到數量的行標「出貨燈可能誤亮」。',
   '常平黃底同步目前每晚 23:30 一次；分批寄出時只記第一次寄出。出貨日未解析者不估可包日。',
   '預估可包日＝寄出日＋預設運輸工作天（順豐 3、空運 5、海特快 7、一般海運 13），尚未以實績校正。',

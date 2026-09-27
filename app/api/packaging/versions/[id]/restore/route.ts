@@ -148,6 +148,8 @@ export async function POST(request: NextRequest, ctx: Ctx) {
       // D72：planRestore 已把缺線／停用線的列改放預設線；D69：覆寫值照寫（快照不存作者，記為還原者）
       lineId: r.planDate == null ? null : (r.lineId ?? defaultLineId),
       minutesOverride: r.estMinutesOverride != null ? { minutes: r.estMinutesOverride, by: actor.email, byName: actor.name, at: nowIso } : null,
+      // D74：線內順序照快照（v1／v2 快照、改放預設線的列為 null）
+      sortIndex: r.planDate == null ? null : (r.sortIndex ?? null),
     }))
     await insertPlacements(sb, rows)
 

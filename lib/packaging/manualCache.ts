@@ -13,6 +13,7 @@ import { computeStdTime, loadStdTimeTables, type StdTimeTables } from '@/lib/pac
 import type { WorkEstimator } from '@/lib/packaging/classify'
 import { buildManualBlock, mergeManualIntoPool, normalPoolLineKeys } from '@/lib/packaging/manualPool'
 import { loadActiveInclusions, loadSoLinesForSos, manualFingerprint } from '@/lib/packaging/manualDb'
+import { loadSalesForSos } from '@/lib/packaging/salesSync'
 import type { SupabaseAdmin } from '@/lib/packaging/scheduleDb'
 
 type PoolOk = Extract<PoolResponse, { success: true }>
@@ -25,7 +26,7 @@ export interface ManualMerged {
   pool: PoolOk
   meta: Record<string, ManualInclusionMeta>
   backInPoolKeys: ReadonlySet<string>
-  skipped: { soGone: number; backInPool: number }
+  skipped: { soGone: number; backInPool: number; soldOut: number }
 }
 
 let stdTables: { at: number; data: StdTimeTables } | null = null
@@ -62,12 +63,14 @@ export async function getManualMergedPool(sb: SupabaseAdmin, pool: PoolOk): Prom
     const built = buildManualBlock({ inclusions: [], soLines: [], normalLineKeys: new Set(), estimate: () => { throw new Error('unused') }, today: pool.today })
     value = { pool: mergeManualIntoPool(pool, built.block), meta: {}, backInPoolKeys: new Set(), skipped: built.skipped }
   } else {
-    const [soLines, tables] = await Promise.all([
+    const [soLines, tables, soSales] = await Promise.all([
       loadSoLinesForSos(sb, inclusions.map((i) => i.so)),
       getStdTables(sb),
+      // D73：這些 SO 的銷貨鏡像（表不存在／讀取失敗 → null，不排除；銷貨變動最多晚 120 秒快取反映）
+      loadSalesForSos(sb, inclusions.map((i) => i.so)),
     ])
     const estimate: WorkEstimator = (input) => computeStdTime(input, tables).work
-    const built = buildManualBlock({ inclusions, soLines, normalLineKeys: normalPoolLineKeys(pool), estimate, today: pool.today })
+    const built = buildManualBlock({ inclusions, soLines, normalLineKeys: normalPoolLineKeys(pool), estimate, today: pool.today, soSales })
     value = { pool: mergeManualIntoPool(pool, built.block), meta: built.meta, backInPoolKeys: built.backInPoolKeys, skipped: built.skipped }
   }
   memo.set(pool.blocks, { fp, at: Date.now(), value })

@@ -1,7 +1,9 @@
 'use client'
 
 // D67／D68 日檢視的一條線（一欄）：sticky 線頭＋時間軸本體。
-// - 整欄（線頭＋本體）＝droppable `lane:${date}:${lineId}`：放下＝排到／移到這條線（位置照固定排序，不看放下的 y，D5）
+// - 整欄（線頭＋本體）＝droppable `lane:${date}:${lineId}`：放下＝排到／移到這條線（新排入放在該線最後，D74）；
+//   同一條線內拖曳＝上下重排（D74）：BoardLayout 依游標 y 算插入位置（boardLocal.laneDropPlan），這裡畫插入線 dropLine
+// - 本體 data-lane-body＝`${date}:${lineId}`：BoardLayout 放下時量它的位置，把游標換算成「本體內的 y」
 // - 線頭：線名、該線負荷條（CapacityBar，各線各自的正常／加班）、未設定／未排班提示、⚙ 開這條線的產能設定
 //   線頭是固定高度（LANE_HEADER_PX，時間尺左上角同高才對得齊 10:00）：內容一律單行（負荷文字不換行、
 //   「工時未知 N 張」放在線名列），外層 overflow-hidden 兜底，不讓線頭長高壓到 10:00 那一段
@@ -32,7 +34,7 @@ export interface LaneEntry {
 
 export default function LaneColumn({
   date, lane, scale, entries, bodyHeightPx, weekend, today, dragRule, stale, editable, canDrag, canResize, hideCompleted,
-  handlerMap, onOpenOrder, onOpenDetail, onResize, onResizing, onEditCapacity,
+  handlerMap, onOpenOrder, onOpenDetail, onResize, onResizing, onEditCapacity, dropLine, ownLane,
 }: {
   date: YMD
   lane: BoardLane
@@ -55,8 +57,12 @@ export default function LaneColumn({
   onResize: (bc: BoardCard, newEffMinutes: number) => void
   onResizing?: (active: boolean) => void
   onEditCapacity: (date: YMD, lineId?: number) => void
+  /** D74 拖曳中的插入線（本體內 px）：insert＝同線重排的位置、append＝從別處放進來（放在最後） */
+  dropLine?: { topPx: number; mode: 'insert' | 'append' } | null
+  /** 被拖的卡就在這條線（同線重排不改日期 → 不套 D22 的日期限制） */
+  ownLane?: boolean
 }) {
-  const blocked = dropBlockedReason(dragRule, date)
+  const blocked = ownLane ? null : dropBlockedReason(dragRule, date)
   const { setNodeRef, isOver } = useDroppable({ id: `lane:${date}:${lane.lineId}`, disabled: !!blocked || stale })
   const cap = lane.capacity
   const shown = hideCompleted ? entries.filter(e => !e.bc.completed) : entries
@@ -108,7 +114,7 @@ export default function LaneColumn({
       </div>
 
       {/* ── 時間軸本體 ── */}
-      <div className="relative" style={{ height: bodyHeightPx }}>
+      <div className="relative" style={{ height: bodyHeightPx }} data-lane-body={`${date}:${lane.lineId}`}>
         {/* 預設的 19～24 淡橘由各線自己決定：週末（allOvertime）10～19 就是加班 */}
         <HourGrid tintOvertime={false} weekend={weekend} />
         {otSeg && (
@@ -165,6 +171,18 @@ export default function LaneColumn({
             onResizing={onResizing}
           />
         ))}
+        {/* D74 插入位置（拖曳中） */}
+        {dropLine && (
+          <div
+            className="pointer-events-none absolute inset-x-1 z-20 h-0.5 rounded-full bg-sky-400 shadow-[0_0_0_2px_rgba(56,189,248,0.3)]"
+            style={{ top: Math.max(0, dropLine.topPx - 1) }}
+            aria-hidden
+          >
+            <span className="absolute -top-2 right-0 rounded bg-sky-600 px-1 text-[9px] leading-4 text-white">
+              {dropLine.mode === 'insert' ? '放在這裡' : '放到最後'}
+            </span>
+          </div>
+        )}
       </div>
 
       {/* 拖曳中不能放：斜線底紋＋原因 */}

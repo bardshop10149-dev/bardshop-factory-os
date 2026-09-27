@@ -16,6 +16,7 @@
 //     （「素材單/包裝單」不算，D46；「上過塔台」另以製令號解碼的 SO 數字＋項次比對，D47）
 //   同一 SO 行、同區塊的切片合併成一張卡；落在不同區塊 → 拆卡（D7）
 //   最後套 D43 範圍：只留「與塔台未結案批相連」∪「30 天內已發單、未上塔台」的卡（規格 §十二）
+//   再套 D73：ARGO 已全數銷貨的 SO 行不出卡、部分銷貨只留未出貨量（raw.soSales，lib/packaging/salesAlloc.ts）
 
 import {
   POOL_BLOCK_META,
@@ -37,6 +38,7 @@ import {
 } from '@/lib/packaging/types'
 import { decodedTowerKeys, isNonScheduleDocType, soLineDigitsKey } from '@/lib/packaging/saraKeys'
 import { CHANGPING_PACK_HINT_RE, CHANGPING_UNPACKED_RE } from '@/lib/packaging/stdTime'
+import { allocateSoldToLines, applySoldToCards, type SoSalesRow } from '@/lib/packaging/salesAlloc'
 import { addWorkdays, isCovered, workdaysBetween } from '@/lib/packaging/workdays'
 import { CP_SHIP_NOTE_TAG } from '@/lib/purchasing/types'
 
@@ -192,6 +194,11 @@ export interface PoolRawData {
    * lots／schedule／records 另外直接解碼，不必重複放進來。
    */
   saraDecodedMos: { mo_nbr: string; lot_nbr: string | null }[]
+  /**
+   * D73：ARGO 銷貨鏡像（erp_so_sales，依來源 SO＋品號彙總）。null／省略＝銷貨同步尚未啟用或讀取失敗 → 不排除已銷貨
+   * （pool.ts 另在 notes 說明）；空陣列＝已啟用但沒有任何銷貨。
+   */
+  soSales?: SoSalesRow[] | null
 }
 
 /** 與 lib/packaging/stdTime.ts computeStdTime 的 input 同形 */
@@ -676,6 +683,7 @@ const FLAG_LEVEL: Record<DangerFlagCode, DangerFlag['level']> = {
   hours_unknown: 'info', calendar_fallback: 'info',
   po_exceeds_so: 'warn', merged_into_mo: 'info', ship_confirm_early: 'info',
   not_on_sara: 'warn',
+  partial_sold: 'warn',
 }
 
 const flag = (code: DangerFlagCode, label: string): DangerFlag => ({ code, label, level: FLAG_LEVEL[code] })
@@ -756,7 +764,7 @@ export function classifyPool(raw: PoolRawData, estimate: WorkEstimator): Classif
   const cal = makeCal(today)
   const stats: Record<string, number> = {}
   const bump = (k: string, n = 1) => { stats[k] = (stats[k] ?? 0) + n }
-  const excluded: PoolExcluded = { nonPhysical: 0, closedSo: 0, packagedDone: 0, notInPool: 0, materialPurchase: 0, poExceedsSo: 0, saraClosedOrAbsent: 0 }
+  const excluded: PoolExcluded = { nonPhysical: 0, closedSo: 0, packagedDone: 0, notInPool: 0, materialPurchase: 0, poExceedsSo: 0, saraClosedOrAbsent: 0, soldOut: 0 }
   const nonPhysicalKeys = new Set<string>()
 
   // ── 索引：SO 行 ──
@@ -1806,9 +1814,33 @@ export function classifyPool(raw: PoolRawData, estimate: WorkEstimator): Classif
     }))
     .sort((a, b) => b.sheetDate.localeCompare(a.sheetDate) || a.so.localeCompare(b.so) || num(a.soLine) - num(b.soLine))
 
+  // ── D73：ARGO 已銷貨（erp_so_sales 鏡像）──
+  // 放在 D43 範圍之後：「已全數銷貨」只計「本來會進池」的行；放在拆卡標示之前：整行被排除或某張扣到 0 時，拆 i/n 才正確。
+  // 部分銷貨時數量有變的卡，工時用同一個估算器重算（途程類型／品名／包裝方式／常平備註／塔台包裝工序同出卡時）。
+  let pooled: PackagingCard[] = cards
+  if (raw.soSales) {
+    const { byLine, unmatched } = allocateSoldToLines(raw.soLines, raw.soSales)
+    const sold = applySoldToCards(cards, byLine, (c, qty) => estimate({
+      routeType: c.sourceKind === 'changping' ? '常平' : c.sourceKind === 'outsource' ? '委外' : '自製',
+      itemCode: c.itemCode,
+      itemName: c.itemName ?? '',
+      packing: c.packing,
+      qty,
+      cpShipNote: c.cpShipNote,
+      saraJobNames: c.preStation ? c.preStation.packagingJobs.map((j) => j.jobName) : null,
+    }))
+    pooled = sold.cards
+    excluded.soldOut = sold.soldOutLines
+    bump('sold_out_lines', sold.soldOutLines)
+    bump('sold_out_cards', sold.soldOutCards)
+    bump('sold_partial_lines', sold.partialLines)
+    bump('sold_capped_lines', sold.cappedLines)
+    bump('sold_unmatched_rows', unmatched.length)
+  }
+
   // ── 拆卡標示（D7：同 SO 行落在不同區塊）──
   const bySoLine = new Map<string, PackagingCard[]>()
-  for (const c of cards) {
+  for (const c of pooled) {
     let arr = bySoLine.get(c.soLineKey)
     if (!arr) { arr = []; bySoLine.set(c.soLineKey, arr) }
     arr.push(c)
@@ -1838,7 +1870,7 @@ export function classifyPool(raw: PoolRawData, estimate: WorkEstimator): Classif
   }
   const isOverdue = (c: PackagingCard) => !!c.dueDate && c.dueDate < today
   const blocks: PoolBlock[] = POOL_BLOCK_ORDER.map((id) => {
-    const list = cards.filter((c) => c.block === id).sort((a, b) =>
+    const list = pooled.filter((c) => c.block === id).sort((a, b) =>
       Number(isOverdue(b)) - Number(isOverdue(a))
       || Number(b.sample.isSample) - Number(a.sample.isSample)
       || cmpNullLast(a.workdaysLeft, b.workdaysLeft)
@@ -1859,7 +1891,7 @@ export function classifyPool(raw: PoolRawData, estimate: WorkEstimator): Classif
     }
   })
 
-  stats.cards = cards.length
+  stats.cards = pooled.length
   stats.cardsBeforeScope = allCards.length
   stats.slices = keptSlices.length
   return {

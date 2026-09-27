@@ -24,6 +24,7 @@ import {
 } from './classify'
 import { decodeSaraMo, isNonScheduleDocType, soLineDigitsKey } from './saraKeys'
 import { manualBlockedReason, soLineNoStr } from './manualPool'
+import type { LineSold } from './salesAlloc'
 
 /** 採購行（伺服器端只取判斷需要的欄位；vendor 不外流） */
 export interface ManualLookupPurchase {
@@ -58,6 +59,8 @@ export interface ManualLookupInput {
   purchases: readonly ManualLookupPurchase[]
   /** 製令（erp_mo_lines，source_order＝這張 SO）的品號 */
   moItemCodes: readonly string[]
+  /** D73：這張 SO 各行的已銷貨分配（allocateSoldToLines）；null／省略＝銷貨同步未啟用 */
+  sold?: ReadonlyMap<string, LineSold> | null
 }
 
 const up = (s: string | null | undefined) => String(s ?? '').trim().toUpperCase()
@@ -111,6 +114,7 @@ function suggestRoute(purchases: readonly ManualLookupPurchase[]): ManualRouteTy
  * 5 non_schedule_doc（出單表上這行只出現在素材單／包裝單，D46）；6 tower_closed（有上過塔台的證據但沒有未結案批，D43／D47）；
  * 7 packaged_done（未結案批的包裝站工序已人工報完工，D45）；8 sheet_stale（出單日超過 30 天且塔台查無，D44）；
  * 9 waiting_source（有採購或製令來源，但 5～8 都不是）；10 unknown（以上皆非）。
+ * D73：sold_out（ARGO 已全數銷貨）排在 4 之後、不可勾選（加入後也會被待排池排除）。
  * 解讀：塔台未結案批、但前站未開工的行歸在 waiting_source（P0 只列前站已開工）。
  */
 export function explainManualLines(input: ManualLookupInput): ManualLookupLine[] {
@@ -148,10 +152,16 @@ export function explainManualLines(input: ManualLookupInput): ManualLookupLine[]
       reasons.push({ code: 'manual_active', label: manualDone ? `已手動加入且已全數完成（${who}），待排池已無此卡` : `已手動加入（${who}）` })
     }
 
-    const blocked = manualBlockedReason(sl)
     // 3／4. 不可勾選
     if (isNonPhysicalLine(sl.mbp_part, sl.description)) reasons.push({ code: 'non_physical', label: '費用行（運費、設計費等），不需包裝' })
     if (!(orderQty > 0)) reasons.push({ code: 'zero_qty', label: '訂單量為 0' })
+    // D73：ARGO 已全數銷貨（同品號多行依項次分配後，本行未出貨量 ≤ 0）
+    const sold = input.sold?.get(soLineKey) ?? null
+    const soldOut = !!sold && orderQty > 0 && sold.unshippedQty <= 1e-9
+    if (soldOut) {
+      reasons.push({ code: 'sold_out', label: `ARGO 已全數銷貨（${Math.min(sold.soldQty, orderQty)}/${orderQty}${sold.lastSaleDate ? `，最後 ${mdOf(sold.lastSaleDate)}` : ''}）` })
+    }
+    const blocked = manualBlockedReason(sl) ?? (soldOut ? 'ARGO 已全數銷貨（出貨），不需包裝；加入後也會被待排池排除' : null)
 
     // 採購來源：POC 項次＝本行、或品號相同；出單表記的採購單號-行對到本行也算
     const sheetForLine = input.sheetRows.filter((r) => up(r.order_number) === soU && soLineNoStr(r.line_no) === lineNo)

@@ -45,10 +45,11 @@ export interface ApiResult<T> {
 }
 
 /**
- * 分線輪起多了新表／新欄位（packaging_lines、line_id…）：兩份 migration 都要套用（先 P1 本體、再分線擴充）。
+ * 分線輪起多了新表／新欄位（packaging_lines、line_id…）：migration 依序套用（先 P1 本體、再分線擴充、再 D73／D74）。
  * 伺服器的 migration_required 訊息會寫「找不到資料表或欄位…」，一樣會被 MISSING_TABLE_RE 認出來、換成這段提示。
+ * （sql/20260928 沒套用時工作台照常可用：待排池不排除已銷貨、新卡沿用固定排序，只有「調整線內順序」會出這段提示）
  */
-export const MIGRATION_HINT = '資料表或欄位尚未建立，請 Snow 備份後依序套用 migration：sql/20260927_packaging_schedule.sql → sql/20260927b_packaging_p1_extend.sql'
+export const MIGRATION_HINT = '資料表或欄位尚未建立，請 Snow 備份後依序套用 migration：sql/20260927_packaging_schedule.sql → sql/20260927b_packaging_p1_extend.sql → sql/20260928_packaging_sales_and_order.sql'
 
 /** PostgREST／Postgres 找不到表的各種說法：PGRST205（schema cache）、42P01（relation does not exist） */
 const MISSING_TABLE_RE = /PGRST205|42P01|schema cache|does not exist|找不到資料表|relation .*packaging_/i

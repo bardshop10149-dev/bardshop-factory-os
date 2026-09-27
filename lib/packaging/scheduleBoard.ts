@@ -31,6 +31,7 @@ import { dayLoad, resolveDayCapacity } from './scheduleCapacity'
 import { allocateLine, isPlaceableBlock, lineSupply, minutesForQty, r3 } from './scheduleAllocate'
 import { activeLinesOf, defaultLineIdOf, laneRemaining, lineNameOf, resolveLaneId } from './scheduleLines'
 import { effectiveMinutes } from './scheduleMinutes'
+import { compareLaneOrder } from './laneOrder'
 
 type PoolOk = Extract<PoolResponse, { success: true }>
 export type BoardBody = Omit<Extract<BoardResponse, { success: true; unchanged?: false }>, 'lock' | 'me' | 'serverTime' | 'revision'>
@@ -38,12 +39,13 @@ export type BoardBody = Omit<Extract<BoardResponse, { success: true; unchanged?:
 /** 工作台頁尾追加的註腳（P1 規則說明） */
 export const SCHEDULE_NOTES: string[] = [
   '排定日已過仍未勾完成的卡，自動顯示在今天（今天是週末／假日則為下一個工作日）並標「延誤 N 天」（D50）；資料庫的排定日不變，天數會逐日累加。拖到任何一天即清除延誤。',
-  '待排池數量減少（多半是塔台已報包裝完工，D45）時，從最早排定的卡開始扣；扣到 0 的卡顯示「已由待排池扣完」，可按移除。',
+  '待排池數量減少（多半是塔台已報包裝完工 D45，或 ARGO 已部分銷貨出貨 D73）時，從最早排定的卡開始扣；扣到 0 的卡顯示「已由待排池扣完」，可按移除。ARGO 已全數銷貨的品項行整行不列入，已排的卡隨之隱藏（資料保留）。',
   '預排卡（虛線）只能排在預估可包日當天或之後；到期仍未就緒亮橘燈提醒挪移（D22）。「常平未寄出且緊張」與「委外出貨待確認」只提醒、不能排。',
   '已勾完成的卡留在當天欄並變灰、計入當天已排工時；勾完成不回寫塔台（D24）。',
   '每張子卡最少 10 分鐘，拆越多張、工時合計越偏高。',
   '排進日期的卡一定屬於某條線；週／兩週拖到日期欄頭會自動放到當天正常工時剩餘最多的線（週末看加班剩餘），主管可再改（D72）。',
   '卡片工時可由主管修改（拉卡片下緣或在卡片詳情輸入），每次修改都會記錄供日後校正工時（D69）。',
+  '同一條線內的上下順序可在日檢視直接上下拖曳調整（D74，可復原）；新排入或換線、換天的卡放在該線最後。延誤卡與沒調整過順序的卡排在最上面、依固定排序（延誤→預排到期→打樣→交期→建立時間）；拖動延誤卡＝排到今天並解除延誤。週／兩週檢視順序與日檢視相同。',
 ]
 
 /** D66 手動加入區塊的組裝結果（由 lib/packaging/manualCache.ts 併進 pool.blocks 後一起傳入） */
@@ -52,14 +54,18 @@ export interface BoardManualInput {
   meta: Readonly<Record<string, ManualInclusionMeta>>
   /** 有有效手動紀錄、但品項已回到正常區塊的行（排定卡加 manual_in_pool 旗標） */
   backInPoolKeys: ReadonlySet<string>
-  skipped: { soGone: number; backInPool: number }
+  /** soldOut：D73 ARGO 已全數銷貨而不出卡的手動行（舊呼叫端可省略） */
+  skipped: { soGone: number; backInPool: number; soldOut?: number }
 }
 
 const round1 = (x: number): number => Math.round(x * 10) / 10
 const EPS = 1e-9
 const tsOf = (iso: string): number => { const t = Date.parse(iso); return Number.isFinite(t) ? t : 0 }
 
-/** 規格 §3.6 步驟 6 欄內固定排序：延誤天數多 → pre_due → 打樣類 → 交期 → 建立時間（D5 不排時段，欄內順序沒有意義，不存） */
+/**
+ * 規格 §3.6 步驟 6 欄內固定排序：延誤天數多 → pre_due → 打樣類 → 交期 → 建立時間。
+ * D74 起它是「sort_index 為 null 的卡」與平手時的次要排序（主排序見 compareLaneOrder）；待排區仍只用它。
+ */
 function compareBoardCards(a: BoardCard, b: BoardCard, createdAt: ReadonlyMap<string, string>): number {
   if (a.delayWorkdays !== b.delayWorkdays) return b.delayWorkdays - a.delayWorkdays
   const pd = (c: BoardCard) => (c.flags.some((f) => f.code === 'pre_due') ? 0 : 1)
@@ -146,6 +152,7 @@ export function assembleBoard(input: {
     lineGoneOpen: 0, lineGoneCompleted: 0, consumedPast: 0,
     manualSoGone: input.manual?.skipped.soGone ?? 0,
     manualBackInPool: input.manual?.skipped.backInPool ?? 0,
+    manualSoldOut: input.manual?.skipped.soldOut ?? 0,
   }
   const allocs = new Map<string, LineAllocation>()
   const supplies = new Map<string, LineSupply>()
@@ -197,7 +204,11 @@ export function assembleBoard(input: {
             flags.push({ code: 'before_est_ready', label: `排在預估可包日 ${shortDate(al.preReadyDate)} 之前`, level: 'warn' })
           }
           if (al.trimmedQty > EPS) {
-            flags.push({ code: 'trimmed', label: `待排池減少 ${al.trimmedQty}（可能塔台已報包裝完工或訂單／採購量變更）`, level: 'info' })
+            // D73：底卡帶「部分已出貨」→ 待排池減少多半是 ARGO 已出貨
+            const why = base.flags.some((f) => f.code === 'partial_sold')
+              ? 'ARGO 已部分銷貨出貨，或塔台已報包裝完工'
+              : '可能塔台已報包裝完工或訂單／採購量變更'
+            flags.push({ code: 'trimmed', label: `待排池減少 ${al.trimmedQty}（${why}）`, level: 'info' })
           }
         } else if (supply.total <= EPS && supply.nonPlaceableQty > 0) {
           flags.push({ code: 'not_placeable_now', label: '目前只剩未寄出／待確認的量，不能排', level: 'warn' })
@@ -240,6 +251,8 @@ export function assembleBoard(input: {
         minutesStd,
         minutesOverride: override ? { ...override, minutes: minutes ?? 0 } : null,
         manual: base.block === MANUAL_BLOCK_ID ? (manualMeta[key] ?? null) : null,
+        // D74：待排區沒有線內順序
+        sortIndex: dd.date == null ? null : (p.sortIndex ?? null),
       }
       vis.push({ card: bc, display: dd.date, completed: !!p.completed })
     }
@@ -337,9 +350,11 @@ export function assembleBoard(input: {
   }
   const cmp = (a: BoardCard, b: BoardCard) => compareBoardCards(a, b, createdAt)
   holding.sort(cmp)
+  // D74：日期欄＝sort_index 為 null 的卡與延誤卡在前（固定排序）、其後依 sort_index 由小到大；整天一起排，依 laneId 篩出就是各線順序
+  const dayCmp = (a: BoardCard, b: BoardCard) => compareLaneOrder(a, b, cmp)
 
   const days: BoardDay[] = windowDays.map((d) => {
-    const cards = dayCards.get(d)!.sort(cmp)
+    const cards = dayCards.get(d)!.sort(dayCmp)
     // D71：整天產能＝各啟用線加總；D49 各線各自沿用
     const capacity = resolveDayCapacity(d, { daily: capRows, lineRows, lines })
     const usedMinutes = round1(cards.reduce((s, c) => s + (c.minutes ?? 0), 0))

@@ -8,6 +8,7 @@ import { MANUAL_BLOCK_ID, type ManualInclusion, type ManualInclusionMeta, type M
 import { POOL_BLOCK_META, type DangerFlag, type PackagingCard, type PoolBlock, type PoolResponse, type SourceKind } from './types'
 import type { RawSoLine, WorkEstimator } from './classify'
 import { isNonPhysicalLine, nameSaysSample, normDate } from './classify'
+import { allocateSoldToLines, applySoldToCards, type SoSalesRow } from './salesAlloc'
 import { workdaysBetween } from './workdays'
 
 type PoolOk = Extract<PoolResponse, { success: true }>
@@ -106,6 +107,8 @@ export function manualCardOf(inc: ManualInclusion, sl: RawSoLine, estimate: Work
  * D66 手動區塊組裝（lines.md §六.4～§六.6）：
  * - 該行已在正常區塊（含不可排的 3／5c）→ 不出卡（backInPool，以正常區塊的供給為準，避免同一批貨算兩次；紀錄保留）
  * - ERP 查無此行（erp_so_lines 結案會被同步刪除）→ 不出卡（soGone；ERP 重開時自動回來）
+ * - D73：ARGO 已全數銷貨 → 不出卡（soldOut；紀錄保留）；部分銷貨 → 卡片數量以未出貨量為上限、標「部分已出貨」
+ *   （同 classifyPool，applySoldToCards；soLines 是這些 SO 的全部行，同品號多行才分配得對）
  * - 費用行／訂單量 0 仍出卡（加入時已擋；歷史資料不在讀取時再判）
  * meta 只含「有出卡」的行（BoardCard.manual／PoolCardMeta.manual 用）。
  */
@@ -115,21 +118,24 @@ export function buildManualBlock(input: {
   normalLineKeys: ReadonlySet<string>
   estimate: WorkEstimator
   today: YMD
+  /** D73 這些 SO 的銷貨鏡像；null／省略＝銷貨同步未啟用（不排除） */
+  soSales?: readonly SoSalesRow[] | null
 }): {
   block: PoolBlock
   meta: Record<string, ManualInclusionMeta>
   backInPoolKeys: Set<string>
-  skipped: { soGone: number; backInPool: number }
+  skipped: { soGone: number; backInPool: number; soldOut: number }
 } {
   const bySoLine = new Map<string, RawSoLine>()
   for (const sl of input.soLines) {
     const line = soLineNoStr(sl.line_no)
     if (line) bySoLine.set(`${sl.project_id.trim().toUpperCase()}-${line}`, sl)
   }
-  const cards: PackagingCard[] = []
+  let cards: PackagingCard[] = []
   const meta: Record<string, ManualInclusionMeta> = {}
   const backInPoolKeys = new Set<string>()
-  const skipped = { soGone: 0, backInPool: 0 }
+  const skipped = { soGone: 0, backInPool: 0, soldOut: 0 }
+  const incByKey = new Map<string, ManualInclusion>()
   const sorted = [...input.inclusions].sort((a, b) => (a.addedAt < b.addedAt ? -1 : a.addedAt > b.addedAt ? 1 : a.inclusionId - b.inclusionId))
   for (const inc of sorted) {
     if (inc.removedAt) continue
@@ -137,7 +143,24 @@ export function buildManualBlock(input: {
     const sl = bySoLine.get(`${inc.so.trim().toUpperCase()}-${inc.lineNo}`) ?? bySoLine.get(inc.soLineKey.toUpperCase())
     if (!sl) { skipped.soGone++; continue }
     cards.push(manualCardOf(inc, sl, input.estimate, input.today))
-    meta[inc.soLineKey] = manualMetaOf(inc)
+    incByKey.set(inc.soLineKey, inc)
+  }
+  if (input.soSales && cards.length > 0) {
+    const { byLine } = allocateSoldToLines(input.soLines, input.soSales)
+    const sold = applySoldToCards(cards, byLine, (c, qty) => input.estimate({
+      routeType: incByKey.get(c.soLineKey)?.routeType ?? '自製',
+      itemCode: c.itemCode,
+      itemName: c.itemName ?? '',
+      packing: c.packing,
+      qty,
+      cpShipNote: null,
+    }))
+    cards = sold.cards
+    skipped.soldOut = sold.soldOutLines
+  }
+  for (const c of cards) {
+    const inc = incByKey.get(c.soLineKey)
+    if (inc) meta[c.soLineKey] = manualMetaOf(inc)
   }
   const m = POOL_BLOCK_META[MANUAL_BLOCK_ID]
   const block: PoolBlock = {

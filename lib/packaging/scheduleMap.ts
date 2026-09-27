@@ -64,6 +64,8 @@ export function rowToPlacement(r: PlacementRow): Placement {
     // D72：待排區（plan_date null）一律不屬於任何線——舊程式（穩定站）把卡移到待排區不會清 line_id，讀取時忽略（lines.md §1.4）
     lineId: planDate == null || r.line_id == null ? null : num(r.line_id),
     minutesOverride: overrideOf(r),
+    // D74：待排區沒有線內順序；sql/20260928 套用前沒有這欄（undefined）→ null
+    sortIndex: planDate == null || r.sort_index == null ? null : Number(r.sort_index),
   }
 }
 
@@ -96,6 +98,8 @@ export function placementToRow(p: Placement): PlacementRow {
     minutes_override_by: p.minutesOverride ? p.minutesOverride.by : null,
     minutes_override_by_name: p.minutesOverride ? p.minutesOverride.byName : null,
     minutes_override_at: p.minutesOverride ? p.minutesOverride.at : null,
+    // D74：待排區一律 null（scheduleDb 在欄位尚未建立時會把這個鍵拿掉再寫）
+    sort_index: p.planDate == null ? null : (p.sortIndex ?? null),
   }
 }
 

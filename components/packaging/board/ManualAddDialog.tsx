@@ -42,6 +42,8 @@ const REASON_TONE: Record<ManualAbsenceCode, string> = {
   manual_active: 'border-violet-700 bg-violet-950/50 text-violet-200',
   non_physical: 'border-rose-800 bg-rose-950/40 text-rose-200',
   zero_qty: 'border-rose-800 bg-rose-950/40 text-rose-200',
+  // D73：ARGO 已全數銷貨（出貨），不能勾
+  sold_out: 'border-rose-800 bg-rose-950/40 text-rose-200',
   non_schedule_doc: 'border-amber-800 bg-amber-950/30 text-amber-200',
   tower_closed: 'border-amber-800 bg-amber-950/30 text-amber-200',
   packaged_done: 'border-amber-800 bg-amber-950/30 text-amber-200',

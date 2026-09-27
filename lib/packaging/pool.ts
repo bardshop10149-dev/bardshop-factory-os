@@ -1,12 +1,14 @@
 // 包裝專區 P0 — 待排池組裝（I/O 層：分頁讀表 → classifyPool → 回應形狀）
 //
 // 只讀 Supabase 既有鏡像（service role），不寫任何資料、不呼叫 ARGO／塔台（D4、D42 P0 唯讀）。
+// D73 已銷貨：只讀 ARGO 銷貨的 EIP 鏡像 erp_so_sales（由 /api/packaging/sales-sync 定時同步），待排池本身不即時打 ARGO；
+//   鏡像表不存在（sql/20260928 未套用）或讀取失敗時照舊出池、不排除已銷貨，並在 notes 最前面說明。
 // 判定邏輯全部在 lib/packaging/classify.ts（純函式）；工時在 lib/packaging/stdTime.ts。
 // 規格：docs/design/2026-09-27-packaging-schedule.md §7.1。
 //
 // 讀取分四波（後一波的查詢條件要用前一波的結果）：
 //   ① 採購行（近 180 天）、採購追蹤、常平出貨標記、塔台批／排程、出單表（近 365 天）、工時三表、新鮮度、
-//      D47 塔台報工紀錄的全部 MOT／MOS 製令號（只要 mo_nbr、lot_nbr，解碼出 SO＋項次）
+//      D47 塔台報工紀錄的全部 MOT／MOS 製令號（只要 mo_nbr、lot_nbr，解碼出 SO＋項次）、D73 銷貨鏡像與同步狀態
 //   ② RO→SO 橋接、SO 品項行（依①收集到的 SO 集合分塊 in()；含出單表上的 SO，D44 要判斷 ERP 是否仍未結案）
 //   ③ 塔台報工紀錄（批 mo_nbr ∪ 開放中 SO 的 POC 採購行）、erp_mo_lines（製令 SO，僅顯示）
 //   ④ D43/D44 補查：出單表單號在①③都對不到時，再以單號查 sara_wip_records 判斷「是否上過塔台」；
@@ -33,6 +35,7 @@ import {
   unresolvedSheetMoRefs,
 } from '@/lib/packaging/classify'
 import { computeStdTime, loadStdTimeTables } from '@/lib/packaging/stdTime'
+import { loadSalesMirror, SALES_MIGRATION_FILE } from '@/lib/packaging/salesSync'
 import type { PoolFreshness, PoolResponse } from '@/lib/packaging/types'
 import { CALENDAR_COVERAGE, todayTaipei } from '@/lib/packaging/workdays'
 
@@ -63,7 +66,7 @@ export const POOL_NOTES: string[] = [
   'P0 暫用完成規則：常平貨在塔台包裝站的包裝工序（非 QC）人工報完工即隱藏，SO 在 ARGO 結案即隱藏；P1 改為主管勾選完成。ARGO 入庫＝品檢完成＝才要開始包，絕不當作完成（塔台系統自動結工也不算）。',
   '委外（MPO）在塔台只有 QC 工序，P0 沒有包裝完成訊號；已入庫的委外卡留到塔台批結案（D43）或 SO 結案。',
   '自製製令以塔台包裝工序完工代替 ARGO 繳庫（EIP 尚未同步繳庫量）。',
-  '「SO 行已全數銷貨」目前查不到（系統不查 ARGO 銷貨），以塔台結案（D43）與 SO 結案判斷。',
+  '已銷貨（D73）：以 ARGO 銷貨明細（IV_INVENTORYIODETAIL，出庫／銷貨）判斷。EIP 定時把銷貨依「SO＋品號」同步成鏡像（erp_so_sales，作廢的銷貨單在下一次同步後自動回補），待排池只讀鏡像、不即時查 ARGO。同一張 SO 同品號多行時，已銷貨量依項次由小到大分配；全數銷貨的品項行不列入（頁尾「已全數銷貨」），部分銷貨的卡片只留未出貨量並標「部分已出貨」（卡片數量大於訂單量、單位可能不同時依比例扣）。銷貨退回目前不回補。',
   '常平出貨燈可能誤亮：同單同品號多行時黃底同步會把所有行都亮燈；數量配不到的行標「出貨燈可能誤亮」。',
   '常平黃底同步目前每晚 23:30 一次；分批寄出時只記第一次寄出。出貨日無法解析者（如「出HK」）不估可包日。',
   '預估可包日＝寄出日＋預設運輸工作天（順豐 3、空運 5、海特快 7、一般海運 13），尚未以實績校正。',
@@ -321,7 +324,7 @@ async function lastErpSync(supabase: SupabaseAdmin, action: 'sync_so' | 'sync_po
   return typeof v === 'string' ? v : fallback()
 }
 
-async function loadFreshness(supabase: SupabaseAdmin): Promise<Omit<PoolFreshness, 'orderSheet'>> {
+async function loadFreshness(supabase: SupabaseAdmin): Promise<Omit<PoolFreshness, 'orderSheet' | 'soSales'>> {
   const [erpSo, erpPo, saraSchedule, saraRecords, changping] = await Promise.all([
     lastErpSync(supabase, 'sync_so', () => latestOf(supabase, 'erp_so_lines', 'synced_at')),
     lastErpSync(supabase, 'sync_po', () => latestOf(supabase, 'erp_pj_sync', 'synced_at', ['doc_type', '採購單號'])),
@@ -336,10 +339,21 @@ async function loadFreshness(supabase: SupabaseAdmin): Promise<Omit<PoolFreshnes
 // 主流程
 // ─────────────────────────────────────────────────────────────────────
 
+/** D73 銷貨鏡像不可用或尚未成功同步時，放在頁尾註腳最前面的說明（null＝正常） */
+function salesNoteOf(m: Awaited<ReturnType<typeof loadSalesMirror>>): string | null {
+  if (!m.available) {
+    return m.reason === 'missing'
+      ? `銷貨同步尚未啟用（${SALES_MIGRATION_FILE} 尚未套用）：待排池暫不排除 ARGO 已銷貨的品項。`
+      : '銷貨資料這次讀取失敗：待排池暫不排除 ARGO 已銷貨的品項（重新整理後再試）。'
+  }
+  if (!m.status?.lastOkAt) return '銷貨同步尚未完整成功跑過一次：已銷貨的排除可能不完整（請手動觸發一次全量同步）。'
+  return null
+}
+
 /** 讀完所有原始列（供 classifyPool 與驗證腳本共用） */
 export async function loadPoolRawData(supabase: SupabaseAdmin, today: string) {
   // ① 彼此獨立的讀取
-  const [poLines, tracking, shipMarks, lots, schedule, sheets, tables, fresh, decodableRecords] = await Promise.all([
+  const [poLines, tracking, shipMarks, lots, schedule, sheets, tables, fresh, decodableRecords, sales] = await Promise.all([
     fetchPoLines(supabase, today),
     fetchTracking(supabase),
     fetchShipMarks(supabase),
@@ -349,6 +363,7 @@ export async function loadPoolRawData(supabase: SupabaseAdmin, today: string) {
     loadStdTimeTables(supabase),
     loadFreshness(supabase),
     fetchDecodableRecords(supabase),
+    loadSalesMirror(supabase),
   ])
 
   // ② SO 集合：採購行來源單（SO/SOB/RO 直接查；RO 另抓前單號＝RO 的 SO 當橋接候選，
@@ -443,15 +458,17 @@ export async function loadPoolRawData(supabase: SupabaseAdmin, today: string) {
     moLines,
     saraRefMos,
     saraDecodedMos,
+    // D73：鏡像不可用 → null（不排除已銷貨）；可用但還沒成功同步過 → 照樣用讀到的列（每張 SO 都是整張重算過的，數字可信）
+    soSales: sales.available ? sales.rows : null,
   }
-  const freshness: PoolFreshness = { ...fresh, orderSheet: sheets.latest }
-  return { raw, tables, freshness }
+  const freshness: PoolFreshness = { ...fresh, orderSheet: sheets.latest, soSales: sales.available ? sales.status?.lastOkAt ?? null : null }
+  return { raw, tables, freshness, salesNote: salesNoteOf(sales) }
 }
 
 /** 組出 GET /api/packaging/pool 的成功回應（快取由 route 處理） */
 export async function buildPackagingPool(supabase: SupabaseAdmin, now: Date = new Date()): Promise<PoolOk> {
   const today = todayTaipei(now)
-  const { raw, tables, freshness } = await loadPoolRawData(supabase, today)
+  const { raw, tables, freshness, salesNote } = await loadPoolRawData(supabase, today)
   // 工時：stdTime 回傳完整拆解（WorkEstimate），直接放進卡片
   const estimate: WorkEstimator = (input) => computeStdTime(input, tables).work
   const result = classifyPool(raw, estimate)
@@ -468,7 +485,7 @@ export async function buildPackagingPool(supabase: SupabaseAdmin, now: Date = ne
       source: result.calendarFallback ? 'fallback' : 'static',
       coveredYears: Array.from({ length: toYear - fromYear + 1 }, (_, i) => fromYear + i),
     },
-    notes: POOL_NOTES,
+    notes: salesNote ? [salesNote, ...POOL_NOTES] : POOL_NOTES,
     cached: false,
     staleUnsynced: result.staleUnsynced,
   }
