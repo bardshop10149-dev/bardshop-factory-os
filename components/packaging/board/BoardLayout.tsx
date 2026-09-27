@@ -1,11 +1,17 @@
 'use client'
 
-// 包裝排程工作台（P1，D21 左右分欄）：左＝待排池＋待排區，右＝今天起 10 個台灣工作日的日期欄。
+// 包裝排程工作台（P1，D21 左右分欄）：左＝待排池＋待排區，右＝排程（D56 日／週／兩週三種檢視）。
 //
 // 元件分工：
-//   BoardLayout（本檔）：DndContext、拖放 → 操作（op）轉換、工具列、對話框開關
+//   BoardLayout（本檔）：DndContext、拖放 → 操作（op）轉換、工具列、檢視切換、對話框開關
 //   useBoard：載入／輪詢／佇列／樂觀更新／Undo　useEditLock：編輯鎖　useUndo：50 步堆疊
-//   PoolSidebar／ParkingArea／DayColumn／DraggableCard：畫面（卡片本體沿用 P0 PackagingCard，樣式不改）
+//   ViewSwitcher：日／週／兩週＋◀ 今天 ▶　DayCardWall（日，卡片牆＋負荷進度條，D62）　MultiDayView（週／兩週）
+//   PoolSidebar（D58 簡化卡片 SimplePool）／ParkingArea（待排區）：左欄　PaneResizer：左右分隔線（D59）
+//   卡片：左右同一套外觀 CardFace（D58／D60）；排定卡 PlacementCard（日＝md、週＝sm、兩週＝迷你卡）
+//   卡片詳情 CardDetailDialog（D61）：待排池的由 SimplePool 開，排定卡的由本檔開（detail 狀態）
+//
+// 檢視與資料視窗：日＝1、週＝5、兩週＝10 個工作日，起點 anchor（null＝今天）→ GET /api/packaging/board?from=&workdays=。
+// 換檢視只換「要哪一段日期」，拖放、完成、拆卡等操作與 API 完全不變。
 //
 // 資料一律經 /api/packaging/*（瀏覽器端 Supabase 是 anon，不直接查表）。
 // 每次操作立即送出（自動儲存）；唯讀者與沒有編輯鎖的人看得到但不能拖、不能勾。
@@ -25,32 +31,63 @@ import {
   type DragStartEvent,
 } from '@dnd-kit/core'
 import {
-  BOARD_MAX_WORKDAYS,
   type BoardCard,
-  type BoardDay,
   type PlacementOp,
   type YMD,
 } from '@/lib/packaging/scheduleTypes'
+import {
+  VIEW_WORKDAYS,
+  listViewDays,
+  parseViewMode,
+  resolveViewDay,
+  shiftByWorkdays,
+  stepViewDay,
+  windowRequest,
+  type BoardViewMode,
+} from '@/lib/packaging/boardView'
+import { weekdayOf } from '@/lib/packaging/scheduleCalendar'
 import type { PackagingCard as PackagingCardData } from '@/lib/packaging/types'
-import PackagingCard from '@/components/packaging/PackagingCard'
 import PackagingOrderModal from '@/components/packaging/PackagingOrderModal'
 import { fmtQty } from '@/components/packaging/poolStyles'
-import { newId, ruleForBoardCard, ruleForPoolCard, type DragRule } from './boardLocal'
+import { mergeCandidates, newId, ruleForBoardCard, ruleForPoolCard, type DragRule } from './boardLocal'
 import { ago, clock, hours, md, mdw } from './boardFormat'
 import { useUndo } from './useUndo'
 import { useEditLock } from './useEditLock'
 import { useBoard } from './useBoard'
 import PoolSidebar, { type PoolAction } from './PoolSidebar'
 import ParkingArea from './ParkingArea'
-import DayColumn, { mergeCandidates } from './DayColumn'
-import { CardFrame, type CardMenuHandlers } from './DraggableCard'
+import type { CardMenuHandlers } from './cardMenu'
+import { SimplePoolCardFace } from './SimplePoolCard'
+import { lineLabel } from './CardFace'
+import { PlacementCardOverlay } from './PlacementCard'
+import CardDetailDialog from './CardDetailDialog'
+import ViewSwitcher from './ViewSwitcher'
+import DayCardWall from './DayCardWall'
+import MultiDayView from './MultiDayView'
+import { useOpenSaturdays } from './useOpenSaturdays'
 import LockBanner from './LockBanner'
 import SplitDialog from './SplitDialog'
 import QtyDateDialog from './QtyDateDialog'
 import CapacityEditor from './CapacityEditor'
 import VersionsPanel from './VersionsPanel'
+import PaneResizer, { MIN_POOL_WIDTH } from './PaneResizer'
 
 const HIDE_DONE_KEY = 'packaging.schedule.hideCompleted.v1'
+/** D56：記住上次選的檢視 */
+const VIEW_KEY = 'packaging.schedule.view.v1'
+/** D57 試用期的舊鍵（樣式切換、常駐欄位）：D58 已移除切換，載入時清掉 */
+const LEGACY_KEYS = ['packaging.schedule.poolStyle.v1', 'packaging.schedule.poolExtraCols.v1']
+/** 1366 寬的螢幕看週檢視／日檢視卡片牆時可先把左欄收起來（卡片牆每張 ≥ 260px，收起後一列多放 1～2 張） */
+const POOL_HIDDEN_KEY = 'packaging.schedule.poolHidden.v1'
+/** 左欄（待排池）寬度：使用者拖過分隔線才有值；沒有值＝用 RWD 預設寬度 */
+const POOL_WIDTH_KEY = 'packaging.schedule.poolWidth.v1'
+
+function readLS(key: string): string | null {
+  try { return typeof window === 'undefined' ? null : window.localStorage.getItem(key) } catch { return null }
+}
+function writeLS(key: string, v: string) {
+  try { window.localStorage.setItem(key, v) } catch { /* 存不進去（無痕、封鎖）就算了 */ }
+}
 
 type ActiveDrag =
   | { kind: 'pool'; card: PackagingCardData; rule: DragRule }
@@ -77,10 +114,6 @@ function useIsDesktop(): boolean {
   )
 }
 
-function lineLabel(c: { so: string; soLine: string | null }): string {
-  return `${c.so}${c.soLine ? `-${c.soLine}` : ''}`
-}
-
 function readInitialPanel(): Dialog | null {
   try {
     const p = new URLSearchParams(window.location.search).get('panel')
@@ -96,11 +129,34 @@ export default function BoardLayout() {
   const [nowMs, setNowMs] = useState(() => Date.now())
   const [dialog, setDialog] = useState<Dialog | null>(() => (typeof window === 'undefined' ? null : readInitialPanel()))
   const [orderSo, setOrderSo] = useState<string | null>(null)
+  /** D61 排定卡的卡片詳情：記 placementId＋點開當下的快照（輪詢更新後顯示最新資料；卡片已不在畫面上時留快照） */
+  const [detail, setDetail] = useState<BoardCard | null>(null)
+  const openDetail = useCallback((bc: BoardCard) => setDetail(bc), [])
+  // 開訂單詳情時一併關掉排定卡的卡片詳情：訂單詳情（SoOrderModal，全站共用 z-50）比卡片詳情（Modal z-[60]）低，
+  // 兩個同時開著時訂單詳情會被壓在後面看不到
+  const openOrder = useCallback((so: string) => { setDetail(null); setOrderSo(so) }, [])
   const [activeDrag, setActiveDrag] = useState<ActiveDrag | null>(null)
   const [hideDone, setHideDone] = useState<boolean>(() => {
     try { return typeof window !== 'undefined' && window.localStorage.getItem(HIDE_DONE_KEY) === '1' } catch { return false }
   })
   const isDesktop = useIsDesktop()
+  // D56：檢視（預設「日」＝今天；記住上次選擇）與起點（null＝今天，不記住：每次打開都從今天開始）
+  const [view, setView] = useState<BoardViewMode>(() => parseViewMode(readLS(VIEW_KEY)))
+  const [anchor, setAnchor] = useState<YMD | null>(null)
+  const [poolHidden, setPoolHidden] = useState<boolean>(() => readLS(POOL_HIDDEN_KEY) === '1')
+  const [poolWidth, setPoolWidth] = useState<number | null>(() => {
+    const v = Number(readLS(POOL_WIDTH_KEY))
+    return Number.isFinite(v) && v >= MIN_POOL_WIDTH ? v : null
+  })
+  const asideRef = useRef<HTMLElement>(null)
+  const getPoolWidth = useCallback(() => asideRef.current?.getBoundingClientRect().width ?? poolWidth ?? 400, [poolWidth])
+  const commitPoolWidth = useCallback((w: number) => { setPoolWidth(w); writeLS(POOL_WIDTH_KEY, String(w)) }, [])
+  const resetPoolWidth = useCallback(() => {
+    setPoolWidth(null)
+    try { window.localStorage.removeItem(POOL_WIDTH_KEY) } catch { /* 忽略 */ }
+  }, [])
+  /** 產能存檔後 +1：重讀「哪些週六開加班」 */
+  const [capRefresh, setCapRefresh] = useState(0)
 
   const undo = useUndo()
   const boardRef = useRef<ReturnType<typeof useBoard> | null>(null)
@@ -113,6 +169,7 @@ export default function BoardLayout() {
   })
   const board = useBoard({
     enabled: !denied,
+    initialWindow: windowRequest(view, null),
     lock: lk,
     undo,
     onUnauthorized: () => router.replace('/login'),
@@ -123,8 +180,15 @@ export default function BoardLayout() {
   const data = board.data
   const me = data?.me
 
+  const openSatsFetched = useOpenSaturdays(!denied && !!data, data?.today ?? null, capRefresh)
+
   const editable = !!me?.canEdit && lk.phase === 'mine'
   const canDrag = editable && isDesktop
+
+  // D58：清掉 D57 試用期留下的 localStorage 鍵（一次性、不影響畫面）
+  useEffect(() => {
+    try { for (const k of LEGACY_KEYS) window.localStorage.removeItem(k) } catch { /* 忽略 */ }
+  }, [])
 
   // 時鐘（「N 分鐘前」、鎖逾時倒數）
   useEffect(() => {
@@ -242,6 +306,16 @@ export default function BoardLayout() {
     )
   }, [data, placePool, submit, actor, showToast])
 
+  // ── 檢視切換（D56）────────────────────────────────────────────────────
+  const { setWindow } = board
+  /** 換檢視／起點：同時告訴 useBoard 要抓哪一段（在事件裡直接呼叫，不靠 effect 同步） */
+  const go = useCallback((nextView: BoardViewMode, nextAnchor: YMD | null) => {
+    setView(nextView)
+    setAnchor(nextAnchor)
+    writeLS(VIEW_KEY, nextView)
+    setWindow(windowRequest(nextView, nextAnchor))
+  }, [setWindow])
+
   // ── 拖曳 ────────────────────────────────────────────────────────────────
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
@@ -321,9 +395,69 @@ export default function BoardLayout() {
     )
   }
 
-  const cpSyncLabel = data.freshness.changping ? `常平資料 ${clock(data.freshness.changping, nowMs)}` : '常平資料時間不明'
   const loadErr = board.loadError
   const holdingCards = data.holding
+
+  // ── 檢視（D56）的衍生值 ──────────────────────────────────────────────────
+  // 目前畫面上的資料是不是「現在要的那一段」（換日／換檢視後、新資料回來前為 false → 蓋一層載入中）
+  const req = board.windowReq
+  const expectFrom = req.from == null || req.from < data.today ? data.today : req.from
+  const windowMatches = data.window.workdays === req.workdays && data.window.from === expectFrom
+  // 已開加班的週六：產能表讀到的＋已載入欄位看到的；
+  // 日檢視選了某個週六、伺服器卻回下一個工作日＝那個週六其實沒開（產能表是舊的）→ 排除，◀ ▶ 才不會卡在那天
+  const openSats = new Set<YMD>(openSatsFetched)
+  for (const d of data.days) if (d.kind === 'saturday_ot' && weekdayOf(d.date) === 6) openSats.add(d.date)
+  if (view === 'day' && windowMatches && anchor && weekdayOf(anchor) === 6 && data.days[0]?.date !== anchor) openSats.delete(anchor)
+
+  const shownDate = resolveViewDay(anchor, data.rollTarget, openSats)
+  const dayData = view === 'day' ? (data.days.find(d => d.date === shownDate) ?? data.days[0] ?? null) : null
+  // 換日、新資料還沒回來時（windowMatches＝false）畫面上的 dayData 還是舊的那天：
+  // ◀ ▶ 與日期標籤一律以「使用者選的日期」為準，連按兩次 ▶ 才會真的前進兩天
+  const baseDate = windowMatches ? (dayData?.date ?? shownDate) : shownDate
+  // 載入中不能拖放：遮罩只擋畫面、擋不住 dnd-kit（pointerWithin 看 droppable 的 rect），
+  // 不關掉的話放下去會落到舊資料那一天
+  const viewCanDrag = canDrag && windowMatches
+  let onPrev: (() => void) | null = null
+  let onNext: (() => void) | null = null
+  let rangeLabel: string
+  let atToday: boolean
+  const dayPrev = view === 'day' ? stepViewDay(baseDate, -1, openSats, data.rollTarget) : null
+  const dayNext = view === 'day' ? stepViewDay(baseDate, 1, openSats) : null
+  if (view === 'day') {
+    const prev = dayPrev
+    const next = dayNext
+    onPrev = prev ? () => go('day', prev <= data.rollTarget ? null : prev) : null
+    onNext = next ? () => go('day', next) : null
+    rangeLabel = mdw(baseDate)
+    atToday = baseDate === data.rollTarget
+  } else {
+    const n = VIEW_WORKDAYS[view]
+    const start = anchor && anchor > data.rollTarget ? anchor : data.rollTarget
+    if (start > data.rollTarget) {
+      const p = shiftByWorkdays(start, -n, data.rollTarget)
+      onPrev = () => go(view, p <= data.rollTarget ? null : p)
+    }
+    // ▶ 新起點＝目前視窗最後一天之後的第一個工作台日期（含開加班的週六，不會漏掉兩段之間的週六）；
+    // 資料還沒回來時退回純工作日平移（shiftByWorkdays 已處理起點是週六的情況）
+    const lastLoaded = windowMatches ? data.days[data.days.length - 1]?.date : undefined
+    const nextStart = (lastLoaded ? stepViewDay(lastLoaded, 1, openSats) : null) ?? shiftByWorkdays(start, n)
+    onNext = () => go(view, nextStart)
+    const first = windowMatches ? data.days[0]?.date : start
+    const last = windowMatches ? data.days[data.days.length - 1]?.date : null
+    rangeLabel = first ? `${mdw(first)}${last && last !== first ? ` ～ ${mdw(last)}` : ''}` : ''
+    atToday = start === data.rollTarget
+  }
+  // 「移到日期…」「拆卡」的日期選單：今天起 10 個工作日＋目前視窗（日檢視只載入 1 天，不能只給那一天）
+  const dateOptionMap = new Map<YMD, { date: YMD; label: string; kind: 'workday' | 'saturday_ot' }>()
+  for (const d of listViewDays(data.rollTarget, 10, openSats)) dateOptionMap.set(d.date, d)
+  for (const d of data.days) dateOptionMap.set(d.date, { date: d.date, label: d.label, kind: d.kind })
+  const dateOptions = [...dateOptionMap.values()].sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0))
+  const editCapacity = (date: YMD) => setDialog({ t: 'capacity-day', date })
+  const loadingOverlay = windowMatches ? null : (
+    <div className="absolute inset-0 z-40 flex items-start justify-center bg-slate-950/50 pt-24">
+      <span className="animate-pulse rounded border border-slate-600 bg-slate-900 px-3 py-1.5 text-xs text-amber-300">載入 {rangeLabel}…</span>
+    </div>
+  )
 
   return (
     <div className="min-h-screen bg-[#050b14] text-white lg:flex lg:h-screen lg:flex-col lg:overflow-hidden">
@@ -387,6 +521,34 @@ export default function BoardLayout() {
           ) : null}
         </div>
 
+        <ViewSwitcher
+          view={view}
+          onView={v => go(v, anchor)}
+          rangeLabel={rangeLabel}
+          onPrev={onPrev}
+          onNext={onNext}
+          onToday={() => go(view, null)}
+          atToday={atToday}
+          busy={!windowMatches}
+          extra={<>
+            {view !== 'day' && windowMatches && (
+              <span className="text-[11px] text-slate-500">
+                {data.later.count > 0
+                  ? `之後還有 ${data.later.count} 張（${hours(data.later.minutes)} 小時${data.later.firstDate ? `，最早 ${md(data.later.firstDate)}` : ''}）`
+                  : '之後沒有已排的卡'}
+                ・點欄頭日期看當天明細
+              </span>
+            )}
+            <span className="flex-1" />
+            <button
+              type="button"
+              onClick={() => setPoolHidden(v => { writeLS(POOL_HIDDEN_KEY, v ? '0' : '1'); return !v })}
+              title="螢幕較窄時可先收起左側待排池，讓排程表寬一點（收起時不能從待排池拖入）"
+              className="hidden rounded border border-slate-700 bg-slate-900 px-2.5 py-1 text-slate-300 hover:bg-slate-800 lg:inline-block"
+            >{poolHidden ? '▸ 顯示待排池' : '◂ 收起待排池'}</button>
+          </>}
+        />
+
         {!isDesktop && (
           <div className="rounded border border-slate-700 bg-slate-900 px-3 py-1.5 text-[11px] text-slate-300">
             手機／平板只能檢視；拖曳排程請用電腦（寬度 1024px 以上）。
@@ -401,9 +563,22 @@ export default function BoardLayout() {
       </header>
 
       <DndContext sensors={sensors} collisionDetection={pointerWithin} onDragStart={onDragStart} onDragEnd={onDragEnd} onDragCancel={onDragCancel}>
-        <main className="flex flex-col gap-4 px-4 pb-4 lg:min-h-0 lg:flex-1 lg:flex-row">
-          {/* ─── 左：待排池＋待排區 ─── */}
-          <aside className="order-2 min-w-0 lg:order-1 lg:w-[400px] lg:shrink-0 lg:overflow-y-auto lg:pr-1">
+        <main className="flex flex-col gap-4 px-4 pb-4 lg:min-h-0 lg:flex-1 lg:flex-row lg:gap-1">
+          {/* ─── 左：待排池＋待排區 ───
+               寬度：使用者拖過分隔線 → 用記住的寬度（CSS 變數，只在 lg 生效；手機仍上下堆疊全寬），
+               並以 min/max 兜底（視窗縮小時不會把右側擠沒）。
+               沒拖過 → RWD 預設：1366 寬螢幕（< 2xl＝1536px）400px，右側日檢視卡片牆（每張 ≥ 260px）約可排 3 欄、
+               週檢視 5 欄×168px 也放得下；
+               寬螢幕 440px（簡化卡片一欄剛好；拉到約 560px 以上卡片自動排成兩欄，D58） */}
+          <aside
+            ref={asideRef}
+            style={poolWidth != null ? ({ '--pool-w': `${poolWidth}px` } as React.CSSProperties) : undefined}
+            className={`eip-scrollbar order-2 min-w-0 lg:order-1 lg:shrink-0 lg:overflow-y-auto lg:pr-1 ${poolHidden ? 'lg:hidden' : ''} ${
+              poolWidth != null
+                ? 'lg:w-[var(--pool-w)] lg:min-w-[280px] lg:max-w-[70vw]'
+                : 'lg:w-[400px] 2xl:w-[440px]'
+            }`}
+          >
             <PoolSidebar
               blocks={data.pool.blocks}
               cardMeta={data.pool.cardMeta}
@@ -412,9 +587,8 @@ export default function BoardLayout() {
               canDrag={canDrag}
               editable={editable}
               dragKind={activeDrag?.kind ?? null}
-              onOpenOrder={setOrderSo}
+              onOpenOrder={openOrder}
               onPoolAction={onPoolAction}
-              changpingSyncLabel={cpSyncLabel}
             >
               <ParkingArea
                 cards={holdingCards}
@@ -424,57 +598,81 @@ export default function BoardLayout() {
                 canDrag={canDrag}
                 hideCompleted={hideDone}
                 handlersFor={handlersFor}
-                onOpenOrder={setOrderSo}
-                changpingSyncLabel={cpSyncLabel}
+                onOpenOrder={openOrder}
+                onOpenDetail={openDetail}
               />
               <BoardFooter data={data} />
             </PoolSidebar>
           </aside>
 
-          {/* ─── 右：日期欄 ─── */}
-          <section className="order-1 min-w-0 flex-1 lg:order-2 lg:overflow-x-auto lg:overflow-y-hidden" aria-label="日期欄">
-            <div className="flex flex-col gap-3 lg:h-full lg:w-max lg:flex-row">
-              {data.days.map(day => (
-                <DayColumn
-                  key={day.date}
-                  day={day}
+          {/* ─── 左右之間：可拖拉的分隔線（收起待排池時不顯示） ─── */}
+          {!poolHidden && (
+            <PaneResizer
+              getCurrentWidth={getPoolWidth}
+              onResize={setPoolWidth}
+              onCommit={commitPoolWidth}
+              onReset={resetPoolWidth}
+              currentWidth={poolWidth}
+            />
+          )}
+
+          {/* ─── 右：排程（日／週／兩週） ─── */}
+          <section className="relative order-1 flex min-w-0 flex-1 flex-col lg:order-3 lg:min-h-0" aria-label="排程">
+            {view === 'day' ? (
+              dayData ? (
+                <DayCardWall
+                  day={dayData}
+                  today={data.today}
+                  prevDate={dayPrev}
+                  nextDate={dayNext}
+                  dragRule={activeDrag?.rule ?? null}
+                  dragging={!!activeDrag}
+                  editable={editable}
+                  canDrag={viewCanDrag}
+                  stale={!windowMatches}
+                  hideCompleted={hideDone}
+                  handlersFor={handlersFor}
+                  onOpenOrder={openOrder}
+                  onOpenDetail={openDetail}
+                  onEditCapacity={editCapacity}
+                  onGoDate={d => go('day', d <= data.rollTarget ? null : d)}
+                  loadingOverlay={loadingOverlay}
+                />
+              ) : (
+                <div className="flex h-40 items-center justify-center rounded-xl border border-dashed border-slate-800 text-xs text-slate-500">載入中…</div>
+              )
+            ) : (
+              <div className="relative min-h-[16rem] lg:min-h-0 lg:flex-1">
+                <MultiDayView
+                  days={data.days}
+                  dense={view === 'twoWeek'}
                   today={data.today}
                   dragRule={activeDrag?.rule ?? null}
                   editable={editable}
-                  canDrag={canDrag}
+                  canDrag={viewCanDrag}
+                  stale={!windowMatches}
                   hideCompleted={hideDone}
                   handlersFor={handlersFor}
-                  onOpenOrder={setOrderSo}
-                  onEditCapacity={(d: BoardDay) => setDialog({ t: 'capacity-day', date: d.date })}
-                  changpingSyncLabel={cpSyncLabel}
+                  onOpenOrder={openOrder}
+                  onOpenDetail={openDetail}
+                  onPickDay={d => go('day', d <= data.rollTarget ? null : d)}
+                  onEditCapacity={editCapacity}
                 />
-              ))}
-              <div className="flex w-full shrink-0 flex-col gap-2 rounded-xl border border-dashed border-slate-800 p-3 text-xs text-slate-400 lg:w-[200px]">
-                {data.later.count > 0 ? (
-                  <p>
-                    之後還有 <b className="text-slate-200">{data.later.count}</b> 張
-                    （{hours(data.later.minutes)} 小時{data.later.firstDate ? `，最早 ${md(data.later.firstDate)}` : ''}）
-                  </p>
-                ) : <p>視窗之後沒有已排的卡</p>}
-                {board.workdays < BOARD_MAX_WORKDAYS && (
-                  <button type="button" onClick={board.loadMore} disabled={board.loading}
-                    className="rounded border border-slate-700 bg-slate-900 px-2 py-1 text-slate-200 hover:bg-slate-800 disabled:opacity-50">
-                    再載入 10 個工作日
-                  </button>
-                )}
-                <p className="text-[10px] text-slate-500">顯示 {data.window.workdays} 個工作日（{md(data.window.from)}～{md(data.window.to)}）；週六只在開加班時出現</p>
+                {loadingOverlay}
               </div>
-            </div>
+            )}
           </section>
         </main>
 
         <DragOverlay dropAnimation={null}>
           {activeDrag?.kind === 'pool' ? (
-            <div className="w-[264px] rotate-1 rounded-lg shadow-2xl ring-2 ring-sky-400">
-              <PackagingCard card={activeDrag.card} today={data.today} onOpenOrder={() => {}} />
+            // D58：從待排池拖出去的就是那張簡化卡片本身（寬度固定，不跟左欄寬度走）
+            <div className="w-[300px] rotate-1 rounded-md border border-sky-400 bg-slate-900 shadow-2xl ring-2 ring-sky-400/40">
+              <SimplePoolCardFace card={activeDrag.card} today={data.today} overlay />
             </div>
           ) : activeDrag?.kind === 'placement' ? (
-            <CardFrame bc={activeDrag.bc} today={data.today} editable={false} onOpenOrder={() => {}} isOverlay />
+            // D60：排定卡飛出去的也是卡片本身（同一套外觀）
+            <PlacementCardOverlay bc={activeDrag.bc} today={data.today} />
           ) : null}
         </DragOverlay>
       </DndContext>
@@ -483,7 +681,7 @@ export default function BoardLayout() {
       {dialog?.t === 'split' && (
         <SplitDialog
           bc={dialog.bc}
-          days={data.days}
+          days={dateOptions}
           onClose={() => setDialog(null)}
           onSubmit={(keepQty, parts) => {
             const bc = dialog.bc
@@ -501,7 +699,7 @@ export default function BoardLayout() {
         <QtyDateDialog
           mode="move"
           title={`移動 ${lineLabel(dialog.bc.card)}`}
-          days={data.days}
+          days={dateOptions}
           today={data.today}
           minDate={ruleForBoardCard(dialog.bc).minDate}
           onClose={() => setDialog(null)}
@@ -515,7 +713,7 @@ export default function BoardLayout() {
           <QtyDateDialog
             mode="place"
             title={`排部分數量：${lineLabel(card)}`}
-            days={data.days}
+            days={dateOptions}
             today={data.today}
             maxQty={remaining}
             defaultQty={remaining}
@@ -533,7 +731,7 @@ export default function BoardLayout() {
           editable={editable}
           getLockToken={lk.getToken}
           onClose={() => setDialog(null)}
-          onSaved={() => { void board.reload() }}
+          onSaved={() => { setCapRefresh(n => n + 1); void board.reload() }}
         />
       )}
       {dialog?.t === 'versions' && (
@@ -549,6 +747,20 @@ export default function BoardLayout() {
           }}
         />
       )}
+
+      {detail && (() => {
+        // 用最新資料（輪詢／操作後）；找不到（已放回待排池、已結案隱藏）就顯示點開當下的快照
+        const fresh = [...data.holding, ...data.days.flatMap(d => d.cards)].find(c => c.placementId === detail.placementId) ?? detail
+        return (
+          <CardDetailDialog
+            card={fresh.card}
+            placement={fresh}
+            today={data.today}
+            onClose={() => setDetail(null)}
+            onOpenOrder={openOrder}
+          />
+        )
+      })()}
 
       {orderSo && <PackagingOrderModal so={orderSo} open onClose={() => setOrderSo(null)} />}
 

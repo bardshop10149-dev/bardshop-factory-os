@@ -26,8 +26,8 @@ function validQty(n: number): boolean {
 
 export default function SplitDialog({ bc, days, onClose, onSubmit }: {
   bc: BoardCard
-  /** 可選的日期（工作台視窗內的日期欄） */
-  days: BoardDay[]
+  /** 可選的日期（日檢視只載入 1 天，由 BoardLayout 另外列出之後 10 個工作日） */
+  days: Pick<BoardDay, 'date' | 'label'>[]
   onClose: () => void
   onSubmit: (keepQty: number, parts: { qty: number; toDate: YMD | null }[]) => void
 }) {

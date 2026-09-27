@@ -92,8 +92,10 @@ async function call<T extends { success: boolean }>(
 
 // ── 工作台 ──────────────────────────────────────────────────────────────
 
-export function fetchBoard(opts: { workdays: number; rev?: string | null; fresh?: boolean; lockToken?: string | null }) {
+/** from：檢視起點（null＝今天，由伺服器決定）；workdays：日 1／週 5／兩週 10（D56） */
+export function fetchBoard(opts: { from?: string | null; workdays: number; rev?: string | null; fresh?: boolean; lockToken?: string | null }) {
   const q = new URLSearchParams({ workdays: String(opts.workdays) })
+  if (opts.from) q.set('from', opts.from)
   if (opts.rev) q.set('rev', opts.rev)
   if (opts.fresh) q.set('fresh', '1')
   return call<BoardResponse>(`/api/packaging/board?${q.toString()}`, {

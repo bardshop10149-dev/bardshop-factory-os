@@ -2,19 +2,16 @@
 
 // 左欄：待排池（D21 左半邊）＋待排區。
 //
-// 卡片與區塊一律沿用 P0 的 PoolBlock／PackagingCard（兩個檔都不改）。
-// PoolBlock 內部直接渲染 PackagingCard、沒有預留「包一層」的插槽，所以拖曳用「事件委派」：
-//   整個待排池只註冊一個 draggable（id = 'poolcard'），監聽器掛在外層容器；
-//   pointerdown 時從事件目標往上找 <article>（PackagingCard 的根元素）與所在區塊（data-pool-block），
-//   以「第幾個 article」對回 PoolBlock 收到的 cards 陣列（PoolBlock 依序渲染 cards.slice(0, limit)），
-//   再把 draggable 的節點指到那張 article（DragOverlay 才會從卡片原位置起飛），最後交給 dnd-kit 的監聽器。
-// 右鍵選單提供鍵盤／精準操作的替代：「排部分數量…」「直接勾完成」「放到待排區」。
+// D58：待排池一律用「簡化卡片」（SimplePool／SimplePoolCard，只顯示單號、製令、交期、客戶名稱、品項名稱、數量、PACKING），
+// 取代 D57 試用的「表格／卡片」切換（PoolTable 已刪除；P0 的 PoolBlock／PackagingCard 仍給 /packaging/pool 用，這裡不再引用）。
+// 拖曳：每張簡化卡片自己是 draggable（不再用事件委派）。
+// 右鍵選單提供鍵盤／精準操作的替代：「排部分數量…」「直接勾完成」「放到待排區」；卡片根元素帶 data-pool-card-id，這裡依它找回卡片。
 
-import { useCallback, useDeferredValue, useMemo, useState, type MouseEvent, type ReactNode, type SyntheticEvent } from 'react'
-import { useDraggable, useDroppable } from '@dnd-kit/core'
+import { useCallback, useDeferredValue, useMemo, useState, type MouseEvent, type ReactNode } from 'react'
+import { useDroppable } from '@dnd-kit/core'
 import { PLACEABLE_BLOCKS, type PoolCardMeta } from '@/lib/packaging/scheduleTypes'
 import type { PackagingCard, PoolBlock as PoolBlockData, PoolBlockId } from '@/lib/packaging/types'
-import PoolBlock from '@/components/packaging/PoolBlock'
+import SimplePool from './SimplePool'
 import { fmtQty } from '@/components/packaging/poolStyles'
 import { isPlaceableBlock, ruleForPoolCard } from './boardLocal'
 import { md } from './boardFormat'
@@ -42,7 +39,7 @@ function haystack(c: PackagingCard): string {
 export type PoolAction = 'partial' | 'complete' | 'holding'
 
 export default function PoolSidebar({
-  blocks, cardMeta, today, rollTarget, canDrag, editable, dragKind, onOpenOrder, onPoolAction, changpingSyncLabel, children,
+  blocks, cardMeta, today, rollTarget, canDrag, editable, dragKind, onOpenOrder, onPoolAction, children,
 }: {
   blocks: PoolBlockData[]
   cardMeta: Record<string, PoolCardMeta>
@@ -55,7 +52,6 @@ export default function PoolSidebar({
   dragKind: 'pool' | 'placement' | null
   onOpenOrder: (so: string) => void
   onPoolAction: (card: PackagingCard, action: PoolAction) => void
-  changpingSyncLabel?: string
   /** 待排池下方（待排區、頁尾資訊） */
   children?: ReactNode
 }) {
@@ -63,7 +59,6 @@ export default function PoolSidebar({
   const deferred = useDeferredValue(keyword)
   const [collapsed, setCollapsed] = useState<Set<PoolBlockId>>(() => (typeof window === 'undefined' ? new Set() : readCollapsed()))
   const [menu, setMenu] = useState<{ x: number; y: number; card: PackagingCard } | null>(null)
-  const [picked, setPicked] = useState<PackagingCard | null>(null)
 
   const blockMap = useMemo(() => new Map(blocks.map(b => [b.id, b])), [blocks])
   const ordered = useMemo(() => SIDEBAR_ORDER.map(id => blockMap.get(id)).filter((b): b is PoolBlockData => !!b), [blockMap])
@@ -88,47 +83,27 @@ export default function PoolSidebar({
     setCollapsed(next)
   }
 
-  // ── 拖曳（事件委派，見檔頭說明） ──
-  const { setNodeRef: setDragNode, listeners } = useDraggable({
-    id: 'poolcard',
-    data: { kind: 'pool', card: picked },
-    disabled: !canDrag,
-  })
+  // 「放回待排池」：從右側把排定列拖回來
   const { setNodeRef: setDropNode, isOver } = useDroppable({ id: 'pool', disabled: dragKind !== 'placement' })
 
-  /** 從事件目標找出被按住的待排池卡 */
-  const cardFromEvent = useCallback((e: SyntheticEvent): { card: PackagingCard; el: HTMLElement } | null => {
-    const target = e.target as HTMLElement | null
-    const art = target?.closest('article') as HTMLElement | null
-    const blk = art?.closest('[data-pool-block]') as HTMLElement | null
-    if (!art || !blk) return null
-    const id = blk.getAttribute('data-pool-block') as PoolBlockId
-    const idx = Array.from(blk.querySelectorAll('article')).indexOf(art)
-    const card = viewCards.get(id)?.[idx]
-    return card ? { card, el: art } : null
-  }, [viewCards])
-
-  const delegated = useMemo(() => {
-    if (!canDrag || !listeners) return {}
-    const out: Record<string, (e: SyntheticEvent) => void> = {}
-    for (const [name, fn] of Object.entries(listeners)) {
-      out[name] = (e: SyntheticEvent) => {
-        const hit = cardFromEvent(e)
-        if (!hit || !isPlaceableBlock(hit.card.block)) return
-        setPicked(hit.card)
-        setDragNode(hit.el)
-        ;(fn as (ev: SyntheticEvent) => void)(e)
-      }
+  /** 從事件目標找出被按住的待排池卡（卡片根元素帶 data-pool-card-id） */
+  const cardFromEvent = useCallback((e: MouseEvent): PackagingCard | null => {
+    const el = (e.target as HTMLElement | null)?.closest('[data-pool-card-id]')
+    const id = el?.getAttribute('data-pool-card-id')
+    if (!id) return null
+    for (const list of viewCards.values()) {
+      const card = list.find(c => c.cardId === id)
+      if (card) return card
     }
-    return out
-  }, [canDrag, listeners, cardFromEvent, setDragNode])
+    return null
+  }, [viewCards])
 
   const onContextMenu = (e: MouseEvent) => {
     if (!editable) return
-    const hit = cardFromEvent(e)
-    if (!hit) return
+    const card = cardFromEvent(e)
+    if (!card) return
     e.preventDefault()
-    setMenu({ x: e.clientX, y: e.clientY, card: hit.card })
+    setMenu({ x: e.clientX, y: e.clientY, card })
   }
 
   const totalCards = ordered.reduce((n, b) => n + b.cardCount, 0)
@@ -150,44 +125,34 @@ export default function PoolSidebar({
         type="search"
         value={keyword}
         onChange={e => setKeyword(e.target.value)}
-        placeholder="搜尋 SO、品名、客戶、單號…"
+        placeholder="搜尋 SO、製令、品名、客戶、單號…"
         className="w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs text-slate-100 placeholder:text-slate-500 focus:border-sky-600 focus:outline-none"
       />
       {canDrag ? (
-        <p className="text-[11px] leading-snug text-slate-500">拖曳卡片到右側日期欄＝排定；拖到下方「待排區」＝先擱置。右鍵卡片可「排部分數量」「直接勾完成」。</p>
-      ) : null}
+        <p className="text-[11px] leading-snug text-slate-500">
+          拖曳卡片到右側日期＝排定；拖到下方「待排區」＝先擱置。右鍵可「排部分數量」「直接勾完成」。
+          滑鼠停在卡片上可看工時、品項編碼、備註與提醒；點卡片看卡片詳情，點單號看訂單詳情。
+        </p>
+      ) : (
+        <p className="text-[11px] leading-snug text-slate-500">點卡片看卡片詳情（工時、備註、提醒），點單號看訂單詳情。</p>
+      )}
       {dragKind === 'placement' && (
         <div className="rounded-lg border border-dashed border-sky-600 bg-sky-950/30 px-3 py-2 text-center text-xs text-sky-200">放到這裡＝放回待排池</div>
       )}
 
-      <div
-        {...delegated}
-        onContextMenu={onContextMenu}
-        className="space-y-3"
-      >
-        {ordered.map(b => {
-          const placeable = isPlaceableBlock(b.id)
-          const notice = !placeable ? (
-            <div className="rounded border border-rose-800/60 bg-rose-950/30 px-2 py-1 text-[11px] text-rose-200">
-              這一區不能排到日期（{b.id === '3' ? 'D22：未寄出不預排，僅提醒' : '出貨與否不明，比照未寄出'}）
-            </div>
-          ) : undefined
-          return (
-            <div key={b.id} data-pool-block={b.id} className={placeable && canDrag ? '[&_article]:cursor-grab' : ''}>
-              <PoolBlock
-                block={b}
-                cards={viewCards.get(b.id) ?? []}
-                filtered={!!q}
-                collapsed={collapsed.has(b.id)}
-                onToggle={() => toggle(b.id)}
-                onOpenOrder={onOpenOrder}
-                today={today}
-                notice={notice}
-                changpingSyncLabel={changpingSyncLabel}
-              />
-            </div>
-          )
-        })}
+      <div onContextMenu={onContextMenu}>
+        <SimplePool
+          blocks={ordered}
+          viewCards={viewCards}
+          cardMeta={cardMeta}
+          filtered={!!q}
+          collapsed={collapsed}
+          onToggle={toggle}
+          today={today}
+          canDrag={canDrag}
+          dragging={dragKind != null}
+          onOpenOrder={onOpenOrder}
+        />
       </div>
       </div>
 

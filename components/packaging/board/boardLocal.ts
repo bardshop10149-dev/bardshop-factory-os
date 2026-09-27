@@ -101,6 +101,20 @@ export function ruleForBoardCard(c: BoardCard): DragRule {
   return { blocked: false, minDate: null, reason: null }
 }
 
+/** 拖曳中這一天能不能放（D22 預排卡早於預估可包日、區塊 3／5c）；可放回 null。伺服器仍會再驗一次 */
+export function dropBlockedReason(rule: DragRule | null, date: string | null): string | null {
+  if (!rule) return null
+  if (rule.blocked) return rule.reason ?? '不能排'
+  if (date && rule.minDate && date < rule.minDate) return rule.reason ?? `預估 ${md(rule.minDate)} 才可包`
+  return null
+}
+
+/** 同欄同 SO 行有 ≥ 2 張未完成子卡 → 可合併 */
+export function mergeCandidates(cards: BoardCard[], bc: BoardCard): BoardCard[] {
+  if (bc.completed) return []
+  return cards.filter(c => c.placementId !== bc.placementId && c.soLineKey === bc.soLineKey && !c.completed)
+}
+
 function md(ymd: string): string {
   const m = ymd.match(/^\d{4}-(\d{2})-(\d{2})/)
   return m ? `${Number(m[1])}/${Number(m[2])}` : ymd

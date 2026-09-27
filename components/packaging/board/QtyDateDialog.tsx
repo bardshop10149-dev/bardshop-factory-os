@@ -17,7 +17,8 @@ const CUSTOM = '__custom__'
 export default function QtyDateDialog({ mode, title, days, today, maxQty, defaultQty, minDate: minDateProp, readyQty, onClose, onSubmit }: {
   mode: 'place' | 'move'
   title: string
-  days: BoardDay[]
+  /** 可選的日期（日檢視只載入 1 天，由 BoardLayout 另外列出之後 10 個工作日） */
+  days: Pick<BoardDay, 'date' | 'label' | 'kind'>[]
   today: YMD
   /** place：剩餘可排量 */
   maxQty?: number

@@ -12,16 +12,17 @@
 //   「過時回應」防護：每個 GET 發出時記下 mutationGen（有新操作排入或寫入成功就 +1），
 //   回來時若 gen 已變＝這份資料是寫入前的 DB 快照，丟掉不套用、改成之後再抓一次；
 //   拖曳中回來的回應也先不套用（避免被拖的卡／目標欄被換掉），放開後補抓。
+//   檢視視窗（D56：日 1／週 5／兩週 10 個工作日，起點 from）改變時 windowGen +1；
+//   發出時的 windowGen 與回來時不同＝舊視窗的回應，丟掉再抓（否則日檢視會短暫顯示成別天）。
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
-  BOARD_DEFAULT_WORKDAYS,
-  BOARD_MAX_WORKDAYS,
   BOARD_POLL_MS,
   type ApplyResponse,
   type CompleteRequest,
   type Placement,
   type PlacementOp,
+  type YMD,
 } from '@/lib/packaging/scheduleTypes'
 import { MIGRATION_HINT, fetchBoard, postComplete, postPlacements, type ApiResult } from './boardApi'
 import { applyLocal, rebaseOpVersions, versionMapOf, type BoardOk, type LocalAction } from './boardLocal'
@@ -66,8 +67,16 @@ function patchVersions(d: BoardOk, rows: Placement[]): BoardOk {
   }
 }
 
+/** 目前要向伺服器要的視窗：from＝檢視起點（null＝今天）、workdays＝天數 */
+export interface BoardWindowReq {
+  from: YMD | null
+  workdays: number
+}
+
 export function useBoard(opts: {
   enabled: boolean
+  /** 初始視窗（之後用 setWindow 改） */
+  initialWindow: BoardWindowReq
   lock: EditLockApi
   undo: UndoApi
   onUnauthorized: () => void
@@ -78,7 +87,7 @@ export function useBoard(opts: {
   const [loadError, setLoadError] = useState<LoadError | null>(null)
   const [loading, setLoading] = useState(false)
   const [lastLoadedAt, setLastLoadedAt] = useState<number | null>(null)
-  const [workdays, setWorkdays] = useState(BOARD_DEFAULT_WORKDAYS)
+  const [windowReq, setWindowReq] = useState<BoardWindowReq>(opts.initialWindow)
 
   const [pending, setPending] = useState(0)
   const [saving, setSaving] = useState(false)
@@ -100,7 +109,9 @@ export function useBoard(opts: {
   const dragPauseRef = useRef(false)
   /** 寫入世代：enqueue 與每次寫入成功各 +1；用來辨識「在寫入之前就發出的 GET」 */
   const mutationGenRef = useRef(0)
-  const workdaysRef = useRef(workdays)
+  const windowRef = useRef(windowReq)
+  /** 視窗世代：setWindow 改到不同視窗就 +1，用來丟掉舊視窗的回應 */
+  const windowGenRef = useRef(0)
   const lockRef = useRef(lock)
   const undoRef = useRef(undo)
   const cbRef = useRef(opts)
@@ -125,8 +136,10 @@ export function useBoard(opts: {
     try {
       const reqToken = lockRef.current.getToken()
       const gen = mutationGenRef.current
+      const wgen = windowGenRef.current
       const r = await fetchBoard({
-        workdays: workdaysRef.current,
+        from: windowRef.current.from,
+        workdays: windowRef.current.workdays,
         rev: o.force || o.fresh ? null : revRef.current,
         fresh: o.fresh,
         lockToken: reqToken,
@@ -147,6 +160,11 @@ export function useBoard(opts: {
         // 這個請求發出後有新的寫入（已排入或已寫完）：回應是寫入前的快照，套用會讓卡片跳回原位、
         // 已知版本號倒退（之後 rebase 出舊 version → 假的 version_conflict）→ 丟掉，finally 再抓一次
         if (mutationGenRef.current !== gen) {
+          reloadAgainRef.current = true
+          return
+        }
+        // 發出後換了檢視視窗：這份是舊視窗的資料 → 丟掉，finally 再抓新視窗
+        if (windowGenRef.current !== wgen) {
           reloadAgainRef.current = true
           return
         }
@@ -175,9 +193,17 @@ export function useBoard(opts: {
   const reload = useCallback((fresh = false) => load({ force: true, fresh }), [load])
 
   useEffect(() => {
-    workdaysRef.current = workdays
     if (enabled) void load({ force: true })
-  }, [enabled, workdays, load])
+  }, [enabled, windowReq, load])
+
+  /** 換檢視視窗（D56）；同一個視窗不重抓 */
+  const setWindow = useCallback((w: BoardWindowReq) => {
+    const cur = windowRef.current
+    if (cur.from === w.from && cur.workdays === w.workdays) return
+    windowRef.current = w
+    windowGenRef.current++
+    setWindowReq(w)
+  }, [])
 
   // 輪詢（D52：所有人每 60 秒）；背景分頁暫停，切回前景若已超過 60 秒立刻補抓
   useEffect(() => {
@@ -397,10 +423,6 @@ export function useBoard(opts: {
     void load({ force: true })
   }, [load, syncPending])
 
-  const loadMore = useCallback(() => {
-    setWorkdays(w => Math.min(BOARD_MAX_WORKDAYS, w + 10))
-  }, [])
-
   const setDragging = useCallback((v: boolean) => {
     dragPauseRef.current = v
     // 拖曳中有輪詢回應被擱置：放開後補抓。佇列非空時交給 pump 在清空後處理（它也看 dirtyRef）
@@ -415,8 +437,8 @@ export function useBoard(opts: {
     loadError,
     loading,
     lastLoadedAt,
-    workdays,
-    loadMore,
+    windowReq,
+    setWindow,
     reload,
     submit,
     undoStep,
