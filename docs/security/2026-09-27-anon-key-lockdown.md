@@ -104,6 +104,7 @@ supabase-js 本質上只是把 `.select().eq().range()` 翻譯成 `GET /rest/v1/
 | `app/tasks/page.tsx` | `postgres_changes` 即時訂閱 → 15 秒輪詢（比照 `app/admin/production/notice/page.tsx`）。 |
 | `app/api/admin/members/sync/route.ts` | 不再讀 `members.password`（欄位要刪）；找不到 Auth 帳號的成員列在 failed，請管理員用「設定登入密碼」建立。 |
 | `scripts/security/anon-probe.mjs` **(新)** | 曝險探針，套用 migration 前後各跑一次。 |
+| `proxy.ts` | 順帶修（來源：包裝排程 session 查證）：`matcher` 的負向前瞻 `(?!api` 沒帶斜線、函式內 `startsWith('/api')`，兩者都會讓 `/apixxx`、`/api-docs` 這類**頁面**路徑跳過登入閘。改成 `(?!api/` + `path === '/api' \|\| startsWith('/api/')`。實測：未登入 `/apixxx` 由 404 變 307 → `/login`；`/api/*` 仍由各 route 回 401。目前 repo 沒有這種頁面，屬潛在風險。 |
 | `sql/20260927_lockdown_anon.sql` **(新)** | migration，見 §3。 |
 
 ### 2.3 白名單權限對照（與 `proxy.ts` 頁面守門一致）

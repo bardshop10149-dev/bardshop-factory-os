@@ -15,8 +15,10 @@ function isJwtFormat(token: string): boolean {
 export function proxy(request: NextRequest) {
   const path = request.nextUrl.pathname
 
-  // API 路徑不受 middleware 管控
-  if (path.startsWith('/api')) {
+  // API 路徑不受 middleware 管控（各 route 自行以 guardAuth 守門）。
+  // 只放行 /api 與 /api/*：以前用 startsWith('/api') 會連 /apixxx、/api-docs 這類「頁面」
+  // 路徑一起放行，等於這些頁不用登入（下方 matcher 同步修正，2026-09-27）。
+  if (path === '/api' || path.startsWith('/api/')) {
     return NextResponse.next()
   }
 
@@ -121,6 +123,9 @@ export function proxy(request: NextRequest) {
 
 export const config = {
   matcher: [
-    '/((?!api|_next/static|_next/image|favicon.ico).*)',
+    // 負向前瞻要帶斜線：`(?!api` 會把 /apixxx、/api-docs 等頁面路徑也排除在 proxy 之外
+    // （= 免登入）；`(?!api/` 只排除真正的 /api/*。/api 本身（無斜線）會進 proxy，
+    // 由上方 path === '/api' 放行。
+    '/((?!api/|_next/static|_next/image|favicon.ico).*)',
   ],
 }
