@@ -159,7 +159,10 @@ export const NAV_GROUPS: Array<{ title: string; theme: string; items: MenuEntry[
       { name: '印刷排程', path: '/admin/production/printing', icon: '...' },
       { name: '雷切排程', path: '/admin/production/laser', icon: '...' },
       { name: '後加工排程', path: '/admin/production/post', icon: '...' },
-      { name: '包裝排程', path: '/admin/production/packaging', icon: '...' },
+      // D36:舊唯讀看板保留,改名「包裝站塔台看板」;真正的排程工作台在 /packaging(包裝專區)
+      { name: '包裝站塔台看板', path: '/admin/production/packaging', icon: '...' },
+      // 包裝專區入口(本選單無權限欄位,權限由 /packaging 頁與 /api/packaging/* 把關:guardAuth() 後 admin || packaging || packaging_admin 任一通過,不可只收 packaging)
+      { name: '包裝專區', path: '/packaging', icon: 'M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4' },
       { name: '委外排程', path: '/admin/production/outsourced', icon: '...' },
       { name: '常平排程', path: '/admin/production/changping', icon: '...' },
    ]

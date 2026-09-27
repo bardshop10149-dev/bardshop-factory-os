@@ -7,6 +7,8 @@ export const ADMIN_PERMISSIONS = [
   'qa_report', 'qa', 'production_admin', 'system_settings',
   'argo_db', 'design', 'material', 'product_dev', 'info_board', 'argo_tool',
   'purchasing', 'quote_admin', 'quote_user', 'engineering',
+  // 包裝專區(D30):packaging = 唯讀、packaging_admin = 編輯排程
+  'packaging', 'packaging_admin',
 ]
 
 /** 舊格式 permissions 正規化（與 login/page.tsx 原邏輯一致） */
