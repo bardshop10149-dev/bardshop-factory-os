@@ -508,8 +508,15 @@ export async function insertOpLog(
   }
 }
 
+/**
+ * 正式工作台輪詢指紋（D52）用的 op_log 最大 id。
+ * 排除 AI 模擬排程的紀錄（kind 'ai_%'，P3）：模擬區每次拖曳、鎖定、儲存規則都會記 op_log，
+ * 若算進來，正式區所有使用者每次輪詢都會被迫整份重讀。真正改到正式區的 AI 動作（採用／退回）
+ * 會寫 packaging_placements，擺放指紋照樣會變，所以排除它們不會漏更新。
+ */
 export async function getOpLogMaxId(sb: SupabaseAdmin): Promise<number> {
-  const { data, error } = await sb.from(TBL.opLog).select('id').order('id', { ascending: false }).limit(1)
+  const { data, error } = await sb.from(TBL.opLog).select('id').not('kind', 'like', 'ai_%')
+    .order('id', { ascending: false }).limit(1)
   if (error) throw new ScheduleDbError('讀取操作紀錄', error)
   const r = (data ?? [])[0] as { id: number | string } | undefined
   return r ? Number(r.id) : 0

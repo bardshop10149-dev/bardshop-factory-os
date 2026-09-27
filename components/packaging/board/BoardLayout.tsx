@@ -90,6 +90,9 @@ import QtyDateDialog, { type LineChoice } from './QtyDateDialog'
 import CapacityEditor from './CapacityEditor'
 import VersionsPanel from './VersionsPanel'
 import PaneResizer, { MIN_POOL_WIDTH } from './PaneResizer'
+// P3 AI 模擬排程（規格 §八）：正式工作台只新增「AI 採用紀錄」按鈕與對話框（退回採用），不動既有拖曳／儲存／鎖邏輯
+import AdoptionsDialog from '@/components/packaging/ai/AdoptionsDialog'
+import { useAiAccess } from '@/components/packaging/ai/aiAccess'
 
 const HIDE_DONE_KEY = 'packaging.schedule.hideCompleted.v1'
 /** D56：記住上次選的檢視 */
@@ -210,6 +213,9 @@ export default function BoardLayout() {
   }, [])
   /** 產能存檔後 +1：重讀「哪些週六／週日開加班」 */
   const [capRefresh, setCapRefresh] = useState(0)
+  /** P3：AI 採用紀錄（只有 AI 模擬排程被授權人看得到按鈕，D89；守門在 API） */
+  const aiAccess = useAiAccess(!denied)
+  const [aiAdoptionsOpen, setAiAdoptionsOpen] = useState(false)
 
   const undo = useUndo()
   const boardRef = useRef<ReturnType<typeof useBoard> | null>(null)
@@ -673,6 +679,11 @@ export default function BoardLayout() {
             className="rounded border border-slate-700 bg-slate-900 px-2.5 py-1 text-slate-200 hover:bg-slate-800">產能表</button>
           <button type="button" onClick={() => setDialog({ t: 'versions' })}
             className="rounded border border-slate-700 bg-slate-900 px-2.5 py-1 text-slate-200 hover:bg-slate-800">版本</button>
+          {aiAccess.canUseAi && (
+            <button type="button" onClick={() => setAiAdoptionsOpen(true)}
+              title="AI 模擬區每次「採用此版排程」的紀錄；可退回最近一次採用（只倒回那次的範圍）"
+              className="rounded border border-violet-700/70 bg-violet-950/40 px-2.5 py-1 text-violet-200 hover:bg-violet-900/50">AI 採用紀錄</button>
+          )}
           <label className="flex cursor-pointer items-center gap-1.5 rounded px-1.5 py-1 text-slate-300 hover:bg-slate-900">
             <input type="checkbox" checked={hideDone} onChange={toggleHideDone} className="accent-sky-500" />隱藏已完成
           </label>
@@ -952,6 +963,22 @@ export default function BoardLayout() {
           nowMs={nowMs}
           onClose={() => setDialog(null)}
           onRestored={msg => {
+            undo.clear()
+            board.showToast('info', msg)
+            void board.reload()
+          }}
+        />
+      )}
+
+      {aiAdoptionsOpen && (
+        <AdoptionsDialog
+          editable={editable}
+          getLockToken={lk.getToken}
+          nowMs={nowMs}
+          lines={data.lines ?? []}
+          onClose={() => setAiAdoptionsOpen(false)}
+          onReverted={msg => {
+            // 範圍內退回：那幾天的卡被倒回（版本號、甚至 id 都可能變了），Undo 堆疊裡的反向操作已對不上 → 清空（同版本還原）
             undo.clear()
             board.showToast('info', msg)
             void board.reload()

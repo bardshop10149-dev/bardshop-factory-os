@@ -1,0 +1,1164 @@
+'use client'
+
+// AI 模擬排程頁（P3，規格 §八；D77／D78／D83／D88）：與排程工作台相同版面的獨立空間。
+//   建立（複製／清空）→ 鎖定不想動的卡／訂單／線 → AI 排程 → 主管在模擬區調整 → 退回上一步 → 採用此版排程
+//
+// 元件分工：
+//   SimLayout（本檔）：工具列、檢視（日／全部天數）、拖放 → 模擬區操作（op）轉換、鎖定模式、對話框與抽屜開關
+//   useSim：載入／輪詢、操作佇列（樂觀更新＋失敗回滾）、鎖定、退回、AI 執行輪詢
+//   simBoard：鎖定判斷、顯示用標記（🔒／〔AI〕／〔正式〕）、樂觀更新包裝
+//   重用正式工作台的「純顯示」元件：DayLanesView／MultiDayView（卡片、時間尺、負荷條）、PoolSidebar（待排池）、ParkingArea（待排區，唯讀）
+//   ⚠ PoolSidebar 絕不傳 manual（會啟用「＋加入訂單」直接寫正式表）；useBoard／BoardLayout 的「拖曳 → 正式 API」邏輯不重用（規格 §八）。
+//
+// 模擬區裡的卡分兩種（SimView.simCards）：
+//   模擬列（可動、可鎖）＝範圍內（模擬日期 × 建立時啟用的線）、未完成；
+//   正式區唯讀列＝已完成、延誤順延、範圍外的線、待排區——照樣顯示、照樣佔產能，但模擬區與 AI 都不動它。
+// 拖放規則（伺服器 applySimOps 會再驗一次，這裡先擋、講清楚原因）：
+//   只能排進模擬範圍內的日期與線；鎖定的卡／訂單／線不能動；沒有待排區（要先不排＝拖回待排池）；不能勾完成。
+
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
+import { useRouter } from 'next/navigation'
+import Link from 'next/link'
+import {
+  DndContext,
+  DragOverlay,
+  PointerSensor,
+  TouchSensor,
+  pointerWithin,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+  type DragMoveEvent,
+  type DragStartEvent,
+} from '@dnd-kit/core'
+import {
+  AI_DEFAULT_HORIZON,
+  EMPTY_SIM_LOCKS,
+  SIM_MAX_OPS_PER_REQUEST,
+  type SimLocks,
+} from '@/lib/packaging/ai/types'
+import { MINUTES_SNAP, type BoardCard, type BoardDay, type PlacementOp, type YMD } from '@/lib/packaging/scheduleTypes'
+import type { PackagingCard as PackagingCardData } from '@/lib/packaging/types'
+import { lineNameOf } from '@/lib/packaging/scheduleLines'
+import { effectiveMinutes, overrideFromEffective } from '@/lib/packaging/scheduleMinutes'
+import PackagingOrderModal from '@/components/packaging/PackagingOrderModal'
+import { fmtQty } from '@/components/packaging/poolStyles'
+import {
+  laneCardsOf, laneDropPlan, laneReorderChanges, mergeCandidates, newId, parseDropId, ruleForBoardCard, ruleForPoolCard, storedOverrideOf,
+  type DragRule, type LocalAction,
+} from '@/components/packaging/board/boardLocal'
+import { ago, clock, hours, md, mdw } from '@/components/packaging/board/boardFormat'
+import PoolSidebar, { type PoolAction } from '@/components/packaging/board/PoolSidebar'
+import ParkingArea from '@/components/packaging/board/ParkingArea'
+import type { CardMenuHandlers } from '@/components/packaging/board/cardMenu'
+import { SimplePoolCardFace } from '@/components/packaging/board/SimplePoolCard'
+import { lineLabel } from '@/components/packaging/board/CardFace'
+import { PlacementCardOverlay } from '@/components/packaging/board/PlacementCard'
+import DayLanesView from '@/components/packaging/board/DayLanesView'
+import MultiDayView from '@/components/packaging/board/MultiDayView'
+import SplitDialog from '@/components/packaging/board/SplitDialog'
+import QtyDateDialog from '@/components/packaging/board/QtyDateDialog'
+import CapacityEditor from '@/components/packaging/board/CapacityEditor'
+import Modal, { Btn } from '@/components/packaging/board/Modal'
+import { useSim } from './useSim'
+import {
+  AI_MARK, LIVE_MARK, LOCK_MARK, decorateSimBoard, locksCount, simAutoLane, simCardState, soNumberOfKey,
+  toggleCardLock, toggleLineLock, toggleOrderLock, type SimCardState,
+} from './simBoard'
+import { MODE_LABEL, UNDO_KIND_LABEL, horizonLabel } from './simText'
+import { SimCreateForm, type SimCreateValue } from './SimCreateDialog'
+import SimCreateDialog from './SimCreateDialog'
+import SimCardDetail from './SimCardDetail'
+import AiRunPanel, { RunProgress, runElapsedMs } from './AiRunPanel'
+import RunHistory from './RunHistory'
+import RulesPanel from './RulesPanel'
+import ThresholdsPanel from './ThresholdsPanel'
+import AdoptDialog from './AdoptDialog'
+import LockPanel from './LockPanel'
+import Drawer from './Drawer'
+
+/** 記住上次選的檢視（日／全部） */
+const VIEW_KEY = 'packaging.ai.view.v1'
+const POOL_HIDDEN_KEY = 'packaging.ai.poolHidden.v1'
+
+function readLS(key: string): string | null {
+  try { return typeof window === 'undefined' ? null : window.localStorage.getItem(key) } catch { return null }
+}
+function writeLS(key: string, v: string) {
+  try { window.localStorage.setItem(key, v) } catch { /* 存不進去就算了 */ }
+}
+
+/**
+ * 鎖定卡「灰底」：顯示元件是正式工作台共用的，不能加欄位（見 simBoard.ts 檔頭），
+ * 改用 CSS 屬性選擇器——鎖定卡的品名前有 🔒，卡片根元素的 aria-label 就含 🔒。
+ * 寫在一般 <style>（不在 Tailwind 的 @layer 裡）：未分層的樣式優先於 Tailwind 的 utilities，蓋得掉卡片原本的底色。
+ * 只作用在 .sim-board 裡面，正式工作台不受影響。
+ */
+const SIM_CSS = `
+.sim-board [aria-roledescription="排定卡"][aria-label*="${LOCK_MARK}"] {
+  background-color: rgb(30 41 59);
+  background-image: repeating-linear-gradient(135deg, rgba(148,163,184,0.16) 0 6px, transparent 6px 12px);
+  border-color: rgb(100 116 139);
+}
+.sim-board.sim-lock-mode [aria-roledescription="排定卡"] { cursor: pointer; }
+.sim-board.sim-lock-mode [aria-roledescription="排定卡"]:hover { outline: 2px solid rgb(245 158 11 / 0.7); outline-offset: -2px; }
+`
+
+type ActiveDrag =
+  | { kind: 'pool'; card: PackagingCardData; rule: DragRule }
+  | { kind: 'placement'; bc: BoardCard; rule: DragRule }
+
+type ReorderHint = { laneKey: string; topPx: number; mode: 'insert' | 'append' }
+
+type Dialog =
+  | { t: 'reset' }
+  | { t: 'run' }
+  | { t: 'adopt' }
+  | { t: 'split'; bc: BoardCard }
+  | { t: 'move'; bc: BoardCard }
+  | { t: 'partial'; card: PackagingCardData }
+  | { t: 'capacity'; date: YMD; lineId?: number }
+
+type DrawerKind = 'run' | 'history' | 'rules' | 'locks'
+
+function pointerClientY(tracked: { y: number } | null, e: { activatorEvent: Event | null; delta: { y: number } }): number | null {
+  if (tracked) return tracked.y
+  const a = e.activatorEvent as (Event & { clientY?: number; touches?: TouchList }) | null
+  const y0 = typeof a?.clientY === 'number' ? a.clientY : a?.touches?.[0]?.clientY
+  return typeof y0 === 'number' ? y0 + e.delta.y : null
+}
+
+function laneBodyY(laneKey: string, clientY: number | null): number | null {
+  if (clientY == null || typeof document === 'undefined') return null
+  const el = document.querySelector(`.sim-board [data-lane-body="${laneKey}"]`)
+  return el ? clientY - el.getBoundingClientRect().top : null
+}
+
+/** 桌機（≥ 1024px）才提供拖曳（同正式工作台 D54） */
+function useIsDesktop(): boolean {
+  return useSyncExternalStore(
+    cb => {
+      const mq = window.matchMedia('(min-width: 1024px)')
+      mq.addEventListener('change', cb)
+      return () => mq.removeEventListener('change', cb)
+    },
+    () => window.matchMedia('(min-width: 1024px)').matches,
+    () => true,
+  )
+}
+
+const TOOL_BTN = 'rounded border border-slate-700 bg-slate-900 px-2.5 py-1 text-slate-200 hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-40'
+
+export default function SimLayout({ meEmail }: { meEmail: string | null }) {
+  const router = useRouter()
+  const [denied, setDenied] = useState(false)
+  const [owner, setOwner] = useState<string | null>(null)
+  const [nowMs, setNowMs] = useState(() => Date.now())
+  const [dialog, setDialog] = useState<Dialog | null>(null)
+  const [drawer, setDrawer] = useState<DrawerKind | null>(null)
+  const [rulesTab, setRulesTab] = useState<'rules' | 'thresholds'>('rules')
+  const rulesDirtyRef = useRef({ rules: false, thresholds: false })
+  const [lockMode, setLockMode] = useState(false)
+  const [view, setView] = useState<'day' | 'all'>(() => (readLS(VIEW_KEY) === 'day' ? 'day' : 'all'))
+  const [pickedDate, setPickedDate] = useState<YMD | null>(null)
+  const [detailId, setDetailId] = useState<string | null>(null)
+  const [orderSo, setOrderSo] = useState<string | null>(null)
+  const [poolHidden, setPoolHidden] = useState<boolean>(() => readLS(POOL_HIDDEN_KEY) === '1')
+  const [createValue, setCreateValue] = useState<SimCreateValue>({ horizon: AI_DEFAULT_HORIZON, mode: 'copy', start: 'today' })
+  const [activeDrag, setActiveDrag] = useState<ActiveDrag | null>(null)
+  const [reorderHint, setReorderHint] = useState<ReorderHint | null>(null)
+  const pointerRef = useRef<{ x: number; y: number } | null>(null)
+  const isDesktop = useIsDesktop()
+
+  /** AI 執行結束（成功或失敗）：自動打開結果面板 */
+  const onRunFinished = useCallback(() => setDrawer('run'), [])
+  const sim = useSim({
+    enabled: !denied,
+    owner,
+    onUnauthorized: () => router.replace('/login'),
+    onForbidden: () => setDenied(true),
+    onRunFinished,
+  })
+
+  const v = sim.view
+  const session = v?.session ?? null
+  const rawBoard = v?.board ?? null
+  const isOwner = !!v?.isOwner
+  const locks: SimLocks = session?.locks ?? EMPTY_SIM_LOCKS
+  const scopeLineIds = useMemo(() => session?.lineIds ?? [], [session?.lineIds])
+  const simCards = useMemo(() => v?.simCards ?? {}, [v?.simCards])
+  const windowSet = useMemo(() => new Set(session?.windowDates ?? []), [session?.windowDates])
+  // 執行中＝running 且沒逾時。逾時（stale：超過 6 分鐘沒結束，背景執行多半已中斷）不算執行中——
+  //   否則 AI 排程／採用／重設全部停用，而能把它標成失敗的 POST session/run 又按不到，模擬區就永遠卡住（審查發現）
+  const running = v?.runningRun && v.runningRun.status === 'running' && !v.runningRun.stale ? v.runningRun : null
+  const staleRun = v?.runningRun && v.runningRun.status === 'running' && v.runningRun.stale ? v.runningRun : null
+  const busy = sim.action != null
+  const stale = !!session?.stale
+  const lines = useMemo(() => rawBoard?.lines ?? [], [rawBoard?.lines])
+  const editable = isOwner && !!session && !stale && !busy
+  const noLockables = !!session && session.mode === 'clear' && session.placementCount === 0 && Object.keys(simCards).length === 0
+  // 鎖定模式：沒有東西可鎖、不能寫時視同關閉（資料換了也跟著失效，不必另外同步狀態）
+  const lockModeOn = lockMode && editable && !noLockables
+  const canDrag = editable && isDesktop && !lockModeOn
+
+  // 拖曳中追游標（D74 線內重排的插入點）
+  const dragging = activeDrag != null
+  useEffect(() => {
+    if (!dragging) { pointerRef.current = null; return }
+    const onPointer = (e: PointerEvent) => { pointerRef.current = { x: e.clientX, y: e.clientY } }
+    const onTouch = (e: TouchEvent) => { const t = e.touches[0]; if (t) pointerRef.current = { x: t.clientX, y: t.clientY } }
+    window.addEventListener('pointermove', onPointer, { capture: true, passive: true })
+    window.addEventListener('touchmove', onTouch, { capture: true, passive: true })
+    return () => {
+      window.removeEventListener('pointermove', onPointer, { capture: true })
+      window.removeEventListener('touchmove', onTouch, { capture: true })
+    }
+  }, [dragging])
+
+  // 時鐘（進度秒數、「N 分鐘前」）：AI 執行中每秒，平常 5 秒
+  const isRunning = running != null
+  useEffect(() => {
+    const id = window.setInterval(() => setNowMs(Date.now()), isRunning ? 1000 : 5000)
+    return () => window.clearInterval(id)
+  }, [isRunning])
+
+  // toast 自動消失
+  const { toast, dismissToast, showToast } = sim
+  useEffect(() => {
+    if (!toast) return
+    const id = window.setTimeout(dismissToast, toast.kind === 'error' ? 10_000 : 6000)
+    return () => window.clearTimeout(id)
+  }, [toast, dismissToast])
+
+  // ── 顯示用資料 ──────────────────────────────────────────────────────────
+  const board = useMemo(
+    () => (rawBoard ? decorateSimBoard(rawBoard, simCards, locks, scopeLineIds) : null),
+    [rawBoard, simCards, locks, scopeLineIds],
+  )
+  const cardState = useCallback((bc: BoardCard): SimCardState => simCardState(bc, simCards, locks, scopeLineIds), [simCards, locks, scopeLineIds])
+  const usableLineIds = useMemo(() => scopeLineIds.filter(id => !locks.lineIds.includes(id)), [scopeLineIds, locks.lineIds])
+  const usableLines = useMemo(
+    () => lines.filter(l => l.active && usableLineIds.includes(l.id)).sort((a, b) => a.sortOrder - b.sortOrder),
+    [lines, usableLineIds],
+  )
+  const scopeLines = useMemo(
+    () => lines.filter(l => scopeLineIds.includes(l.id)).sort((a, b) => a.sortOrder - b.sortOrder),
+    [lines, scopeLineIds],
+  )
+  const lineName = useCallback((id: number | null | undefined) => lineNameOf(lines, id), [lines])
+  const days: BoardDay[] = useMemo(() => board?.days ?? [], [board])
+  const shownDate = pickedDate && days.some(d => d.date === pickedDate) ? pickedDate : (days[0]?.date ?? null)
+  const dayData = view === 'day' ? (days.find(d => d.date === shownDate) ?? null) : null
+  const dayIdx = dayData ? days.findIndex(d => d.date === dayData.date) : -1
+  const dateOptions = useMemo(
+    () => days.filter(d => windowSet.has(d.date)).map(d => ({ date: d.date, label: d.label, kind: d.kind })),
+    [days, windowSet],
+  )
+
+  /** 未加工的原始卡（詳情、鎖定清單用） */
+  const rawCard = useCallback((id: string): BoardCard | null => {
+    if (!rawBoard) return null
+    for (const d of rawBoard.days) for (const c of d.cards) if (c.placementId === id) return c
+    return rawBoard.holding.find(c => c.placementId === id) ?? null
+  }, [rawBoard])
+
+  // ── 操作（全部經 useSim.submitOps → POST session/ops） ─────────────────────
+  const { submitOps, submitLocks } = sim
+
+  /** 模擬列能不能動；不能時 toast 說明並回 false */
+  const assertMovable = useCallback((bc: BoardCard): boolean => {
+    const st = cardState(bc)
+    if (!st.sim) { showToast('warn', `${st.readonlyReason ?? '正式排程的卡'}：模擬區不能動它`); return false }
+    if (st.lockedBy.length > 0) { showToast('warn', `${lineLabel(bc.card)} 已鎖定（${st.lockedBy.includes('card') ? '卡片' : st.lockedBy.includes('order') ? '整張訂單' : '整條線'}），要先解除鎖定才能動`); return false }
+    return true
+  }, [cardState, showToast])
+
+  /** 目標日期與線是否在模擬範圍、線是否可用 */
+  const assertTarget = useCallback((toDate: YMD | null, lineId: number | null): boolean => {
+    if (toDate == null) { showToast('warn', '模擬區沒有待排區；要先不排這張卡，請拖回左邊的待排池'); return false }
+    if (!windowSet.has(toDate)) { showToast('warn', `模擬區只能排在模擬範圍內（${session ? `${md(session.windowDates[0])}～${md(session.windowDates[session.windowDates.length - 1])}` : ''}）`); return false }
+    if (lineId == null) { showToast('warn', '這天沒有可排的線（線都被鎖定、停線或不在模擬範圍）'); return false }
+    if (!scopeLineIds.includes(lineId)) { showToast('warn', `${lineName(lineId)} 不在這次模擬的範圍（建立模擬區之後才啟用的線）`); return false }
+    if (locks.lineIds.includes(lineId)) { showToast('warn', `${lineName(lineId)} 已整條鎖定，不能放卡或移出`); return false }
+    return true
+  }, [windowSet, session, scopeLineIds, locks.lineIds, lineName, showToast])
+
+  const autoLane = useCallback((date: YMD, moving: BoardCard | null): number | null => {
+    const day = rawBoard?.days.find(d => d.date === date)
+    const keep = moving?.lineId != null && usableLineIds.includes(moving.lineId) ? moving.lineId : null
+    return simAutoLane(day, moving ? { placementId: moving.placementId } : null, usableLineIds, keep ?? usableLines[0]?.id ?? null)
+  }, [rawBoard, usableLineIds, usableLines])
+
+  const placePool = useCallback((card: PackagingCardData, qty: number, toDate: YMD, lineId: number, how = '排入') => {
+    if (locks.soNumbers.includes(soNumberOfKey(card.soLineKey))) {
+      showToast('warn', `訂單 ${soNumberOfKey(card.soLineKey)} 已鎖定：剩餘量不能再排（先解除訂單鎖定）`)
+      return
+    }
+    const id = newId()
+    submitOps(
+      [{ op: 'place', id, soLineKey: card.soLineKey, qty, toDate, originCardId: card.cardId, lineId }],
+      `${how} ${lineLabel(card)} ${fmtQty(qty)} → ${md(toDate)} ${lineName(lineId)}`,
+      [{ t: 'place', id, qty, toDate, poolCard: card, lineId }],
+    )
+  }, [locks.soNumbers, lineName, showToast, submitOps])
+
+  const moveCard = useCallback((bc: BoardCard, toDate: YMD, lineId: number) => {
+    if (toDate === bc.planDate && lineId === bc.lineId) return
+    submitOps(
+      [{ op: 'move', id: bc.placementId, version: bc.version, toDate, lineId }],
+      toDate === bc.displayDate && lineId !== bc.laneId ? `換線 ${lineLabel(bc.card)} → ${lineName(lineId)}` : `移動 ${lineLabel(bc.card)} → ${md(toDate)} ${lineName(lineId)}`,
+      [{ t: 'move', id: bc.placementId, toDate, lineId }],
+    )
+  }, [lineName, submitOps])
+
+  const unplaceCard = useCallback((bc: BoardCard) => {
+    if (!assertMovable(bc)) return
+    submitOps(
+      [{ op: 'unplace', id: bc.placementId, version: bc.version }],
+      `放回待排池 ${lineLabel(bc.card)}`,
+      [{ t: 'unplace', id: bc.placementId }],
+    )
+  }, [assertMovable, submitOps])
+
+  const setMinutes = useCallback((bc: BoardCard, minutes: number | null, reason: string | null, via: 'drag' | 'dialog') => {
+    if (!assertMovable(bc)) return
+    const cur = storedOverrideOf(bc)
+    if (minutes === cur || (minutes != null && cur != null && Math.abs(minutes - cur) < 0.05)) return
+    const eff = effectiveMinutes({ qty: bc.qty, effectiveQty: bc.effectiveQty, override: minutes, perUnit: bc.card.work.perUnit })
+    submitOps(
+      [{ op: 'setMinutes', id: bc.placementId, version: bc.version, minutes, reason: reason || null, via }],
+      `改工時 ${lineLabel(bc.card)} ${hours(bc.minutes)}→${minutes == null ? '標準' : hours(eff)}h`,
+      [{ t: 'setMinutes', id: bc.placementId, minutes, by: meEmail ?? '', byName: null, atIso: new Date().toISOString() }],
+    )
+  }, [assertMovable, meEmail, submitOps])
+
+  /** D69 日檢視拉下緣（與正式工作台同規則：接近標準值半格內＝回到標準值） */
+  const resizeMinutes = useCallback((bc: BoardCard, newEff: number) => {
+    const std = bc.minutesStd ?? null
+    const value = std != null && Math.abs(newEff - std) < MINUTES_SNAP / 2 ? null : overrideFromEffective(newEff, bc.qty, bc.effectiveQty)
+    setMinutes(bc, value, null, 'drag')
+  }, [setMinutes])
+
+  /**
+   * D74 同一條線內上下重排。線上可能夾著正式區唯讀的卡（今天已完成的卡）：
+   * 它們不能改 sort_index（伺服器回 not_sim_row），所以只拿「模擬列」來算要改哪幾張；
+   * 游標落在唯讀卡前面時，改成「放在它後面第一張模擬列之前」。
+   */
+  const reorderInLane = useCallback((bc: BoardCard, date: YMD, lineId: number, clientY: number | null) => {
+    const day = rawBoard?.days.find(d => d.date === date)
+    if (!day) return
+    const isSim = (id: string) => !!simCards[id]
+    const plan = laneDropPlan(day, lineId, bc.placementId, laneBodyY(`${date}:${lineId}`, clientY), false)
+    let beforeId = plan.beforeId
+    if (beforeId && !isSim(beforeId)) {
+      const lane = laneCardsOf(day, lineId)
+      const at = lane.findIndex(c => c.placementId === beforeId)
+      beforeId = lane.slice(at).find(c => isSim(c.placementId) && c.placementId !== bc.placementId)?.placementId ?? null
+    }
+    const simDay = { ...day, cards: day.cards.filter(c => isSim(c.placementId)) }
+    const changes = laneReorderChanges(simDay, lineId, bc.placementId, beforeId)
+    if (changes.length === 0) return
+    if (changes.length > SIM_MAX_OPS_PER_REQUEST) {
+      showToast('warn', `這條線的卡太多（要重新編號 ${changes.length} 張，一次最多 ${SIM_MAX_OPS_PER_REQUEST} 張），無法調整順序`)
+      return
+    }
+    const lockedIds = changes.filter(c => {
+      const row = rawCard(c.id)
+      return row ? cardState(row).lockedBy.length > 0 : false
+    })
+    if (lockedIds.length > 0) {
+      showToast('warn', '這條線有鎖定的卡、需要一起重新編號，無法調整順序（先解除鎖定，或把卡拖到最後）')
+      return
+    }
+    submitOps(
+      changes.map((c): PlacementOp => (c.replan
+        ? { op: 'move', id: c.id, version: c.version, toDate: date, lineId, sortIndex: c.sortIndex }
+        : { op: 'reorder', id: c.id, version: c.version, sortIndex: c.sortIndex })),
+      `調整順序 ${lineLabel(bc.card)}（${lineName(lineId)}）`,
+      changes.map((c): LocalAction => (c.replan
+        ? { t: 'move', id: c.id, toDate: date, lineId, sortIndex: c.sortIndex }
+        : { t: 'reorder', id: c.id, sortIndex: c.sortIndex })),
+    )
+  }, [rawBoard, simCards, rawCard, cardState, lineName, showToast, submitOps])
+
+  // ── 鎖定（D88） ────────────────────────────────────────────────────────
+  const changeLocks = useCallback((next: SimLocks, label: string) => submitLocks(next, label), [submitLocks])
+
+  const toggleCard = useCallback((bc: BoardCard) => {
+    const raw = rawCard(bc.placementId) ?? bc
+    const st = cardState(raw)
+    if (!st.sim) { showToast('info', `${st.readonlyReason ?? '正式排程的卡'}：本來就不會被 AI 動，不用鎖`); return }
+    const own = locks.placementIds.includes(raw.placementId)
+    if (!own && st.lockedBy.length > 0) {
+      showToast('info', `這張卡因為${st.lockedBy.includes('order') ? '整張訂單' : '整條線'}被鎖；要解除請到「鎖定清單」`)
+      return
+    }
+    changeLocks(toggleCardLock(locks, raw.placementId), `${own ? '解除鎖定' : '鎖定'} ${lineLabel(raw.card)}`)
+  }, [rawCard, cardState, locks, changeLocks, showToast])
+
+  // ── 卡片右鍵選單 ────────────────────────────────────────────────────────
+  const handlersFor = useCallback((bc: BoardCard, siblings: BoardCard[]): CardMenuHandlers => {
+    const st = cardState(bc)
+    const deny = () => { assertMovable(bc) }
+    if (!st.sim || st.lockedBy.length > 0) {
+      return {
+        onToggleComplete: () => showToast('warn', '模擬區不能勾完成；完成請在正式排程工作台勾'),
+        onSplit: deny, onMoveTo: deny, onToHolding: deny, onUnplace: deny,
+        onEditMinutes: c => setDetailId(c.placementId),
+      }
+    }
+    const others = mergeCandidates(siblings, bc).filter(o => {
+      const s = cardState(o)
+      return !!s.sim && s.lockedBy.length === 0
+    })
+    return {
+      onToggleComplete: () => showToast('warn', '模擬區不能勾完成；完成請在正式排程工作台勾'),
+      onSplit: c => setDialog({ t: 'split', bc: c }),
+      onMoveTo: c => setDialog({ t: 'move', bc: c }),
+      onToHolding: () => showToast('warn', '模擬區沒有待排區；要先不排這張卡，請用「放回待排池」'),
+      onUnplace: c => unplaceCard(c),
+      onMoveLine: (c, lineId) => { if (c.displayDate && assertTarget(c.displayDate, lineId)) moveCard(c, c.displayDate, lineId) },
+      moveLines: usableLines,
+      onEditMinutes: c => setDetailId(c.placementId),
+      onMerge: others.length > 0 ? c => {
+        submitOps(
+          [{ op: 'merge', targetId: c.placementId, targetVersion: c.version, sources: others.map(o => ({ id: o.placementId, version: o.version })) }],
+          `合併 ${lineLabel(c.card)}（${others.length + 1} 張）`,
+          [{ t: 'merge', targetId: c.placementId, sourceIds: others.map(o => o.placementId) }],
+        )
+      } : undefined,
+    }
+  }, [cardState, assertMovable, assertTarget, moveCard, unplaceCard, usableLines, submitOps, showToast])
+
+  const onOpenDetail = useCallback((bc: BoardCard) => {
+    if (lockModeOn) { toggleCard(bc); return }
+    setDetailId(bc.placementId)
+  }, [lockModeOn, toggleCard])
+  const openOrder = useCallback((so: string) => { setDetailId(null); setOrderSo(so) }, [])
+
+  const onPoolAction = useCallback((card: PackagingCardData, action: PoolAction) => {
+    if (action === 'partial') { setDialog({ t: 'partial', card }); return }
+    showToast('warn', action === 'complete' ? '模擬區不能勾完成；完成請在正式排程工作台勾' : '模擬區沒有待排區；直接拖到模擬範圍內的日期即可')
+  }, [showToast])
+
+  // ── 拖曳 ────────────────────────────────────────────────────────────────
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
+    useSensor(TouchSensor, { activationConstraint: { delay: 250, tolerance: 5 } }),
+  )
+
+  const onDragStart = (e: DragStartEvent) => {
+    setReorderHint(null)
+    const d = e.active.data.current as { kind?: string; card?: PackagingCardData | null; bc?: BoardCard } | undefined
+    if (d?.kind === 'pool' && d.card) setActiveDrag({ kind: 'pool', card: d.card, rule: ruleForPoolCard(d.card) })
+    else if (d?.kind === 'placement' && d.bc) setActiveDrag({ kind: 'placement', bc: d.bc, rule: ruleForBoardCard(d.bc) })
+    sim.setDragging(true)
+  }
+
+  const onDragMove = (e: DragMoveEvent) => {
+    const drag = activeDrag
+    const t = e.over ? parseDropId(String(e.over.id)) : null
+    const day = view === 'day' && drag && rawBoard && t?.kind === 'lane' ? rawBoard.days.find(x => x.date === t.date) : undefined
+    if (!drag || !day || t?.kind !== 'lane') { setReorderHint(h => (h ? null : h)); return }
+    const laneKey = `${t.date}:${t.lineId}`
+    const own = drag.kind === 'placement' && drag.bc.displayDate === t.date && drag.bc.laneId === t.lineId
+    const y = own ? laneBodyY(laneKey, pointerClientY(pointerRef.current, e)) : null
+    const plan = laneDropPlan(day, t.lineId, own && drag.kind === 'placement' ? drag.bc.placementId : null, y, false)
+    const next: ReorderHint = { laneKey, topPx: Math.round(plan.topPx), mode: own ? 'insert' : 'append' }
+    setReorderHint(h => (h && h.laneKey === next.laneKey && h.topPx === next.topPx && h.mode === next.mode ? h : next))
+  }
+
+  const onDragEnd = (e: DragEndEvent) => {
+    const drag = activeDrag
+    const clientY = pointerClientY(pointerRef.current, e)
+    setActiveDrag(null)
+    setReorderHint(null)
+    sim.setDragging(false)
+    if (!drag || !e.over || !rawBoard || !session) return
+    const target = parseDropId(String(e.over.id))
+    if (!target) return
+    if (drag.kind === 'placement' && !assertMovable(drag.bc)) return
+    if (target.kind === 'pool') { if (drag.kind === 'placement') unplaceCard(drag.bc); return }
+    if (target.kind === 'holding') { showToast('warn', '模擬區沒有待排區；要先不排這張卡，請拖回待排池'); return }
+    if (view === 'day' && drag.kind === 'placement' && target.kind === 'lane'
+      && drag.bc.displayDate === target.date && drag.bc.laneId === target.lineId) {
+      reorderInLane(drag.bc, target.date, target.lineId, clientY)
+      return
+    }
+    if (drag.rule.blocked) return
+    const toDate = target.date
+    if (drag.rule.minDate && toDate < drag.rule.minDate) return
+    const moving = drag.kind === 'placement' ? drag.bc : null
+    const lineId = target.kind === 'lane' ? target.lineId : autoLane(toDate, moving)
+    if (!assertTarget(toDate, lineId) || lineId == null) return
+    if (drag.kind === 'pool') {
+      const remaining = rawBoard.pool.cardMeta[drag.card.cardId]?.remainingQty ?? drag.card.qtyCard
+      if (!(remaining > 0)) return
+      placePool(drag.card, remaining, toDate, lineId, '拖曳')
+      return
+    }
+    moveCard(drag.bc, toDate, lineId)
+  }
+
+  const onDragCancel = () => {
+    setActiveDrag(null)
+    setReorderHint(null)
+    sim.setDragging(false)
+  }
+
+  // ── 其他動作 ────────────────────────────────────────────────────────────
+  const goView = (next: 'day' | 'all') => { setView(next); writeLS(VIEW_KEY, next) }
+  const closeDrawer = () => {
+    if (drawer === 'rules' && (rulesDirtyRef.current.rules || rulesDirtyRef.current.thresholds)
+      && !window.confirm('規則或門檻表有未儲存的修改，確定要關閉嗎？')) return
+    rulesDirtyRef.current = { rules: false, thresholds: false }
+    setDrawer(null)
+  }
+  const onRulesDirty = useCallback((d: boolean) => { rulesDirtyRef.current.rules = d }, [])
+  const onThresholdsDirty = useCallback((d: boolean) => { rulesDirtyRef.current.thresholds = d }, [])
+
+  const openRunPanel = (id?: number | null) => {
+    setDrawer('run')
+    const target = id ?? v?.runningRun?.id ?? v?.latestRun?.id ?? null
+    if (target != null && sim.run?.id !== target) void sim.openRun(target)
+  }
+
+  const doLoadRun = (runId: number, which: 'result' | 'base') => {
+    void sim.loadRun(runId, which).then(ok => { if (ok) setDrawer(null) })
+  }
+
+  // ── 狀態畫面 ────────────────────────────────────────────────────────────
+  if (denied) return <AccessDenied />
+
+  if (!v) {
+    const err = sim.loadError
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-[#050b14] p-4 text-white">
+        {err ? (
+          <div className="w-full max-w-lg rounded-2xl border border-red-800 bg-slate-900 p-8 text-center">
+            <h1 className="text-lg font-bold text-red-300">{err.missingTable ? 'AI 模擬排程資料表尚未建立' : 'AI 模擬區載入失敗'}</h1>
+            <p className="mt-3 break-words text-sm leading-relaxed text-slate-300">{err.message}</p>
+            {err.missingTable && (
+              <p className="mt-2 text-xs leading-relaxed text-slate-500">
+                這是新功能的資料表，要由 Snow 在 Supabase 備份後手動套用。套用前正式排程工作台照常可用，只有 AI 模擬排程不能用。
+              </p>
+            )}
+            <div className="mt-6 flex justify-center gap-2">
+              <button type="button" onClick={() => void sim.reload()} disabled={sim.loading}
+                className="rounded border border-slate-600 px-4 py-1.5 text-sm text-slate-200 hover:bg-slate-800 disabled:opacity-50">{sim.loading ? '重試中…' : '重試'}</button>
+              <Link href="/packaging" className="rounded border border-slate-600 px-4 py-1.5 text-sm text-slate-200 hover:bg-slate-800">回包裝專區</Link>
+            </div>
+          </div>
+        ) : (
+          <div className="animate-pulse font-mono text-sm text-violet-300">載入 AI 模擬區…（待排池冷啟動約 3~6 秒）</div>
+        )}
+      </div>
+    )
+  }
+
+  const ownerLabel = v.owner.name ?? v.owner.email
+  const lastUndo = session?.undo[session.undo.length - 1] ?? null
+  const runBusy = !!running || sim.polling
+  const detailRaw = detailId ? rawCard(detailId) : null
+  const adoptBlock = !isOwner ? '別人的模擬區只能檢視'
+    : !session ? '請先建立模擬區'
+      : stale ? '起始日已過，請先重設模擬區'
+        : runBusy ? 'AI 執行中，請等結果出來'
+          : sim.pending > 0 || sim.saving ? '還有操作儲存中'
+            : busy ? '請等目前的動作完成' : null
+  const runBlock = !isOwner ? '別人的模擬區只能檢視'
+    : !session ? '請先建立模擬區'
+      : stale ? '起始日已過，請先重設模擬區'
+        : runBusy ? 'AI 正在執行'
+          : sim.pending > 0 || sim.saving ? '還有操作儲存中'
+            : busy ? '請等目前的動作完成' : null
+
+  return (
+    <div className={`sim-board min-h-screen bg-[#050b14] text-white lg:flex lg:h-screen lg:flex-col lg:overflow-hidden ${lockModeOn ? 'sim-lock-mode' : ''}`}>
+      <style>{SIM_CSS}</style>
+
+      {/* ─── 標題列 ─── */}
+      <header className="shrink-0 space-y-2 px-4 pb-2 pt-3">
+        <div className="flex flex-wrap items-end gap-x-4 gap-y-1">
+          <div className="min-w-0">
+            <Link href="/packaging" className="font-mono text-xs text-slate-400 hover:text-white">← 包裝專區</Link>
+            <h1 className="text-xl font-bold">
+              AI 模擬排程
+              <span className="ml-2 rounded border border-violet-600/50 bg-violet-950/40 px-1.5 py-0.5 align-middle text-[11px] font-semibold text-violet-300">P3</span>
+            </h1>
+          </div>
+          <p className="text-[11px] text-slate-400">
+            今天 {mdw(v.today)}
+            {session && (
+              <>
+                <span className="text-slate-300">・範圍 {mdw(session.windowDates[0])}～{mdw(session.windowDates[session.windowDates.length - 1])}</span>
+                （{horizonLabel(session.horizon)}・{MODE_LABEL[session.mode]}）・模擬 {session.placementCount} 張
+                <span className="text-slate-500">・更新 {clock(session.updatedAt, nowMs)}（{ago(session.updatedAt, nowMs + sim.serverOffsetMs)}）</span>
+              </>
+            )}
+          </p>
+          <div className="flex-1" />
+          {v.owners.length > 1 || !isOwner ? (
+            <label className="flex items-center gap-1.5 text-[11px] text-slate-400">
+              檢視
+              <select
+                value={isOwner ? '' : v.owner.email}
+                onChange={e => setOwner(e.target.value || null)}
+                className="max-w-[12rem] rounded border border-slate-700 bg-slate-900 px-1.5 py-1 text-xs text-slate-200"
+                aria-label="切換檢視誰的模擬區"
+              >
+                <option value="">我的模擬區</option>
+                {v.owners.filter(o => o.email !== v.me.email).map(o => (
+                  <option key={o.email} value={o.email}>{o.name ?? o.email}（唯讀）</option>
+                ))}
+                {!isOwner && !v.owners.some(o => o.email === v.owner.email) && (
+                  <option value={v.owner.email}>{ownerLabel}（唯讀）</option>
+                )}
+              </select>
+            </label>
+          ) : null}
+          <button type="button" onClick={() => { setRulesTab('rules'); setDrawer('rules') }} className={TOOL_BTN + ' text-xs'}>規則與門檻</button>
+          <button type="button" onClick={() => void sim.reload()} disabled={sim.loading || sim.pending > 0}
+            className="rounded-lg border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs font-semibold text-slate-200 hover:bg-slate-700 disabled:opacity-50">
+            {sim.loading ? '更新中…' : '重新整理'}
+          </button>
+        </div>
+
+        {!isOwner && (
+          <div className="flex flex-wrap items-center gap-2 rounded-lg border border-sky-800/70 bg-sky-950/30 px-3 py-2 text-xs text-sky-100">
+            <b>唯讀檢視：{ownerLabel} 的模擬區</b>
+            <span className="text-sky-200/70">・只有本人能改；規則與門檻是大家共用的，可以編輯</span>
+            <span className="flex-1" />
+            <button type="button" onClick={() => setOwner(null)} className="rounded border border-sky-700 px-2 py-0.5 hover:bg-sky-900/50">回到我的模擬區</button>
+          </div>
+        )}
+
+        {/* ─── 工具列 ─── */}
+        {session && (
+          <div className="flex flex-wrap items-center gap-2 text-xs">
+            {isOwner && (
+              <button type="button" onClick={() => setDialog({ t: 'reset' })} disabled={busy || runBusy || sim.pending > 0} className={TOOL_BTN}
+                title="換範圍（2／4／6 天）、起始日或開始方式（複製／清空）；目前狀態會先存進退回上一步">重設…</button>
+            )}
+            <button
+              type="button"
+              aria-pressed={lockModeOn}
+              onClick={() => setLockMode(!lockModeOn)}
+              disabled={!editable || noLockables}
+              title={noLockables ? '清空模式目前沒有卡可以鎖（手動排入後才能鎖）' : '開啟後點卡片＝鎖定／解除（灰底＋🔒），拖曳暫停'}
+              className={`rounded border px-2.5 py-1 disabled:cursor-not-allowed disabled:opacity-40 ${
+                lockModeOn ? 'border-amber-500 bg-amber-600 font-semibold text-white' : 'border-slate-700 bg-slate-900 text-slate-200 hover:bg-slate-800'
+              }`}
+            >{LOCK_MARK} 鎖定模式{lockModeOn ? '：開' : ''}</button>
+            <span className="flex flex-wrap items-center gap-1" role="group" aria-label="整條線鎖定">
+              {scopeLines.map(l => {
+                const on = locks.lineIds.includes(l.id)
+                return (
+                  <button
+                    key={l.id}
+                    type="button"
+                    aria-pressed={on}
+                    disabled={!editable || noLockables}
+                    onClick={() => changeLocks(toggleLineLock(locks, l.id), `${on ? '解除鎖定' : '鎖定'} ${l.name}`)}
+                    title={on ? `解除 ${l.name} 的整條鎖定` : `整條鎖定 ${l.name}：AI 不能放新卡、也不能移出；採用時這條線不動`}
+                    className={`rounded border px-2 py-1 disabled:cursor-not-allowed disabled:opacity-40 ${
+                      on ? 'border-amber-600 bg-amber-950/60 text-amber-100' : 'border-slate-700 bg-slate-900 text-slate-300 hover:bg-slate-800'
+                    }`}
+                  >{on ? `${LOCK_MARK} ` : ''}{l.name}</button>
+                )
+              })}
+            </span>
+            <button type="button" onClick={() => setDrawer('locks')} className={TOOL_BTN}>鎖定清單（{locksCount(locks)}）</button>
+            <span className="mx-1 h-4 w-px bg-slate-700" />
+            <button
+              type="button"
+              onClick={() => setDialog({ t: 'run' })}
+              disabled={runBlock != null}
+              title={runBlock ?? '讓 AI 排範圍內沒鎖定的卡（約 1～3 分鐘）'}
+              className="rounded border border-violet-500 bg-violet-600 px-3 py-1 font-semibold text-white hover:bg-violet-500 disabled:cursor-not-allowed disabled:opacity-40"
+            >✦ AI 排程</button>
+            <button
+              type="button"
+              onClick={() => void sim.undoStep()}
+              disabled={!isOwner || !lastUndo || busy || sim.pending > 0 || sim.saving}
+              title={lastUndo ? `退回到「${lastUndo.label}」之前（${UNDO_KIND_LABEL[lastUndo.kind]}，${clock(lastUndo.at, nowMs)}）` : '沒有可以退回的步驟'}
+              className={TOOL_BTN}
+            >↶ 退回上一步{session.undo.length > 0 ? ` ${session.undo.length}` : ''}</button>
+            <button type="button" onClick={() => setDrawer('history')} className={TOOL_BTN}>歷史</button>
+            {(v.latestRun || running || sim.run) && (
+              <button type="button" onClick={() => openRunPanel()} className={TOOL_BTN}>AI 結果</button>
+            )}
+            <span className="flex-1" />
+            <SaveStatus sim={sim} nowMs={nowMs} editable={editable} />
+            <button
+              type="button"
+              onClick={() => setDialog({ t: 'adopt' })}
+              disabled={adoptBlock != null}
+              title={adoptBlock ?? '把模擬版寫進正式排程（只覆蓋模擬的日期 × 未鎖定的線；採用前自動存版本）'}
+              className="rounded border border-emerald-500 bg-emerald-600 px-3 py-1 font-semibold text-white hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-40"
+            >採用此版排程</button>
+          </div>
+        )}
+
+        {/* ─── 橫幅 ─── */}
+        {running && (
+          <div className="flex flex-wrap items-center gap-3 rounded-lg border border-violet-700/60 bg-violet-950/30 px-3 py-2">
+            <span className="text-xs font-bold text-violet-100">AI 排程中</span>
+            <div className="min-w-0 flex-1">
+              <RunProgress phase={running.phase} elapsedMs={runElapsedMs(running, nowMs, sim.serverOffsetMs)} compact />
+            </div>
+            <button type="button" onClick={() => openRunPanel(running.id)} className="rounded border border-violet-600 px-2 py-0.5 text-xs text-violet-100 hover:bg-violet-900/50">查看</button>
+            {isOwner && (
+              <span className="basis-full text-[11px] text-violet-200/70">執行期間也可以手動調整模擬區，但那樣 AI 的結果就不會自動放進來（之後可從「歷史」載入）。</span>
+            )}
+          </div>
+        )}
+        {staleRun && (
+          <div className="flex flex-wrap items-center gap-2 rounded-lg border border-amber-600/70 bg-amber-950/40 px-3 py-2 text-xs text-amber-100">
+            <b>上次 AI 排程（#{staleRun.id}）超過 6 分鐘沒有結束，背景執行可能已中斷</b>
+            <span className="text-amber-200/80">・模擬區沒有被改動；{isOwner ? '可以直接再按「AI 排程」重新執行（會把上次標成失敗）' : '只有本人能重新執行'}</span>
+            <span className="flex-1" />
+            <button type="button" onClick={() => openRunPanel(staleRun.id)} className="rounded border border-amber-600 px-2 py-0.5 hover:bg-amber-900/50">查看</button>
+          </div>
+        )}
+        {stale && isOwner && (
+          <div className="flex flex-wrap items-center gap-2 rounded-lg border border-orange-600/70 bg-orange-950/40 px-3 py-2 text-xs text-orange-100">
+            <b>模擬起始日 {md(session?.windowDates[0])} 已經過了</b>・AI 排程與採用前請先重設模擬區（目前內容會存進「退回上一步」）
+            <span className="flex-1" />
+            <Btn tone="primary" onClick={() => setDialog({ t: 'reset' })} disabled={busy}>重設模擬區</Btn>
+          </div>
+        )}
+        {lockModeOn && (
+          <div className="rounded-lg border border-amber-600/70 bg-amber-950/40 px-3 py-1.5 text-xs text-amber-100">
+            <b>鎖定模式</b>：點卡片＝鎖定／解除（灰底＋{LOCK_MARK}）；整張訂單在卡片詳情鎖、整條線在上方線名按鈕鎖。拖曳暫停，按「{LOCK_MARK} 鎖定模式」結束。
+          </div>
+        )}
+        {sim.loadError && (
+          <div className="flex flex-wrap items-center gap-2 rounded border border-yellow-700/60 bg-yellow-950/30 px-3 py-1.5 text-[11px] text-yellow-100">
+            資料更新失敗（{clock(sim.loadError.at, nowMs)}）：{sim.loadError.message}。顯示的是較舊的資料。
+            <button type="button" onClick={() => void sim.reload()} className="rounded border border-yellow-600 px-1.5 hover:bg-yellow-900/50">重試</button>
+          </div>
+        )}
+        {sim.action && <div className="animate-pulse text-xs text-amber-300">{sim.action}中…</div>}
+
+        {/* ─── 檢視切換 ─── */}
+        {session && board && (
+          <div className="flex flex-wrap items-center gap-2 text-xs">
+            <div role="group" aria-label="檢視" className="inline-flex overflow-hidden rounded-lg border border-slate-600">
+              <button type="button" aria-pressed={view === 'all'} onClick={() => goView('all')}
+                className={`px-3 py-1 font-semibold ${view === 'all' ? 'bg-violet-600 text-white' : 'bg-slate-900 text-slate-300 hover:bg-slate-800'}`}>全部 {days.length} 天</button>
+              <button type="button" aria-pressed={view === 'day'} onClick={() => goView('day')}
+                className={`px-3 py-1 font-semibold ${view === 'day' ? 'bg-violet-600 text-white' : 'bg-slate-900 text-slate-300 hover:bg-slate-800'}`}>日</button>
+            </div>
+            {view === 'day' && (
+              <div role="tablist" aria-label="模擬日期" className="flex flex-wrap gap-1">
+                {days.map(d => (
+                  <button key={d.date} type="button" role="tab" aria-selected={d.date === dayData?.date} onClick={() => setPickedDate(d.date)}
+                    className={`rounded border px-2 py-1 ${d.date === dayData?.date ? 'border-violet-500 bg-violet-950/60 text-violet-100' : 'border-slate-700 bg-slate-900 text-slate-300 hover:bg-slate-800'} ${
+                      d.load === 'over_overtime' ? 'ring-1 ring-red-500/70' : ''}`}>{mdw(d.date)}</button>
+                ))}
+              </div>
+            )}
+            <span className="text-[11px] text-slate-500">
+              圖例：{LOCK_MARK} 鎖定（AI 不動）・{AI_MARK} AI 排入・{LIVE_MARK} 正式排程的卡（唯讀）・「（範圍外）」不在模擬範圍的線
+            </span>
+            <span className="flex-1" />
+            <button
+              type="button"
+              onClick={() => setPoolHidden(h => { writeLS(POOL_HIDDEN_KEY, h ? '0' : '1'); return !h })}
+              className="hidden rounded border border-slate-700 bg-slate-900 px-2.5 py-1 text-slate-300 hover:bg-slate-800 lg:inline-block"
+            >{poolHidden ? '▸ 顯示待排池' : '◂ 收起待排池'}</button>
+          </div>
+        )}
+        {session && !isDesktop && (
+          <div className="rounded border border-slate-700 bg-slate-900 px-3 py-1.5 text-[11px] text-slate-300">
+            手機／平板可以檢視、鎖定、按 AI 排程與採用；拖曳調整請用電腦（寬度 1024px 以上）。
+          </div>
+        )}
+      </header>
+
+      {/* ─── 還沒有模擬區 ─── */}
+      {!session && (
+        <main className="px-4 pb-8">
+          {isOwner ? (
+            <div className="mx-auto mt-4 max-w-2xl space-y-4 rounded-2xl border border-slate-700 bg-slate-900/70 p-5">
+              <div>
+                <h2 className="text-lg font-bold text-white">建立你的模擬區</h2>
+                <p className="mt-1 text-xs leading-relaxed text-slate-400">
+                  流程：建立模擬區 → 鎖定不想動的卡／訂單／線 → 按「AI 排程」→ 在模擬區調整 → 「採用此版排程」寫進正式排程。
+                  模擬區每位主管各一份，互相可以唯讀查看。
+                </p>
+              </div>
+              <SimCreateForm value={createValue} onChange={setCreateValue} disabled={busy} />
+              <div className="flex justify-end">
+                <Btn tone="primary" disabled={busy} onClick={() => void sim.createOrReset(createValue)}>{busy ? '建立中…' : '建立模擬區'}</Btn>
+              </div>
+            </div>
+          ) : (
+            <div className="mx-auto mt-8 max-w-md rounded-2xl border border-slate-700 bg-slate-900/70 p-6 text-center text-sm text-slate-300">
+              {ownerLabel} 還沒有建立模擬區。
+              <div className="mt-4"><Btn onClick={() => setOwner(null)}>回到我的模擬區</Btn></div>
+            </div>
+          )}
+        </main>
+      )}
+
+      {/* ─── 模擬區 ─── */}
+      {session && board && (
+        <DndContext sensors={sensors} collisionDetection={pointerWithin} onDragStart={onDragStart} onDragMove={onDragMove} onDragEnd={onDragEnd} onDragCancel={onDragCancel}>
+          <main className="flex flex-col gap-4 px-4 pb-4 lg:min-h-0 lg:flex-1 lg:flex-row lg:gap-3">
+            <aside className={`eip-scrollbar order-2 min-w-0 lg:order-1 lg:w-[380px] lg:shrink-0 lg:overflow-y-auto lg:pr-1 2xl:w-[420px] ${poolHidden ? 'lg:hidden' : ''}`}>
+              {/* ⚠ 不傳 manual：手動加入會直接寫正式表（規格 §八） */}
+              <PoolSidebar
+                blocks={board.pool.blocks}
+                cardMeta={board.pool.cardMeta}
+                today={board.today}
+                rollTarget={board.rollTarget}
+                canDrag={canDrag}
+                editable={editable}
+                dragKind={activeDrag?.kind ?? null}
+                onOpenOrder={openOrder}
+                onPoolAction={onPoolAction}
+              >
+                <details className="rounded-xl border border-slate-800 bg-slate-950/40">
+                  <summary className="cursor-pointer px-3 py-2 text-xs text-slate-300">
+                    待排區（主管擱置 {board.holding.length} 張・模擬區唯讀，AI 不動）
+                  </summary>
+                  <div className="p-1.5">
+                    <ParkingArea
+                      cards={board.holding}
+                      today={board.today}
+                      dragRule={activeDrag?.rule ?? null}
+                      editable={false}
+                      canDrag={false}
+                      hideCompleted={false}
+                      handlersFor={handlersFor}
+                      onOpenOrder={openOrder}
+                      onOpenDetail={bc => setDetailId(bc.placementId)}
+                    />
+                  </div>
+                </details>
+              </PoolSidebar>
+            </aside>
+
+            <section className="relative order-1 flex min-w-0 flex-1 flex-col lg:order-3 lg:min-h-0" aria-label="模擬排程">
+              {view === 'day' ? (
+                dayData ? (
+                  <DayLanesView
+                    day={dayData}
+                    today={board.today}
+                    prevDate={dayIdx > 0 ? days[dayIdx - 1].date : null}
+                    nextDate={dayIdx >= 0 && dayIdx < days.length - 1 ? days[dayIdx + 1].date : null}
+                    dragRule={activeDrag?.rule ?? null}
+                    dragging={!!activeDrag}
+                    editable={editable}
+                    canDrag={canDrag}
+                    canResize={canDrag}
+                    stale={false}
+                    stacked={!isDesktop}
+                    hideCompleted={false}
+                    defaultLineName={usableLines[0]?.name ?? null}
+                    handlersFor={handlersFor}
+                    onOpenOrder={openOrder}
+                    onOpenDetail={onOpenDetail}
+                    onEditCapacity={(date, lineId) => setDialog({ t: 'capacity', date, lineId })}
+                    onGoDate={d => setPickedDate(d)}
+                    onResize={resizeMinutes}
+                    onResizing={sim.setDragging}
+                    reorderHint={reorderHint}
+                    ownLaneKey={activeDrag?.kind === 'placement' && activeDrag.bc.displayDate != null && activeDrag.bc.laneId != null
+                      ? `${activeDrag.bc.displayDate}:${activeDrag.bc.laneId}` : null}
+                  />
+                ) : (
+                  <div className="flex h-40 items-center justify-center rounded-xl border border-dashed border-slate-800 text-xs text-slate-500">沒有日期</div>
+                )
+              ) : (
+                <div className="relative min-h-[16rem] lg:min-h-0 lg:flex-1">
+                  <MultiDayView
+                    days={days}
+                    dense={days.length > 7}
+                    today={board.today}
+                    dragRule={activeDrag?.rule ?? null}
+                    // 欄頭「放開＝自動放到 X 線」的提示用的是全部線；模擬區只能放未鎖定的線 → 不顯示提示，免得說的和做的不一樣
+                    drag={null}
+                    defaultLineId={usableLines[0]?.id ?? null}
+                    editable={editable}
+                    canDrag={canDrag}
+                    stale={false}
+                    hideCompleted={false}
+                    handlersFor={handlersFor}
+                    onOpenOrder={openOrder}
+                    onOpenDetail={onOpenDetail}
+                    onPickDay={d => { setPickedDate(d); goView('day') }}
+                    onEditCapacity={(date, lineId) => setDialog({ t: 'capacity', date, lineId })}
+                  />
+                </div>
+              )}
+            </section>
+          </main>
+
+          <DragOverlay dropAnimation={null}>
+            {activeDrag?.kind === 'pool' ? (
+              <div className="w-[300px] rotate-1 rounded-md border border-violet-400 bg-slate-900 shadow-2xl ring-2 ring-violet-400/40">
+                <SimplePoolCardFace card={activeDrag.card} today={board.today} overlay />
+              </div>
+            ) : activeDrag?.kind === 'placement' ? (
+              <PlacementCardOverlay bc={activeDrag.bc} today={board.today} />
+            ) : null}
+          </DragOverlay>
+        </DndContext>
+      )}
+
+      {/* ─── 對話框 ─── */}
+      {dialog?.t === 'reset' && session && (
+        <SimCreateDialog
+          initial={{ horizon: session.horizon, mode: session.mode }}
+          busy={busy}
+          onClose={() => setDialog(null)}
+          onSubmit={val => { void sim.createOrReset(val).then(ok => { if (ok) { setDialog(null); setLockMode(false) } }) }}
+        />
+      )}
+      {dialog?.t === 'run' && session && (
+        <Modal
+          title="讓 AI 排這個模擬區？"
+          onClose={() => setDialog(null)}
+          footer={<>
+            <Btn onClick={() => setDialog(null)}>取消</Btn>
+            <Btn tone="primary" disabled={busy || runBlock != null} onClick={() => { void sim.startRun().then(ok => { if (ok) setDialog(null) }) }}>
+              {busy ? '送出中…' : '開始 AI 排程'}
+            </Btn>
+          </>}
+        >
+          <ul className="list-disc space-y-1 pl-5 text-xs leading-relaxed text-slate-200">
+            <li>範圍：{mdw(session.windowDates[0])}～{mdw(session.windowDates[session.windowDates.length - 1])}（{horizonLabel(session.horizon)}）・{scopeLines.map(l => l.name).join('、')}</li>
+            <li>AI 會重排<b>沒鎖定</b>的模擬卡與待排池裡可排的卡；鎖定的卡／訂單／線（目前 {locksCount(locks)} 項）原位不動、照樣佔產能。</li>
+            <li>待排區（主管擱置）、已完成、工時未知的卡不會交給 AI；工時未知的會列在結果裡請你手動排。</li>
+            <li>AI 的排法會經過程式驗算：超產能、排在可包日之前、動到鎖定的部分會被修正或退回待排池，並寫在結果的「系統修正」。</li>
+            <li>送給 AI 的資料已去識別化（客戶換成代號、不送備註／金額／地址，D84）；規則照「規則與門檻」最新版。</li>
+            <li>約 1～3 分鐘。目前的模擬區會先存進「退回上一步」，不滿意可以一鍵退回。</li>
+          </ul>
+        </Modal>
+      )}
+      {dialog?.t === 'adopt' && session && (
+        <AdoptDialog
+          meEmail={v.me.email}
+          lines={lines}
+          getVersion={sim.getVersion}
+          isIdle={sim.isIdle}
+          onClose={() => setDialog(null)}
+          onAdopted={r => { showToast('info', `已採用到正式排程（採用前版本 #${r.versionId}）`); void sim.reload() }}
+          onFailed={() => { void sim.reload() }}
+        />
+      )}
+      {dialog?.t === 'split' && (
+        <SplitDialog
+          bc={dialog.bc}
+          days={dateOptions}
+          lines={usableLines}
+          onClose={() => setDialog(null)}
+          onSubmit={(keepQty, parts) => {
+            const bc = dialog.bc
+            if (parts.some(p => p.toDate == null)) { showToast('warn', '模擬區沒有待排區：拆出來的每一張都要選模擬範圍內的日期'); return }
+            const origUsable = bc.lineId != null && usableLineIds.includes(bc.lineId) ? bc.lineId : null
+            const withIds = parts.map(p => ({
+              id: newId(),
+              qty: p.qty,
+              toDate: p.toDate as YMD,
+              lineId: p.line !== 'same' ? p.line : (origUsable ?? autoLane(p.toDate as YMD, null)),
+            }))
+            for (const p of withIds) if (!assertTarget(p.toDate, p.lineId)) return
+            setDialog(null)
+            submitOps(
+              [{ op: 'split', id: bc.placementId, version: bc.version, keepQty, parts: withIds.map(p => ({ id: p.id, qty: p.qty, toDate: p.toDate, lineId: p.lineId })) }],
+              `拆卡 ${lineLabel(bc.card)} → ${[keepQty, ...parts.map(p => p.qty)].map(fmtQty).join('／')}`,
+              [{ t: 'split', id: bc.placementId, keepQty, parts: withIds }],
+            )
+          }}
+        />
+      )}
+      {dialog?.t === 'move' && (
+        <QtyDateDialog
+          mode="move"
+          title={`移動 ${lineLabel(dialog.bc.card)}`}
+          days={dateOptions}
+          today={board?.today ?? v.today}
+          minDate={ruleForBoardCard(dialog.bc).minDate}
+          lines={usableLines}
+          onClose={() => setDialog(null)}
+          onSubmit={(_q, toDate, line) => {
+            const bc = dialog.bc
+            const lineId = toDate == null ? null : line === 'auto' ? autoLane(toDate, bc) : line
+            if (!assertTarget(toDate, lineId) || toDate == null || lineId == null) return
+            setDialog(null)
+            moveCard(bc, toDate, lineId)
+          }}
+        />
+      )}
+      {dialog?.t === 'partial' && board && (() => {
+        const card = dialog.card
+        const remaining = board.pool.cardMeta[card.cardId]?.remainingQty ?? card.qtyCard
+        return (
+          <QtyDateDialog
+            mode="place"
+            title={`排部分數量：${lineLabel(card)}`}
+            days={dateOptions}
+            today={board.today}
+            maxQty={remaining}
+            defaultQty={remaining}
+            readyQty={card.qtyReady}
+            minDate={ruleForPoolCard(card).minDate}
+            lines={usableLines}
+            onClose={() => setDialog(null)}
+            onSubmit={(qty, toDate, line) => {
+              const lineId = toDate == null ? null : line === 'auto' ? autoLane(toDate, null) : line
+              if (!assertTarget(toDate, lineId) || toDate == null || lineId == null) return
+              setDialog(null)
+              if (qty && qty > 0) placePool(card, qty, toDate, lineId)
+            }}
+          />
+        )
+      })()}
+      {dialog?.t === 'capacity' && (
+        // 模擬區沿用正式產能：只給看（要改請到正式工作台的「產能表」，需要編輯鎖）
+        <CapacityEditor
+          mode={{ kind: 'day', date: dialog.date, lineId: dialog.lineId }}
+          today={v.today}
+          editable={false}
+          getLockToken={() => null}
+          onClose={() => setDialog(null)}
+          onSaved={() => void sim.reload()}
+        />
+      )}
+
+      {detailRaw && (
+        <SimCardDetail
+          bc={detailRaw}
+          state={cardState(detailRaw)}
+          today={v.today}
+          lines={lines}
+          editable={editable}
+          busy={busy}
+          onClose={() => setDetailId(null)}
+          onOpenOrder={openOrder}
+          onToggleCardLock={() => toggleCard(detailRaw)}
+          onToggleOrderLock={() => {
+            const so = soNumberOfKey(detailRaw.soLineKey)
+            const on = locks.soNumbers.includes(so)
+            changeLocks(toggleOrderLock(locks, detailRaw.soLineKey), `${on ? '解除鎖定' : '鎖定'}訂單 ${so}`)
+          }}
+          onSubmitMinutes={(m, reason) => setMinutes(detailRaw, m, reason, 'dialog')}
+        />
+      )}
+      {orderSo && <PackagingOrderModal so={orderSo} open onClose={() => setOrderSo(null)} />}
+
+      {/* ─── 抽屜 ─── */}
+      {drawer === 'run' && (
+        <AiRunPanel
+          run={sim.run}
+          running={v.runningRun}
+          loading={sim.runLoading}
+          error={sim.runError}
+          nowMs={nowMs}
+          serverOffsetMs={sim.serverOffsetMs}
+          lines={lines}
+          currentWindow={session?.windowDates ?? null}
+          isOwner={isOwner}
+          busy={busy || sim.pending > 0}
+          onClose={() => setDrawer(null)}
+          onLoad={doLoadRun}
+        />
+      )}
+      {drawer === 'history' && (
+        <RunHistory
+          owner={owner}
+          isOwner={isOwner}
+          currentWindow={session?.windowDates ?? null}
+          busy={busy || sim.pending > 0}
+          nowMs={nowMs}
+          onClose={() => setDrawer(null)}
+          onShow={id => openRunPanel(id)}
+          onLoad={doLoadRun}
+        />
+      )}
+      {drawer === 'locks' && (
+        <LockPanel
+          locks={locks}
+          simCards={simCards}
+          board={rawBoard}
+          lines={lines}
+          editable={editable}
+          onChange={changeLocks}
+          onClose={() => setDrawer(null)}
+        />
+      )}
+      {drawer === 'rules' && (
+        <RulesDrawer tab={rulesTab} onTab={setRulesTab} nowMs={nowMs} onClose={closeDrawer} onRulesDirty={onRulesDirty} onThresholdsDirty={onThresholdsDirty} />
+      )}
+
+      {/* ─── 提示 ─── */}
+      {toast && (
+        <div role="alert" className={`fixed bottom-4 left-1/2 z-[70] flex max-w-[92vw] -translate-x-1/2 items-start gap-3 rounded-lg border px-4 py-2.5 text-sm shadow-2xl ${
+          toast.kind === 'error' ? 'border-red-600 bg-red-950 text-red-100'
+            : toast.kind === 'warn' ? 'border-orange-600 bg-orange-950 text-orange-100'
+              : 'border-violet-600 bg-slate-900 text-violet-100'
+        }`}>
+          <span className="min-w-0 break-words">{toast.text}</span>
+          <button type="button" onClick={dismissToast} aria-label="關閉提示" className="shrink-0 text-lg leading-none opacity-70 hover:opacity-100">×</button>
+        </div>
+      )}
+    </div>
+  )
+}
+
+/** 自動儲存狀態（同正式工作台的寫法） */
+function SaveStatus({ sim, nowMs, editable }: { sim: ReturnType<typeof useSim>; nowMs: number; editable: boolean }) {
+  if (sim.saveError) {
+    return (
+      <span className="flex flex-wrap items-center gap-2 rounded border border-red-700 bg-red-950/50 px-2 py-1 text-red-200">
+        {sim.saveError.count} 個操作未儲存（{sim.saveError.message}）
+        <button type="button" onClick={sim.retryNow} className="rounded border border-red-600 px-1.5 hover:bg-red-900/60">重試</button>
+        <button type="button" onClick={sim.discardQueue} className="rounded border border-red-600 px-1.5 hover:bg-red-900/60">放棄並重新載入</button>
+      </span>
+    )
+  }
+  if (sim.pending > 0 || sim.saving) return <span className="text-amber-300">儲存中…（尚未儲存 {sim.pending}）</span>
+  if (sim.lastSavedAt) return <span className="text-slate-400">模擬區已儲存 {clock(sim.lastSavedAt, nowMs)}</span>
+  return editable ? <span className="text-slate-500">每次操作自動儲存（只存在模擬區）</span> : null
+}
+
+function RulesDrawer({ tab, onTab, nowMs, onClose, onRulesDirty, onThresholdsDirty }: {
+  tab: 'rules' | 'thresholds'
+  onTab: (t: 'rules' | 'thresholds') => void
+  nowMs: number
+  onClose: () => void
+  onRulesDirty: (d: boolean) => void
+  onThresholdsDirty: (d: boolean) => void
+}) {
+  const tabBtn = (t: 'rules' | 'thresholds', label: string) => (
+    <button type="button" role="tab" aria-selected={tab === t} onClick={() => onTab(t)}
+      className={`px-3 py-1 text-xs font-semibold ${tab === t ? 'bg-violet-600 text-white' : 'bg-slate-900 text-slate-300 hover:bg-slate-800'}`}>{label}</button>
+  )
+  return (
+    <Drawer title="規則與門檻" onClose={onClose}>
+      <div role="tablist" className="mb-3 inline-flex overflow-hidden rounded-lg border border-slate-600">
+        {tabBtn('rules', '主管建議規則')}
+        {tabBtn('thresholds', '大量門檻表')}
+      </div>
+      {/* 兩個面板都保持掛載（切分頁不會丟掉未儲存的輸入），只切換顯示 */}
+      <div className={tab === 'rules' ? '' : 'hidden'}><RulesPanel nowMs={nowMs} onDirtyChange={onRulesDirty} /></div>
+      <div className={tab === 'thresholds' ? '' : 'hidden'}><ThresholdsPanel nowMs={nowMs} onDirtyChange={onThresholdsDirty} /></div>
+    </Drawer>
+  )
+}
+
+function AccessDenied() {
+  return (
+    <div className="flex min-h-screen items-center justify-center bg-[#050b14] p-4">
+      <div className="w-full max-w-md rounded-2xl border border-red-800 bg-slate-900 p-10 text-center">
+        <h1 className="mb-3 text-xl font-bold text-red-400">沒有 AI 模擬排程的權限</h1>
+        <p className="mb-6 text-sm leading-relaxed text-slate-400">需要「包裝專區（AI 模擬排程）」權限，請聯絡核心管理員在管理後台開通。</p>
+        <Link href="/packaging" className="rounded border border-slate-600 px-6 py-2 text-sm text-slate-300 hover:bg-slate-700">← 回包裝專區</Link>
+      </div>
+    </div>
+  )
+}

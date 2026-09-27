@@ -45,6 +45,36 @@ export async function guardPackaging(level: 'read' | 'write'): Promise<Packaging
   return { ok: true, member: m, canEdit }
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// P3 AI 模擬排程（D89／D90；規格 docs/design/2026-09-28-packaging-ai.md §二）
+// ─────────────────────────────────────────────────────────────────────
+
+/** 新權限鍵（members.permissions 文字陣列，免 migration；/admin/team 勾選開通） */
+export const PACKAGING_AI_PERMISSION = 'packaging_ai'
+
+/**
+ * D89／D90：被授權人＝admin，或「有 packaging_ai」且「能編輯包裝排程（packaging_admin）」。
+ * 為什麼還要 packaging_admin：採用會寫正式排程（仍需編輯鎖，D53），只給 packaging_ai 而不能編輯的人按了採用也寫不進去；
+ * 後台勾 packaging_ai 時會連帶補 packaging＋packaging_admin（app/admin/team），這裡再擋一次防資料不一致。
+ */
+export function canUseAi(m: AuthedMember): boolean {
+  return m.isAdmin || (m.permissions.includes(PACKAGING_AI_PERMISSION) && canEditPackaging(m))
+}
+
+/**
+ * 所有 /api/packaging/ai/** 的守門（§二：一律 guardPackagingAi）。通過時 canEdit 恆為 true（canUseAi ⊂ canEditPackaging）。
+ * 其他被授權人的模擬區可唯讀檢視（GET 帶 owner），「只有本人能改」由各 route 自行比對 owner_email。
+ */
+export async function guardPackagingAi(): Promise<PackagingGuard> {
+  const g = await guardAuth()
+  if (!g.ok) return g
+  const m = g.member
+  if (!canUseAi(m)) {
+    return { ok: false, res: noStore({ success: false, error: '需要權限：包裝 AI 模擬排程（packaging_ai）', code: 'forbidden' }, 403) }
+  }
+  return { ok: true, member: m, canEdit: true }
+}
+
 /** 寫入 API：Content-Type 必須是 application/json，否則 415 */
 export function requireJson(request: NextRequest): NextResponse | null {
   const ct = (request.headers.get('content-type') ?? '').toLowerCase()

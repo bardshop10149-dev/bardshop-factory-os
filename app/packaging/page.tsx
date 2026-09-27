@@ -3,10 +3,11 @@
 import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import Link from 'next/link'
+import { canUseAiFrom } from '@/components/packaging/ai/aiAccess'
 
 // 包裝專區入口（D36 / D42）：比照工程專區，包裝站排程相關功能都掛在這一頁底下。
 // P1 起「排程工作台」「每日產能」「版本歷史」可用（後兩者連到工作台並自動開對應面板）；
-// P2 的 AI 規則仍灰掉標「即將推出」，讓使用者知道路線圖。
+// P3「AI 模擬排程」（取代原本灰掉的「AI 規則」卡）只有被授權的主管看得到（D89：admin，或 packaging_ai＋packaging_admin）。
 // 權限（D30）：admin 或 packaging（唯讀，可進入檢視）/ packaging_admin（可編輯）。
 // 編輯提示只給有編輯權的人看；唯讀者一樣進得去，只是看到「唯讀檢視」。
 // 頁面自查只是體驗；真正的資料守門在 /api/packaging/* 各路由：guardAuth() 後再判斷 admin || packaging || packaging_admin。
@@ -24,6 +25,8 @@ type ZoneItem = {
   needsProductionAdmin?: boolean
   /** 編輯類入口：有編輯權（packaging_admin/admin）時顯示這段提示；唯讀者改顯示「唯讀檢視」 */
   editHint?: string
+  /** 只有 AI 模擬排程被授權人看得到（D89；沒權限的人整張卡不顯示） */
+  needsAi?: boolean
 }
 
 const ZONE_ITEMS: ZoneItem[] = [
@@ -59,11 +62,12 @@ const ZONE_ITEMS: ZoneItem[] = [
     icon: 'M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z',
   },
   {
-    name: 'AI 規則',
-    en: 'AI Rules',
-    desc: '主管寫下的排程規則，交給 AI 自動排出建議並提醒風險。',
-    href: null,
-    phase: 'P2',
+    name: 'AI 模擬排程',
+    en: 'AI Sim',
+    desc: '在獨立的模擬區讓 AI 依主管規則排 2／4／6 個工作日，調整滿意後再採用到正式排程（可退回）。',
+    href: '/packaging/ai',
+    needsAi: true,
+    editHint: '鎖定、AI 排程、採用；規則與大量門檻也在這裡改',
     icon: 'M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.286 6.857L21 12l-5.714 2.143L13 21l-2.286-6.857L5 12l5.714-2.143L13 3z',
   },
   {
@@ -129,6 +133,7 @@ export default function PackagingPage() {
 
   const canEdit = access.isAdmin || access.permissions.includes('packaging_admin')
   const canTowerBoard = access.isAdmin || access.permissions.includes('production_admin')
+  const canUseAi = canUseAiFrom(access)
 
   return (
     <div className="min-h-screen bg-[#050b14] text-white p-4 md:p-8">
@@ -151,12 +156,13 @@ export default function PackagingPage() {
           </div>
           <p className="text-slate-400 text-sm mt-1">包裝站排程：待排池、排程工作台、每日產能 (Packaging)</p>
           <p className="text-slate-500 text-xs mt-2 leading-relaxed">
-            目前為第二階段（P1）：可在工作台排定包裝日、設定每日產能、存取版本；排程只存在 EIP，不回寫塔台。AI 規則將於 P2 推出。
+            可在工作台排定包裝日、設定每日產能、存取版本；排程只存在 EIP，不回寫塔台。
+            {canUseAi ? '「AI 模擬排程」（P3 試用）可讓 AI 先在模擬區排好，再由主管確認採用。' : ''}
           </p>
         </div>
 
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-          {ZONE_ITEMS.map(item => {
+          {ZONE_ITEMS.filter(item => !item.needsAi || canUseAi).map(item => {
             const locked = item.needsProductionAdmin && !canTowerBoard
             const available = item.href !== null && !locked
             const cardBody = (

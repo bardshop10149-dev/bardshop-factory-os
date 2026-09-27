@@ -201,8 +201,9 @@ export async function handleApplyRequest(
 /**
  * D69 學習紀錄：每個值有變的 setMinutes 一列。品號、品名、PACKING、途程、work.source／explain 取自該行待排池底卡
  * （與畫面 BoardCard.card 同一張：以寫入後狀態重跑 allocateLine 的 baseCardId），qty＝有效數量。
+ * export：AI 模擬排程的「採用」（app/api/packaging/ai/session/adopt）寫進正式區的工時覆寫也要留 D69 紀錄，共用同一套組法。
  */
-function buildMinuteAdjustments(
+export function buildMinuteAdjustments(
   res: ApplyOk,
   ctx: {
     supplyOf: (key: string) => LineSupply | null
