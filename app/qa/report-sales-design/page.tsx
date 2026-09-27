@@ -138,15 +138,12 @@ export default function SalesDesignAnomalyReportPage() {
     if (departmentOptions.length === 0 || personnelOptions.length === 0) return
     let cancelled = false
     const prefill = async () => {
-      const { data: auth } = await supabase.auth.getUser()
-      const email = auth.user?.email
-      if (!email || cancelled) return
-      const { data } = await supabase
-        .from('members')
-        .select('department, nickname, real_name')
-        .eq('email', email)
-        .limit(1)
-      const me = (data ?? [])[0] as { department?: string; nickname?: string; real_name?: string } | undefined
+      // 自己的部門／姓名走 /api/profile（伺服器端以登入 cookie 認定身分）。
+      // 以前用 supabase.auth.getUser() 取 email 再直讀 members——但瀏覽器沒有 Supabase
+      // session，getUser 永遠是空的，這段預填其實從來沒生效過。
+      const res = await fetch('/api/profile').catch(() => null)
+      if (!res || !res.ok || cancelled) return
+      const me = (await res.json().catch(() => null)) as { department?: string; nickname?: string; real_name?: string } | null
       if (!me || cancelled || reporterTouchedRef.current) return
       const raw = (me.department ?? '').trim()
       const dept = departmentOptions.includes(raw) ? raw : DEPT_MAP[raw] ?? ''

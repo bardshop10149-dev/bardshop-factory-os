@@ -1,5 +1,3 @@
-import { supabase } from './supabaseClient'
-
 type LogPayload = {
   actionType: string
   target: string
@@ -8,46 +6,14 @@ type LogPayload = {
   metadata?: Record<string, unknown>
 }
 
-const resolveCurrentActor = async () => {
-  const { data: authData } = await supabase.auth.getUser()
-  const authUser = authData?.user
-
-  if (!authUser?.email) {
-    return {
-      actorUserId: null,
-      userName: 'Unknown',
-      userEmail: null,
-      userDepartment: null,
-    }
-  }
-
-  let member: { real_name: string | null; department: string | null; email: string | null } | null = null
-
-  const { data: memberByAuthId } = await supabase
-    .from('members')
-    .select('real_name, department, email')
-    .eq('auth_user_id', authUser.id)
-    .maybeSingle()
-
-  member = memberByAuthId
-
-  if (!member) {
-    const { data: memberByEmail } = await supabase
-      .from('members')
-      .select('real_name, department, email')
-      .eq('email', authUser.email)
-      .maybeSingle()
-    member = memberByEmail
-  }
-
-  return {
-    actorUserId: authUser.id,
-    userName: member?.real_name || authUser.email,
-    userEmail: member?.email || authUser.email,
-    userDepartment: member?.department || null,
-  }
-}
-
+/**
+ * 系統操作日誌（前端呼叫端）。
+ *
+ * 只把「做了什麼」POST 給 /api/system-logs，操作者身分由伺服器端 guardAuth 認定——
+ * 以前這裡用 anon key 直讀 members + 直寫 system_logs，而且因為瀏覽器沒有 Supabase
+ * session，每一筆的操作者都是 "Unknown"。
+ * 日誌失敗不應影響主要操作，所以一律吞掉錯誤只印 console。
+ */
 export const logSystemAction = async (
   actionTypeOrPayload: string | LogPayload,
   target?: string,
@@ -65,22 +31,14 @@ export const logSystemAction = async (
           }
         : actionTypeOrPayload
 
-    const actor = await resolveCurrentActor()
-
-    const { error } = await supabase.from('system_logs').insert({
-      actor_user_id: actor.actorUserId,
-      user_name: actor.userName,
-      user_email: actor.userEmail,
-      user_department: actor.userDepartment,
-      action_type: payload.actionType,
-      target_resource: payload.target,
-      module: payload.module || null,
-      details: payload.details || '',
-      metadata: payload.metadata || {},
+    const res = await fetch('/api/system-logs', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
     })
-
-    if (error) {
-      console.error('日誌寫入失敗:', error)
+    if (!res.ok) {
+      const j = await res.json().catch(() => ({})) as { error?: string }
+      console.error('日誌寫入失敗:', j.error || `HTTP ${res.status}`)
     }
   } catch (err) {
     console.error('Logger Error:', err)

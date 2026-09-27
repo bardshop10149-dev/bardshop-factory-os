@@ -106,6 +106,52 @@ export async function guardAuth(): Promise<Guarded> {
   }
 }
 
+// ── 短暫快取版（給高頻代查用）────────────────────────────────────────────────
+// /api/db 代查一頁常常連發幾十個查詢，每次都向 Supabase Auth 驗 token + 查 members
+// 會讓每個查詢多兩趟往返。這裡以 token 的 SHA-256 當 key，把「驗過的成員」留 60 秒。
+//   - 只快取成功結果，失敗（過期／被停用）不快取。
+//   - 60 秒內若成員被停權或改權限，代查仍會沿用舊結果——可接受（access_token 本身就有 1 小時效期）。
+//   - Vercel 每個 function instance 各有一份，重啟即清空；上限 500 筆避免無限長大。
+const AUTH_CACHE_TTL_MS = 60_000
+const AUTH_CACHE_MAX = 500
+const authCache = new Map<string, { member: AuthedMember; expiresAt: number }>()
+
+async function sha256Hex(input: string): Promise<string> {
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(input))
+  return Array.from(new Uint8Array(buf), b => b.toString(16).padStart(2, '0')).join('')
+}
+
+/** 與 guardAuth 相同語意，但成功結果快取 60 秒。 */
+export async function guardAuthCached(): Promise<Guarded> {
+  let token: string | undefined
+  try {
+    const cookieStore = await cookies()
+    token = cookieStore.get('bardshop-token')?.value
+  } catch {
+    return deny(401, '未登入')
+  }
+  if (!token) return deny(401, '未登入')
+
+  const key = await sha256Hex(token)
+  const now = Date.now()
+  const hit = authCache.get(key)
+  if (hit && hit.expiresAt > now) return { ok: true, member: hit.member }
+
+  const g = await guardAuth()
+  if (!g.ok) return g
+
+  if (authCache.size >= AUTH_CACHE_MAX) {
+    // 先清掉已過期的；還是太多就砍最早放進來的那一筆（Map 保留插入順序）
+    for (const [k, v] of authCache) if (v.expiresAt <= now) authCache.delete(k)
+    if (authCache.size >= AUTH_CACHE_MAX) {
+      const oldest = authCache.keys().next().value
+      if (oldest !== undefined) authCache.delete(oldest)
+    }
+  }
+  authCache.set(key, { member: g.member, expiresAt: now + AUTH_CACHE_TTL_MS })
+  return g
+}
+
 /** 需要管理員。 */
 export async function guardAdmin(): Promise<Guarded> {
   const g = await guardAuth()
