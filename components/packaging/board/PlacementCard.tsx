@@ -7,6 +7,8 @@
 //   sm   ＝週檢視（欄寬約 168px）：CardFace sm（同 7 項，字小、長文字截斷）
 //   mini ＝兩週檢視（欄寬約 80px）：只剩單號＋數量＋1 個最重要的標記，左側同樣有細色條（D56「兩週看負荷」精神不變）
 // 狀態：已完成＝灰＋勾（D24）、延誤 N 天＝橘標（D50）、預排＝虛線框（D22）、拆卡 i/n——都不另佔文字行。
+// 分線輪：右下角小角標（手動加入 D66／調整過工時 D69／線已停用），見 cardParts PlacementBadges。
+// 日檢視改用時間尺上的 LaneCard（長度＝工時，D68）；本元件用在週／兩週的各線小欄與待排區。
 //
 // 操作（D61）：
 //   點卡片本身／聚焦後 Enter → 卡片詳情（CardDetailDialog，與左側同一個）
@@ -24,7 +26,7 @@ import { cardBarTone, cardMarks, isCardDanger, placementFrame, placementState, t
 import { md } from './boardFormat'
 import CardFace, { BAR_CLASS, CardMarks, OrderNo, lineLabel } from './CardFace'
 import type { CardMenuHandlers } from './cardMenu'
-import { DoneCheck, cardTitle, useCardDrag, useCardMenu } from './cardParts'
+import { DoneCheck, PlacementBadges, cardTitle, useCardDrag, useCardMenu } from './cardParts'
 
 const FRAME_CLASS: Record<ReturnType<typeof placementFrame>, string> = {
   solid: 'border-slate-700 hover:border-slate-500',
@@ -116,6 +118,8 @@ const PlacementCard = memo(function PlacementCard({ bc, today, size, editable, c
           check={<DoneCheck bc={bc} editable={editable} handlers={handlers} />}
         />
       )}
+      {/* 迷你卡（約 64px 寬）放不下角標：手動／調整工時／線停用寫在滑過提示（cardTitle） */}
+      {!mini && <PlacementBadges bc={bc} className="absolute bottom-1 right-1" />}
     </div>
   )
   // 選單（portal）放在卡片元素外面：合成事件會沿元件樹冒泡，放裡面的話點選單會變成「點卡片」

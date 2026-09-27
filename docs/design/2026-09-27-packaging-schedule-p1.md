@@ -475,7 +475,7 @@ HTTP 狀態對照：401 未登入、403 `forbidden`、409 `lock_*`／`version_co
 
 - `GET ?from=&to=`（讀；預設 today ~ today+60，最長 180 天）→ `CapacityResponse { rows, effective }`；`effective` 只含區間內的工作台日期（工作日＋已開加班的週六）＋**區間內所有週六**（產能對話框要能開關週六）。
 - `PUT`（packaging_admin＋鎖）請求 `CapacityPutRequest { lockToken, rows: CapacityInput[] (1~60) }` → 每列 `validateCapacityInput` → upsert（`clear` 者 delete）→ op_log `capacity` → 回應同 GET（區間＝請求日期的最小～最大）。
-- 錯誤：`date_not_workday`（422）、`saturday_has_cards`（409，附 `date`、`cardCount`）。
+- 錯誤：`date_not_workday`（422）、`weekend_has_cards`（409，附 `date`、`cardCount`；D63 前名為 `saturday_has_cards`）、`migration_required`（409，D63，見 §十一）。
 - 不進 Undo。
 
 ### 4.5 `GET / POST /api/packaging/versions`、`GET / POST /api/packaging/versions/[id]/restore`
@@ -794,7 +794,7 @@ if (openLotLines.has(k) || refsOnSara([...e.refs], saraIdx) || lineOnSaraByPo(e.
 
 ### 9.3 待問
 
-1. 週日／國定假日加班要不要能開欄？（目前一律不能，含國定假日落在週六，例 10/10 國慶；若可以，放寬 `isHolidaySaturday` 相關檢查並改 §3.1、§9.1 第 7 條）
+1. ~~週日~~（D63 已定案：比照週六，見 §十一）／國定假日加班要不要能開欄？（目前國定假日一律不能，含落在週六、週日，例 10/10 國慶、10/25 光復節；若可以，放寬 `isHolidayWeekend` 相關檢查並改 §3.1、§9.1 第 7 條）
 2. 平日產能要不要改成「平日預設值」＋單日覆寫（避免請假值被沿用）？
 3. 要不要補匯入塔台歷史報工讓 D47 解碼完整（寫入既有表 `sara_wip_records`，需 Snow 另外決定）？
 4. P0 §12.6 仍待確認的 4 題（`packagedDone` 保留與否等）照舊。
@@ -814,3 +814,44 @@ if (openLotLines.has(k) || refsOnSara([...e.refs], saraIdx) || lineOnSaraByPo(e.
 - 勾完成委外卡 → 待排池不再出現該量；塔台報工的常平卡勾完成後，塔台再報工 → 不重複扣（§3.4）。
 - 待排池 ns 區塊張數明顯下降（D47）、「素材單/包裝單」不再出現在異常清單（D46）；把實際數字補進 §6.2。
 - 回傳 JSON 不得出現 `customer_vendor`、廠商名稱、`changping_ship_marks` 原文、採購手打備註、鎖 token（token 只出現在 acquire／takeover 給本人的回應）。
+
+---
+
+## 十一、D63～D65 產能修正（2026-09-27，Snow 試用 P1 後回饋）
+
+> 權威：需求決策紀錄 D63（週日加班）、D64（產能「套用全部」）、D65（改填總時數）。取代 D48「週日未定義」、D49 的人數欄。
+
+### 11.1 D63 週日加班＝比照週六
+
+- 週六、週日統稱「週末」：只有「開加班」旗標＋**加班總時數**，正常總時數恆為 0；開了（且加班 > 0、不是國定假日）才出現在工作台。
+- 程式：`scheduleCalendar.ts` 新增 `isWeekend`／`weekendName`／`isHolidayWeekend`／`openWeekendDaysOf`（取代 `isHolidaySaturday`／`openSaturdaysOf`）；`boardWindow`／`nextBoardDay`／`rollTarget`／`displayDateOf`（D50 順延）、`applyOps` 的合法日期、`validateCapacityInput`（週末不能有正常工時、關閉有卡的週末要先移卡）、前端 `boardView`（◀ ▶、`listViewDays`、`resolveViewDay`）與 `useOpenWeekends`（原 `useOpenSaturdays`）全部改用「開加班的週末日」集合（變數 `openWeekends`）。
+- API 契約改名（前後端同一個 commit，型別在 `scheduleTypes.ts`）：`BoardDay.kind` `'saturday_ot'`→`'weekend_ot'`；`EffectiveCapacity.kind` `'saturday'`→`'weekend'`；`CapacitySource` `'saturday_default'`→`'weekend_default'`；錯誤碼 `saturday_has_cards`→`weekend_has_cards`；新增 `migration_required`。DB 欄 `is_saturday_open`／型別 `isSaturdayOpen` **名稱不改**，語意改為「週末開加班」。
+- `GET /api/packaging/capacity` 的 `effective` 改列出區間內所有週六**與週日**（國定假日的週末也列出，產能表顯示「國定假日不能開加班」）。
+- 國定假日落在週末：**不能開加班、不出現在工作台**（同既有週六規則；例 10/10 國慶日逢週六、10/25 光復節逢週日）。補行上班的週末本來就是工作日（115、116 年日曆沒有）。
+
+### 11.2 Migration：`sql/20260927b_packaging_capacity_weekend.sql`
+
+> **2026-09-27 分線輪更新**：這份 migration 從未套用，已刪除並**併入** `sql/20260927b_packaging_p1_extend.sql` 第 1 段（內容不變），同一份檔再加上分線、工時覆寫、手動加入的新表（見 `docs/design/2026-09-27-packaging-lines.md` §一、§九）。下面描述的 constraint 規則照舊有效；`app/api/packaging/capacity/route.ts` 的 `migration_required` 訊息內的檔名由實作輪改為新檔名。
+
+- 只替換 `packaging_daily_capacity` 的 check constraint（交易內、冪等、不動資料）：刪 `packaging_daily_capacity_no_sunday`；`..._saturday_overtime_only`→`..._weekend_overtime_only`（isodow 6、7 時 `regular_hours = 0`）；`..._open_only_saturday`→`..._open_only_weekend`（`is_saturday_open` 只能用在 isodow 6、7）；並以 `comment on column` 註明 `is_saturday_open` 語意＝週末開加班、`headcount` 不再使用。
+- **套用順序：先套 migration，再開始使用週日加班。** 程式可以先部署——沒套之前週六照常；若有人儲存週日加班，DB 用舊 constraint 拒絕整批 upsert（單一語句，沒有寫入任何一天），API 把 Postgres `23514` 轉成 409 `migration_required`「週日加班需要先套用資料庫更新…這次沒有儲存任何一天」，不是 500。
+- 套用前請先備份（正式站無自動備份）；還原方式寫在 migration 檔頭。
+
+### 11.3 D64 產能表「批次填寫 → 套用到全部平日」
+
+- 產能表（CapacityEditor 表格模式、持有編輯鎖時）上方一列：正常總時數、加班總時數兩欄（空白＝該欄不變）＋「套用到全部平日」。
+- 流程：按鈕 → **預覽**（表內將改變的格子加橘框、顯示「→ 新值」，並列出「幾個平日、幾格會變、幾天原本已設定會被覆蓋」）→「確認套用並儲存」→ 以既有 `PUT /api/packaging/capacity` 一次送出（20 個平日＋其他手動修改，在 1～60 筆限制內）。預覽中手動改表格或改批次值 → 預覽作廢。
+- 套用對象＝表內的平日工作日（`isBulkFillTarget`：非週末、`isWorkday`）；**週六、週日不套用**（逐日決定），國定假日的平日本來就不在表內、純函式也再擋一次。
+- 只填加班、但有平日從沒設定過正常總時數 → 擋下並提示一併填寫。
+- 規則在 `lib/packaging/capacityForm.ts`（`planBulkFill`／`applyBulkFill`／`bulkFillRowsError`，連同表單 `toFormRow`／`formRowError`／`formRowToInput`），元件只負責顯示。
+
+### 11.4 D65 改填總時數、拿掉人數
+
+- 產能表、單日產能設定、日檢視卡片牆頂部、週／兩週欄頭：**不再輸入或顯示人數**；欄位名稱改為「正常總時數」「加班總時數」，並註明「由組長直接填寫當天總時數」（工讀生出席時數不一，人×時不準）。
+- DB `headcount` 欄保留（不刪、不改）；新畫面送 `headcount: null`（`CapacityInput.headcount` 改為選填，舊客戶端送值仍照範圍驗證）。`EffectiveCapacity.headcount` 仍回傳舊資料，但畫面不用。
+- 工時計算不變：正常／加班「總時數」就是原本的 `regular_hours`／`overtime_hours_max`（小時），進度條與 D51 顏色規則照舊。
+
+### 11.5 測試
+
+- 新增 `scratchpad/p1-cap2/p1-cap2.test.mjs`：週日開加班的工作台視窗（日／週／兩週）、◀ ▶、D50 順延目標與 offBoard、週末不能填正常工時、國定假日週末、applyOps 合法日期、assembleBoard 週日欄、批次填寫只影響平日、國定假日平日不被套用、20 筆在 PUT 限制內。
+- 既有 `p1-logic`／`p1-cards`／`p1-views` 隨改名調整（`openWeekendDaysOf`、`weekend_ot`、`weekend_default`、`weekend_has_cards`、`weekend` 旗標）；語意改變的只有「週日填產能」由 `date_not_workday` 改為「週日有正常工時 → `bad_request`、只填加班 → ok」，以及進度條提示「週六加班上限」改為「週末加班上限」。

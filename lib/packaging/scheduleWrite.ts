@@ -2,21 +2,32 @@
 //
 // 流程：守門（packaging_admin，D30）→ Content-Type 必須 JSON（擋 CSRF）→ 驗鎖＋續命（D53）
 //      → 讀觸及 SO 行的全部擺放 → 待排池（共用快取 10 分）→ applyOps 模擬驗證 → 「先減後增」寫入 → op_log。
-// 只寫 packaging_placements／packaging_op_log／packaging_edit_lock（續命），絕不寫既有表（D4／D24）。
+// 只寫 packaging_placements／packaging_op_log／packaging_edit_lock（續命）；分線輪另寫 packaging_time_adjustments（D69 學習紀錄）。
+// 絕不寫既有表（D4／D24）。
+// 分線輪（lines.md §4.2）：多讀線別（D72 驗 lineId）與 D66 手動區塊（併進待排池再算 supplyOf）；
+//   本批有值改變的 setMinutes → 寫入成功後插學習紀錄，失敗回 adjustmentLogFailed（工時已改成功）。
 
 import type { NextRequest, NextResponse } from 'next/server'
 import { describeError, getSupabaseAdminClient } from '@/lib/supabaseAdmin'
-import type { ApplyErrorCode, ApplyResponse, LineSupply, PlacementOp } from '@/lib/packaging/scheduleTypes'
+import type { ApplyErrorCode, ApplyResponse, LineSupply, Placement, PlacementOp, TimeAdjustmentRow } from '@/lib/packaging/scheduleTypes'
 import type { PackagingCard } from '@/lib/packaging/types'
 import { guardPackaging, noStore, readJson, requireJson } from '@/lib/packaging/guard'
 import { getPool, POOL_WRITE_MAX_AGE_MS } from '@/lib/packaging/poolCache'
-import { addDays, openSaturdaysOf } from '@/lib/packaging/scheduleCalendar'
-import { lineSupply } from '@/lib/packaging/scheduleAllocate'
-import { applyOps, parseOps, touchedKeys } from '@/lib/packaging/scheduleOps'
+import { addDays, openWeekendDaysOf } from '@/lib/packaging/scheduleCalendar'
+import { allocateLine, lineSupply } from '@/lib/packaging/scheduleAllocate'
+import { applyOps, parseOps, touchedKeys, type ApplyOk } from '@/lib/packaging/scheduleOps'
+import { defaultLineIdOf } from '@/lib/packaging/scheduleLines'
+import { buildAdjustment } from '@/lib/packaging/scheduleMinutes'
+import { getManualMergedPool } from '@/lib/packaging/manualCache'
 import {
   countOpenPlacements,
   insertOpLog,
+  insertTimeAdjustments,
+  isMissingSchema,
+  linesMigrationMessage,
   loadCapacityRows,
+  loadLineCapacityRows,
+  loadLines,
   loadPlacementsByIds,
   loadPlacementsByLines,
   publicDbError,
@@ -91,15 +102,19 @@ export async function handleApplyRequest(
 
     // 觸及的 SO 行：ops 直接帶的＋以 id 查出來的；再讀這些行的「全部」擺放（守恆檢查要看整行）
     const { lineKeys, ids } = touchedKeys(ops)
-    const [byIdRows, pool, capRows] = await Promise.all([
+    const [byIdRows, basePool, capRows, lines, lineRows] = await Promise.all([
       loadPlacementsByIds(sb, [...ids]),
       getPool({ maxAgeMs: POOL_WRITE_MAX_AGE_MS }).catch((e: unknown) => {
         console.error('[packaging/write] 待排池組裝失敗:', describeError(e))
         return null
       }),
       loadCapacityRows(sb, addDays(today, -1), addDays(today, MAX_PLAN_DAYS + 14)),
+      loadLines(sb),
+      loadLineCapacityRows(sb, addDays(today, -1), addDays(today, MAX_PLAN_DAYS + 14)),
     ])
-    if (!pool) return failRes({ code: 'pool_unavailable', error: '待排池暫時無法組裝，無法驗證，請稍後再試', lock: lk.lock })
+    if (!basePool) return failRes({ code: 'pool_unavailable', error: '待排池暫時無法組裝，無法驗證，請稍後再試', lock: lk.lock })
+    // D66：手動區塊併進待排池（'mn' 卡是一般供給，place／complete 走同一套驗證）
+    const pool = (await getManualMergedPool(sb, basePool)).pool
     for (const p of byIdRows) lineKeys.add(p.soLineKey)
     const linePlacements = await loadPlacementsByLines(sb, [...lineKeys])
     const byId = new Map(linePlacements.map((p) => [p.id, p]))
@@ -121,11 +136,15 @@ export async function handleApplyRequest(
       return supplyMemo.get(key)!
     }
 
+    const activeIds = new Set(lines.filter((l) => l.active).map((l) => l.id))
+    const openWeekends = openWeekendDaysOf(capRows, lineRows, activeIds)
     const res = applyOps({ byId }, ops, {
       today, nowIso, actor,
-      openSats: openSaturdaysOf(capRows),
+      openWeekends,
       supplyOf, cards,
       maxDate: addDays(today, MAX_PLAN_DAYS),
+      lines: new Map(lines.map((l) => [l.id, l])),
+      defaultLineId: defaultLineIdOf(lines),
     })
     if (!res.ok) {
       return failRes({ code: res.code, error: res.message, opIndex: res.opIndex, current: res.current, lock: lk.lock })
@@ -148,6 +167,13 @@ export async function handleApplyRequest(
       return failRes({ code: w.code, error: w.partial ? `${w.message}（部分操作已寫入，請重新載入）` : w.message, current: w.current, partial: w.partial, lock: lk.lock })
     }
 
+    // D69 規則 6：先改工時、後記紀錄（先記後改失敗會留下「沒發生的修改」誤導學習）
+    let adjustmentLogFailed = false
+    if (res.minuteEdits.length > 0) {
+      const adj = buildMinuteAdjustments(res, { supplyOf, cards, today, openWeekends, actor })
+      adjustmentLogFailed = !(await insertTimeAdjustments(sb, adj))
+    }
+
     const opLogId = await insertOpLog(sb, { actorEmail: actor.email, actorName: actor.name, kind: opts.kind, label, ops })
     return noStore<ApplyResponse>({
       success: true,
@@ -157,9 +183,52 @@ export async function handleApplyRequest(
       // 刻意「不」等於 GET /board 的指紋：讓下一次輪詢一定拿完整資料，校正前端的樂觀更新
       revision: `w${opLogId ?? nowMs}`,
       lock: lk.lock,
+      ...(adjustmentLogFailed ? { adjustmentLogFailed: true } : {}),
     })
   } catch (e) {
     console.error(`[packaging/${opts.kind}]`, describeError(e))
+    // 分線輪 migration 未套用（packaging_lines 等表或 line_id 欄不存在）→ 明確提示要套哪個檔
+    if (isMissingSchema(e)) return failRes({ code: 'db_error', error: linesMigrationMessage(e) })
     return failRes({ code: 'db_error', error: publicDbError(e) })
   }
+}
+
+/**
+ * D69 學習紀錄：每個值有變的 setMinutes 一列。品號、品名、PACKING、途程、work.source／explain 取自該行待排池底卡
+ * （與畫面 BoardCard.card 同一張：以寫入後狀態重跑 allocateLine 的 baseCardId），qty＝有效數量。
+ */
+function buildMinuteAdjustments(
+  res: ApplyOk,
+  ctx: {
+    supplyOf: (key: string) => LineSupply | null
+    cards: ReadonlyMap<string, PackagingCard>
+    today: string
+    openWeekends: ReadonlySet<string>
+    actor: { email: string; name: string | null }
+  },
+): Omit<TimeAdjustmentRow, 'id' | 'created_at'>[] {
+  const byLine = new Map<string, Placement[]>()
+  for (const p of res.next.values()) {
+    let arr = byLine.get(p.soLineKey)
+    if (!arr) { arr = []; byLine.set(p.soLineKey, arr) }
+    arr.push(p)
+  }
+  return res.minuteEdits.map((e) => {
+    const supply = ctx.supplyOf(e.after.soLineKey)
+    let effectiveQty = e.after.qty
+    let card: PackagingCard | null = null
+    if (supply) {
+      const a = allocateLine({ supply, placements: byLine.get(e.after.soLineKey) ?? [], today: ctx.today, openWeekends: ctx.openWeekends })
+      const pa = a.placements.find((x) => x.placementId === e.after.id)
+      if (pa && !e.after.completed) effectiveQty = pa.effectiveQty
+      const cid = pa?.baseCardId ?? e.after.originCardId
+      card = (cid ? ctx.cards.get(cid) : undefined) ?? null
+    }
+    if (!card && e.after.originCardId) card = ctx.cards.get(e.after.originCardId) ?? null
+    return buildAdjustment({
+      before: e.before, after: e.after, card, effectiveQty,
+      perUnit: supply?.perUnit ?? card?.work.perUnit ?? null,
+      reason: e.reason, via: e.via, actor: ctx.actor,
+    })
+  })
 }

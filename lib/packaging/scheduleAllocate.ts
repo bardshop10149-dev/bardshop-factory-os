@@ -126,9 +126,9 @@ export function allocateLine(input: {
   supply: LineSupply
   placements: readonly Placement[]
   today: YMD
-  openSats: ReadonlySet<YMD>
+  openWeekends: ReadonlySet<YMD>
 }): LineAllocation {
-  const { supply, today, openSats } = input
+  const { supply, today, openWeekends } = input
   const open = input.placements.filter((p) => !p.completed)
   const completed = input.placements.filter((p) => !!p.completed)
   const S = supply.total
@@ -146,7 +146,7 @@ export function allocateLine(input: {
   }
 
   const ordered = open
-    .map((p) => ({ p, display: displayDateOf(p, today, openSats).date }))
+    .map((p) => ({ p, display: displayDateOf(p, today, openWeekends).date }))
     .sort(compareOpenPlacements)
 
   // 修剪：從最早的卡開始扣

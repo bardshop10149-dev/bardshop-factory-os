@@ -19,13 +19,16 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   BOARD_POLL_MS,
   type ApplyResponse,
+  type BoardCard,
   type CompleteRequest,
+  type MinutesEditVia,
   type Placement,
   type PlacementOp,
   type YMD,
 } from '@/lib/packaging/scheduleTypes'
+import { hoursText } from '@/lib/packaging/boardView'
 import { MIGRATION_HINT, fetchBoard, postComplete, postPlacements, type ApiResult } from './boardApi'
-import { applyLocal, rebaseOpVersions, versionMapOf, type BoardOk, type LocalAction } from './boardLocal'
+import { applyLocal, rebaseOpVersions, storedOverrideOf, versionMapOf, type BoardOk, type LocalAction } from './boardLocal'
 import type { EditLockApi } from './useEditLock'
 import type { UndoApi } from './useUndo'
 
@@ -97,6 +100,9 @@ export function useBoard(opts: {
   const [toast, setToast] = useState<Toast | null>(null)
 
   const revRef = useRef<string | null>(null)
+  /** 最新資料（setMinutes 取目前使用者當樂觀更新的修改者） */
+  const dataRef = useRef<BoardOk | null>(null)
+  useEffect(() => { dataRef.current = data }, [data])
   const versionsRef = useRef<Map<string, number>>(new Map())
   const queueRef = useRef<QueueItem[]>([])
   const keyRef = useRef(0)
@@ -300,6 +306,8 @@ export function useBoard(opts: {
       setLastSavedAt(Date.now())
       setSaveError(null)
       dirtyRef.current = true
+      // D69：工時已改成功，但學習紀錄沒存到（伺服器先改後記，lines.md §3.6 規則 6）
+      if (ok.adjustmentLogFailed) showToast('warn', '工時已修改，但「修改紀錄」未存到（不影響排程；日後校正工時會少這一筆）')
       return pump()
     }
 
@@ -378,17 +386,34 @@ export function useBoard(opts: {
     enqueue({ endpoint, ops, label, mode: 'normal' })
   }, [enqueue, showToast])
 
+  /**
+   * D69 改工時（日檢視拉卡片下緣＝drag、卡片詳情＝dialog）。
+   * minutes＝以本列 qty 為準的覆寫值（null＝回到標準估計）；與目前相同就不送（伺服器也不會記學習紀錄）。
+   * 走同一個佇列與 Undo（反向操作由伺服器回 setMinutes via 'undo'）。
+   */
+  const setMinutes = useCallback((bc: BoardCard, minutes: number | null, reason: string | null, via: MinutesEditVia, label: string) => {
+    const me = dataRef.current?.me
+    const cur = storedOverrideOf(bc)
+    if (minutes === cur || (minutes != null && cur != null && Math.abs(minutes - cur) < 0.05)) return
+    submit(
+      [{ op: 'setMinutes', id: bc.placementId, version: bc.version, minutes, reason: reason || null, via }],
+      label || `改工時 ${bc.soLineKey} ${hoursText(bc.minutes) ?? '?'}→${minutes == null ? '標準' : `${hoursText(minutes)}`}h`,
+      [{ t: 'setMinutes', id: bc.placementId, minutes, by: me?.email ?? '', byName: me?.name ?? null, atIso: new Date().toISOString() }],
+    )
+  }, [submit])
+
   const canStep = pending === 0 && !saving && lock.phase === 'mine'
 
+  // 拖曳／拉下緣中（dragPauseRef）不接受 Undo／Redo：畫面上正在拉的卡會被反向操作換掉位置，放開時對到別的起點
   const undoStep = useCallback(() => {
-    if (queueRef.current.length > 0 || busyRef.current || lockRef.current.phase !== 'mine') return
+    if (queueRef.current.length > 0 || busyRef.current || dragPauseRef.current || lockRef.current.phase !== 'mine') return
     const e = undoRef.current.takeUndo()
     if (!e) return
     enqueue({ endpoint: 'placements', ops: e.ops, label: `復原：${e.label}`, mode: 'undo' })
   }, [enqueue])
 
   const redoStep = useCallback(() => {
-    if (queueRef.current.length > 0 || busyRef.current || lockRef.current.phase !== 'mine') return
+    if (queueRef.current.length > 0 || busyRef.current || dragPauseRef.current || lockRef.current.phase !== 'mine') return
     const e = undoRef.current.takeRedo()
     if (!e) return
     enqueue({ endpoint: 'placements', ops: e.ops, label: `重做：${e.label}`, mode: 'redo' })
@@ -423,6 +448,7 @@ export function useBoard(opts: {
     void load({ force: true })
   }, [load, syncPending])
 
+  /** dnd-kit 拖曳與日檢視拉卡片下緣（D69）共用：拖動中不套用輪詢結果、不接受 Undo／Redo */
   const setDragging = useCallback((v: boolean) => {
     dragPauseRef.current = v
     // 拖曳中有輪詢回應被擱置：放開後補抓。佇列非空時交給 pump 在清空後處理（它也看 dirtyRef）
@@ -441,6 +467,7 @@ export function useBoard(opts: {
     setWindow,
     reload,
     submit,
+    setMinutes,
     undoStep,
     redoStep,
     canStep,

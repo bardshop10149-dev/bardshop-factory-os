@@ -7,6 +7,7 @@
 //   - 滑鼠停留或鍵盤聚焦卡片 → 提示 PoolHoverTip（快速瞄一眼）
 //   - 點卡片本身（或聚焦後按 Enter）→ 卡片詳情 CardDetailDialog（D61；與右側排定卡共用；觸控裝置也拿得到）
 //   - 點單號 → 訂單詳情（全部品項＋示意圖，BoardLayout 的 PackagingOrderModal）
+// D66：「手動加入」區塊（'mn'）的卡在卡片上方加「手動・誰・何時」標記（showManualTag；資料來自 cardMeta[*].manual）。
 
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
@@ -20,8 +21,10 @@ import CardDetailDialog, { CardInfo } from './CardDetailDialog'
 /** 一段先畫這麼多張，其餘按「顯示更多」 */
 const PAGE = 60
 
-function Section({ block, cards, filtered, collapsed, onToggle, today, canDrag, descId, onOpenOrder, onOpenDetail, onHover }: {
+function Section({ block, cards, cardMeta, showManualTag, filtered, collapsed, onToggle, today, canDrag, descId, onOpenOrder, onOpenDetail, onHover }: {
   block: PoolBlockData
+  cardMeta: Record<string, PoolCardMeta>
+  showManualTag: boolean
   cards: PackagingCard[]
   filtered: boolean
   collapsed: boolean
@@ -77,6 +80,7 @@ function Section({ block, cards, filtered, collapsed, onToggle, today, canDrag, 
                 <SimplePoolCard
                   key={c.cardId}
                   card={c}
+                  manual={showManualTag ? (cardMeta[c.cardId]?.manual ?? null) : null}
                   today={today}
                   canDrag={canDrag}
                   descId={descId}
@@ -132,7 +136,7 @@ function PoolHoverTip({ card, meta, rect }: { card: PackagingCard; meta: PoolCar
   )
 }
 
-export default function SimplePool({ blocks, viewCards, cardMeta, filtered, collapsed, onToggle, today, canDrag, dragging, onOpenOrder }: {
+export default function SimplePool({ blocks, viewCards, cardMeta, filtered, collapsed, onToggle, today, canDrag, dragging, onOpenOrder, showManualTag = false }: {
   blocks: PoolBlockData[]
   viewCards: Map<PoolBlockId, PackagingCard[]>
   cardMeta: Record<string, PoolCardMeta>
@@ -144,6 +148,8 @@ export default function SimplePool({ blocks, viewCards, cardMeta, filtered, coll
   /** 拖曳中不顯示滑過提示 */
   dragging: boolean
   onOpenOrder: (so: string) => void
+  /** D66：手動卡顯示「手動・誰・何時」標記（PoolSidebar 有啟用手動加入時） */
+  showManualTag?: boolean
 }) {
   const [hover, setHover] = useState<{ card: PackagingCard; rect: DOMRect } | null>(null)
   const [detail, setDetail] = useState<PackagingCard | null>(null)
@@ -191,6 +197,8 @@ export default function SimplePool({ blocks, viewCards, cardMeta, filtered, coll
           key={b.id}
           block={b}
           cards={viewCards.get(b.id) ?? []}
+          cardMeta={cardMeta}
+          showManualTag={showManualTag}
           filtered={filtered}
           collapsed={collapsed.has(b.id)}
           onToggle={() => onToggle(b.id)}

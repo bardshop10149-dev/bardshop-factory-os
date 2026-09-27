@@ -9,22 +9,28 @@
 import type {
   BoardCard,
   BoardDay,
+  BoardLane,
   BoardResponse,
   BoardSkipped,
   DailyCapacity,
   LineAllocation,
+  LineCapacity,
   LineSupply,
+  ManualInclusionMeta,
+  PackagingLine,
   Placement,
   PlacementAllocation,
   PlacementFlag,
   PoolCardMeta,
   YMD,
 } from './scheduleTypes'
-import { MIN_CARD_MINUTES } from './scheduleTypes'
+import { MANUAL_BLOCK_ID, MIN_CARD_MINUTES } from './scheduleTypes'
 import type { PackagingCard, PoolBlock, PoolResponse } from './types'
-import { boardWindow, dayLabel, delayWorkdays, displayDateOf, openSaturdaysOf, rollTarget, shortDate, weekdayOf } from './scheduleCalendar'
-import { dayLoad, resolveCapacity } from './scheduleCapacity'
+import { boardWindow, dayLabel, delayWorkdays, displayDateOf, isWeekend, openWeekendDaysOf, rollTarget, shortDate, weekdayOf } from './scheduleCalendar'
+import { dayLoad, resolveDayCapacity } from './scheduleCapacity'
 import { allocateLine, isPlaceableBlock, lineSupply, minutesForQty, r3 } from './scheduleAllocate'
+import { activeLinesOf, defaultLineIdOf, laneRemaining, lineNameOf, resolveLaneId } from './scheduleLines'
+import { effectiveMinutes } from './scheduleMinutes'
 
 type PoolOk = Extract<PoolResponse, { success: true }>
 export type BoardBody = Omit<Extract<BoardResponse, { success: true; unchanged?: false }>, 'lock' | 'me' | 'serverTime' | 'revision'>
@@ -36,7 +42,18 @@ export const SCHEDULE_NOTES: string[] = [
   '預排卡（虛線）只能排在預估可包日當天或之後；到期仍未就緒亮橘燈提醒挪移（D22）。「常平未寄出且緊張」與「委外出貨待確認」只提醒、不能排。',
   '已勾完成的卡留在當天欄並變灰、計入當天已排工時；勾完成不回寫塔台（D24）。',
   '每張子卡最少 10 分鐘，拆越多張、工時合計越偏高。',
+  '排進日期的卡一定屬於某條線；週／兩週拖到日期欄頭會自動放到當天正常工時剩餘最多的線（週末看加班剩餘），主管可再改（D72）。',
+  '卡片工時可由主管修改（拉卡片下緣或在卡片詳情輸入），每次修改都會記錄供日後校正工時（D69）。',
 ]
+
+/** D66 手動加入區塊的組裝結果（由 lib/packaging/manualCache.ts 併進 pool.blocks 後一起傳入） */
+export interface BoardManualInput {
+  /** soLineKey → 手動加入紀錄（有效、目前供給來自 'mn' 卡的行） */
+  meta: Readonly<Record<string, ManualInclusionMeta>>
+  /** 有有效手動紀錄、但品項已回到正常區塊的行（排定卡加 manual_in_pool 旗標） */
+  backInPoolKeys: ReadonlySet<string>
+  skipped: { soGone: number; backInPool: number }
+}
 
 const round1 = (x: number): number => Math.round(x * 10) / 10
 const EPS = 1e-9
@@ -77,20 +94,33 @@ function cardWithQty(base: PackagingCard, qty: number, readyQty: number, minutes
   }
 }
 
+/**
+ * 分線輪（lines.md §3.9）輸入新增：
+ * - lines：全部線（含停用）；lineRows：各線產能列（D71 總時數＝啟用線加總，D49 各線各自沿用）
+ * - capacityRows（daily）仍要：週末開加班旗標一天一個、不分線（D63）
+ * - manual：D66 手動區塊的附加資訊（'mn' 卡本身已由呼叫端併進 pool.blocks）
+ */
 export function assembleBoard(input: {
   pool: PoolOk
   placements: readonly Placement[]
   capacityRows: readonly DailyCapacity[]
+  lines: readonly PackagingLine[]
+  lineRows: readonly LineCapacity[]
+  manual?: BoardManualInput | null
   today: YMD
   from: YMD
   workdays: number
 }): BoardBody {
-  const { pool, today } = input
+  const { pool, today, lines, lineRows } = input
   const from = input.from < today ? today : input.from
   const capRows = [...input.capacityRows].sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0))
-  const openSats = openSaturdaysOf(capRows)
-  const rt = rollTarget(today, openSats)
-  const windowDays = boardWindow(from, input.workdays, openSats)
+  const activeLines = activeLinesOf(lines)
+  const defaultLineId = defaultLineIdOf(lines)
+  const openWeekends = openWeekendDaysOf(capRows, lineRows, new Set(activeLines.map((l) => l.id)))
+  const manualMeta = input.manual?.meta ?? {}
+  const manualBack = input.manual?.backInPoolKeys ?? new Set<string>()
+  const rt = rollTarget(today, openWeekends)
+  const windowDays = boardWindow(from, input.workdays, openWeekends)
   const windowSet = new Set(windowDays)
   const windowEnd = windowDays[windowDays.length - 1] ?? from
 
@@ -112,7 +142,11 @@ export function assembleBoard(input: {
     arr.push(p)
   }
 
-  const skipped: BoardSkipped = { lineGoneOpen: 0, lineGoneCompleted: 0, consumedPast: 0 }
+  const skipped: BoardSkipped = {
+    lineGoneOpen: 0, lineGoneCompleted: 0, consumedPast: 0,
+    manualSoGone: input.manual?.skipped.soGone ?? 0,
+    manualBackInPool: input.manual?.skipped.backInPool ?? 0,
+  }
   const allocs = new Map<string, LineAllocation>()
   const supplies = new Map<string, LineSupply>()
 
@@ -128,7 +162,7 @@ export function assembleBoard(input: {
     }
     // 3. 供給與分配
     const supply = lineSupply(key, lineCards)
-    const a = allocateLine({ supply, placements: pls, today, openSats })
+    const a = allocateLine({ supply, placements: pls, today, openWeekends })
     supplies.set(key, supply)
     allocs.set(key, a)
     const byPid = new Map<string, PlacementAllocation>()
@@ -137,13 +171,18 @@ export function assembleBoard(input: {
     const vis: Visible[] = []
     for (const p of pls) {
       const al = byPid.get(p.id)!
-      const dd = displayDateOf(p, today, openSats)
+      const dd = displayDateOf(p, today, openWeekends)
       // pool_consumed 且原排定日已過：不顯示（D50「effectiveQty = 0 的卡不順延」）
       if (!p.completed && al.effectiveQty <= EPS && p.planDate != null && p.planDate < today) { skipped.consumedPast++; continue }
       const base = cardById.get(al.baseCardId ?? '') ?? (p.originCardId ? cardById.get(p.originCardId) : undefined) ?? lineCards[0]
       const qty = p.completed ? p.qty : al.effectiveQty
-      const minutes = minutesForQty(supply.perUnit, qty)
+      // D69：主管覆寫（以本列 qty 為準）依有效數量等比換算；沒覆寫＝標準估計
+      const override = p.minutesOverride ?? null
+      const minutesStd = minutesForQty(supply.perUnit, qty)
+      const minutes = effectiveMinutes({ qty: p.qty, effectiveQty: qty, override: override?.minutes ?? null, perUnit: supply.perUnit })
       const delay = !p.completed && dd.rolled && p.planDate ? delayWorkdays(p.planDate, today) : 0
+      // D72：顯示在哪條線（讀取時推導；停用／不存在 → 預設線＋line_inactive）。延誤卡保留原線（D50）
+      const lane = resolveLaneId(p.lineId ?? null, dd.date, lines, defaultLineId)
 
       // 旗標（規格 §3.3 表）
       const flags: PlacementFlag[] = []
@@ -167,6 +206,14 @@ export function assembleBoard(input: {
         }
         const eta = base.flags.find((f) => f.code === 'eta_passed')
         if (eta) flags.push({ code: 'line_eta_passed', label: eta.label, level: 'warn' })
+        if (manualBack.has(key)) flags.push({ code: 'manual_in_pool', label: '已回到正常區塊（手動加入紀錄保留）', level: 'info' })
+      }
+      if (lane.fallback && lane.laneId != null) {
+        const orig = p.lineId != null ? lineNameOf(lines, p.lineId) : ''
+        const label = orig
+          ? `原屬${orig}（已停用），暫顯示在${lineNameOf(lines, lane.laneId)}${p.completed ? '' : '，請改排'}`
+          : `沒有所屬線，暫顯示在${lineNameOf(lines, lane.laneId)}${p.completed ? '' : '，請改排'}`
+        flags.push({ code: 'line_inactive', label, level: p.completed ? 'info' : 'warn' })
       }
 
       const bc: BoardCard = {
@@ -188,6 +235,11 @@ export function assembleBoard(input: {
         source: p.source,
         flags,
         card: cardWithQty(base, qty, p.completed ? p.qty : al.readyQty, minutes, null),
+        lineId: p.planDate == null ? null : (p.lineId ?? null),
+        laneId: lane.laneId,
+        minutesStd,
+        minutesOverride: override ? { ...override, minutes: minutes ?? 0 } : null,
+        manual: base.block === MANUAL_BLOCK_ID ? (manualMeta[key] ?? null) : null,
       }
       vis.push({ card: bc, display: dd.date, completed: !!p.completed })
     }
@@ -212,6 +264,7 @@ export function assembleBoard(input: {
         placedQty: r3(Math.max(0, c.qtyCard - remaining)),
         remainingQty: remaining,
         placeable: isPlaceableBlock(c.block),
+        manual: c.block === MANUAL_BLOCK_ID ? (manualMeta[c.soLineKey] ?? null) : null,
       }
       if (remaining <= EPS) continue
       // 有擺放的行一律複製（下面步驟 8 會改 split）；絕不可改到 P0 快取裡的原物件（多個請求共用）
@@ -287,14 +340,35 @@ export function assembleBoard(input: {
 
   const days: BoardDay[] = windowDays.map((d) => {
     const cards = dayCards.get(d)!.sort(cmp)
-    const capacity = resolveCapacity(d, capRows)
+    // D71：整天產能＝各啟用線加總；D49 各線各自沿用
+    const capacity = resolveDayCapacity(d, { daily: capRows, lineRows, lines })
     const usedMinutes = round1(cards.reduce((s, c) => s + (c.minutes ?? 0), 0))
     const openMinutes = round1(cards.reduce((s, c) => s + (c.completed ? 0 : c.minutes ?? 0), 0))
+    // D67／D72：每條啟用線一個 lane，只帶彙總；卡片由前端以 laneId 從 day.cards 篩出（順序沿用 §3.6 排序）
+    const lanes: BoardLane[] = activeLines.map((l) => {
+      const lc = capacity.lines?.find((x) => x.lineId === l.id)
+        ?? { date: d, lineId: l.id, kind: isWeekend(d) ? 'weekend' : 'weekday', regularMinutes: null, overtimeMinutes: 0, source: 'unset', inheritedFrom: null }
+      const laneCards = cards.filter((c) => c.laneId === l.id)
+      const used = round1(laneCards.reduce((s, c) => s + (c.minutes ?? 0), 0))
+      return {
+        lineId: l.id,
+        code: l.code,
+        name: l.name,
+        sortOrder: l.sortOrder,
+        capacity: lc,
+        cardCount: laneCards.length,
+        usedMinutes: used,
+        openMinutes: round1(laneCards.reduce((s, c) => s + (c.completed ? 0 : c.minutes ?? 0), 0)),
+        unknownMinutesCards: laneCards.filter((c) => c.minutes == null).length,
+        load: dayLoad(used, lc),
+        remainingMinutes: laneRemaining(lc, used),
+      }
+    })
     const wd = weekdayOf(d)
     return {
       date: d,
       weekday: wd,
-      kind: wd === 6 ? 'saturday_ot' : 'workday',
+      kind: isWeekend(d) ? 'weekend_ot' : 'workday',
       isToday: d === today,
       label: dayLabel(d),
       capacity,
@@ -304,6 +378,7 @@ export function assembleBoard(input: {
       unknownMinutesCards: cards.filter((c) => c.minutes == null).length,
       load: dayLoad(usedMinutes, capacity),
       rolledInCount: cards.filter((c) => c.delayWorkdays > 0).length,
+      lanes,
     }
   })
 
@@ -321,6 +396,8 @@ export function assembleBoard(input: {
     excluded: pool.excluded,
     notes: [...pool.notes, ...SCHEDULE_NOTES],
     staleUnsyncedCount: pool.staleUnsynced?.count ?? 0,
+    lines: [...lines].sort((a, b) => a.sortOrder - b.sortOrder || a.id - b.id),
+    defaultLineId,
   }
 }
 

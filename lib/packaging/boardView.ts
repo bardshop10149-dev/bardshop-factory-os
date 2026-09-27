@@ -8,17 +8,18 @@
 // ── 工時 → 時間（D55 的換算，D62 起只用在進度條上）─────────────────────────
 // D62 拿掉了日檢視左側的時間尺（改卡片牆），但保留「時間感」：負荷進度條上標 19:00／24:00，並顯示「已排約做到幾點」。
 // 換算方式沿用 D55（**不排時段**，D5）：
-//   平日：09:00~19:00（600 尺分鐘）對應當天「正常工時 R」，19:00~24:00（300 尺分鐘）對應「加班上限 O」。
+//   平日：10:00~19:00（540 尺分鐘）對應當天「正常工時 R」，19:00~24:00（300 尺分鐘）對應「加班上限 O」。
+//         （D70 起點由 09:00 改 10:00；日檢視時間尺另見 laneTimeline.ts，每條線各自換算）
 //         累計工時 w 的尺上位置：
-//           w ≤ R        → 600 × w / R
-//           R < w ≤ R+O  → 600 + 300 × (w − R) / O
-//           w > R+O      → 900 + (w − R − O) × 最後一段的比例（超出 24:00，紅色區）
-//   週六（或正常工時 0 的日子）：只有加班額度 O（D49），09:00~19:00 對應 O，其後全是「超過上限」。
+//           w ≤ R        → 540 × w / R
+//           R < w ≤ R+O  → 540 + 300 × (w − R) / O
+//           w > R+O      → 840 + (w − R − O) × 最後一段的比例（超出 24:00，紅色區）
+//   週六／週日（D63，或正常工時 0 的日子）：只有加班額度 O（D49），10:00~19:00 對應 O，其後全是「超過上限」。
 //   產能未設定（平日且從沒填過，伺服器 source='unset'）或 R=O=0：不換算。
 
 import type { YMD } from './scheduleTypes'
 import { isWorkday } from './workdays'
-import { addDays, dayLabel, isHolidaySaturday, weekdayOf } from './scheduleCalendar'
+import { addDays, dayLabel, isHolidayWeekend, isWeekend } from './scheduleCalendar'
 
 // ─────────────────────────────────────────────────────────────────────
 // 檢視模式與視窗（D56）
@@ -26,7 +27,7 @@ import { addDays, dayLabel, isHolidaySaturday, weekdayOf } from './scheduleCalen
 
 export type BoardViewMode = 'day' | 'week' | 'twoWeek'
 
-/** 各檢視向 GET /api/packaging/board 要幾個台灣工作日（開加班的週六由伺服器插入、不佔名額） */
+/** 各檢視向 GET /api/packaging/board 要幾個台灣工作日（開加班的週末日由伺服器插入、不佔名額） */
 export const VIEW_WORKDAYS: Record<BoardViewMode, number> = { day: 1, week: 5, twoWeek: 10 }
 
 export const VIEW_LABEL: Record<BoardViewMode, string> = { day: '日', week: '週', twoWeek: '兩週' }
@@ -40,12 +41,12 @@ export function parseViewMode(raw: unknown): BoardViewMode {
 const NAV_SAFETY_DAYS = 60
 
 /**
- * 是否為工作台上的一天：台灣工作日，或已開加班的週六（D48；國定假日的週六不算）。
- * openSats 由前端從產能表（GET /api/packaging/capacity）與已載入的工作台欄位彙整。
+ * 是否為工作台上的一天：台灣工作日，或已開加班的週六／週日（D48／D63；國定假日的週末不算）。
+ * openWeekends 由前端從產能表（GET /api/packaging/capacity）與已載入的工作台欄位彙整。
  */
-export function isViewDay(d: YMD, openSats: ReadonlySet<YMD>): boolean {
+export function isViewDay(d: YMD, openWeekends: ReadonlySet<YMD>): boolean {
   if (isWorkday(d)) return true
-  return weekdayOf(d) === 6 && openSats.has(d) && !isHolidaySaturday(d)
+  return isWeekend(d) && openWeekends.has(d) && !isHolidayWeekend(d)
 }
 
 /**
@@ -53,12 +54,12 @@ export function isViewDay(d: YMD, openSats: ReadonlySet<YMD>): boolean {
  * 往前不可早於 min（順延目標日＝今天或下一個工作日；過去的日子不在工作台上，D50 延誤卡已順延到今天）。
  * 找不到（往前已到 min）回 null，按鈕就停用。
  */
-export function stepViewDay(d: YMD, dir: 1 | -1, openSats: ReadonlySet<YMD>, min: YMD | null = null): YMD | null {
+export function stepViewDay(d: YMD, dir: 1 | -1, openWeekends: ReadonlySet<YMD>, min: YMD | null = null): YMD | null {
   let cur = d
   for (let i = 0; i < NAV_SAFETY_DAYS; i++) {
     cur = addDays(cur, dir)
     if (dir < 0 && min != null && cur < min) return null
-    if (isViewDay(cur, openSats)) return cur
+    if (isViewDay(cur, openWeekends)) return cur
   }
   return null
 }
@@ -66,20 +67,20 @@ export function stepViewDay(d: YMD, dir: 1 | -1, openSats: ReadonlySet<YMD>, min
 /**
  * 日檢視實際要顯示哪一天：
  * - 沒選（null）或選到順延目標日之前 → 順延目標日（今天是工作日＝今天）
- * - 選到的那天不是工作台日期（例：週六後來被取消加班）→ 往後第一個工作台日期
+ * - 選到的那天不是工作台日期（例：週末後來被取消加班）→ 往後第一個工作台日期
  */
-export function resolveViewDay(selected: YMD | null, rollTarget: YMD, openSats: ReadonlySet<YMD>): YMD {
+export function resolveViewDay(selected: YMD | null, rollTarget: YMD, openWeekends: ReadonlySet<YMD>): YMD {
   const base = selected == null || selected < rollTarget ? rollTarget : selected
-  if (isViewDay(base, openSats)) return base
-  return stepViewDay(base, 1, openSats) ?? base
+  if (isViewDay(base, openWeekends)) return base
+  return stepViewDay(base, 1, openWeekends) ?? base
 }
 
 /**
- * 週／兩週檢視的 ◀ ▶：以「台灣工作日」為單位平移起點（週六不佔名額，同伺服器 boardWindow）。
+ * 週／兩週檢視的 ◀ ▶：以「台灣工作日」為單位平移起點（週末不佔名額，同伺服器 boardWindow）。
  * 往前不可早於 min。n 可正可負。
  *
- * 起點本身不是工作日（開加班的週六、或今天剛好是開加班的週六＝rollTarget）時，
- * 伺服器視窗＝「那個週六＋其後 n 個工作日」，所以往後要多走一個工作日，新起點才會在目前視窗之後、不重疊。
+ * 起點本身不是工作日（開加班的週末日、或今天剛好是開加班的週末日＝rollTarget）時，
+ * 伺服器視窗＝「那個週末日＋其後 n 個工作日」，所以往後要多走一個工作日，新起點才會在目前視窗之後、不重疊。
  * （往前不用：從非工作日往回數 n 個工作日，本來就落在目前視窗之前。）
  */
 export function shiftByWorkdays(d: YMD, n: number, min: YMD | null = null): YMD {
@@ -96,19 +97,19 @@ export function shiftByWorkdays(d: YMD, n: number, min: YMD | null = null): YMD 
 }
 
 /**
- * 從 from 起列出 n 個台灣工作日（開加班的週六插入、不佔名額）——與伺服器 boardWindow 同規則。
+ * 從 from 起列出 n 個台灣工作日（開加班的週末日插入、不佔名額）——與伺服器 boardWindow 同規則。
  * 給「移到日期…」「拆卡」對話框當日期選單（日檢視只載入 1 天，選單不能只剩那一天）。
  */
-export function listViewDays(from: YMD, n: number, openSats: ReadonlySet<YMD>): { date: YMD; label: string; kind: 'workday' | 'saturday_ot' }[] {
-  const out: { date: YMD; label: string; kind: 'workday' | 'saturday_ot' }[] = []
+export function listViewDays(from: YMD, n: number, openWeekends: ReadonlySet<YMD>): { date: YMD; label: string; kind: 'workday' | 'weekend_ot' }[] {
+  const out: { date: YMD; label: string; kind: 'workday' | 'weekend_ot' }[] = []
   let cur = from
   let count = 0
   for (let i = 0; i < NAV_SAFETY_DAYS * 4 && count < n; i++) {
     if (isWorkday(cur)) {
-      out.push({ date: cur, label: dayLabel(cur), kind: weekdayOf(cur) === 6 ? 'saturday_ot' : 'workday' })
+      out.push({ date: cur, label: dayLabel(cur), kind: isWeekend(cur) ? 'weekend_ot' : 'workday' })
       count++
-    } else if (isViewDay(cur, openSats)) {
-      out.push({ date: cur, label: dayLabel(cur), kind: 'saturday_ot' })
+    } else if (isViewDay(cur, openWeekends)) {
+      out.push({ date: cur, label: dayLabel(cur), kind: 'weekend_ot' })
     }
     cur = addDays(cur, 1)
   }
@@ -124,14 +125,15 @@ export function windowRequest(mode: BoardViewMode, anchor: YMD | null): { from: 
 // 工時 → 時間換算（D55 時間尺的公式；D62 起給負荷進度條用）
 // ─────────────────────────────────────────────────────────────────────
 
-export const RULER_START_HOUR = 9
+/** D70：一天的工作起點 10:00（原 D55 為 09:00） */
+export const RULER_START_HOUR = 10
 export const RULER_REGULAR_END_HOUR = 19
 export const RULER_END_HOUR = 24
-/** 09:00~19:00 的尺上分鐘數 */
+/** 10:00~19:00 的尺上分鐘數 */
 const REGULAR_SPAN = (RULER_REGULAR_END_HOUR - RULER_START_HOUR) * 60
 /** 19:00~24:00 的尺上分鐘數 */
 const OVERTIME_SPAN = (RULER_END_HOUR - RULER_REGULAR_END_HOUR) * 60
-/** 09:00~24:00 */
+/** 10:00~24:00 */
 export const RULER_TOTAL_SPAN = REGULAR_SPAN + OVERTIME_SPAN
 
 export interface RulerCapInput {
@@ -139,8 +141,8 @@ export interface RulerCapInput {
   regularMinutes: number | null
   /** 加班上限（分鐘） */
   overtimeMinutes: number
-  /** 週六加班日（D48：週六只有加班） */
-  saturday: boolean
+  /** 週末加班日（D48／D63：週六、週日只有加班） */
+  weekend: boolean
 }
 
 interface Segment {
@@ -157,12 +159,12 @@ export type RulerMode =
 
 /** 依當天產能決定時間尺怎麼換算（見檔頭公式） */
 export function rulerMode(cap: RulerCapInput): RulerMode {
-  if (cap.regularMinutes == null && !cap.saturday) return { kind: 'uniform', reason: 'unset' }
-  const R = cap.saturday ? 0 : Math.max(0, cap.regularMinutes ?? 0)
+  if (cap.regularMinutes == null && !cap.weekend) return { kind: 'uniform', reason: 'unset' }
+  const R = cap.weekend ? 0 : Math.max(0, cap.regularMinutes ?? 0)
   const O = Math.max(0, cap.overtimeMinutes)
   if (R <= 0 && O <= 0) return { kind: 'uniform', reason: 'zero' }
   if (R <= 0) {
-    // 週六／正常工時 0：整段 09:00~19:00 都是加班額度，19:00 之後＝超過上限
+    // 週末／正常工時 0：整段 10:00~19:00 都是加班額度，19:00 之後＝超過上限
     return { kind: 'scaled', segments: [{ kind: 'overtime', minutes: O, rulerFrom: 0, rulerTo: REGULAR_SPAN }], regular: 0, overtime: O, allOvertime: true }
   }
   const segs: Segment[] = [{ kind: 'regular', minutes: R, rulerFrom: 0, rulerTo: REGULAR_SPAN }]
@@ -171,7 +173,7 @@ export function rulerMode(cap: RulerCapInput): RulerMode {
 }
 
 /**
- * 累計工時（分鐘）→ 尺上分鐘（0 ＝ 09:00）。超出所有段 → 用最後一段的比例往後延伸。
+ * 累計工時（分鐘）→ 尺上分鐘（0 ＝ 10:00）。超出所有段 → 用最後一段的比例往後延伸。
  * uniform 模式沒有換算，回 null。
  */
 export function workToRuler(w: number, mode: RulerMode): number | null {
@@ -198,7 +200,7 @@ export type RowZone = 'regular' | 'overtime' | 'over' | 'none'
 
 /**
  * 累計工時落在哪一段（進度條旁「約做到幾點」的文字顏色）。
- * 平日：≤ R 一般、≤ R+O 加班（橘）、其餘超過上限（紅）。週六：≤ O 加班、其餘紅。
+ * 平日：≤ R 一般、≤ R+O 加班（橘）、其餘超過上限（紅）。週末：≤ O 加班、其餘紅。
  * uniform 模式：none（不上色）。浮點容差 1e-6，避免 R 剛好排滿時被判成加班。
  */
 export function zoneOf(endMin: number, mode: RulerMode): RowZone {
@@ -213,10 +215,10 @@ export function zoneOf(endMin: number, mode: RulerMode): RowZone {
 // 負荷進度條（D51／D62）
 // ─────────────────────────────────────────────────────────────────────
 
-/** 刻度：09:00 起點、19:00（平日＝正常工時滿載；週六＝加班上限）、24:00（平日加班上限） */
+/** 刻度：10:00 起點、19:00（平日＝正常工時滿載；週末＝加班上限）、24:00（平日加班上限） */
 export interface LoadBarTick {
   kind: 'start' | 'regularEnd' | 'capEnd'
-  label: '09:00' | '19:00' | '24:00'
+  label: '10:00' | '19:00' | '24:00'
   /** 在條上的位置（0~100） */
   pct: number
   /** 標籤是否畫得下（相鄰刻度太近時只留重要的） */
@@ -242,7 +244,7 @@ export interface LoadBarScale {
   zone: RowZone
   /** 超過加班上限的工時（分鐘）；沒超過為 0 */
   overMinutes: number
-  /** 沒有正常工時、只有加班額度（週六，或平日正常工時設 0）：09:00~19:00 整段都是加班額度，19:00＝上限 */
+  /** 沒有正常工時、只有加班額度（週末，或平日正常工時設 0）：10:00~19:00 整段都是加班額度，19:00＝上限 */
   allOvertime: boolean
 }
 
@@ -255,9 +257,9 @@ const pctOf = (m: number, full: number): number => Math.max(0, Math.min(100, (m 
  * D62 日檢視頂部的負荷進度條（週／兩週欄頭也用同一份換算，只是不畫標籤）。
  *   平日：綠＝正常工時內、橘＝超過正常但在加班上限內、紅＝超過加班上限；
  *         19:00 刻度在「正常工時 R」的位置（R 排滿＝做到 19:00），24:00 在 R＋O（加班上限）。
- *   週六（D48 只有加班）：整段都是加班額度 O → 有排就是橘；19:00 刻度在 O（09:00~19:00 對應 O，同 D55 時間尺）。
+ *   週末（D48／D63 只有加班）：整段都是加班額度 O → 有排就是橘；19:00 刻度在 O（10:00~19:00 對應 O，同 D55 時間尺、D70 起點）。
  *   產能 0（R＝O＝0）：沒有刻度，有排就全紅。
- * 標籤擠在一起時依重要度保留：19:00 ＞ 24:00 ＞ 09:00。
+ * 標籤擠在一起時依重要度保留：19:00 ＞ 24:00 ＞ 10:00。
  */
 export function loadBarScale(used: number, cap: RulerCapInput, minLabelGap: number = LOAD_LABEL_MIN_GAP): LoadBarScale {
   const u = Number.isFinite(used) && used > 0 ? used : 0
@@ -265,7 +267,7 @@ export function loadBarScale(used: number, cap: RulerCapInput, minLabelGap: numb
   if (mode.kind === 'uniform' && mode.reason === 'unset') {
     return { unset: true, full: Math.max(u, 1), regularPct: 0, overtimePct: 0, overPct: 0, ticks: [], reachClock: null, zone: 'none', overMinutes: 0, allOvertime: false }
   }
-  const R = cap.saturday ? 0 : Math.max(0, cap.regularMinutes ?? 0)
+  const R = cap.weekend ? 0 : Math.max(0, cap.regularMinutes ?? 0)
   const O = Math.max(0, cap.overtimeMinutes)
   const full = Math.max(u, R + O, 1)
   const inRegular = Math.min(u, R)
@@ -274,12 +276,12 @@ export function loadBarScale(used: number, cap: RulerCapInput, minLabelGap: numb
 
   const raw: Omit<LoadBarTick, 'showLabel' | 'align'>[] = []
   if (R + O > 0) {
-    raw.push({ kind: 'start', label: '09:00', pct: 0 })
+    raw.push({ kind: 'start', label: '10:00', pct: 0 })
     if (R > 0) {
       raw.push({ kind: 'regularEnd', label: '19:00', pct: pctOf(R, full) })
       if (O > 0) raw.push({ kind: 'capEnd', label: '24:00', pct: pctOf(R + O, full) })
     } else {
-      // 週六／正常工時 0：19:00 就是加班上限
+      // 週末／正常工時 0：19:00 就是加班上限
       raw.push({ kind: 'capEnd', label: '19:00', pct: pctOf(O, full) })
     }
   }
@@ -317,7 +319,7 @@ export function loadBarScale(used: number, cap: RulerCapInput, minLabelGap: numb
 /**
  * 進度條旁的「時間感」文字（D62 日檢視）：
  *   沒超過上限 → 「預計約做到 14:30」
- *   超過加班上限 → 「超過 24:00，超出上限 7.0 h」（週六／正常工時 0 的上限是 19:00）——
+ *   超過加班上限 → 「超過 24:00，超出上限 7.0 h」（週末／正常工時 0 的上限是 19:00）——
  *   不顯示 28:23 這種 24 點以後的時刻，現場看不懂。
  *   沒排、產能未設定、產能 0 → null（不顯示）
  */
@@ -329,15 +331,15 @@ export function reachText(scale: Pick<LoadBarScale, 'reachClock' | 'zone' | 'ove
   return scale.reachClock ? `預計約做到 ${scale.reachClock}` : null
 }
 
-/** 進度條的滑過說明（小時一位小數；未設定／週六／正常工時 0 各有說法） */
-export function loadBarTitle(used: number, cap: { regularMinutes: number | null; overtimeMinutes: number; saturday: boolean }, scale: Pick<LoadBarScale, 'unset' | 'allOvertime'>): string {
+/** 進度條的滑過說明（小時一位小數；未設定／週末／正常工時 0 各有說法） */
+export function loadBarTitle(used: number, cap: { regularMinutes: number | null; overtimeMinutes: number; weekend: boolean }, scale: Pick<LoadBarScale, 'unset' | 'allOvertime'>): string {
   const h = (m: number | null) => hoursText(m ?? 0) ?? '0.0'
   if (scale.unset) return `已排 ${h(used)} 小時；這天還沒設定產能（點「設定產能」或欄頭 ⚙）`
   const O = Math.max(0, cap.overtimeMinutes)
   if (scale.allOvertime) {
-    return `已排 ${h(used)} 小時／${cap.saturday ? '週六' : '正常工時 0，'}加班上限 ${h(O)} 小時（09:00~19:00）`
+    return `已排 ${h(used)} 小時／${cap.weekend ? '週末' : '正常工時 0，'}加班上限 ${h(O)} 小時（10:00~19:00）`
   }
-  const R = cap.saturday ? 0 : Math.max(0, cap.regularMinutes ?? 0)
+  const R = cap.weekend ? 0 : Math.max(0, cap.regularMinutes ?? 0)
   return `已排 ${h(used)} 小時／正常 ${h(R)} 小時（至 19:00）${O > 0 ? `＋加班上限 ${h(O)} 小時（至 24:00）` : ''}`
 }
 

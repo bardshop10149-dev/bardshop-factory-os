@@ -5,11 +5,18 @@
 // 成功時回傳 inserts／updates／deletes（伺服器照「先減後增」寫入）與 inverse（前端推進 Undo 堆疊）。
 //
 // 不 import supabase、不讀時鐘（today／nowIso 由參數傳入）；相對路徑 import、不用 enum。
+//
+// 分線輪（lines.md §3.8）：排進日期的卡一定屬於某條線（D72）、主管可改工時（D69 setMinutes）。
+// 線只是「同一天內放在哪一欄」：守恆（D7）、分配、順延（D50）、預排（D22）都不看線。
 
 import {
+  ADJUST_REASON_MAX,
   MAX_OPS_PER_REQUEST,
   type ApplyErrorCode,
   type LineSupply,
+  type MinutesEditVia,
+  type MinutesOverride,
+  type PackagingLine,
   type Placement,
   type PlacementOp,
   type PlacementSnapshotRow,
@@ -19,6 +26,7 @@ import type { PackagingCard } from './types'
 import { displayDateOf, isBoardDay, isValidYmd, rollTarget, shortDate } from './scheduleCalendar'
 import { allocateLine, isPlaceableBlock, r3 } from './scheduleAllocate'
 import { toSnapshotRow } from './scheduleSnapshot'
+import { isValidOverride, mergeOverride, splitOverride } from './scheduleMinutes'
 
 export interface OpsState {
   /** 至少包含 ops 觸及的 SO 行的「全部」擺放（含已完成），守恆檢查才算得準 */
@@ -29,13 +37,27 @@ export interface OpsContext {
   today: YMD
   nowIso: string
   actor: { email: string; name: string | null }
-  openSats: ReadonlySet<YMD>
-  /** 由待排池算出的該行可排供給；null＝行不在池內 */
+  openWeekends: ReadonlySet<YMD>
+  /** 由待排池算出的該行可排供給；null＝行不在池內（perUnit 也給 merge 算覆寫加總用） */
   supplyOf(soLineKey: string): LineSupply | null
   /** cardId → 待排池卡（驗 originCardId 用） */
   cards: ReadonlyMap<string, PackagingCard>
   /** today + 120 日曆天 */
   maxDate: YMD
+  /** 分線：全部線（含停用；id → 線） */
+  lines: ReadonlyMap<number, PackagingLine>
+  /** 分線：預設線（待排區卡直接勾完成、restore 缺線時用） */
+  defaultLineId: number | null
+}
+
+/** D69：本批中「值有變」的 setMinutes（伺服器據此寫 packaging_time_adjustments；值沒變的不記，避免雜訊） */
+export interface MinuteEdit {
+  opIndex: number
+  id: string
+  before: Placement
+  after: Placement
+  reason: string | null
+  via: MinutesEditVia
 }
 
 export type ApplyOk = {
@@ -45,6 +67,7 @@ export type ApplyOk = {
   updates: { before: Placement; after: Placement }[]
   deletes: Placement[]
   inverse: PlacementOp[]
+  minuteEdits: MinuteEdit[]
 }
 export type ApplyFail = { ok: false; code: ApplyErrorCode; opIndex: number; message: string; current?: Placement | null }
 export type ApplyResult = ApplyOk | ApplyFail
@@ -80,6 +103,19 @@ const isDateOrNull = (d: unknown): d is YMD | null => d === null || isValidYmd(d
 const LINE_KEY_RE = /^[A-Za-z0-9][A-Za-z0-9?\-_./]{2,79}$/
 export const isLineKey = (s: unknown): s is string => typeof s === 'string' && LINE_KEY_RE.test(s)
 const isOriginCardId = (s: unknown): boolean => s == null || (typeof s === 'string' && s.length <= ORIGIN_CARD_ID_MAX)
+/** packaging_lines.id（smallint）；null／undefined 另外判斷 */
+const isLineId = (x: unknown): x is number => typeof x === 'number' && Number.isInteger(x) && x >= 1 && x <= 32767
+const isLineIdOrNull = (x: unknown): boolean => x == null || isLineId(x)
+const isVia = (x: unknown): x is MinutesEditVia => x === 'drag' || x === 'dialog' || x === 'undo'
+const ISO_TS_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,6})?(Z|[+-]\d{2}:\d{2})$/
+/** setMinutes.restoreMeta：{ by 1～320 字, byName null 或 ≤100 字, at ISO 時間 } */
+const isRestoreMeta = (x: unknown): x is { by: string; byName: string | null; at: string } => {
+  if (!x || typeof x !== 'object') return false
+  const m = x as Record<string, unknown>
+  return typeof m.by === 'string' && m.by.length >= 1 && m.by.length <= 320
+    && (m.byName === null || (typeof m.byName === 'string' && m.byName.length <= 100))
+    && typeof m.at === 'string' && ISO_TS_RE.test(m.at) && Number.isFinite(Date.parse(m.at))
+}
 
 /**
  * 請求 JSON → PlacementOp[] 的形狀檢查（不看資料庫狀態；語意驗證在 applyOps）。
@@ -99,23 +135,35 @@ export function parseOps(
     const op = o.op as PlacementOp['op']
     if (allowed && !allowed.has(op)) return bad(`這支 API 不接受 ${String(o.op)}`)
     switch (op) {
-      case 'place':
+      case 'place': {
         if (!isUuid(o.id) || !isLineKey(o.soLineKey) || typeof o.qty !== 'number' || !isDateOrNull(o.toDate ?? null)) return bad('place 欄位不完整')
         if (!isOriginCardId(o.originCardId)) return bad(`originCardId 須為 ${ORIGIN_CARD_ID_MAX} 字以內的字串`)
-        out.push({ op, id: o.id, soLineKey: o.soLineKey, qty: o.qty, toDate: (o.toDate as YMD | null | undefined) ?? null, originCardId: (o.originCardId as string | null | undefined) ?? null })
+        if (!isLineIdOrNull(o.lineId)) return bad('lineId 須為正整數')
+        const pl: Extract<PlacementOp, { op: 'place' }> = { op, id: o.id, soLineKey: o.soLineKey, qty: o.qty, toDate: (o.toDate as YMD | null | undefined) ?? null, originCardId: (o.originCardId as string | null | undefined) ?? null }
+        if (o.lineId != null) pl.lineId = o.lineId as number
+        out.push(pl)
         break
-      case 'move':
+      }
+      case 'move': {
         if (!isUuid(o.id) || !isVersion(o.version) || !isDateOrNull(o.toDate ?? null)) return bad('move 欄位不完整')
-        out.push({ op, id: o.id, version: o.version, toDate: (o.toDate as YMD | null | undefined) ?? null })
+        if (!isLineIdOrNull(o.lineId)) return bad('lineId 須為正整數')
+        const mv: Extract<PlacementOp, { op: 'move' }> = { op, id: o.id, version: o.version, toDate: (o.toDate as YMD | null | undefined) ?? null }
+        if (o.lineId != null) mv.lineId = o.lineId as number
+        out.push(mv)
         break
+      }
       case 'split': {
         if (!isUuid(o.id) || !isVersion(o.version) || typeof o.keepQty !== 'number' || !Array.isArray(o.parts)) return bad('split 欄位不完整')
-        const parts: { id: string; qty: number; toDate?: YMD | null }[] = []
+        const parts: { id: string; qty: number; toDate?: YMD | null; lineId?: number | null }[] = []
         for (const p of o.parts as unknown[]) {
           const q = p as Record<string, unknown> | null
           if (!q || !isUuid(q.id) || typeof q.qty !== 'number') return bad('split.parts 格式錯誤')
           if (q.toDate !== undefined && !isDateOrNull(q.toDate)) return bad('split.parts.toDate 格式錯誤')
-          parts.push(q.toDate === undefined ? { id: q.id, qty: q.qty } : { id: q.id, qty: q.qty, toDate: q.toDate as YMD | null })
+          if (!isLineIdOrNull(q.lineId)) return bad('split.parts.lineId 須為正整數')
+          const part: { id: string; qty: number; toDate?: YMD | null; lineId?: number | null } = { id: q.id, qty: q.qty }
+          if (q.toDate !== undefined) part.toDate = q.toDate as YMD | null
+          if (q.lineId != null) part.lineId = q.lineId as number
+          parts.push(part)
         }
         out.push({ op, id: o.id, version: o.version, keepQty: o.keepQty, parts })
         break
@@ -132,26 +180,41 @@ export function parseOps(
         break
       }
       case 'unplace':
-      case 'complete':
         if (!isUuid(o.id) || !isVersion(o.version)) return bad(`${op} 欄位不完整`)
         out.push({ op, id: o.id, version: o.version })
         break
-      case 'setQty':
-        if (!isUuid(o.id) || !isVersion(o.version) || typeof o.qty !== 'number') return bad('setQty 欄位不完整')
-        out.push({ op, id: o.id, version: o.version, qty: o.qty })
+      case 'complete': {
+        if (!isUuid(o.id) || !isVersion(o.version)) return bad(`${op} 欄位不完整`)
+        if (!isLineIdOrNull(o.lineId)) return bad('lineId 須為正整數')
+        const c: Extract<PlacementOp, { op: 'complete' }> = { op, id: o.id, version: o.version }
+        if (o.lineId != null) c.lineId = o.lineId as number
+        out.push(c)
         break
+      }
+      case 'setQty': {
+        if (!isUuid(o.id) || !isVersion(o.version) || typeof o.qty !== 'number') return bad('setQty 欄位不完整')
+        if (o.minutesOverride !== undefined && o.minutesOverride !== null && typeof o.minutesOverride !== 'number') return bad('minutesOverride 須為數字或 null')
+        const sq: Extract<PlacementOp, { op: 'setQty' }> = { op, id: o.id, version: o.version, qty: o.qty }
+        if (o.minutesOverride !== undefined) sq.minutesOverride = o.minutesOverride as number | null
+        out.push(sq)
+        break
+      }
       case 'restore': {
         const r = o.row as Record<string, unknown> | null
         if (!r || !isUuid(r.id) || !isLineKey(r.soLineKey) || typeof r.qty !== 'number') return bad('restore.row 欄位不完整')
         if (!isDateOrNull(r.planDate ?? null) || !isDateOrNull(r.originalDate ?? null)) return bad('restore.row 日期格式錯誤')
         if (r.source !== 'manual' && r.source !== 'ai') return bad('restore.row.source 錯誤')
         if (!isOriginCardId(r.originCardId)) return bad(`restore.row.originCardId 須為 ${ORIGIN_CARD_ID_MAX} 字以內的字串`)
+        if (!isLineIdOrNull(r.lineId)) return bad('restore.row.lineId 須為正整數')
+        if (r.estMinutesOverride != null && typeof r.estMinutesOverride !== 'number') return bad('restore.row.estMinutesOverride 須為數字')
         out.push({
           op, row: {
             id: r.id, soLineKey: r.soLineKey, qty: r.qty,
             planDate: (r.planDate as YMD | null | undefined) ?? null,
             originalDate: (r.originalDate as YMD | null | undefined) ?? null,
             source: r.source, originCardId: (r.originCardId as string | null | undefined) ?? null,
+            lineId: (r.lineId as number | null | undefined) ?? null,
+            estMinutesOverride: (r.estMinutesOverride as number | null | undefined) ?? null,
           },
         })
         break
@@ -160,10 +223,28 @@ export function parseOps(
         if (!isUuid(o.id) || !isVersion(o.version)) return bad('uncomplete 欄位不完整')
         if (o.prevPlanDate !== undefined && !isDateOrNull(o.prevPlanDate)) return bad('prevPlanDate 格式錯誤')
         if (o.prevQty !== undefined && typeof o.prevQty !== 'number') return bad('prevQty 須為數字')
+        if (o.prevLineId !== undefined && !isLineIdOrNull(o.prevLineId)) return bad('prevLineId 須為正整數或 null')
         const u: Extract<PlacementOp, { op: 'uncomplete' }> = { op, id: o.id, version: o.version }
         if (o.prevPlanDate !== undefined) u.prevPlanDate = o.prevPlanDate as YMD | null
         if (o.prevQty !== undefined) u.prevQty = o.prevQty as number
+        if (o.prevLineId !== undefined) u.prevLineId = (o.prevLineId as number | null) ?? null
         out.push(u)
+        break
+      }
+      case 'setMinutes': {
+        // D69：minutes 必帶（null＝回到標準值）；範圍在 applyOps 驗（minutes_invalid）
+        if (!isUuid(o.id) || !isVersion(o.version) || !('minutes' in o)) return bad('setMinutes 欄位不完整')
+        if (o.minutes !== null && typeof o.minutes !== 'number') return bad('minutes 須為數字或 null')
+        if (o.reason != null && (typeof o.reason !== 'string' || o.reason.length > ADJUST_REASON_MAX)) return bad(`原因最多 ${ADJUST_REASON_MAX} 字`)
+        if (o.via !== undefined && !isVia(o.via)) return bad('via 只能是 drag／dialog／undo')
+        const sm: Extract<PlacementOp, { op: 'setMinutes' }> = { op, id: o.id, version: o.version, minutes: o.minutes as number | null }
+        if (typeof o.reason === 'string' && o.reason.trim()) sm.reason = o.reason.trim()
+        if (o.via !== undefined) sm.via = o.via as MinutesEditVia
+        if (o.restoreMeta != null) {
+          if (!isRestoreMeta(o.restoreMeta)) return bad('restoreMeta 格式錯誤')
+          sm.restoreMeta = { by: o.restoreMeta.by, byName: o.restoreMeta.byName, at: o.restoreMeta.at }
+        }
+        out.push(sm)
         break
       }
       default:
@@ -182,7 +263,7 @@ export function touchedKeys(ops: readonly PlacementOp[]): { lineKeys: Set<string
       case 'place': lineKeys.add(o.soLineKey); break
       case 'restore': lineKeys.add(o.row.soLineKey); break
       case 'merge': ids.add(o.targetId); for (const s of o.sources) ids.add(s.id); break
-      default: ids.add(o.id)
+      default: ids.add(o.id) // move／split／unplace／setQty／complete／uncomplete／setMinutes（D69）
     }
   }
   return { lineKeys, ids }
@@ -213,7 +294,7 @@ export function rebaseVersions(ops: readonly PlacementOp[], byId: ReadonlyMap<st
         for (const p of o.parts) ver.set(p.id, 1)
         return { ...o, version: v }
       }
-      default: { // move / setQty / complete / uncomplete
+      default: { // move / setQty / complete / uncomplete / setMinutes（D69：一般更新，version+1）
         const v = cur(o.id, o.version)
         ver.set(o.id, v + 1)
         return { ...o, version: v }
@@ -243,7 +324,8 @@ export function applyOps(state: OpsState, ops: readonly PlacementOp[], ctx: OpsC
   const orig = state.byId
   const next = new Map<string, Placement>(orig)
   const invGroups: PlacementOp[][] = []
-  const { today, openSats } = ctx
+  const minuteEdits: MinuteEdit[] = []
+  const { today, openWeekends } = ctx
 
   const fail = (code: ApplyErrorCode, opIndex: number, message: string, current?: Placement | null): ApplyFail =>
     current === undefined ? { ok: false, code, opIndex, message } : { ok: false, code, opIndex, message, current }
@@ -257,17 +339,25 @@ export function applyOps(state: OpsState, ops: readonly PlacementOp[], ctx: OpsC
     r3(lineRows(key, map).reduce((s, p) => s + (p.completed ? 0 : p.qty), 0))
   const alloc = (key: string) => {
     const supply = ctx.supplyOf(key)
-    return supply ? allocateLine({ supply, placements: lineRows(key, next), today, openSats }) : null
+    return supply ? allocateLine({ supply, placements: lineRows(key, next), today, openWeekends }) : null
   }
   const stamp = (p: Placement, patch: Partial<Placement>): Placement => ({
     ...p, ...patch,
     version: p.version + 1, updatedAt: ctx.nowIso, updatedBy: ctx.actor.email, updatedByName: ctx.actor.name,
   })
-  const fresh = (r: PlacementSnapshotRow): Placement => ({
+  /** D69：由操作者此刻寫入的覆寫（null＝沒覆寫） */
+  const overrideNow = (minutes: number | null | undefined): MinutesOverride | null =>
+    minutes == null ? null : { minutes, by: ctx.actor.email, byName: ctx.actor.name, at: ctx.nowIso }
+  /** 改覆寫「值」但保留原作者（合併、Undo 合併：不是主管這次親手改工時） */
+  const overrideKeepMeta = (minutes: number | null | undefined, keep: MinutesOverride | null | undefined): MinutesOverride | null =>
+    minutes == null ? null : keep ? { ...keep, minutes } : overrideNow(minutes)
+  const fresh = (r: PlacementSnapshotRow, override?: MinutesOverride | null): Placement => ({
     id: r.id, soLineKey: r.soLineKey, qty: r.qty, planDate: r.planDate, originalDate: r.originalDate,
     source: r.source, originCardId: r.originCardId, completed: null, version: 1,
     createdAt: ctx.nowIso, createdBy: ctx.actor.email, createdByName: ctx.actor.name,
     updatedAt: ctx.nowIso, updatedBy: ctx.actor.email, updatedByName: ctx.actor.name,
+    lineId: r.planDate == null ? null : (r.lineId ?? null),
+    minutesOverride: override !== undefined ? override : overrideNow(r.estMinutesOverride),
   })
   const pastLimit = (() => {
     const t = Date.UTC(+today.slice(0, 4), +today.slice(5, 7) - 1, +today.slice(8, 10)) - PAST_MOVE_LIMIT_DAYS * 86_400_000
@@ -291,8 +381,21 @@ export function applyOps(state: OpsState, ops: readonly PlacementOp[], ctx: OpsC
       if (allowPast && d >= pastLimit) return null
       return fail('date_past', i, `${shortDate(d)} 已經過去，不能排`)
     }
-    // D48：只能排在台灣工作日或已開加班的週六
-    if (!isBoardDay(d, openSats)) return fail('date_not_board_day', i, `${shortDate(d)} 不是工作日（週六需先開加班）`)
+    // D48／D63：只能排在台灣工作日或已開加班的週六、週日
+    if (!isBoardDay(d, openWeekends)) return fail('date_not_board_day', i, `${shortDate(d)} 不是工作日（週六、週日需先開加班）`)
+    return null
+  }
+
+  /**
+   * D72 排進日期的卡一定屬於某條線：
+   * - lineId 缺 → line_required（伺服器不自動選線，前端一律送明確 lineId，lines.md §3.4 第 4 點）
+   * - 線不存在 → line_invalid；已停用 → line_invalid，除非 allowInactive（Undo／restore 要能還原到原線，讀取時回退顯示）
+   */
+  const checkLine = (i: number, lineId: number | null | undefined, allowInactive: boolean): ApplyFail | null => {
+    if (lineId == null) return fail('line_required', i, '排進日期的卡必須指定產線（D72），請重新整理後再拖一次')
+    const line = ctx.lines.get(lineId)
+    if (!line) return fail('line_invalid', i, `找不到產線 #${lineId}，請重新整理`)
+    if (!line.active && !allowInactive) return fail('line_invalid', i, `${line.name}已停用，請改排到其他線`)
     return null
   }
 
@@ -303,7 +406,7 @@ export function applyOps(state: OpsState, ops: readonly PlacementOp[], ctx: OpsC
     const a = alloc(p.soLineKey)
     if (!a) return null
     const pa = a.placements.find((x) => x.placementId === id)
-    const disp = displayDateOf(p, today, openSats).date
+    const disp = displayDateOf(p, today, openWeekends).date
     if (pa && pa.readiness === 'pre' && pa.preReadyDate && disp && disp < pa.preReadyDate) {
       return fail('before_est_ready', i, `${shortDate(disp)} 早於預估可包日 ${shortDate(pa.preReadyDate)}（D22：預排卡只能排在預估可包日當天或之後）`)
     }
@@ -355,10 +458,12 @@ export function applyOps(state: OpsState, ops: readonly PlacementOp[], ctx: OpsC
         if (supply.total <= EPS && supply.nonPlaceableQty > 0) return fail('not_placeable', i, '這個品項目前只剩未寄出／出貨待確認的量，不能排（D22）')
         const dErr = checkDate(i, op.toDate, false)
         if (dErr) return dErr
+        // D72：排進日期必帶啟用中的線；進待排區不屬於任何線
+        if (op.toDate != null) { const lErr = checkLine(i, op.lineId, false); if (lErr) return lErr }
         next.set(op.id, fresh({
           id: op.id, soLineKey: op.soLineKey, qty: r3(op.qty), planDate: op.toDate, originalDate: op.toDate,
-          source: 'manual', originCardId: op.originCardId ?? null,
-        }))
+          source: 'manual', originCardId: op.originCardId ?? null, lineId: op.toDate != null ? op.lineId ?? null : null,
+        }, null))
         const cErr = checkConserve(i, op.soLineKey) ?? checkLineCount(i, op.soLineKey) ?? checkPre(i, op.id)
         if (cErr) return cErr
         invGroups.push([{ op: 'unplace', id: op.id, version: 1 }])
@@ -371,15 +476,30 @@ export function applyOps(state: OpsState, ops: readonly PlacementOp[], ctx: OpsC
         if (row.completed) return fail('completed_locked', i, '已完成的卡不能移動，請先取消完成', row)
         const dErr = checkDate(i, op.toDate, true)
         if (dErr) return dErr
+        // D72：移進日期 → lineId 省略＝沿用原線（原本在待排區或原線無效 → line_required／line_invalid）；給了須為啟用線。
+        // 同一天換線＝同 toDate＋新 lineId。移到待排區 → 不屬於任何線。
+        const rowLine = row.planDate != null ? (row.lineId ?? null) : null
+        let lineId: number | null = null
+        if (op.toDate != null) {
+          lineId = op.lineId ?? rowLine
+          const lErr = checkLine(i, lineId, false)
+          if (lErr) return lErr
+        }
         // D50：主管手動挪過的卡以主管安排為準 → source 變 manual；original_date 只在第一次排上日期時補
         next.set(op.id, stamp(row, {
           planDate: op.toDate,
           originalDate: row.originalDate ?? op.toDate,
           source: 'manual',
+          lineId,
         }))
-        const pErr = checkPre(i, op.id)
+        // D22 只擋「把預排卡往前挪到預估可包日之前」；同一天只換線（toDate＝原日期）日期沒變，不再擋
+        // （資料變動後已落在預估可包日之前的卡，主管仍可在當天換線，畫面照舊標 before_est_ready 提醒）
+        const sameDayLineChange = op.toDate != null && op.toDate === row.planDate
+        const pErr = sameDayLineChange ? null : checkPre(i, op.id)
         if (pErr) return pErr
-        invGroups.push([{ op: 'move', id: op.id, version: row.version + 1, toDate: row.planDate }])
+        const inv: Extract<PlacementOp, { op: 'move' }> = { op: 'move', id: op.id, version: row.version + 1, toDate: row.planDate }
+        if (row.planDate != null && rowLine != null) inv.lineId = rowLine
+        invGroups.push([inv])
         break
       }
 
@@ -402,17 +522,24 @@ export function applyOps(state: OpsState, ops: readonly PlacementOp[], ctx: OpsC
         // D7：加總必須等於原數量
         const sum = r3(op.keepQty + op.parts.reduce((s, p) => s + p.qty, 0))
         if (Math.abs(sum - row.qty) > EPS) return fail('split_sum_mismatch', i, `拆分合計 ${sum} 不等於原數量 ${row.qty}`)
-        next.set(op.id, stamp(row, { qty: r3(op.keepQty) }))
-        for (const p of op.parts) {
+        // D69 規則 2：原卡有覆寫 → 依數量比例分給原卡與各新卡（作者沿用原卡）；沒有 → 全部沿用標準估計
+        const so = splitOverride(row.minutesOverride?.minutes ?? null, row.qty, op.keepQty, op.parts.map((p) => p.qty))
+        next.set(op.id, stamp(row, { qty: r3(op.keepQty), minutesOverride: overrideKeepMeta(so.keep, row.minutesOverride) }))
+        const rowLine = row.planDate != null ? (row.lineId ?? null) : null
+        for (let k = 0; k < op.parts.length; k++) {
+          const p = op.parts[k]
           const d = p.toDate === undefined ? row.planDate : p.toDate
           if (d !== row.planDate) {
             const dErr = checkDate(i, d, false)
             if (dErr) return dErr
           }
+          // D72：part 的線省略＝同原卡（原卡在待排區而 part 排進日期 → 必填）
+          const lineId = d == null ? null : (p.lineId ?? rowLine)
+          if (d != null) { const lErr = checkLine(i, lineId, false); if (lErr) return lErr }
           next.set(p.id, fresh({
             id: p.id, soLineKey: row.soLineKey, qty: r3(p.qty), planDate: d,
-            originalDate: row.originalDate ?? d, source: row.source, originCardId: row.originCardId,
-          }))
+            originalDate: row.originalDate ?? d, source: row.source, originCardId: row.originCardId, lineId,
+          }, overrideKeepMeta(so.parts[k], row.minutesOverride)))
         }
         const nErr = checkLineCount(i, row.soLineKey)
         if (nErr) return nErr
@@ -420,7 +547,11 @@ export function applyOps(state: OpsState, ops: readonly PlacementOp[], ctx: OpsC
           const d = p.toDate === undefined ? row.planDate : p.toDate
           if (d !== row.planDate) { const pErr = checkPre(i, p.id); if (pErr) return pErr }
         }
-        invGroups.push([{ op: 'merge', targetId: op.id, targetVersion: row.version + 1, sources: op.parts.map((p) => ({ id: p.id, version: 1 })) }])
+        // 反向＝merge：merge 的覆寫加總（規則 3）通常正好還原拆前的覆寫（捨入差已補在原卡）；
+        // 但各張被補到下限 1 分時加總會變大 → 原卡有覆寫就再接一個 setQty 帶原覆寫，精確還原（同 merge 的反向操作）
+        const splitInv: PlacementOp[] = [{ op: 'merge', targetId: op.id, targetVersion: row.version + 1, sources: op.parts.map((p) => ({ id: p.id, version: 1 })) }]
+        if (row.minutesOverride) splitInv.push({ op: 'setQty', id: op.id, version: row.version + 2, qty: row.qty, minutesOverride: row.minutesOverride.minutes })
+        invGroups.push(splitInv)
         break
       }
 
@@ -443,10 +574,22 @@ export function applyOps(state: OpsState, ops: readonly PlacementOp[], ctx: OpsC
           if (r.soLineKey !== target.soLineKey) return fail('merge_mismatch', i, '只能合併同一個 SO 品項行的子卡', r)
           srcRows.push(r)
         }
-        next.set(target.id, stamp(target, { qty: r3(target.qty + srcRows.reduce((s, r) => s + r.qty, 0)) }))
+        // D69 規則 3：任一張有覆寫 → 合併後覆寫＝各張「覆寫或標準值」加總；target 保留自己的日期與線（D72）
+        const perUnit = ctx.supplyOf(target.soLineKey)?.perUnit ?? null
+        const mo = mergeOverride(
+          { qty: target.qty, override: target.minutesOverride?.minutes ?? null },
+          srcRows.map((r) => ({ qty: r.qty, override: r.minutesOverride?.minutes ?? null })),
+          perUnit,
+        )
+        const metaFrom = target.minutesOverride ?? srcRows.find((r) => r.minutesOverride)?.minutesOverride ?? null
+        next.set(target.id, stamp(target, {
+          qty: r3(target.qty + srcRows.reduce((s, r) => s + r.qty, 0)),
+          minutesOverride: overrideKeepMeta(mo, metaFrom),
+        }))
         for (const r of srcRows) next.delete(r.id)
+        // 反向：setQty 帶 minutesOverride 精確還原 target 原本的覆寫（含 null），各來源 restore 帶線與覆寫
         invGroups.push([
-          { op: 'setQty', id: target.id, version: target.version + 1, qty: target.qty },
+          { op: 'setQty', id: target.id, version: target.version + 1, qty: target.qty, minutesOverride: target.minutesOverride?.minutes ?? null },
           ...srcRows.map((r): PlacementOp => ({ op: 'restore', row: toSnapshotRow(r) })),
         ])
         break
@@ -466,9 +609,15 @@ export function applyOps(state: OpsState, ops: readonly PlacementOp[], ctx: OpsC
         if (isFail(row)) return row
         if (row.completed) return fail('completed_locked', i, '已完成的卡不能改數量，請先取消完成', row)
         if (!isQty(op.qty)) return fail('qty_invalid', i, '數量須大於 0、最多 3 位小數')
-        next.set(op.id, stamp(row, { qty: r3(op.qty) }))
+        if (op.minutesOverride != null && !isValidOverride(op.minutesOverride)) return fail('minutes_invalid', i, '工時須為 1～6000 分鐘、最多 1 位小數')
+        const patch: Partial<Placement> = { qty: r3(op.qty) }
+        // D69：有帶 minutesOverride（含 null）就一併設定（Undo 合併時還原 target 原本的覆寫）；省略＝不動
+        if (op.minutesOverride !== undefined) patch.minutesOverride = overrideKeepMeta(op.minutesOverride, row.minutesOverride)
+        next.set(op.id, stamp(row, patch))
         if (op.qty > row.qty) { const cErr = checkConserve(i, row.soLineKey); if (cErr) return cErr }
-        invGroups.push([{ op: 'setQty', id: op.id, version: row.version + 1, qty: row.qty }])
+        const inv: Extract<PlacementOp, { op: 'setQty' }> = { op: 'setQty', id: op.id, version: row.version + 1, qty: row.qty }
+        if (op.minutesOverride !== undefined) inv.minutesOverride = row.minutesOverride?.minutes ?? null
+        invGroups.push([inv])
         break
       }
 
@@ -480,11 +629,19 @@ export function applyOps(state: OpsState, ops: readonly PlacementOp[], ctx: OpsC
         if (!isLineKey(r.soLineKey)) return fail('bad_request', i, 'soLineKey 格式錯誤')
         if (!isDateOrNull(r.planDate) || !isDateOrNull(r.originalDate)) return fail('date_invalid', i, '日期格式錯誤')
         if (!isOriginCardId(r.originCardId)) return fail('bad_request', i, `originCardId 須為 ${ORIGIN_CARD_ID_MAX} 字以內`)
+        if (r.estMinutesOverride != null && !isValidOverride(r.estMinutesOverride)) return fail('minutes_invalid', i, '工時須為 1～6000 分鐘、最多 1 位小數')
         // Undo 用：日期同 move（允許 400 天內的過去日期、不可超過 maxDate、未來須為工作台日期）；原排定日只是紀錄，只擋超過 maxDate
         const dErr = checkDate(i, r.planDate, true)
         if (dErr) return dErr
         if (r.originalDate != null && r.originalDate > ctx.maxDate) return fail('date_invalid', i, `原排定日不可晚於 ${shortDate(ctx.maxDate)}`)
-        next.set(r.id, fresh({ ...r, qty: r3(r.qty), source: r.source === 'ai' ? 'ai' : 'manual', originCardId: r.originCardId ?? null }))
+        // D72：排進日期的列要有線：缺 → 預設線；給了須存在（停用線允許——Undo 要能還原到原線，讀取時回退顯示）
+        let lineId: number | null = null
+        if (r.planDate != null) {
+          lineId = r.lineId ?? ctx.defaultLineId
+          const lErr = checkLine(i, lineId, true)
+          if (lErr) return lErr
+        }
+        next.set(r.id, fresh({ ...r, qty: r3(r.qty), source: r.source === 'ai' ? 'ai' : 'manual', originCardId: r.originCardId ?? null, lineId }))
         const cErr = checkConserve(i, r.soLineKey) ?? checkLineCount(i, r.soLineKey)
         if (cErr) return cErr
         invGroups.push([{ op: 'unplace', id: r.id, version: 1 }])
@@ -501,15 +658,23 @@ export function applyOps(state: OpsState, ops: readonly PlacementOp[], ctx: OpsC
         const eff = a.placements.find((x) => x.placementId === row.id)?.effectiveQty ?? 0
         if (eff <= EPS) return fail('qty_invalid', i, '這張卡已由待排池扣完，不需勾完成，請用「移除」', row)
         // D24／規格 §3.4：延誤卡或待排區卡勾完成＝「實際在今天完成」→ 日期改 rollTarget；被修剪過 → qty 改成有效量
-        const planDate = row.planDate == null || row.planDate < today ? rollTarget(today, openSats) : row.planDate
+        const planDate = row.planDate == null || row.planDate < today ? rollTarget(today, openWeekends) : row.planDate
         const qty = eff < row.qty ? r3(eff) : row.qty
+        // D72：卡留在原線；待排區的卡勾完成時沒有線 → op.lineId（須啟用）或預設線
+        let lineId = row.planDate != null ? (row.lineId ?? null) : null
+        if (row.planDate == null) {
+          lineId = op.lineId ?? ctx.defaultLineId
+          const lErr = checkLine(i, lineId, false)
+          if (lErr) return lErr
+        }
         next.set(row.id, stamp(row, {
-          planDate, qty,
+          planDate, qty, lineId,
           completed: { at: ctx.nowIso, by: ctx.actor.email, byName: ctx.actor.name, poolQtyAt: supply.total },
         }))
         const inv: Extract<PlacementOp, { op: 'uncomplete' }> = { op: 'uncomplete', id: row.id, version: row.version + 1 }
         if (planDate !== row.planDate) inv.prevPlanDate = row.planDate
         if (qty !== row.qty) inv.prevQty = row.qty
+        if (lineId !== (row.planDate != null ? (row.lineId ?? null) : null)) inv.prevLineId = row.planDate != null ? (row.lineId ?? null) : null
         invGroups.push([inv])
         break
       }
@@ -521,11 +686,15 @@ export function applyOps(state: OpsState, ops: readonly PlacementOp[], ctx: OpsC
         if (op.prevPlanDate !== undefined && !isDateOrNull(op.prevPlanDate)) return fail('date_invalid', i, 'prevPlanDate 格式錯誤')
         if (op.prevQty !== undefined && !isQty(op.prevQty)) return fail('qty_invalid', i, 'prevQty 須大於 0、最多 3 位小數')
         if (op.prevPlanDate !== undefined) { const dErr = checkDate(i, op.prevPlanDate, true); if (dErr) return dErr }
-        const reopen = (qty: number) => next.set(row.id, stamp(row, {
-          completed: null,
-          planDate: op.prevPlanDate !== undefined ? op.prevPlanDate : row.planDate,
-          qty,
-        }))
+        const planDate = op.prevPlanDate !== undefined ? op.prevPlanDate : row.planDate
+        // D72：帶 prevLineId 時一併還原（Undo 用，停用線允許）；回到待排區 → 不屬於任何線
+        let lineId: number | null = null
+        if (planDate != null) {
+          lineId = op.prevLineId !== undefined && op.prevLineId !== null ? op.prevLineId : (row.lineId ?? null)
+          const lErr = checkLine(i, lineId, true)
+          if (lErr) return lErr
+        }
+        const reopen = (qty: number) => next.set(row.id, stamp(row, { completed: null, planDate, qty, lineId }))
         const want = op.prevQty !== undefined ? r3(op.prevQty) : row.qty
         reopen(want)
         let cErr = checkConserve(i, row.soLineKey)
@@ -542,7 +711,29 @@ export function applyOps(state: OpsState, ops: readonly PlacementOp[], ctx: OpsC
         }
         cErr = cErr ?? checkLineCount(i, row.soLineKey)
         if (cErr) return cErr
+        // 反向＝complete：卡此時已排進日期（或待排區→complete 會再用預設線），不必帶 lineId
         invGroups.push([{ op: 'complete', id: row.id, version: row.version + 1 }])
+        break
+      }
+
+      case 'setMinutes': {
+        // D69：主管改工時（以本列 qty 為準；null＝清除覆寫、回到標準估計）。已完成的卡也可以改（記實際花的時間）。
+        const row = getRow(i, op.id, op.version)
+        if (isFail(row)) return row
+        if (op.minutes !== null && !isValidOverride(op.minutes)) return fail('minutes_invalid', i, '工時須為 1～6000 分鐘、最多 1 位小數')
+        if (op.reason != null && (typeof op.reason !== 'string' || op.reason.length > ADJUST_REASON_MAX)) return fail('bad_request', i, `原因最多 ${ADJUST_REASON_MAX} 字`)
+        const prev = row.minutesOverride?.minutes ?? null
+        // Undo／Redo 還原覆寫時沿用原作者（restoreMeta 由上一次的反向操作帶回）；其餘＝本次操作者
+        const restored = op.via === 'undo' && op.restoreMeta && op.minutes != null ? { minutes: op.minutes, ...op.restoreMeta } : null
+        const after = stamp(row, { minutesOverride: restored ?? overrideNow(op.minutes) })
+        next.set(op.id, after)
+        // 值相同（含都 null）→ 仍算成功（版本 +1），但不寫學習紀錄
+        if (prev !== op.minutes) {
+          minuteEdits.push({ opIndex: i, id: op.id, before: row, after, reason: op.reason?.trim() || null, via: op.via ?? 'dialog' })
+        }
+        const inv: Extract<PlacementOp, { op: 'setMinutes' }> = { op: 'setMinutes', id: op.id, version: row.version + 1, minutes: prev, via: 'undo' }
+        if (row.minutesOverride) inv.restoreMeta = { by: row.minutesOverride.by, byName: row.minutesOverride.byName, at: row.minutesOverride.at }
+        invGroups.push([inv])
         break
       }
 
@@ -562,7 +753,7 @@ export function applyOps(state: OpsState, ops: readonly PlacementOp[], ctx: OpsC
   for (const [id, o] of orig) if (!next.has(id)) deletes.push(o)
 
   const inverse = rebaseVersions(invGroups.reverse().flat(), next)
-  return { ok: true, next, inserts, updates, deletes, inverse }
+  return { ok: true, next, inserts, updates, deletes, inverse, minuteEdits }
 }
 
 /** 「先減後增」分類用：一列對「該行未完成總量」的貢獻（已完成＝0） */

@@ -147,11 +147,12 @@ const addDays = (ymd: string, n: number) =>
 // ─────────────────────────────────────────────────────────────────────
 
 // extra JSONB 只展開需要的鍵（整包數十欄，幾千列全抓很慢；比照 PO_SELECT）
-const PO_SELECT = 'doc_no, sub_no, item_code, description, qty, status, start_date, end_date, customer_vendor, '
+export const PO_SELECT = 'doc_no, sub_no, item_code, description, qty, status, start_date, end_date, customer_vendor, '
   + 'so_project_id:extra->>SO_PROJECT_ID, mbp_lot_no:extra->>MBP_LOT_NO, tpn_part_no:extra->>TPN_PART_NO, '
   + 'received_qty:extra->>RECEIVED_QTY, reject_qty:extra->>REJECT_QTY, close_flag:extra->>CLOSE_FLAG'
 
-const SO_SELECT = 'id, project_id, line_no, mbp_part, description, packing, remark2, duedate, order_qty_oru, '
+/** erp_so_lines 取用欄位（D66 手動加入的 manualDb.ts 共用） */
+export const SO_SELECT = 'id, project_id, line_no, mbp_part, description, packing, remark2, duedate, order_qty_oru, '
   + 'unit_of_measure_oru, partner_name, tpn_part_no, begin_date'
 
 function fetchPoLines(supabase: SupabaseAdmin, today: string) {
@@ -239,7 +240,7 @@ const str = (v: unknown): string | null => {
 }
 
 /** rows[] 只留判定要用的欄位（打樣單 D10、示意圖、PO/MPO 對應、D44 塔台比對與異常清單） */
-function trimSheetRows(sheetDate: string, rows: unknown): RawSheetRow[] {
+export function trimSheetRows(sheetDate: string, rows: unknown): RawSheetRow[] {
   if (!Array.isArray(rows)) return []
   const out: RawSheetRow[] = []
   for (const r of rows as Record<string, unknown>[]) {

@@ -7,13 +7,23 @@
 //   翻成看得懂的中文，畫面上才不會只看到一串 PostgREST 錯誤碼。
 
 import type {
+  AdjustmentsResponse,
   ApplyResponse,
   BoardResponse,
   CapacityInput,
   CapacityResponse,
   CompleteRequest,
+  LineCreateRequest,
+  LineMutationResponse,
+  LinePatchRequest,
+  LinesResponse,
   LockRequest,
   LockResponse,
+  ManualAddItem,
+  ManualLookupResponse,
+  ManualMutationResponse,
+  ManualRemoveRequest,
+  ManualUpdateRequest,
   PlacementsRequest,
   RestorePreviewResponse,
   RestoreResponse,
@@ -34,7 +44,11 @@ export interface ApiResult<T> {
   network: boolean
 }
 
-export const MIGRATION_HINT = '資料表尚未建立，請 Snow 備份後套用 migration（sql/20260927_packaging_schedule.sql）'
+/**
+ * 分線輪起多了新表／新欄位（packaging_lines、line_id…）：兩份 migration 都要套用（先 P1 本體、再分線擴充）。
+ * 伺服器的 migration_required 訊息會寫「找不到資料表或欄位…」，一樣會被 MISSING_TABLE_RE 認出來、換成這段提示。
+ */
+export const MIGRATION_HINT = '資料表或欄位尚未建立，請 Snow 備份後依序套用 migration：sql/20260927_packaging_schedule.sql → sql/20260927b_packaging_p1_extend.sql'
 
 /** PostgREST／Postgres 找不到表的各種說法：PGRST205（schema cache）、42P01（relation does not exist） */
 const MISSING_TABLE_RE = /PGRST205|42P01|schema cache|does not exist|找不到資料表|relation .*packaging_/i
@@ -188,4 +202,47 @@ export function postRestore(id: number, lockToken: string) {
     method: 'POST',
     json: { lockToken },
   })
+}
+
+// ── 分線：線別管理（D67／D71；寫入要 packaging_admin＋編輯鎖） ─────────────────
+
+export function fetchLines() {
+  return call<LinesResponse>('/api/packaging/lines')
+}
+
+export function createLine(req: LineCreateRequest) {
+  return call<LineMutationResponse>('/api/packaging/lines', { method: 'POST', json: req })
+}
+
+export function patchLine(req: LinePatchRequest) {
+  return call<LineMutationResponse>('/api/packaging/lines', { method: 'PATCH', json: req })
+}
+
+// ── D66 手動加入（寫入要 packaging_admin＋編輯鎖；不進 Undo） ──────────────────
+
+/** 查詢某張 SO 的全部品項行與「不在待排池的原因」 */
+export function lookupManual(so: string) {
+  return call<ManualLookupResponse>(`/api/packaging/manual?${new URLSearchParams({ so }).toString()}`)
+}
+
+export function addManual(lockToken: string, items: ManualAddItem[]) {
+  return call<ManualMutationResponse>('/api/packaging/manual', { method: 'POST', json: { lockToken, items } })
+}
+
+export function updateManual(req: ManualUpdateRequest) {
+  return call<ManualMutationResponse>('/api/packaging/manual', { method: 'PATCH', json: req })
+}
+
+/** 移出待排池＝軟刪除（紀錄保留）；用 POST 子路徑而不是 DELETE：寫入 API 一律只收 JSON body */
+export function removeManual(req: ManualRemoveRequest) {
+  return call<ManualMutationResponse>('/api/packaging/manual/remove', { method: 'POST', json: req })
+}
+
+// ── D69 工時修改紀錄（唯讀） ─────────────────────────────────────────────
+
+export function fetchAdjustments(opts: { placementId?: string | null; itemCode?: string | null }) {
+  const q = new URLSearchParams()
+  if (opts.placementId) q.set('placementId', opts.placementId)
+  if (opts.itemCode) q.set('itemCode', opts.itemCode)
+  return call<AdjustmentsResponse>(`/api/packaging/adjustments?${q.toString()}`)
 }

@@ -12,13 +12,16 @@
 // 可及性：不展開 useDraggable 的 attributes（role=button＋「按空白鍵拿起」說明）——工作台沒有 KeyboardSensor，
 // 那段說明是做不到的操作，而且 role=button 裡再包單號 <button> 是巢狀互動元素。
 // 改成自己給 tabIndex＋role=group：聚焦顯示提示、Enter 開卡片詳情、Shift+F10 開右鍵選單（鍵盤的替代操作）。
+// D66：手動加入的卡在 CardFace 上方多一條「手動・王主管・9/27 14:05」標記（CardFace 左右共用、不改，所以加在外框）。
 
 import { memo } from 'react'
 import { useDraggable } from '@dnd-kit/core'
+import type { ManualInclusionMeta } from '@/lib/packaging/scheduleTypes'
 import type { PackagingCard } from '@/lib/packaging/types'
 import { isCardDanger } from '@/lib/packaging/boardView'
 import { isPlaceableBlock } from './boardLocal'
 import CardFace from './CardFace'
+import { manualTag } from './CardDetailDialog'
 
 /** 危險＝已逾期或帶紅色旗標（左側細色條變紅） */
 export function isPoolDanger(c: PackagingCard, today: string): boolean {
@@ -44,8 +47,10 @@ export function SimplePoolCardFace({ card, today, onOpenOrder, overlay = false }
 }
 
 /** 包 memo：BoardLayout 每 5 秒更新時鐘會整頁重畫，待排池可能上百張（onHover／onOpenDetail 在 SimplePool 用 useCallback 固定） */
-const SimplePoolCard = memo(function SimplePoolCard({ card, today, canDrag, descId, onOpenOrder, onOpenDetail, onHover }: {
+const SimplePoolCard = memo(function SimplePoolCard({ card, manual = null, today, canDrag, descId, onOpenOrder, onOpenDetail, onHover }: {
   card: PackagingCard
+  /** D66 手動加入的紀錄（'mn' 卡）：卡片上方顯示「手動・誰・何時」 */
+  manual?: ManualInclusionMeta | null
   today: string
   canDrag: boolean
   /** 鍵盤操作說明（SimplePool 放一份隱藏文字，所有卡共用） */
@@ -85,6 +90,12 @@ const SimplePoolCard = memo(function SimplePoolCard({ card, today, canDrag, desc
         disabled ? 'cursor-pointer' : 'cursor-grab active:cursor-grabbing'
       } ${isDragging ? 'opacity-30' : ''}`}
     >
+      {manual && (
+        <div className="truncate border-b border-violet-900/60 bg-violet-950/40 px-2 py-0.5 text-[10px] text-violet-200"
+          title={manual.reason ? `原因：${manual.reason}` : undefined}>
+          {manualTag(manual)}{manual.reason ? `・${manual.reason}` : ''}
+        </div>
+      )}
       <SimplePoolCardFace card={card} today={today} onOpenOrder={onOpenOrder} />
     </div>
   )

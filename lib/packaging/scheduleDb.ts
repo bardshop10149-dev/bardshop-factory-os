@@ -8,25 +8,36 @@
 //     中途失敗的結果只會是「數量回到待排池」，永遠不會超排。
 //   - 編輯鎖用「where token = 舊 token」的單一 UPDATE 做 compare-and-set（單一敘述即原子）。
 // PostgREST 單次上限 1000 列：列表查詢一律分頁＋固定排序；in() 每 100 個一塊。
+//
+// 分線輪（lines.md §一）：多 4 張表 packaging_lines／packaging_line_capacity／packaging_time_adjustments／
+// packaging_manual_inclusions（手動加入的讀寫在 manualDb.ts）；placements 多 line_id 與 D69 覆寫四欄。
+// 這些表／欄在 sql/20260927b_packaging_p1_extend.sql 套用前不存在 → API 一律回 migration_required 提示，不做降級。
 
 import type { getSupabaseAdminClient } from '@/lib/supabaseAdmin'
 import { describeError } from '@/lib/supabaseAdmin'
 import {
+  ADJUSTMENTS_LIST_LIMIT,
   LOCK_IDLE_MS,
   VERSION_RETENTION_DAYS,
   type DailyCapacity,
   type DailyCapacityRow,
   type EditLockRow,
+  type LineCapacity,
+  type LineCapacityRow,
   type LockPlan,
   type LockState,
+  type PackagingLine,
+  type PackagingLineRow,
   type Placement,
   type PlacementRow,
   type ScheduleSnapshot,
   type ScheduleVersionRow,
+  type TimeAdjustment,
+  type TimeAdjustmentRow,
   type VersionMeta,
   type VersionSource,
 } from '@/lib/packaging/scheduleTypes'
-import { placementToRow, rowToCapacity, rowToPlacement, versionRowToMeta } from '@/lib/packaging/scheduleMap'
+import { placementToRow, rowToAdjustment, rowToCapacity, rowToLine, rowToLineCapacity, rowToPlacement, versionRowToMeta } from '@/lib/packaging/scheduleMap'
 import { evaluateLock } from '@/lib/packaging/scheduleLock'
 import { openContribution, isUuid, type ApplyOk } from '@/lib/packaging/scheduleOps'
 
@@ -38,7 +49,15 @@ export const TBL = {
   versions: 'packaging_schedule_versions',
   lock: 'packaging_edit_lock',
   opLog: 'packaging_op_log',
+  // 分線輪（20260927b）
+  lines: 'packaging_lines',
+  lineCapacity: 'packaging_line_capacity',
+  adjustments: 'packaging_time_adjustments',
+  manual: 'packaging_manual_inclusions',
 } as const
+
+/** 分線輪 migration 檔名（錯誤訊息提示用） */
+export const LINES_MIGRATION_FILE = 'sql/20260927b_packaging_p1_extend.sql'
 
 const PAGE = 1000
 const IN_CHUNK = 100
@@ -65,6 +84,23 @@ export class ScheduleDbError extends Error {
 
 /** 資料表不存在（migration 未套用）的錯誤碼 */
 const MISSING_TABLE_CODES = new Set(['PGRST205', '42P01'])
+/** 欄位不存在（PGRST204：schema cache 找不到欄；42703：undefined_column）——分線輪 placements 新欄未套用 */
+const MISSING_COLUMN_CODES = new Set(['PGRST204', '42703'])
+
+/** 分線輪的表或欄不存在（sql/20260927b_packaging_p1_extend.sql 尚未套用） */
+export function isMissingSchema(e: unknown): boolean {
+  const code = pgCodeOf(e)
+  return !!code && (MISSING_TABLE_CODES.has(code) || MISSING_COLUMN_CODES.has(code))
+}
+
+/**
+ * 分線輪 migration 未套用時回給前端的訊息：保留「找不到資料表」字樣（前端 boardApi.isMissingTableMessage 靠它辨識），
+ * 並寫明要套用的檔名（lines.md §4.1：不做「沒有線表時假裝只有一條線」的降級）。
+ */
+export function linesMigrationMessage(e?: unknown): string {
+  const code = e ? pgCodeOf(e) : null
+  return `找不到資料表或欄位${code ? `（${code}）` : ''}，請先套用 ${LINES_MIGRATION_FILE}`
+}
 
 /**
  * 回給前端的錯誤訊息：固定中文＋錯誤碼，不帶 PostgREST 的 message／details／hint
@@ -74,13 +110,14 @@ const MISSING_TABLE_CODES = new Set(['PGRST205', '42P01'])
  */
 export function publicDbError(e: unknown, what = '資料庫存取'): string {
   const code = pgCodeOf(e)
-  if (code && MISSING_TABLE_CODES.has(code)) return `找不到資料表（${code}），請先套用 migration`
+  if (code && MISSING_TABLE_CODES.has(code)) return `找不到資料表（${code}），請先套用 migration（分線輪：${LINES_MIGRATION_FILE}）`
+  if (code && MISSING_COLUMN_CODES.has(code)) return linesMigrationMessage(e)
   return `${what}失敗${code ? `（${code}）` : ''}，請稍後再試`
 }
 
 type PgResult<T> = { data: T[] | null; error: unknown }
 
-async function fetchAll<T>(label: string, page: (from: number, to: number) => PromiseLike<PgResult<T>>): Promise<T[]> {
+export async function fetchAll<T>(label: string, page: (from: number, to: number) => PromiseLike<PgResult<T>>): Promise<T[]> {
   const out: T[] = []
   for (let from = 0; ; from += PAGE) {
     const { data, error } = await page(from, from + PAGE - 1)
@@ -91,7 +128,7 @@ async function fetchAll<T>(label: string, page: (from: number, to: number) => Pr
   }
 }
 
-function chunks<T>(arr: readonly T[], n: number): T[][] {
+export function chunks<T>(arr: readonly T[], n: number): T[][] {
   const out: T[][] = []
   for (let i = 0; i < arr.length; i += n) out.push(arr.slice(i, i + n))
   return out
@@ -167,11 +204,11 @@ export async function countOpenPlacements(sb: SupabaseAdmin): Promise<number> {
   return count ?? 0
 }
 
-/** 各日期（plan_date）的未完成卡數（關閉週六加班前檢查用，D48） */
+/** 各日期（plan_date）的未完成卡數（關閉週六／週日加班前檢查用，D48／D63） */
 export async function countOpenByDates(sb: SupabaseAdmin, dates: readonly string[]): Promise<Map<string, number>> {
   const out = new Map<string, number>()
   if (dates.length === 0) return out
-  const rows = await fetchAll<{ id: string; plan_date: string }>('讀取週六卡數', (a, b) => sb
+  const rows = await fetchAll<{ id: string; plan_date: string }>('讀取週末卡數', (a, b) => sb
     .from(TBL.placements).select('id, plan_date').is('completed_at', null).in('plan_date', [...new Set(dates)])
     .order('id', { ascending: true }).range(a, b))
   for (const r of rows) { const d = String(r.plan_date).slice(0, 10); out.set(d, (out.get(d) ?? 0) + 1) }
@@ -204,6 +241,12 @@ const mutablePatch = (p: Placement) => {
     completed_at: r.completed_at, completed_by: r.completed_by, completed_by_name: r.completed_by_name,
     completed_pool_qty: r.completed_pool_qty, version: r.version,
     updated_by: r.updated_by, updated_by_name: r.updated_by_name, updated_at: r.updated_at,
+    // 分線輪：move／complete 換線、setMinutes（D69）要寫得進去
+    line_id: r.line_id ?? null,
+    est_minutes_override: r.est_minutes_override ?? null,
+    minutes_override_by: r.minutes_override_by ?? null,
+    minutes_override_by_name: r.minutes_override_by_name ?? null,
+    minutes_override_at: r.minutes_override_at ?? null,
   }
 }
 
@@ -376,7 +419,7 @@ export async function verifyAndTouchLock(
 // 操作紀錄、指紋
 // ─────────────────────────────────────────────────────────────────────
 
-export type OpLogKind = 'placements' | 'complete' | 'capacity' | 'version_create' | 'version_restore' | 'lock'
+export type OpLogKind = 'placements' | 'complete' | 'capacity' | 'version_create' | 'version_restore' | 'lock' | 'lines' | 'manual'
 
 /** 寫入成功後記一列；失敗只 console.error，不影響回應（規格 §3.8） */
 export async function insertOpLog(
@@ -448,4 +491,130 @@ export async function deleteExpiredVersions(sb: SupabaseAdmin, nowMs: number): P
   const cutoff = new Date(nowMs - VERSION_RETENTION_DAYS * 86_400_000).toISOString()
   const { error } = await sb.from(TBL.versions).delete().lt('created_at', cutoff)
   if (error) console.error('[packaging/versions] 清除過期版本失敗:', describeError(error))
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// 分線輪：產線（D67／D71）
+// ─────────────────────────────────────────────────────────────────────
+
+/** 全部線（含停用；≤ 12 列），依 sort_order、id */
+export async function loadLines(sb: SupabaseAdmin): Promise<PackagingLine[]> {
+  const { data, error } = await sb.from(TBL.lines).select('*').order('sort_order', { ascending: true }).order('id', { ascending: true })
+  if (error) throw new ScheduleDbError('讀取產線', error)
+  return ((data ?? []) as PackagingLineRow[]).map(rowToLine)
+}
+
+export async function insertLine(
+  sb: SupabaseAdmin,
+  v: { code: string; name: string; sortOrder: number; actorEmail: string; actorName: string | null; nowIso: string },
+): Promise<PackagingLine> {
+  const { data, error } = await sb.from(TBL.lines).insert({
+    code: v.code, name: v.name, sort_order: v.sortOrder, active: true,
+    created_by: v.actorEmail, created_by_name: v.actorName, created_at: v.nowIso,
+    updated_by: v.actorEmail, updated_by_name: v.actorName, updated_at: v.nowIso,
+  }).select('*').single()
+  if (error) throw new ScheduleDbError('新增產線', error)
+  return rowToLine(data as PackagingLineRow)
+}
+
+export async function updateLine(
+  sb: SupabaseAdmin,
+  id: number,
+  patch: { name?: string; active?: boolean; sort_order?: number },
+  actor: { email: string; name: string | null },
+  nowIso: string,
+): Promise<PackagingLine | null> {
+  const { data, error } = await sb.from(TBL.lines)
+    .update({ ...patch, updated_by: actor.email, updated_by_name: actor.name, updated_at: nowIso })
+    .eq('id', id).select('*')
+  if (error) throw new ScheduleDbError('更新產線', error)
+  const row = ((data ?? []) as PackagingLineRow[])[0]
+  return row ? rowToLine(row) : null
+}
+
+/** 停用前檢查：該線「未完成、已排進日期」的卡數（不分日期；有部分索引 packaging_placements_open_line_idx） */
+export async function countOpenOnLine(sb: SupabaseAdmin, lineId: number): Promise<number> {
+  const { count, error } = await sb.from(TBL.placements).select('id', { count: 'exact', head: true })
+    .eq('line_id', lineId).is('completed_at', null).not('plan_date', 'is', null)
+  if (error) throw new ScheduleDbError('計算產線卡數', error)
+  return count ?? 0
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// 分線輪：各線產能（D49 各線各自沿用、D71 總時數＝各線加總）
+// ─────────────────────────────────────────────────────────────────────
+
+export async function loadLineCapacityRows(sb: SupabaseAdmin, from: string, to?: string): Promise<LineCapacity[]> {
+  const rows = await fetchAll<LineCapacityRow>('讀取各線產能', (a, b) => {
+    let q = sb.from(TBL.lineCapacity).select('*').gte('date', from)
+    if (to) q = q.lte('date', to)
+    return q.order('date', { ascending: true }).order('line_id', { ascending: true }).range(a, b)
+  })
+  return rows.map(rowToLineCapacity)
+}
+
+export async function upsertLineCapacity(sb: SupabaseAdmin, rows: readonly Omit<LineCapacityRow, 'updated_at'>[], nowIso: string): Promise<void> {
+  if (rows.length === 0) return
+  const { error } = await sb.from(TBL.lineCapacity).upsert(rows.map((r) => ({ ...r, updated_at: nowIso })), { onConflict: 'date,line_id' })
+  if (error) throw new ScheduleDbError('儲存各線產能', error)
+}
+
+/** 刪除指定（日期, 線）的列：同一天的線一個請求 */
+export async function deleteLineCapacity(sb: SupabaseAdmin, pairs: readonly { date: string; lineId: number }[]): Promise<void> {
+  const byDate = new Map<string, number[]>()
+  for (const p of pairs) {
+    let arr = byDate.get(p.date)
+    if (!arr) { arr = []; byDate.set(p.date, arr) }
+    arr.push(p.lineId)
+  }
+  for (const [date, ids] of byDate) {
+    const { error } = await sb.from(TBL.lineCapacity).delete().eq('date', date).in('line_id', ids)
+    if (error) throw new ScheduleDbError('清除各線產能', error)
+  }
+}
+
+/** 刪除整天的各線列（{ date, clear: true }） */
+export async function deleteLineCapacityDates(sb: SupabaseAdmin, dates: readonly string[]): Promise<void> {
+  if (dates.length === 0) return
+  const { error } = await sb.from(TBL.lineCapacity).delete().in('date', [...dates])
+  if (error) throw new ScheduleDbError('清除各線產能', error)
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// 分線輪：D69 工時修改學習紀錄（只增不改）
+// ─────────────────────────────────────────────────────────────────────
+
+/** 插入學習紀錄；失敗只 console.error、回 false（工時已改成功，前端提示「修改紀錄未存到」，lines.md §3.6 規則 6） */
+export async function insertTimeAdjustments(sb: SupabaseAdmin, rows: readonly Omit<TimeAdjustmentRow, 'id' | 'created_at'>[]): Promise<boolean> {
+  if (rows.length === 0) return true
+  try {
+    const { error } = await sb.from(TBL.adjustments).insert([...rows])
+    if (error) { console.error('[packaging/time_adjustments]', describeError(error)); return false }
+    return true
+  } catch (err) {
+    console.error('[packaging/time_adjustments]', describeError(err))
+    return false
+  }
+}
+
+/** 學習紀錄要回給前端的欄位（不含 actor_email，lines.md §4.6） */
+const ADJ_COLS = 'id, created_at, placement_id, so_line_key, item_code, item_name, qty, packing, route_type, work_source, work_explain, '
+  + 'per_unit_std, std_minutes, before_minutes, after_minutes, per_unit_after, cleared, reason, via, plan_date, line_id, actor_name'
+
+/** 一張卡的修改歷程（新到舊，最多 ADJUSTMENTS_LIST_LIMIT 筆） */
+export async function listPlacementAdjustments(sb: SupabaseAdmin, placementId: string): Promise<TimeAdjustment[]> {
+  if (!isUuid(placementId)) return []
+  const { data, error } = await sb.from(TBL.adjustments).select(ADJ_COLS)
+    .eq('placement_id', placementId).order('created_at', { ascending: false }).order('id', { ascending: false }).limit(ADJUSTMENTS_LIST_LIMIT)
+  if (error) throw new ScheduleDbError('讀取工時修改紀錄', error)
+  return ((data ?? []) as unknown as TimeAdjustmentRow[]).map(rowToAdjustment)
+}
+
+/** 同品號的歷史（排除 Undo 產生的紀錄；新到舊，最多 limit 筆） */
+export async function listItemAdjustments(sb: SupabaseAdmin, itemCode: string, limit = 500): Promise<TimeAdjustment[]> {
+  const { data, error } = await sb.from(TBL.adjustments).select(ADJ_COLS)
+    .eq('item_code', itemCode).neq('via', 'undo')
+    .order('created_at', { ascending: false }).order('id', { ascending: false }).limit(limit)
+  if (error) throw new ScheduleDbError('讀取同品號工時紀錄', error)
+  return ((data ?? []) as unknown as TimeAdjustmentRow[]).map(rowToAdjustment)
 }

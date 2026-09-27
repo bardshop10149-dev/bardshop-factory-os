@@ -24,7 +24,7 @@ export function cardTitle(bc: BoardCard, mini = false): string {
   const lines = [
     `${lineLabel(c)}　${c.customer ?? ''}`.trim(),
     c.itemName ?? '（無品名）',
-    `數量 ${fmtQty(bc.effectiveQty)}　工時 ${hoursText(bc.minutes) ?? '未知'} h　交期 ${md(c.dueDate)}`,
+    `數量 ${fmtQty(bc.effectiveQty)}　工時 ${hoursText(bc.minutes) ?? '未知'} h${bc.minutesOverride ? `（主管調整，標準 ${hoursText(bc.minutesStd) ?? '未知'} h）` : ''}　交期 ${md(c.dueDate)}`,
   ]
   const mo = moText(c)
   if (mo) lines.push(`${mo.isMo ? '製令' : '來源單'} ${mo.text}`)
@@ -33,10 +33,33 @@ export function cardTitle(bc: BoardCard, mini = false): string {
   if (bc.split) lines.push(`拆卡 ${bc.split.index}/${bc.split.total}`)
   if (s.done) lines.push(`已完成：${bc.completed!.byName ?? bc.completed!.by}（${clock(bc.completed!.at)}）`)
   if (s.consumed && !s.done) lines.push('已由待排池扣完（有效數量 0，不需再包）')
+  if (bc.manual) lines.push(`手動加入：${bc.manual.addedByName ?? bc.manual.addedBy}（${clock(bc.manual.addedAt)}）`)
+  const inactive = bc.flags.find(f => f.code === 'line_inactive')
+  if (inactive) lines.push(inactive.label)
   lines.push(mini
     ? '（點卡片看詳情＋訂單詳情・右鍵：完成、拆卡、移動、訂單詳情…）'
     : '（點卡片看詳情・點單號看訂單・右鍵：完成、拆卡、移動…）')
   return lines.join('\n')
+}
+
+/**
+ * 分線輪的小角標（CardFace 不能改，D58 的 7 項外觀不動；新資訊由外框元件加，lines.md §5.0）：
+ *   手＝D66 手動加入的品項　✎＝D69 主管調整過工時　⚠＝所屬線已停用、暫顯示在預設線
+ */
+export function PlacementBadges({ bc, className = '' }: { bc: BoardCard; className?: string }) {
+  const inactive = bc.flags.find(f => f.code === 'line_inactive')
+  if (!bc.manual && !bc.minutesOverride && !inactive) return null
+  return (
+    <span className={`pointer-events-none flex items-center gap-0.5 text-[9px] font-bold leading-3 ${className}`}>
+      {bc.manual && (
+        <span className="rounded bg-violet-700/90 px-0.5 text-white" title={`手動加入：${bc.manual.addedByName ?? bc.manual.addedBy}（${clock(bc.manual.addedAt)}）`}>手</span>
+      )}
+      {bc.minutesOverride && (
+        <span className="rounded bg-slate-700 px-0.5 text-amber-200" title={`工時已由 ${bc.minutesOverride.byName ?? bc.minutesOverride.by} 調整（標準 ${hoursText(bc.minutesStd) ?? '未知'} h）`}>✎</span>
+      )}
+      {inactive && <span className="rounded bg-orange-700 px-0.5 text-white" title={inactive.label}>⚠</span>}
+    </span>
+  )
 }
 
 /** 完成勾選（D24，不回寫塔台）：小勾選框放在卡片第 1 行最右側 */

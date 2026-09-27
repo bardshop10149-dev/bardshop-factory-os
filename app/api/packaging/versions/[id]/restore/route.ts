@@ -5,6 +5,8 @@ import { guardPackaging, noStore, readJson, requireJson } from '@/lib/packaging/
 import { getPool, POOL_WRITE_MAX_AGE_MS } from '@/lib/packaging/poolCache'
 import { buildSnapshot, parseSnapshot, planRestore } from '@/lib/packaging/scheduleSnapshot'
 import { versionRowToMeta } from '@/lib/packaging/scheduleMap'
+import { defaultLineIdOf } from '@/lib/packaging/scheduleLines'
+import { getManualMergedPool } from '@/lib/packaging/manualCache'
 import {
   deleteExpiredVersions,
   deleteOpenPlacements,
@@ -13,9 +15,13 @@ import {
   insertOpLog,
   insertPlacements,
   insertVersion,
+  isMissingSchema,
+  linesMigrationMessage,
+  loadLines,
   loadOpenPlacements,
   publicDbError,
   verifyAndTouchLock,
+  type SupabaseAdmin,
 } from '@/lib/packaging/scheduleDb'
 import { todayTaipei } from '@/lib/packaging/workdays'
 
@@ -32,6 +38,8 @@ export const maxDuration = 60
 //   → RestoreResponse { plan, backup, revision }
 // 無交易：2 之後、3 之前失敗＝排程暫時清空，但一定已有備份版本，錯誤訊息會寫「請從版本 #N 還原」（規格 §9.1 第 1 條）。
 // 只寫 packaging_schedule_versions／packaging_placements／packaging_op_log。
+// 分線輪（lines.md §4.7、§八）：快照 schemaVersion 2 帶線別與 D69 覆寫工時；v1 快照、或線已停用／不存在的列，
+//   排進日期的改放預設線，張數記在 plan.lineRemappedCount（預覽對話框顯示）。
 
 type Ctx = { params: Promise<{ id: string }> }
 
@@ -41,10 +49,10 @@ async function parseId(ctx: Ctx): Promise<number | null> {
   return /^\d{1,15}$/.test(raw ?? '') && Number.isSafeInteger(n) && n > 0 ? n : null
 }
 
-/** 目前待排池的 SO 行（lineGoneCount 用）；待排池暫時失敗不擋還原，只是這個數字算不出來 */
-async function poolLineSet(): Promise<Set<string> | null> {
+/** 目前待排池的 SO 行（含 D66 手動區塊；lineGoneCount 用）；待排池暫時失敗不擋還原，只是這個數字算不出來 */
+async function poolLineSet(sb: SupabaseAdmin): Promise<Set<string> | null> {
   try {
-    const pool = await getPool({ maxAgeMs: POOL_WRITE_MAX_AGE_MS })
+    const pool = (await getManualMergedPool(sb, await getPool({ maxAgeMs: POOL_WRITE_MAX_AGE_MS }))).pool
     const s = new Set<string>()
     for (const b of pool.blocks) for (const c of b.cards) s.add(c.soLineKey)
     return s
@@ -65,12 +73,16 @@ export async function GET(_request: NextRequest, ctx: Ctx) {
     if (!row) return noStore<RestorePreviewResponse>({ success: false, error: '找不到這個版本（可能已超過 90 天被刪除）', code: 'not_found' }, 404)
     const snap = parseSnapshot(row.snapshot)
     if (!snap) return noStore<RestorePreviewResponse>({ success: false, error: '快照格式不符，無法還原', code: 'bad_request' }, 422)
-    const [open, lines] = await Promise.all([loadOpenPlacements(sb), poolLineSet()])
+    const [open, lines, prodLines] = await Promise.all([loadOpenPlacements(sb), poolLineSet(sb), loadLines(sb)])
     const today = todayTaipei()
-    const { plan } = planRestore(open, snap, { today, poolLines: lines ?? new Set(snap.placements.map((p) => p.soLineKey)), newId: () => '' })
+    const { plan } = planRestore(open, snap, {
+      today, poolLines: lines ?? new Set(snap.placements.map((p) => p.soLineKey)), newId: () => '',
+      lines: prodLines, defaultLineId: defaultLineIdOf(prodLines),
+    })
     return noStore<RestorePreviewResponse>({ success: true, version: versionRowToMeta(row), plan })
   } catch (e) {
     console.error('[packaging/restore GET]', describeError(e))
+    if (isMissingSchema(e)) return noStore<RestorePreviewResponse>({ success: false, error: linesMigrationMessage(e), code: 'db_error' }, 409)
     return noStore<RestorePreviewResponse>({ success: false, error: publicDbError(e), code: 'db_error' }, 500)
   }
 }
@@ -104,7 +116,8 @@ export async function POST(request: NextRequest, ctx: Ctx) {
     const snap = parseSnapshot(row.snapshot)
     if (!snap) return fail(422, { code: 'bad_request', error: '快照格式不符，無法還原' })
 
-    const [open, lines] = await Promise.all([loadOpenPlacements(sb), poolLineSet()])
+    const [open, lines, prodLines] = await Promise.all([loadOpenPlacements(sb), poolLineSet(sb), loadLines(sb)])
+    const defaultLineId = defaultLineIdOf(prodLines)
 
     // 1. 還原前自動備份（D33：讓還原本身可以反悔）
     backup = await insertVersion(sb, {
@@ -118,6 +131,8 @@ export async function POST(request: NextRequest, ctx: Ctx) {
       today,
       poolLines: lines ?? new Set(snap.placements.map((p) => p.soLineKey)),
       newId: () => crypto.randomUUID(),
+      lines: prodLines,
+      defaultLineId,
     })
 
     // 2. 刪除所有未完成擺放（已完成列不動）
@@ -130,6 +145,9 @@ export async function POST(request: NextRequest, ctx: Ctx) {
       source: r.source, originCardId: r.originCardId, completed: null, version: 1,
       createdAt: nowIso, createdBy: actor.email, createdByName: actor.name,
       updatedAt: nowIso, updatedBy: actor.email, updatedByName: actor.name,
+      // D72：planRestore 已把缺線／停用線的列改放預設線；D69：覆寫值照寫（快照不存作者，記為還原者）
+      lineId: r.planDate == null ? null : (r.lineId ?? defaultLineId),
+      minutesOverride: r.estMinutesOverride != null ? { minutes: r.estMinutesOverride, by: actor.email, byName: actor.name, at: nowIso } : null,
     }))
     await insertPlacements(sb, rows)
 

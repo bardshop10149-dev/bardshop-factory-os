@@ -1813,7 +1813,8 @@ export function classifyPool(raw: PoolRawData, estimate: WorkEstimator): Classif
     if (!arr) { arr = []; bySoLine.set(c.soLineKey, arr) }
     arr.push(c)
   }
-  const orderIdx = (b: PoolBlockId) => POOL_BLOCK_ORDER.indexOf(b)
+  // classifyPool 只產生 POOL_BLOCK_ORDER 內的區塊（D66 手動加入 'mn' 由工作台另外併入，不會出現在這裡）
+  const orderIdx = (b: PoolBlockId) => (POOL_BLOCK_ORDER as readonly PoolBlockId[]).indexOf(b)
   for (const list of bySoLine.values()) {
     if (list.length < 2) continue
     list.sort((a, b) => orderIdx(a.block) - orderIdx(b.block) || a.sourceKind.localeCompare(b.sourceKind))

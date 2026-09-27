@@ -3,6 +3,7 @@
 // 排定卡（日／週／兩週檢視、待排區，D60）的右鍵選單（鍵盤：Shift+F10）。
 // 鍵盤：Shift+F10 開啟後焦點在選單內，↑↓ 移動、Enter 執行、Esc 關閉並回到卡片（見 MenuPopup）。
 // 含「勾完成／取消完成」——兩週迷你卡沒有常駐的勾選框，右鍵就要能完成（D24）。
+// 分線輪：排定卡加「移到 B 線」（同一天換線，D67）與「調整工時…」（開卡片詳情的工時編輯，D69）。
 
 import { useEffect, useEffectEvent, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
 import type { BoardCard } from '@/lib/packaging/scheduleTypes'
@@ -17,6 +18,11 @@ export interface CardMenuHandlers {
   onUnplace: (bc: BoardCard) => void
   /** 同欄同行 ≥ 2 張未完成子卡時才有 */
   onMerge?: (bc: BoardCard) => void
+  /** D67 同一天換線（排在日期上的未完成卡）；moveLines＝可選的線（啟用中，依 sortOrder） */
+  onMoveLine?: (bc: BoardCard, lineId: number) => void
+  moveLines?: readonly { id: number; name: string }[]
+  /** D69 調整工時（開卡片詳情；已完成的卡也可以改，記錄實際花的時間） */
+  onEditMinutes?: (bc: BoardCard) => void
 }
 
 export interface MenuItem {
@@ -51,11 +57,18 @@ export function cardMenuItems(bc: BoardCard, opts: {
       if (!consumed) {
         items.push({ label: '拆卡…', onClick: () => handlers.onSplit(bc) })
         items.push({ label: '移到日期…', onClick: () => handlers.onMoveTo(bc) })
+        if (bc.displayDate != null && handlers.onMoveLine && handlers.moveLines) {
+          for (const l of handlers.moveLines) {
+            if (l.id === bc.laneId) continue
+            items.push({ label: `移到 ${l.name}`, onClick: () => handlers.onMoveLine!(bc, l.id), hint: '同一天換到這條線' })
+          }
+        }
         if (bc.displayDate != null) items.push({ label: '移到待排區', onClick: () => handlers.onToHolding(bc) })
         if (handlers.onMerge) items.push({ label: '合併同行子卡', onClick: () => handlers.onMerge!(bc) })
       }
-      items.push({ label: '放回待排池', onClick: () => handlers.onUnplace(bc), danger: true })
     }
+    if (handlers.onEditMinutes && (!consumed || done)) items.push({ label: '調整工時…', onClick: () => handlers.onEditMinutes!(bc) })
+    if (!done) items.push({ label: '放回待排池', onClick: () => handlers.onUnplace(bc), danger: true })
   }
   items.push({ label: '訂單詳情', onClick: () => onOpenOrder(bc.card.so) })
   return items

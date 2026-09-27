@@ -4,10 +4,10 @@
 // 類別名稱若在元件裡用字串拼接（`bg-${color}-500`）會被漏掉、畫面沒有顏色。
 // 所以每一個類別都寫成完整字面值，區塊、卡片、摘要列都從這一份取，換色只改一處。
 
-import type { CardStatus, DangerFlag, PoolBlockId, SourceKind } from '@/lib/packaging/types'
+import { BOARD_ONLY_BLOCKS, type CardStatus, type DangerFlag, type PoolBlockId, type SourceKind } from '@/lib/packaging/types'
 
 /** 區塊色調：三種來源色＋品檢中＋提醒（常平未寄緊張／委外出貨待確認／無前站需確認／已發單未上塔台） */
-export type BlockTone = 'changping' | 'outsource' | 'inhouse' | 'qc' | 'alert'
+export type BlockTone = 'changping' | 'outsource' | 'inhouse' | 'qc' | 'alert' | 'manual'
 
 export const BLOCK_TONE: Record<PoolBlockId, BlockTone> = {
   '3': 'alert',
@@ -20,6 +20,8 @@ export const BLOCK_TONE: Record<PoolBlockId, BlockTone> = {
   '5c': 'alert',
   '5a': 'outsource',
   '5b': 'outsource',
+  // D66 手動加入：獨立色調（琥珀），一眼看出「不是系統判定進池的」
+  'mn': 'manual',
 }
 
 export interface ToneStyle {
@@ -78,6 +80,14 @@ export const TONE_STYLES: Record<BlockTone, ToneStyle> = {
     chip: 'border-rose-700/60 bg-rose-950/40 text-rose-200 hover:bg-rose-900/50',
     dot: 'bg-rose-400',
   },
+  manual: {
+    border: 'border-amber-700/60',
+    headerBg: 'bg-amber-950/40',
+    title: 'text-amber-300',
+    bar: 'bg-amber-500',
+    chip: 'border-amber-700/60 bg-amber-950/40 text-amber-200 hover:bg-amber-900/50',
+    dot: 'bg-amber-400',
+  },
 }
 
 /** 各欄放哪些區塊（欄內順序）。1b 同時含常平與委外，依規格 §8「1b 放常平欄頂」（已到台、只差品檢入庫，是最快變成可包的一批） */
@@ -89,8 +99,13 @@ const COLUMN_BLOCKS = {
 
 /** 跨來源、畫在三欄上方整列寬的區塊（ns：已發單・未上塔台，來源只是推定，放哪一欄都不對） */
 export const POOL_WIDE_BLOCKS = ['ns'] as const satisfies readonly PoolBlockId[]
+/**
+ * 只在 P1 工作台待排池出現的區塊（D66 手動加入 'mn'）：P0 唯讀待排池頁的 API 不產生它，所以不放進三欄或整列區
+ * （放進 POOL_WIDE_BLOCKS 會讓 P0 頁多畫一個永遠空的區塊）。工作台側欄自行排在最上面。
+ */
+export const BOARD_ONLY_POOL_BLOCKS = BOARD_ONLY_BLOCKS
 
-type PlacedBlock = (typeof COLUMN_BLOCKS)[SourceKind][number] | (typeof POOL_WIDE_BLOCKS)[number]
+type PlacedBlock = (typeof COLUMN_BLOCKS)[SourceKind][number] | (typeof POOL_WIDE_BLOCKS)[number] | (typeof BOARD_ONLY_BLOCKS)[number]
 /** 編譯期防呆：新增 PoolBlockId 卻沒放進任何欄或整列區時，這裡會編譯失敗（否則資料有、畫面不畫） */
 const UNPLACED_BLOCKS: Record<Exclude<PoolBlockId, PlacedBlock>, never> = {}
 void UNPLACED_BLOCKS
@@ -173,6 +188,7 @@ export const BLOCK_SHORT: Record<PoolBlockId, string> = {
   '5c': '委外出貨待確認',
   '5a': '委外已出貨',
   '5b': '委外可包',
+  'mn': '手動加入',
 }
 
 // ── 顯示用格式 ─────────────────────────────────────────────────────────

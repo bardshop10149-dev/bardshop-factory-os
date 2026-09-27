@@ -2,16 +2,22 @@
 //
 // 可變的現況用列（packaging_placements），不可變的歷史用 JSON（packaging_schedule_versions.snapshot）。
 // 快照只存「計畫」：未完成的擺放。完成是事實不是計畫，還原時已完成列一律不動。
+// 分線輪（lines.md §八）：schemaVersion 2 起每列多存 lineId（D72）與 estMinutesOverride（D69）；
+// v1 快照照常可還原，排進日期的列落到預設線。
 //
 // 不 import supabase、不讀時鐘；相對路徑 import、不用 enum。
 
-import type { Placement, PlacementSnapshotRow, RestorePlan, ScheduleSnapshot, YMD } from './scheduleTypes'
+import type { PackagingLine, Placement, PlacementSnapshotRow, RestorePlan, ScheduleSnapshot, YMD } from './scheduleTypes'
 import { isValidYmd } from './scheduleCalendar'
+import { isValidOverride } from './scheduleMinutes'
 
 export function toSnapshotRow(p: Placement): PlacementSnapshotRow {
   return {
     id: p.id, soLineKey: p.soLineKey, qty: p.qty, planDate: p.planDate,
     originalDate: p.originalDate, source: p.source, originCardId: p.originCardId,
+    // 待排區不屬於任何線（D72）
+    lineId: p.planDate == null ? null : (p.lineId ?? null),
+    estMinutesOverride: p.minutesOverride?.minutes ?? null,
   }
 }
 
@@ -26,7 +32,7 @@ export function buildSnapshot(placements: readonly Placement[], today: YMD, nowI
     }
     return a.id < b.id ? -1 : a.id > b.id ? 1 : 0
   })
-  return { schemaVersion: 1, takenAt: nowIso, today, placements: rows }
+  return { schemaVersion: 2, takenAt: nowIso, today, placements: rows }
 }
 
 /** 快照上限：列數與 JSON 長度（migration 另有 octet_length < 5MB 的 check 當最後防線） */
@@ -41,7 +47,9 @@ export function snapshotTooLarge(snap: ScheduleSnapshot): string | null {
   return null
 }
 
-function parseRow(x: unknown): PlacementSnapshotRow | null {
+const isLineIdLike = (x: unknown): x is number => typeof x === 'number' && Number.isInteger(x) && x >= 1 && x <= 32767
+
+function parseRow(x: unknown, schemaVersion: 1 | 2): PlacementSnapshotRow | null {
   if (!x || typeof x !== 'object') return null
   const o = x as Record<string, unknown>
   const qty = typeof o.qty === 'string' ? Number(o.qty) : o.qty
@@ -52,47 +60,76 @@ function parseRow(x: unknown): PlacementSnapshotRow | null {
   if (o.originalDate != null && !isValidYmd(o.originalDate)) return null
   if (o.source !== 'manual' && o.source !== 'ai') return null
   if (o.originCardId != null && typeof o.originCardId !== 'string') return null
+  const planDate = (o.planDate as YMD | null | undefined) ?? null
+  let lineId: number | null = null
+  let estMinutesOverride: number | null = null
+  // v1 的列視為「沒有線、沒有覆寫」（lines.md §八）；v2 的兩欄格式不對 → 整份不收（不做部分還原）
+  if (schemaVersion === 2) {
+    if (o.lineId != null && !isLineIdLike(o.lineId)) return null
+    if (o.estMinutesOverride != null && !isValidOverride(o.estMinutesOverride)) return null
+    lineId = planDate == null ? null : ((o.lineId as number | null | undefined) ?? null)
+    estMinutesOverride = (o.estMinutesOverride as number | null | undefined) ?? null
+  }
   return {
     id: o.id, soLineKey: o.soLineKey, qty,
-    planDate: (o.planDate as YMD | null | undefined) ?? null,
+    planDate,
     originalDate: (o.originalDate as YMD | null | undefined) ?? null,
     source: o.source,
     originCardId: (o.originCardId as string | null | undefined) ?? null,
+    lineId,
+    estMinutesOverride,
   }
 }
 
-/** DB 讀出的 jsonb → ScheduleSnapshot；schemaVersion 不是 1 或任一列不合法 → null（不做部分還原） */
+/** DB 讀出的 jsonb → ScheduleSnapshot；schemaVersion 不是 1／2 或任一列不合法 → null（不做部分還原） */
 export function parseSnapshot(json: unknown): ScheduleSnapshot | null {
   if (!json || typeof json !== 'object') return null
   const o = json as Record<string, unknown>
-  if (o.schemaVersion !== 1 || !Array.isArray(o.placements)) return null
+  const ver = o.schemaVersion
+  if ((ver !== 1 && ver !== 2) || !Array.isArray(o.placements)) return null
   if (typeof o.takenAt !== 'string' || !isValidYmd(o.today)) return null
   const rows: PlacementSnapshotRow[] = []
   for (const r of o.placements) {
-    const p = parseRow(r)
+    const p = parseRow(r, ver)
     if (!p) return null
     rows.push(p)
   }
-  return { schemaVersion: 1, takenAt: o.takenAt, today: o.today, placements: rows }
+  return { schemaVersion: ver, takenAt: o.takenAt, today: o.today, placements: rows }
 }
 
 /**
  * 還原計畫（D33）：刪除目前所有未完成擺放、以新 id 寫入快照列（舊 id 可能已是別的已完成列）。
  * 日期已過、數量超過目前供給等情形「不在還原時修正」，全交給讀取時的 §3.3／§3.5（同一套規則，不另寫特例）。
+ * 分線（lines.md §4.7）：排進日期的列 lineId 缺（v1）、不存在或已停用 → 改放預設線，計入 lineRemappedCount。
+ *   （沒給 lines 時不改線、lineRemappedCount 0——只給不需要線別的舊呼叫端；伺服器一律帶 lines。）
  */
 export function planRestore(
   current: readonly Placement[],
   snap: ScheduleSnapshot,
-  ctx: { today: YMD; poolLines: ReadonlySet<string>; newId: () => string },
+  ctx: { today: YMD; poolLines: ReadonlySet<string>; newId: () => string; lines?: readonly PackagingLine[]; defaultLineId?: number | null },
 ): { plan: RestorePlan; deleteIds: string[]; inserts: PlacementSnapshotRow[] } {
   const deleteIds = current.filter((p) => !p.completed).map((p) => p.id)
-  const inserts = snap.placements.map((r) => ({ ...r, id: ctx.newId() }))
+  const active = ctx.lines ? new Set(ctx.lines.filter((l) => l.active).map((l) => l.id)) : null
+  let lineRemappedCount = 0
+  const inserts = snap.placements.map((r): PlacementSnapshotRow => {
+    const row: PlacementSnapshotRow = {
+      ...r, id: ctx.newId(),
+      lineId: r.planDate == null ? null : (r.lineId ?? null),
+      estMinutesOverride: r.estMinutesOverride ?? null,
+    }
+    if (active && row.planDate != null && (row.lineId == null || !active.has(row.lineId))) {
+      row.lineId = ctx.defaultLineId ?? null
+      lineRemappedCount++
+    }
+    return row
+  })
   return {
     plan: {
       removeCount: deleteIds.length,
       insertCount: inserts.length,
       pastDateCount: inserts.filter((r) => r.planDate != null && r.planDate < ctx.today).length,
       lineGoneCount: inserts.filter((r) => !ctx.poolLines.has(r.soLineKey)).length,
+      lineRemappedCount,
     },
     deleteIds,
     inserts,

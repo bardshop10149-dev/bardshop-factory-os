@@ -4,10 +4,11 @@
 // 檔內只用相對路徑 import、不用 enum，才能用 node --experimental-strip-types 跑單元測試。
 //
 // 「工作台日期」＝台灣行政日曆工作日（週一～五扣國定假日，與交期計算同一份 workdays.ts）
-//              ＋主管已開加班的週六（D48 週六＝加班日；D51 週六僅在開加班時出現）。
-// 週日與國定假日不會出現（D48 沒定義假日加班，規格 §9.3 待問）——包含「國定假日剛好落在週六」（例：2026-10-10 國慶日）。
+//              ＋主管已開加班的週末日（D48 週六＝加班日；D63 週日比照週六；D51 週末僅在開加班時出現）。
+// 國定假日不會出現（D48 沒定義假日加班，規格 §9.3 待問）——包含「國定假日剛好落在週六／週日」
+// （例：2026-10-10 國慶日逢週六、2026-10-25 光復節逢週日）：這種週末日不能開加班。
 
-import type { DailyCapacity, Placement, YMD } from './scheduleTypes'
+import type { DailyCapacity, LineCapacity, Placement, YMD } from './scheduleTypes'
 import { dayInfo, isWorkday, workdaysBetween } from './workdays'
 
 const DAY_MS = 86_400_000
@@ -61,38 +62,78 @@ export function shortDate(d: YMD): string {
 
 // ── 規格 §3.1 ──
 
+/** 週六或週日（D63：週末＝只有加班的日子） */
+export function isWeekend(d: YMD): boolean {
+  const w = weekdayOf(d)
+  return w === 0 || w === 6
+}
+
+/** '週六'／'週日'（畫面上的「週六加班」「週日加班」標籤用；平日回 ''） */
+export function weekendName(d: YMD): string {
+  const w = weekdayOf(d)
+  return w === 6 ? '週六' : w === 0 ? '週日' : ''
+}
+
 /**
- * 週六且是國定假日／補假／公司放假（dayInfo 的原因不是單純「週末」）。
- * 規格 §3.1、§9.1 第 7 條：國定假日不能開加班欄 → 這種週六不收產能、也不會出現在工作台。
- * （補行上班的週六 isWorkday＝true，本來就是工作日，不受影響。）
+ * 週末且是國定假日／補假／公司放假（dayInfo 的原因不是單純「週末」）。
+ * 規格 §3.1、§9.1 第 7 條：國定假日不能開加班欄 → 這種週末日不收加班、也不會出現在工作台。
+ * D63 起週日比照週六（例：2026-10-25 光復節逢週日）。
+ * （補行上班的週末 isWorkday＝true，本來就是工作日，不受影響。）
  */
-export function isHolidaySaturday(d: YMD): boolean {
-  if (weekdayOf(d) !== 6 || isWorkday(d)) return false
+export function isHolidayWeekend(d: YMD): boolean {
+  if (!isWeekend(d) || isWorkday(d)) return false
   return dayInfo(d).reason !== '週末'
 }
 
 /**
- * D48／D49：已開加班的週六＝is_saturday_open 且加班上限 > 0，且不是國定假日（isHolidaySaturday）。
+ * D48／D49／D63：已開加班的週末日＝is_saturday_open（語意為「週末開加班」）且加班上限 > 0，
+ * 且是週六或週日、不是國定假日（isHolidayWeekend）。
  * （加班 0 小時的「開加班」沒有意義，當作沒開；API 端 validateCapacityInput 也會擋。）
+ *
+ * 分線輪（lines.md §3.2）：給了 lineRows 時，加班上限改看「各線當天加班列加總 > 0」（D71 總時數＝各線加總；
+ * activeLineIds 給了就只算啟用線），週末旗標仍在 daily 列（一天一個，不分線，D63）。
+ * 沒給 lineRows 時沿用舊規則（daily 列的 overtime_hours_max，分線後它是伺服器同步寫入的加總相容欄）。
  */
-export function openSaturdaysOf(rows: readonly DailyCapacity[]): Set<YMD> {
+export function openWeekendDaysOf(
+  rows: readonly DailyCapacity[],
+  lineRows?: readonly LineCapacity[],
+  activeLineIds?: ReadonlySet<number>,
+): Set<YMD> {
+  let otByDate: Map<YMD, number> | null = null
+  if (lineRows) {
+    otByDate = new Map()
+    for (const l of lineRows) {
+      if (activeLineIds && !activeLineIds.has(l.lineId)) continue
+      otByDate.set(l.date, (otByDate.get(l.date) ?? 0) + l.overtimeHoursMax)
+    }
+  }
   const out = new Set<YMD>()
   for (const r of rows) {
-    if (r.isSaturdayOpen && r.overtimeHoursMax > 0 && isValidYmd(r.date) && weekdayOf(r.date) === 6 && !isHolidaySaturday(r.date)) out.add(r.date)
+    const ot = otByDate ? (otByDate.get(r.date) ?? 0) : r.overtimeHoursMax
+    if (r.isSaturdayOpen && ot > 0 && isValidYmd(r.date) && isWeekend(r.date) && !isHolidayWeekend(r.date)) out.add(r.date)
   }
   return out
 }
 
-/** 工作台日期＝台灣工作日，或已開加班的週六（D48） */
-export function isBoardDay(d: YMD, openSats: ReadonlySet<YMD>): boolean {
-  return isWorkday(d) || openSats.has(d)
+/**
+ * 集合裡的某天是否真的算「開加班的週末日」。
+ * 自己再擋一次「必須是週末、且不是國定假日」，和前端 boardView.isViewDay 同樣防呆：
+ * 就算呼叫端傳進來的集合不是 openWeekendDaysOf 產生的（例：直接塞 '2026-10-25' 光復節逢週日），也不會誤開。
+ */
+function isOpenWeekendDay(d: YMD, openWeekends: ReadonlySet<YMD>): boolean {
+  return openWeekends.has(d) && isWeekend(d) && !isHolidayWeekend(d)
+}
+
+/** 工作台日期＝台灣工作日，或已開加班的週末日（D48／D63） */
+export function isBoardDay(d: YMD, openWeekends: ReadonlySet<YMD>): boolean {
+  return isWorkday(d) || isOpenWeekendDay(d, openWeekends)
 }
 
 /**
- * D51：從 from 起湊滿 workdays 個台灣工作日；開加班的週六插入但不佔名額。
+ * D51：從 from 起湊滿 workdays 個台灣工作日；開加班的週末日（六／日）插入但不佔名額。
  * 例：from＝2026-09-24（四）、3 天、無加班 → [09-24, 09-29, 09-30]（9/25 中秋、9/28 教師節）。
  */
-export function boardWindow(from: YMD, workdays: number, openSats: ReadonlySet<YMD>): YMD[] {
+export function boardWindow(from: YMD, workdays: number, openWeekends: ReadonlySet<YMD>): YMD[] {
   const out: YMD[] = []
   let n = 0
   let cur = toNum(from)
@@ -100,25 +141,25 @@ export function boardWindow(from: YMD, workdays: number, openSats: ReadonlySet<Y
   while (n < workdays && cur <= stop) {
     const d = fromNum(cur)
     if (isWorkday(d)) { out.push(d); n++ }
-    else if (openSats.has(d)) out.push(d)
+    else if (isOpenWeekendDay(d, openWeekends)) out.push(d)
     cur++
   }
   return out
 }
 
 /** 第一個 > d 的工作台日期 */
-export function nextBoardDay(d: YMD, openSats: ReadonlySet<YMD>): YMD {
+export function nextBoardDay(d: YMD, openWeekends: ReadonlySet<YMD>): YMD {
   let cur = toNum(d) + 1
   for (let i = 0; i < NEXT_SAFETY_DAYS; i++, cur++) {
     const x = fromNum(cur)
-    if (isBoardDay(x, openSats)) return x
+    if (isBoardDay(x, openWeekends)) return x
   }
   return fromNum(cur) // 不會發生（60 天內一定有工作日）；保底回傳
 }
 
 /** D50 順延目標：第一個 ≥ today 的工作台日期（今天是週末／假日時＝下一個工作台日期） */
-export function rollTarget(today: YMD, openSats: ReadonlySet<YMD>): YMD {
-  return isBoardDay(today, openSats) ? today : nextBoardDay(today, openSats)
+export function rollTarget(today: YMD, openWeekends: ReadonlySet<YMD>): YMD {
+  return isBoardDay(today, openWeekends) ? today : nextBoardDay(today, openWeekends)
 }
 
 /**
@@ -126,18 +167,18 @@ export function rollTarget(today: YMD, openSats: ReadonlySet<YMD>): YMD {
  * 1. 已完成 → plan_date 原樣（完成是事實，不順延）
  * 2. plan_date = null → null（待排區，D21）
  * 3. plan_date < today → rollTarget(today)，rolled（延誤）
- * 4. plan_date 不是工作台日期（週六取消加班、行事曆更新）→ 下一個工作台日期，offBoard
+ * 4. plan_date 不是工作台日期（週末取消加班、行事曆更新）→ 下一個工作台日期，offBoard
  * 5. 其餘 → plan_date
  */
 export function displayDateOf(
   p: Pick<Placement, 'planDate' | 'completed'>,
   today: YMD,
-  openSats: ReadonlySet<YMD>,
+  openWeekends: ReadonlySet<YMD>,
 ): { date: YMD | null; rolled: boolean; offBoard: boolean } {
   if (p.completed) return { date: p.planDate, rolled: false, offBoard: false }
   if (p.planDate == null) return { date: null, rolled: false, offBoard: false }
-  if (p.planDate < today) return { date: rollTarget(today, openSats), rolled: true, offBoard: false }
-  if (!isBoardDay(p.planDate, openSats)) return { date: nextBoardDay(p.planDate, openSats), rolled: false, offBoard: true }
+  if (p.planDate < today) return { date: rollTarget(today, openWeekends), rolled: true, offBoard: false }
+  if (!isBoardDay(p.planDate, openWeekends)) return { date: nextBoardDay(p.planDate, openWeekends), rolled: false, offBoard: true }
   return { date: p.planDate, rolled: false, offBoard: false }
 }
 

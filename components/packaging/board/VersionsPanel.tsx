@@ -160,6 +160,8 @@ export default function VersionsPanel({ editable, getLockToken, nowMs, onClose, 
             <li>將移除目前 <b>{preview.plan.removeCount}</b> 張未完成的卡，寫入 <b>{preview.plan.insertCount}</b> 張。</li>
             {preview.plan.pastDateCount > 0 && <li>其中 <b>{preview.plan.pastDateCount}</b> 張日期已過，會順延到今天並標「延誤」。</li>}
             {preview.plan.lineGoneCount > 0 && <li><b>{preview.plan.lineGoneCount}</b> 張的訂單已不在待排池（已完成或結案），會隱藏。</li>}
+            {/* 分線輪（lines.md §4.7）：舊版快照沒有線別、或原線已停用 → 改放預設線（啟用中排第一的線） */}
+            {(preview.plan.lineRemappedCount ?? 0) > 0 && <li><b>{preview.plan.lineRemappedCount}</b> 張會改放到預設線（排第一的啟用線）：原線已停用，或是分線前的舊版快照沒有線別。</li>}
             <li>已勾完成的卡不受影響。</li>
             <li>還原前會自動備份目前的排程（「還原前備份」），可以再還原回來。</li>
             <li className="text-orange-300">目前的復原（Undo）紀錄會清空。</li>

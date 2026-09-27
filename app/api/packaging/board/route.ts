@@ -6,11 +6,16 @@ import { getPool, POOL_READ_MAX_AGE_MS } from '@/lib/packaging/poolCache'
 import { addDays, isValidYmd } from '@/lib/packaging/scheduleCalendar'
 import { assembleBoard, boardRevision, poolDigest } from '@/lib/packaging/scheduleBoard'
 import { evaluateLock } from '@/lib/packaging/scheduleLock'
+import { getManualMergedPool } from '@/lib/packaging/manualCache'
 import {
   getOpLogMaxId,
   getPlacementsFingerprint,
+  isMissingSchema,
+  linesMigrationMessage,
   loadCapacityRows,
   loadCompletedSince,
+  loadLineCapacityRows,
+  loadLines,
   loadOpenPlacements,
   loadPlacementsByLines,
   publicDbError,
@@ -30,8 +35,11 @@ export const maxDuration = 60
 // ⚠ GET 不寫入：D50 自動順延、D7 數量修剪都是讀取時推導（唯讀使用者也會呼叫）。
 //
 // 讀取分兩段，讓「沒變」的輪詢幾乎不花資料庫：
-//   1. 便宜指紋：待排池（快取）＋擺放表列數／最大 updated_at（1 個請求）＋op_log 最大 id＋鎖列 → revision
-//   2. revision 與 rev 不同才讀全部擺放、產能（400 天）、池內各行的已完成列，組裝完整工作台
+//   1. 便宜指紋：待排池（快取，已併入 D66 手動區塊）＋擺放表列數／最大 updated_at（1 個請求）＋op_log 最大 id＋鎖列 → revision
+//   2. revision 與 rev 不同才讀全部擺放、產能（400 天，daily＋各線）、線別、池內各行的已完成列，組裝完整工作台
+// 分線輪（lines.md §4.1）：多回 lines、defaultLineId、days[].lanes（只帶彙總）、BoardCard.lineId／laneId／minutesStd／
+//   minutesOverride／manual。線別、各線產能、手動加入的寫入都會寫 op_log（'lines'／'capacity'／'manual'）→ revision 會變。
+//   新表不存在（migration 未套用）→ 明確提示先套 sql/20260927b_packaging_p1_extend.sql，不做降級。
 
 /** 產能沿用要看「較早的平日列」，讀近 400 天就夠（規格 §3.6） */
 const CAPACITY_LOOKBACK_DAYS = 400
@@ -75,16 +83,19 @@ export async function GET(request: NextRequest) {
   const poolP = getPool({ fresh, maxAgeMs: POOL_READ_MAX_AGE_MS }).catch((e: unknown) => { poolFailed = e; return null })
   try {
     // 1. 便宜指紋
-    const [pool, fp, lockRow, opLogMaxId] = await Promise.all([
+    const [basePool, fp, lockRow, opLogMaxId] = await Promise.all([
       poolP,
       getPlacementsFingerprint(sb),
       readLockRow(sb),
       getOpLogMaxId(sb),
     ])
-    if (!pool) {
+    if (!basePool) {
       console.error('[packaging/board] 待排池組裝失敗:', describeError(poolFailed))
       return noStore({ success: false, error: '待排池暫時無法組裝，請稍後再試', code: 'pool_unavailable' }, 500)
     }
+    // D66：手動區塊併進待排池（內容不變時是同一個 blocks 參考，poolDigest 不必重算）
+    const manual = await getManualMergedPool(sb, basePool)
+    const pool = manual.pool
     const revision = boardRevision({
       poolDigest: poolDigest(pool),
       opLogMaxId,
@@ -102,19 +113,25 @@ export async function GET(request: NextRequest) {
     // 2. 完整讀取
     const poolLines = new Set<string>()
     for (const b of pool.blocks) for (const c of b.cards) poolLines.add(c.soLineKey)
-    const [open, completedFrom, capacityRows, completedInPool] = await Promise.all([
+    const [open, completedFrom, capacityRows, completedInPool, lines, lineRows] = await Promise.all([
       loadOpenPlacements(sb),
       loadCompletedSince(sb, from),
       loadCapacityRows(sb, addDays(today, -CAPACITY_LOOKBACK_DAYS)),
       // 已完成的卡：池內各行全部（算「未反映完成量 U」要看最早一筆完成，規格 §3.4）＋ plan_date ≥ from
       loadPlacementsByLines(sb, [...poolLines], { completedOnly: true }),
+      loadLines(sb),
+      // D49 各線各自沿用最近一次較早平日值：同樣往前看 400 天
+      loadLineCapacityRows(sb, addDays(today, -CAPACITY_LOOKBACK_DAYS)),
     ])
 
     const byId = new Map<string, Placement>()
     for (const p of [...open, ...completedFrom, ...completedInPool]) byId.set(p.id, p)
     const placements = [...byId.values()]
 
-    const body = assembleBoard({ pool, placements, capacityRows, today, from, workdays })
+    const body = assembleBoard({
+      pool, placements, capacityRows, lines, lineRows, today, from, workdays,
+      manual: { meta: manual.meta, backInPoolKeys: manual.backInPoolKeys, skipped: manual.skipped },
+    })
     return noStore<BoardResponse>({
       ...body,
       serverTime,
@@ -124,6 +141,8 @@ export async function GET(request: NextRequest) {
     })
   } catch (e) {
     console.error('[packaging/board]', describeError(e))
+    // 分線輪 migration 未套用：明確提示（保留「找不到資料表」字樣，前端據以顯示套用提示）
+    if (isMissingSchema(e)) return noStore({ success: false, error: linesMigrationMessage(e), code: 'migration_required' }, 409)
     return noStore({ success: false, error: publicDbError(e), code: 'db_error' }, 500)
   }
 }

@@ -5,13 +5,20 @@
 // 元件分工：
 //   BoardLayout（本檔）：DndContext、拖放 → 操作（op）轉換、工具列、檢視切換、對話框開關
 //   useBoard：載入／輪詢／佇列／樂觀更新／Undo　useEditLock：編輯鎖　useUndo：50 步堆疊
-//   ViewSwitcher：日／週／兩週＋◀ 今天 ▶　DayCardWall（日，卡片牆＋負荷進度條，D62）　MultiDayView（週／兩週）
+//   ViewSwitcher：日／週／兩週＋◀ 今天 ▶
+//   DayLanesView（日，D68／D70：左側時間尺 10:00～24:00＋每條線一欄，卡片長度＝工時，拉下緣改工時 D69）
+//   MultiDayView（週／兩週：每天一欄、欄內再分各線小欄，D67）
 //   PoolSidebar（D58 簡化卡片 SimplePool）／ParkingArea（待排區）：左欄　PaneResizer：左右分隔線（D59）
 //   卡片：左右同一套外觀 CardFace（D58／D60）；排定卡 PlacementCard（日＝md、週＝sm、兩週＝迷你卡）
 //   卡片詳情 CardDetailDialog（D61）：待排池的由 SimplePool 開，排定卡的由本檔開（detail 狀態）
 //
 // 檢視與資料視窗：日＝1、週＝5、兩週＝10 個工作日，起點 anchor（null＝今天）→ GET /api/packaging/board?from=&workdays=。
 // 換檢視只換「要哪一段日期」，拖放、完成、拆卡等操作與 API 完全不變。
+//
+// 分線（D67／D72）：排進日期的卡一定屬於某條線。拖放目標：
+//   lane:${date}:${lineId}＝指定線；day:${date}（週／兩週欄頭）＝自動選線（pickAutoLane，剩餘工時最多）；
+//   日檢視前後一天的 day:${date} 那天沒載入、算不出剩餘 → 排定卡沿用原線、待排池的卡放預設線（autoLane 的 fallback）；
+//   holding＝待排區（沒有線）；pool＝放回待排池。伺服器不自動選線，前端一律送明確 lineId，樂觀更新與伺服器結果才一致。
 //
 // 資料一律經 /api/packaging/*（瀏覽器端 Supabase 是 anon，不直接查表）。
 // 每次操作立即送出（自動儲存）；唯讀者與沒有編輯鎖的人看得到但不能拖、不能勾。
@@ -31,10 +38,13 @@ import {
   type DragStartEvent,
 } from '@dnd-kit/core'
 import {
+  MINUTES_SNAP,
   type BoardCard,
   type PlacementOp,
   type YMD,
 } from '@/lib/packaging/scheduleTypes'
+import { lineNameOf } from '@/lib/packaging/scheduleLines'
+import { effectiveMinutes, overrideFromEffective } from '@/lib/packaging/scheduleMinutes'
 import {
   VIEW_WORKDAYS,
   listViewDays,
@@ -45,11 +55,11 @@ import {
   windowRequest,
   type BoardViewMode,
 } from '@/lib/packaging/boardView'
-import { weekdayOf } from '@/lib/packaging/scheduleCalendar'
+import { isWeekend } from '@/lib/packaging/scheduleCalendar'
 import type { PackagingCard as PackagingCardData } from '@/lib/packaging/types'
 import PackagingOrderModal from '@/components/packaging/PackagingOrderModal'
 import { fmtQty } from '@/components/packaging/poolStyles'
-import { mergeCandidates, newId, ruleForBoardCard, ruleForPoolCard, type DragRule } from './boardLocal'
+import { autoLaneFor, boardActiveLines, mergeCandidates, newId, parseDropId, ruleForBoardCard, ruleForPoolCard, type DragRule } from './boardLocal'
 import { ago, clock, hours, md, mdw } from './boardFormat'
 import { useUndo } from './useUndo'
 import { useEditLock } from './useEditLock'
@@ -62,12 +72,12 @@ import { lineLabel } from './CardFace'
 import { PlacementCardOverlay } from './PlacementCard'
 import CardDetailDialog from './CardDetailDialog'
 import ViewSwitcher from './ViewSwitcher'
-import DayCardWall from './DayCardWall'
+import DayLanesView from './DayLanesView'
 import MultiDayView from './MultiDayView'
-import { useOpenSaturdays } from './useOpenSaturdays'
+import { useOpenWeekends } from './useOpenWeekends'
 import LockBanner from './LockBanner'
 import SplitDialog from './SplitDialog'
-import QtyDateDialog from './QtyDateDialog'
+import QtyDateDialog, { type LineChoice } from './QtyDateDialog'
 import CapacityEditor from './CapacityEditor'
 import VersionsPanel from './VersionsPanel'
 import PaneResizer, { MIN_POOL_WIDTH } from './PaneResizer'
@@ -77,7 +87,7 @@ const HIDE_DONE_KEY = 'packaging.schedule.hideCompleted.v1'
 const VIEW_KEY = 'packaging.schedule.view.v1'
 /** D57 試用期的舊鍵（樣式切換、常駐欄位）：D58 已移除切換，載入時清掉 */
 const LEGACY_KEYS = ['packaging.schedule.poolStyle.v1', 'packaging.schedule.poolExtraCols.v1']
-/** 1366 寬的螢幕看週檢視／日檢視卡片牆時可先把左欄收起來（卡片牆每張 ≥ 260px，收起後一列多放 1～2 張） */
+/** 1366 寬的螢幕看週檢視／日檢視（多線）時可先把左欄收起來，排程表寬一點、少一點橫向捲動 */
 const POOL_HIDDEN_KEY = 'packaging.schedule.poolHidden.v1'
 /** 左欄（待排池）寬度：使用者拖過分隔線才有值；沒有值＝用 RWD 預設寬度 */
 const POOL_WIDTH_KEY = 'packaging.schedule.poolWidth.v1'
@@ -97,7 +107,8 @@ type Dialog =
   | { t: 'split'; bc: BoardCard }
   | { t: 'move'; bc: BoardCard }
   | { t: 'partial'; card: PackagingCardData }
-  | { t: 'capacity-day'; date: YMD }
+  /** lineId：從日檢視某條線的線頭 ⚙ 打開（該線欄位自動聚焦） */
+  | { t: 'capacity-day'; date: YMD; lineId?: number }
   | { t: 'capacity-table' }
   | { t: 'versions' }
 
@@ -155,7 +166,7 @@ export default function BoardLayout() {
     setPoolWidth(null)
     try { window.localStorage.removeItem(POOL_WIDTH_KEY) } catch { /* 忽略 */ }
   }, [])
-  /** 產能存檔後 +1：重讀「哪些週六開加班」 */
+  /** 產能存檔後 +1：重讀「哪些週六／週日開加班」 */
   const [capRefresh, setCapRefresh] = useState(0)
 
   const undo = useUndo()
@@ -180,7 +191,7 @@ export default function BoardLayout() {
   const data = board.data
   const me = data?.me
 
-  const openSatsFetched = useOpenSaturdays(!denied && !!data, data?.today ?? null, capRefresh)
+  const openWeekendsFetched = useOpenWeekends(!denied && !!data, data?.today ?? null, capRefresh)
 
   const editable = !!me?.canEdit && lk.phase === 'mine'
   const canDrag = editable && isDesktop
@@ -227,23 +238,77 @@ export default function BoardLayout() {
   })
 
   // ── 操作 ────────────────────────────────────────────────────────────────
-  const { submit, showToast } = board
+  const { submit, showToast, setMinutes } = board
   const actor = useMemo(() => ({ email: me?.email ?? '', name: me?.name ?? null }), [me?.email, me?.name])
+  const allLines = data?.lines
+  // 輪詢回來的 lines 每次都是新陣列：內容沒變就沿用同一個 activeLines，handlersFor 才不會跟著重建（卡片 memo 才有用）
+  const activeLinesRaw = useMemo(() => boardActiveLines({ lines: allLines }), [allLines])
+  const activeLinesKey = activeLinesRaw.map(l => `${l.id}:${l.code}:${l.name}:${l.sortOrder}`).join('|')
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- 刻意只看內容 key（見上）
+  const activeLines = useMemo(() => activeLinesRaw, [activeLinesKey])
+  const lineName = useCallback((id: number | null | undefined) => lineNameOf(allLines ?? [], id), [allLines])
 
-  const placePool = useCallback((card: PackagingCardData, qty: number, toDate: YMD | null, how = '排定') => {
+  /**
+   * D72 某天沒指定線時放哪條線：當天各線剩餘工時最多的線（pickAutoLane）。
+   * moving：被移動的排定卡（它本來就在這天時，自己的工時算回原線）。
+   * 那天不在畫面上（例：日檢視只載入一天）→ 沿用原線（仍啟用時）或預設線。
+   */
+  const autoLane = useCallback((date: YMD, moving: BoardCard | null): number | null => {
+    if (!data) return null
+    const keep = moving?.lineId != null && activeLines.some(l => l.id === moving.lineId) ? moving.lineId : null
+    const fallback = keep ?? data.defaultLineId ?? activeLines[0]?.id ?? null
+    return autoLaneFor(data.days.find(x => x.date === date), moving ? { placementId: moving.placementId } : null, fallback)
+  }, [data, activeLines])
+
+  // handlersFor 只在「按下勾選」那一刻需要 autoLane／rollTarget：從 ref 讀最新值，
+  // 不把 data 放進 handlersFor 的相依（否則每次 setData——樂觀更新、輪詢、寫入後 patchVersions——都會重建所有卡的 handler，
+  // useHandlerMap 快取失效，memo 過的 LaneCard／PlacementCard 全部重畫；兩週×多線時很明顯）
+  const autoLaneRef = useRef(autoLane)
+  const rollTargetRef = useRef<YMD | null>(data?.rollTarget ?? null)
+  useEffect(() => {
+    autoLaneRef.current = autoLane
+    rollTargetRef.current = data?.rollTarget ?? null
+  })
+
+  const noLineWarn = useCallback(() => {
+    showToast('warn', '沒有啟用中的產線，無法排進日期；請到「產能表 → 線別管理」啟用產線')
+  }, [showToast])
+
+  /** 從待排池排出；toDate 非 null 時 lineId 必填（D72） */
+  const placePool = useCallback((card: PackagingCardData, qty: number, toDate: YMD | null, lineId: number | null, how = '排定') => {
+    if (toDate && lineId == null) { noLineWarn(); return }
     const id = newId()
-    const op: PlacementOp = { op: 'place', id, soLineKey: card.soLineKey, qty, toDate, originCardId: card.cardId }
-    submit([op], `${how} ${lineLabel(card)} ${fmtQty(qty)} → ${toDate ? md(toDate) : '待排區'}`, [{ t: 'place', id, qty, toDate, poolCard: card }])
-  }, [submit])
-
-  const moveCard = useCallback((bc: BoardCard, toDate: YMD | null) => {
-    if (toDate === bc.planDate) return
+    const op: PlacementOp = { op: 'place', id, soLineKey: card.soLineKey, qty, toDate, originCardId: card.cardId, ...(toDate ? { lineId } : {}) }
     submit(
-      [{ op: 'move', id: bc.placementId, version: bc.version, toDate }],
-      `移動 ${lineLabel(bc.card)} → ${toDate ? md(toDate) : '待排區'}`,
-      [{ t: 'move', id: bc.placementId, toDate }],
+      [op],
+      `${how} ${lineLabel(card)} ${fmtQty(qty)} → ${toDate ? `${md(toDate)} ${lineName(lineId)}` : '待排區'}`,
+      [{ t: 'place', id, qty, toDate, poolCard: card, lineId: toDate ? lineId : null }],
     )
-  }, [submit])
+  }, [submit, lineName, noLineWarn])
+
+  /** 移到別天／別條線／待排區（toDate null）。同一天同一線＝不送操作 */
+  const moveCard = useCallback((bc: BoardCard, toDate: YMD | null, lineId: number | null) => {
+    if (toDate === bc.planDate && (toDate == null || lineId === bc.lineId)) return
+    if (toDate && lineId == null) { noLineWarn(); return }
+    const sameDay = toDate != null && toDate === bc.displayDate
+    submit(
+      [{ op: 'move', id: bc.placementId, version: bc.version, toDate, ...(toDate ? { lineId } : {}) }],
+      toDate == null ? `移動 ${lineLabel(bc.card)} → 待排區`
+        : sameDay && lineId !== bc.laneId ? `換線 ${lineLabel(bc.card)} → ${lineName(lineId)}`
+          : `移動 ${lineLabel(bc.card)} → ${md(toDate)} ${lineName(lineId)}`,
+      [{ t: 'move', id: bc.placementId, toDate, lineId: toDate ? lineId : null }],
+    )
+  }, [submit, lineName, noLineWarn])
+
+  /**
+   * D69 日檢視拉下緣：newEff＝新的有效工時（已吸附 5 分）。
+   * 與標準值相差不到半格（2.5 分）→ 視為回到標準值，送 null（lines.md §3.7 解讀）；否則換成「以本列 qty 為準」再送。
+   */
+  const resizeMinutes = useCallback((bc: BoardCard, newEff: number) => {
+    const std = bc.minutesStd ?? null
+    const value = std != null && Math.abs(newEff - std) < MINUTES_SNAP / 2 ? null : overrideFromEffective(newEff, bc.qty, bc.effectiveQty)
+    setMinutes(bc, value, null, 'drag', `改工時 ${lineLabel(bc.card)} ${hours(bc.minutes)}→${hours(value == null ? std : newEff)}h`)
+  }, [setMinutes])
 
   const unplaceCard = useCallback((bc: BoardCard) => {
     submit(
@@ -261,14 +326,21 @@ export default function BoardLayout() {
           submit([{ op: 'uncomplete', id: c.placementId, version: c.version }], `取消完成 ${lineLabel(c.card)}`,
             [{ t: 'uncomplete', id: c.placementId }], 'complete')
         } else {
-          submit([{ op: 'complete', id: c.placementId, version: c.version }], `完成 ${lineLabel(c.card)}`,
-            [{ t: 'complete', id: c.placementId, by: actor.email, byName: actor.name, atIso: new Date().toISOString() }], 'complete')
+          // 待排區的卡勾完成＝排到順延目標日；線照 D72 自動選（伺服器省略時用預設線，這裡送明確值讓畫面一致）
+          const roll = rollTargetRef.current
+          const lineId = c.planDate == null && roll ? autoLaneRef.current(roll, null) : null
+          submit([{ op: 'complete', id: c.placementId, version: c.version, ...(lineId != null ? { lineId } : {}) }], `完成 ${lineLabel(c.card)}`,
+            [{ t: 'complete', id: c.placementId, by: actor.email, byName: actor.name, atIso: new Date().toISOString(), lineId }], 'complete')
         }
       },
       onSplit: c => setDialog({ t: 'split', bc: c }),
       onMoveTo: c => setDialog({ t: 'move', bc: c }),
-      onToHolding: c => moveCard(c, null),
+      onToHolding: c => moveCard(c, null, null),
       onUnplace: c => unplaceCard(c),
+      // D67 同一天換線（延誤卡＝移到它目前顯示的那天，順便解除延誤，同拖曳）
+      onMoveLine: (c, lineId) => { if (c.displayDate) moveCard(c, c.displayDate, lineId) },
+      moveLines: activeLines,
+      onEditMinutes: c => setDetail(c),
       onMerge: others.length > 0 ? c => {
         submit(
           [{ op: 'merge', targetId: c.placementId, targetVersion: c.version, sources: others.map(o => ({ id: o.placementId, version: o.version })) }],
@@ -277,13 +349,13 @@ export default function BoardLayout() {
         )
       } : undefined,
     }
-  }, [submit, actor, moveCard, unplaceCard])
+  }, [submit, actor, moveCard, unplaceCard, activeLines])
 
   const onPoolAction = useCallback((card: PackagingCardData, action: PoolAction) => {
     if (!data) return
     const remaining = data.pool.cardMeta[card.cardId]?.remainingQty ?? card.qtyCard
     if (action === 'partial') { setDialog({ t: 'partial', card }); return }
-    if (action === 'holding') { placePool(card, remaining, null, '擱置'); return }
+    if (action === 'holding') { placePool(card, remaining, null, null, '擱置'); return }
     // 直接勾完成＝同一批 place（排到順延目標日，通常是今天）＋ complete（規格 §4.3）
     // 預排卡：place 會先驗 D22 → 伺服器必回 before_est_ready；選單已停用，這裡再擋一次（業務規則待 Snow 決定）
     const minDate = ruleForPoolCard(card).minDate
@@ -291,20 +363,22 @@ export default function BoardLayout() {
       showToast('warn', `預排卡預估 ${md(minDate)} 才可包，不能直接完成；請先排到 ${md(minDate)} 或之後`)
       return
     }
+    const lineId = autoLane(data.rollTarget, null)
+    if (lineId == null) { noLineWarn(); return }
     const id = newId()
     submit(
       [
-        { op: 'place', id, soLineKey: card.soLineKey, qty: remaining, toDate: data.rollTarget, originCardId: card.cardId },
+        { op: 'place', id, soLineKey: card.soLineKey, qty: remaining, toDate: data.rollTarget, originCardId: card.cardId, lineId },
         { op: 'complete', id, version: 1 },
       ],
       `直接完成 ${lineLabel(card)} ${fmtQty(remaining)}`,
       [
-        { t: 'place', id, qty: remaining, toDate: data.rollTarget, poolCard: card },
+        { t: 'place', id, qty: remaining, toDate: data.rollTarget, poolCard: card, lineId },
         { t: 'complete', id, by: actor.email, byName: actor.name, atIso: new Date().toISOString() },
       ],
       'complete',
     )
-  }, [data, placePool, submit, actor, showToast])
+  }, [data, placePool, submit, actor, showToast, autoLane, noLineWarn])
 
   // ── 檢視切換（D56）────────────────────────────────────────────────────
   const { setWindow } = board
@@ -334,21 +408,23 @@ export default function BoardLayout() {
     setActiveDrag(null)
     board.setDragging(false)
     if (!drag || !e.over || !data) return
-    const overId = String(e.over.id)
-    const toDate: YMD | null | undefined = overId.startsWith('day:') ? overId.slice(4) : overId === 'holding' ? null : undefined
+    const target = parseDropId(String(e.over.id))
+    if (!target) return
+    // 擺放卡拖回待排池＝放回
+    if (target.kind === 'pool') { if (drag.kind === 'placement') unplaceCard(drag.bc); return }
+    if (drag.rule.blocked) return
+    const toDate: YMD | null = target.kind === 'holding' ? null : target.date
+    if (toDate && drag.rule.minDate && toDate < drag.rule.minDate) return
+    const moving = drag.kind === 'placement' ? drag.bc : null
+    // lane:＝指定線；day:＝自動選線（D72，排除被拖的卡自己）；待排區沒有線
+    const lineId = target.kind === 'lane' ? target.lineId : toDate ? autoLane(toDate, moving) : null
     if (drag.kind === 'pool') {
-      if (toDate === undefined || drag.rule.blocked) return
-      if (toDate && drag.rule.minDate && toDate < drag.rule.minDate) return
       const remaining = data.pool.cardMeta[drag.card.cardId]?.remainingQty ?? drag.card.qtyCard
       if (!(remaining > 0)) return
-      placePool(drag.card, remaining, toDate, toDate ? '拖曳' : '擱置')
+      placePool(drag.card, remaining, toDate, lineId, toDate ? '拖曳' : '擱置')
       return
     }
-    // 擺放卡
-    if (overId === 'pool') { unplaceCard(drag.bc); return }
-    if (toDate === undefined || drag.rule.blocked) return
-    if (toDate && drag.rule.minDate && toDate < drag.rule.minDate) return
-    moveCard(drag.bc, toDate)
+    moveCard(drag.bc, toDate, lineId)
   }
 
   const onDragCancel = () => {
@@ -403,13 +479,13 @@ export default function BoardLayout() {
   const req = board.windowReq
   const expectFrom = req.from == null || req.from < data.today ? data.today : req.from
   const windowMatches = data.window.workdays === req.workdays && data.window.from === expectFrom
-  // 已開加班的週六：產能表讀到的＋已載入欄位看到的；
-  // 日檢視選了某個週六、伺服器卻回下一個工作日＝那個週六其實沒開（產能表是舊的）→ 排除，◀ ▶ 才不會卡在那天
-  const openSats = new Set<YMD>(openSatsFetched)
-  for (const d of data.days) if (d.kind === 'saturday_ot' && weekdayOf(d.date) === 6) openSats.add(d.date)
-  if (view === 'day' && windowMatches && anchor && weekdayOf(anchor) === 6 && data.days[0]?.date !== anchor) openSats.delete(anchor)
+  // 已開加班的週六／週日（D63）：產能表讀到的＋已載入欄位看到的；
+  // 日檢視選了某個週末日、伺服器卻回下一個工作日＝那天其實沒開（產能表是舊的）→ 排除，◀ ▶ 才不會卡在那天
+  const openWeekends = new Set<YMD>(openWeekendsFetched)
+  for (const d of data.days) if (d.kind === 'weekend_ot' && isWeekend(d.date)) openWeekends.add(d.date)
+  if (view === 'day' && windowMatches && anchor && isWeekend(anchor) && data.days[0]?.date !== anchor) openWeekends.delete(anchor)
 
-  const shownDate = resolveViewDay(anchor, data.rollTarget, openSats)
+  const shownDate = resolveViewDay(anchor, data.rollTarget, openWeekends)
   const dayData = view === 'day' ? (data.days.find(d => d.date === shownDate) ?? data.days[0] ?? null) : null
   // 換日、新資料還沒回來時（windowMatches＝false）畫面上的 dayData 還是舊的那天：
   // ◀ ▶ 與日期標籤一律以「使用者選的日期」為準，連按兩次 ▶ 才會真的前進兩天
@@ -421,8 +497,8 @@ export default function BoardLayout() {
   let onNext: (() => void) | null = null
   let rangeLabel: string
   let atToday: boolean
-  const dayPrev = view === 'day' ? stepViewDay(baseDate, -1, openSats, data.rollTarget) : null
-  const dayNext = view === 'day' ? stepViewDay(baseDate, 1, openSats) : null
+  const dayPrev = view === 'day' ? stepViewDay(baseDate, -1, openWeekends, data.rollTarget) : null
+  const dayNext = view === 'day' ? stepViewDay(baseDate, 1, openWeekends) : null
   if (view === 'day') {
     const prev = dayPrev
     const next = dayNext
@@ -437,10 +513,10 @@ export default function BoardLayout() {
       const p = shiftByWorkdays(start, -n, data.rollTarget)
       onPrev = () => go(view, p <= data.rollTarget ? null : p)
     }
-    // ▶ 新起點＝目前視窗最後一天之後的第一個工作台日期（含開加班的週六，不會漏掉兩段之間的週六）；
-    // 資料還沒回來時退回純工作日平移（shiftByWorkdays 已處理起點是週六的情況）
+    // ▶ 新起點＝目前視窗最後一天之後的第一個工作台日期（含開加班的週六／週日，不會漏掉兩段之間的週末）；
+    // 資料還沒回來時退回純工作日平移（shiftByWorkdays 已處理起點是週末的情況）
     const lastLoaded = windowMatches ? data.days[data.days.length - 1]?.date : undefined
-    const nextStart = (lastLoaded ? stepViewDay(lastLoaded, 1, openSats) : null) ?? shiftByWorkdays(start, n)
+    const nextStart = (lastLoaded ? stepViewDay(lastLoaded, 1, openWeekends) : null) ?? shiftByWorkdays(start, n)
     onNext = () => go(view, nextStart)
     const first = windowMatches ? data.days[0]?.date : start
     const last = windowMatches ? data.days[data.days.length - 1]?.date : null
@@ -448,11 +524,14 @@ export default function BoardLayout() {
     atToday = start === data.rollTarget
   }
   // 「移到日期…」「拆卡」的日期選單：今天起 10 個工作日＋目前視窗（日檢視只載入 1 天，不能只給那一天）
-  const dateOptionMap = new Map<YMD, { date: YMD; label: string; kind: 'workday' | 'saturday_ot' }>()
-  for (const d of listViewDays(data.rollTarget, 10, openSats)) dateOptionMap.set(d.date, d)
+  const dateOptionMap = new Map<YMD, { date: YMD; label: string; kind: 'workday' | 'weekend_ot' }>()
+  for (const d of listViewDays(data.rollTarget, 10, openWeekends)) dateOptionMap.set(d.date, d)
   for (const d of data.days) dateOptionMap.set(d.date, { date: d.date, label: d.label, kind: d.kind })
   const dateOptions = [...dateOptionMap.values()].sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0))
-  const editCapacity = (date: YMD) => setDialog({ t: 'capacity-day', date })
+  const editCapacity = (date: YMD, lineId?: number) => setDialog({ t: 'capacity-day', date, lineId })
+  /** 對話框的線別選擇 → 明確 lineId（自動＝pickAutoLane；那天不在畫面上 → 沿用原線或預設線） */
+  const resolveLine = (line: LineChoice, toDate: YMD, moving: BoardCard | null): number | null =>
+    line === 'auto' ? autoLane(toDate, moving) : line
   const loadingOverlay = windowMatches ? null : (
     <div className="absolute inset-0 z-40 flex items-start justify-center bg-slate-950/50 pt-24">
       <span className="animate-pulse rounded border border-slate-600 bg-slate-900 px-3 py-1.5 text-xs text-amber-300">載入 {rangeLabel}…</span>
@@ -567,8 +646,9 @@ export default function BoardLayout() {
           {/* ─── 左：待排池＋待排區 ───
                寬度：使用者拖過分隔線 → 用記住的寬度（CSS 變數，只在 lg 生效；手機仍上下堆疊全寬），
                並以 min/max 兜底（視窗縮小時不會把右側擠沒）。
-               沒拖過 → RWD 預設：1366 寬螢幕（< 2xl＝1536px）400px，右側日檢視卡片牆（每張 ≥ 260px）約可排 3 欄、
-               週檢視 5 欄×168px 也放得下；
+               沒拖過 → RWD 預設：1366 寬螢幕（< 2xl＝1536px）400px。分線後（D67）右側寬度常不夠：
+               日檢視每條線 ≥ 220px（3 線約 710px，放得下）；週檢視每天 = 線數×150px（3 線約 450px，5 天要橫向捲動，
+               1366 寬展開待排池時約看得到 2 天）、兩週每天 = 線數×64px——週／兩週寬度與「一眼看完」的取捨待 Snow 決定；
                寬螢幕 440px（簡化卡片一欄剛好；拉到約 560px 以上卡片自動排成兩欄，D58） */}
           <aside
             ref={asideRef}
@@ -589,6 +669,13 @@ export default function BoardLayout() {
               dragKind={activeDrag?.kind ?? null}
               onOpenOrder={openOrder}
               onPoolAction={onPoolAction}
+              manual={{
+                editable,
+                busy: board.pending > 0 || board.saving,
+                getLockToken: lk.getToken,
+                today: data.today,
+                onChanged: () => void board.reload(),
+              }}
             >
               <ParkingArea
                 cards={holdingCards}
@@ -620,7 +707,7 @@ export default function BoardLayout() {
           <section className="relative order-1 flex min-w-0 flex-1 flex-col lg:order-3 lg:min-h-0" aria-label="排程">
             {view === 'day' ? (
               dayData ? (
-                <DayCardWall
+                <DayLanesView
                   day={dayData}
                   today={data.today}
                   prevDate={dayPrev}
@@ -629,13 +716,18 @@ export default function BoardLayout() {
                   dragging={!!activeDrag}
                   editable={editable}
                   canDrag={viewCanDrag}
+                  canResize={viewCanDrag}
                   stale={!windowMatches}
+                  stacked={!isDesktop}
                   hideCompleted={hideDone}
+                  defaultLineName={data.defaultLineId != null ? lineName(data.defaultLineId) : null}
                   handlersFor={handlersFor}
                   onOpenOrder={openOrder}
                   onOpenDetail={openDetail}
                   onEditCapacity={editCapacity}
                   onGoDate={d => go('day', d <= data.rollTarget ? null : d)}
+                  onResize={resizeMinutes}
+                  onResizing={board.setDragging}
                   loadingOverlay={loadingOverlay}
                 />
               ) : (
@@ -648,6 +740,8 @@ export default function BoardLayout() {
                   dense={view === 'twoWeek'}
                   today={data.today}
                   dragRule={activeDrag?.rule ?? null}
+                  drag={activeDrag ? { placementId: activeDrag.kind === 'placement' ? activeDrag.bc.placementId : null } : null}
+                  defaultLineId={data.defaultLineId ?? null}
                   editable={editable}
                   canDrag={viewCanDrag}
                   stale={!windowMatches}
@@ -682,13 +776,25 @@ export default function BoardLayout() {
         <SplitDialog
           bc={dialog.bc}
           days={dateOptions}
+          lines={activeLines}
           onClose={() => setDialog(null)}
           onSubmit={(keepQty, parts) => {
             const bc = dialog.bc
-            const withIds = parts.map(p => ({ id: newId(), qty: p.qty, toDate: p.toDate }))
+            // 排進日期的新卡一律送明確的線：指定的線；「同原卡」＝原卡的線（仍啟用時），原卡在待排區／線已停用 → 自動選線
+            const origActive = bc.lineId != null && activeLines.some(l => l.id === bc.lineId) ? bc.lineId : null
+            const withIds = parts.map(p => ({
+              id: newId(),
+              qty: p.qty,
+              toDate: p.toDate,
+              lineId: p.toDate == null ? null : p.line !== 'same' ? p.line : (origActive ?? autoLane(p.toDate, null)),
+            }))
+            if (withIds.some(p => p.toDate != null && p.lineId == null)) { noLineWarn(); return }
             setDialog(null)
             submit(
-              [{ op: 'split', id: bc.placementId, version: bc.version, keepQty, parts: withIds }],
+              [{
+                op: 'split', id: bc.placementId, version: bc.version, keepQty,
+                parts: withIds.map(p => ({ id: p.id, qty: p.qty, toDate: p.toDate, ...(p.toDate ? { lineId: p.lineId } : {}) })),
+              }],
               `拆卡 ${lineLabel(bc.card)} → ${[keepQty, ...parts.map(p => p.qty)].map(fmtQty).join('／')}`,
               [{ t: 'split', id: bc.placementId, keepQty, parts: withIds }],
             )
@@ -702,8 +808,13 @@ export default function BoardLayout() {
           days={dateOptions}
           today={data.today}
           minDate={ruleForBoardCard(dialog.bc).minDate}
+          lines={activeLines}
           onClose={() => setDialog(null)}
-          onSubmit={(_q, toDate) => { const bc = dialog.bc; setDialog(null); moveCard(bc, toDate) }}
+          onSubmit={(_q, toDate, line) => {
+            const bc = dialog.bc
+            setDialog(null)
+            moveCard(bc, toDate, toDate == null ? null : resolveLine(line, toDate, bc))
+          }}
         />
       )}
       {dialog?.t === 'partial' && (() => {
@@ -719,14 +830,18 @@ export default function BoardLayout() {
             defaultQty={remaining}
             readyQty={card.qtyReady}
             minDate={ruleForPoolCard(card).minDate}
+            lines={activeLines}
             onClose={() => setDialog(null)}
-            onSubmit={(qty, toDate) => { setDialog(null); if (qty && qty > 0) placePool(card, qty, toDate) }}
+            onSubmit={(qty, toDate, line) => {
+              setDialog(null)
+              if (qty && qty > 0) placePool(card, qty, toDate, toDate == null ? null : resolveLine(line, toDate, null))
+            }}
           />
         )
       })()}
       {(dialog?.t === 'capacity-day' || dialog?.t === 'capacity-table') && (
         <CapacityEditor
-          mode={dialog.t === 'capacity-day' ? { kind: 'day', date: dialog.date } : { kind: 'table' }}
+          mode={dialog.t === 'capacity-day' ? { kind: 'day', date: dialog.date, lineId: dialog.lineId } : { kind: 'table' }}
           today={data.today}
           editable={editable}
           getLockToken={lk.getToken}
@@ -758,6 +873,16 @@ export default function BoardLayout() {
             today={data.today}
             onClose={() => setDetail(null)}
             onOpenOrder={openOrder}
+            lines={data.lines}
+            // D69：排定卡的工時編輯（minutes 已由 (b) 換算成「以本列 qty 為準」；null＝回到標準值）
+            minutesEdit={{
+              editable,
+              busy: board.pending > 0 || board.saving,
+              onSubmit: (m, reason) => {
+                const eff = effectiveMinutes({ qty: fresh.qty, effectiveQty: fresh.effectiveQty, override: m, perUnit: fresh.card.work.perUnit })
+                setMinutes(fresh, m, reason, 'dialog', `改工時 ${lineLabel(fresh.card)} ${hours(fresh.minutes)}→${hours(eff)}h`)
+              },
+            }}
           />
         )
       })()}
@@ -783,14 +908,20 @@ export default function BoardLayout() {
 function BoardFooter({ data }: { data: NonNullable<ReturnType<typeof useBoard>['data']> }) {
   const s = data.skipped
   const hidden = s.lineGoneOpen + s.lineGoneCompleted
+  // D66 手動加入：伺服器已算好但不出卡的兩種情況（沒寫出來的話，手動卡「悄悄消失」主管不知道原因）
+  const manualGone = s.manualSoGone ?? 0
+  const manualBack = s.manualBackInPool ?? 0
   return (
     <details className="rounded-xl border border-slate-800 bg-slate-950/40 px-3 py-2 text-[11px] text-slate-400">
       <summary className="cursor-pointer text-slate-300">
         說明與隱藏的卡
         {hidden + s.consumedPast > 0 && <span className="ml-1 text-slate-500">（隱藏 {hidden + s.consumedPast} 張）</span>}
+        {manualGone > 0 && <span className="ml-1 text-slate-500">（手動加入隱藏 {manualGone} 行）</span>}
       </summary>
       <ul className="mt-2 list-disc space-y-1 pl-4">
         {hidden > 0 && <li>{hidden} 張已排的卡因訂單已完成或結案（塔台結案、包裝報完工、SO 結案）而隱藏（資料保留）。</li>}
+        {manualGone > 0 && <li>{manualGone} 行手動加入因 ERP 訂單結案（該行已不在 ERP 資料）而隱藏（手動加入紀錄保留）。</li>}
+        {manualBack > 0 && <li>{manualBack} 行手動加入已回到自動待排池，改用正常區塊的卡（手動卡讓位，不重複出現）。</li>}
         {s.consumedPast > 0 && <li>{s.consumedPast} 張過去日期的卡已由待排池扣完（多半是塔台已報包裝完工），不顯示。</li>}
         {data.staleUnsyncedCount > 0 && (
           <li>另有 {data.staleUnsyncedCount} 行「發單超過 30 天仍未上塔台」不列入，清單見 <Link href="/packaging/pool" className="text-sky-300 underline">待排池</Link>。</li>
