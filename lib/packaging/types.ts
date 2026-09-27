@@ -235,6 +235,11 @@ export interface StaleUnsynced {
   count: number
   /** 依出單日由新到舊 */
   rows: StaleUnsyncedRow[]
+  /**
+   * D46 另計的排除數：ERP 仍未結案、只出現在出單表「素材單/包裝單」的 SO 行（本來就不上塔台，不列入待排池、也不算未上塔台）。
+   * 放在這裡而不放 PoolExcluded：/packaging/pool 頁尾以 Record<keyof PoolExcluded> 逐項顯示，加欄位要同時改畫面。
+   */
+  nonScheduleDocLines: number
 }
 
 export type PoolResponse =

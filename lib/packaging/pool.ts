@@ -5,15 +5,18 @@
 // 規格：docs/design/2026-09-27-packaging-schedule.md §7.1。
 //
 // 讀取分四波（後一波的查詢條件要用前一波的結果）：
-//   ① 採購行（近 180 天）、採購追蹤、常平出貨標記、塔台批／排程、出單表（近 365 天）、工時三表、新鮮度
+//   ① 採購行（近 180 天）、採購追蹤、常平出貨標記、塔台批／排程、出單表（近 365 天）、工時三表、新鮮度、
+//      D47 塔台報工紀錄的全部 MOT／MOS 製令號（只要 mo_nbr、lot_nbr，解碼出 SO＋項次）
 //   ② RO→SO 橋接、SO 品項行（依①收集到的 SO 集合分塊 in()；含出單表上的 SO，D44 要判斷 ERP 是否仍未結案）
 //   ③ 塔台報工紀錄（批 mo_nbr ∪ 開放中 SO 的 POC 採購行）、erp_mo_lines（製令 SO，僅顯示）
-//   ④ D43/D44 補查：出單表單號在①③都對不到時，再以單號查 sara_wip_records 判斷「是否上過塔台」
+//   ④ D43/D44 補查：出單表單號在①③都對不到時，再以單號查 sara_wip_records 判斷「是否上過塔台」；
+//      同時 D47 以這些列的訂單號查舊式製令號（＝SO／SOB／RO 號本身，lot＝項次）
 // PostgREST 單次上限 1000 列：每個查詢都分頁讀完，且每頁固定排序（比照 lib/purchasing/data.ts）。
 
 import type { getSupabaseAdminClient } from '@/lib/supabaseAdmin'
 import {
   classifyPool,
+  legacySaraCandidates,
   pocSaraMo,
   sourceOrderOf,
   type PoolRawData,
@@ -54,7 +57,9 @@ export const POOL_NOTES: string[] = [
   '待排池範圍（D43）：只列「塔台 SARA 目前未結案的批」相連的卡（卡片任一來源的塔台批仍在塔台，或 SO 行＝某未結案批的單號＋項次），加上「出單表 30 天內已發單、但塔台尚未建立」的品項（D44）。塔台已結案＝多半已出貨，不再列入；塔台結案由 Snow 以結案檢查流程維護。取代原本的「隱藏逾期舊單」勾選。',
   '已發單・未上塔台（D44）：出單表出單日在 30 個日曆天內（含今天，台北時區）、ERP SO 行仍未結案、且製令號／採購單號／請購單號與 SO 行都對不到任何塔台批。已有採購或製令卡的留在原區塊並標「已發單、塔台尚未建立」；沒有任何來源的（例：壓克力集單沒有製令號）另出卡放「已發單・未上塔台」區，來源依出單表廠別推定（C 常平、O 委外、其餘自製），數量取 ERP 訂單量、可包量 0。',
   '出單日超過 30 天仍未上塔台、ERP 也未結案的品項不列入待排池，另列在頁尾上方「發單超過 30 天仍未上塔台」清單，請生管確認是塔台建單失敗還是該在 ERP 結案。清單只涵蓋近 365 天的出單表，超過 365 天的出單不在清單內。',
-  '「是否上過塔台」：比對出單表的製令號／採購單號／請購單號、卡片來源的塔台批，以及 ERP 常平採購行（新式 POC 單號-行；舊式 POC 要批號＝SO 項次且品號相同）；同一張單的別行上過塔台不算本行。塔台已結案批的歷史只能從報工紀錄推，沒報過工就結案的批會被當成「未上塔台」；壓克力集單常沒有製令號，只能靠 SO 行比對。',
+  '「是否上過塔台」：比對出單表的製令號／採購單號／請購單號、卡片來源的塔台批，以及 ERP 常平採購行（新式 POC 單號-行；舊式 POC 要批號＝SO 項次且品號相同）；同一張單的別行上過塔台不算本行。塔台已結案批的歷史只能從報工紀錄推，沒報過工就結案的批會被當成「未上塔台」。',
+  '製令號解碼（D47）：塔台報工沒有來源單號，改從製令號還原 SO＋項次再比對——MOT＋SO 9 碼＋項次（MOT26082502107＝SO260825021 第 7 項）、MOS＋SOB 9 碼＋項次（壓克力集單以 MOS 上塔台）、舊式製令號＝SO 號本身（批號＝項次）；比對只看 SO 數字不分 SO／SOB／RO 前綴。MOM 集單流水號、SOA 長格式無法還原，不判斷。EIP 的塔台報工紀錄只從 2026-07 開始匯入（不是塔台全量），更早就結案的批仍可能被當成「未上塔台」。',
+  '出單表「素材單／包裝單」本來就不上塔台，不列入待排池與「發單超過 30 天仍未上塔台」清單（D46）；同一行若另有正常出單列，照正常列判定。',
   'P0 暫用完成規則：常平貨在塔台包裝站的包裝工序（非 QC）人工報完工即隱藏，SO 在 ARGO 結案即隱藏；P1 改為主管勾選完成。ARGO 入庫＝品檢完成＝才要開始包，絕不當作完成（塔台系統自動結工也不算）。',
   '委外（MPO）在塔台只有 QC 工序，P0 沒有包裝完成訊號；已入庫的委外卡留到塔台批結案（D43）或 SO 結案。',
   '自製製令以塔台包裝工序完工代替 ARGO 繳庫（EIP 尚未同步繳庫量）。',
@@ -190,6 +195,32 @@ function fetchLots(supabase: SupabaseAdmin) {
     .order('lot_id', { ascending: true }))
 }
 
+type DecodedMoRow = { mo_nbr: string; lot_nbr: string | null }
+
+/** 報工紀錄一個製令同批會有多道工序、多筆報工 → 只留不重複的 (mo_nbr, lot_nbr) */
+function uniqMoLot(rows: DecodedMoRow[]): DecodedMoRow[] {
+  const seen = new Map<string, DecodedMoRow>()
+  for (const r of rows) {
+    const k = `${r.mo_nbr}|${r.lot_nbr ?? ''}`
+    if (!seen.has(k)) seen.set(k, { mo_nbr: r.mo_nbr, lot_nbr: r.lot_nbr ?? null })
+  }
+  return [...seen.values()]
+}
+
+/**
+ * D47：塔台報工紀錄的全部 MOT／MOS（2026-09-27 約 7,500 列＝8 頁，並行）。
+ * 已結案批只剩 records 看得到；不能只抓 lots 的 mo_nbr（那只有未結案批）。
+ * 舊式製令號（SO／RO 號本身）約 3.5 萬列，不全抓，改在第 ④ 波以候選單號精確查。
+ */
+async function fetchDecodableRecords(supabase: SupabaseAdmin): Promise<DecodedMoRow[]> {
+  const rows = await fetchAllPages<DecodedMoRow>('sara_wip_records(MOT/MOS)', (wc) => supabase
+    .from('sara_wip_records')
+    .select('mo_nbr, lot_nbr', wc ? { count: 'exact' } : undefined)
+    .or('mo_nbr.like.MOT*,mo_nbr.like.MOS*')
+    .order('id', { ascending: true }))
+  return uniqMoLot(rows)
+}
+
 function fetchSchedule(supabase: SupabaseAdmin) {
   return fetchAllPages<RawSchedule>('sara_wip_schedule', (wc) => supabase
     .from('sara_wip_schedule')
@@ -307,7 +338,7 @@ async function loadFreshness(supabase: SupabaseAdmin): Promise<Omit<PoolFreshnes
 /** 讀完所有原始列（供 classifyPool 與驗證腳本共用） */
 export async function loadPoolRawData(supabase: SupabaseAdmin, today: string) {
   // ① 彼此獨立的讀取
-  const [poLines, tracking, shipMarks, lots, schedule, sheets, tables, fresh] = await Promise.all([
+  const [poLines, tracking, shipMarks, lots, schedule, sheets, tables, fresh, decodableRecords] = await Promise.all([
     fetchPoLines(supabase, today),
     fetchTracking(supabase),
     fetchShipMarks(supabase),
@@ -316,6 +347,7 @@ export async function loadPoolRawData(supabase: SupabaseAdmin, today: string) {
     loadSheetRows(supabase, today),
     loadStdTimeTables(supabase),
     loadFreshness(supabase),
+    fetchDecodableRecords(supabase),
   ])
 
   // ② SO 集合：採購行來源單（SO/SOB/RO 直接查；RO 另抓前單號＝RO 的 SO 當橋接候選，
@@ -378,13 +410,24 @@ export async function loadPoolRawData(supabase: SupabaseAdmin, today: string) {
 
   // ④ D43/D44：出單表單號在批／排程／已抓報工紀錄都對不到 → 以「原樣＋（有 -n 時）舊式無後綴單號」精確補查 records（只要 mo_nbr）。
   //    不用前綴 like：40 個 or 條件一次約 0.5~1 秒、全部要 8 秒以上，併發時還會撞 statement timeout（2026-09-27 實測）
-  const refMos = unresolvedSheetMoRefs({ sheetRows: sheets.rows, soLines, lots, schedule, records })
-  const refRows = await fetchIn<{ mo_nbr: string }>('sara_wip_records(出單表比對)', refMos, (c, wc) => supabase
-    .from('sara_wip_records')
-    .select('mo_nbr', wc ? { count: 'exact' } : undefined)
-    .in('mo_nbr', c)
-    .order('id', { ascending: true }))
+  //    D47：同一批仍對不到的出單列，另以訂單號本身查舊式製令號（mo_nbr＝SO／SOB／RO 號、lot＝項次），兩個查詢並行
+  const sheetInput = { sheetRows: sheets.rows, soLines, lots, schedule, records, saraDecodedMos: decodableRecords }
+  const refMos = unresolvedSheetMoRefs(sheetInput)
+  const legacyMos = legacySaraCandidates(sheetInput)
+  const [refRows, legacyRows] = await Promise.all([
+    fetchIn<{ mo_nbr: string }>('sara_wip_records(出單表比對)', refMos, (c, wc) => supabase
+      .from('sara_wip_records')
+      .select('mo_nbr', wc ? { count: 'exact' } : undefined)
+      .in('mo_nbr', c)
+      .order('id', { ascending: true })),
+    fetchIn<DecodedMoRow>('sara_wip_records(舊式製令號)', legacyMos, (c, wc) => supabase
+      .from('sara_wip_records')
+      .select('mo_nbr, lot_nbr', wc ? { count: 'exact' } : undefined)
+      .in('mo_nbr', c)
+      .order('id', { ascending: true })),
+  ])
   const saraRefMos = [...new Set(refRows.map((r) => r.mo_nbr))]
+  const saraDecodedMos = uniqMoLot([...decodableRecords, ...legacyRows])
 
   const raw: PoolRawData = {
     today,
@@ -398,6 +441,7 @@ export async function loadPoolRawData(supabase: SupabaseAdmin, today: string) {
     sheetRows: sheets.rows,
     moLines,
     saraRefMos,
+    saraDecodedMos,
   }
   const freshness: PoolFreshness = { ...fresh, orderSheet: sheets.latest }
   return { raw, tables, freshness }

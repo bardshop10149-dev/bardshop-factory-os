@@ -5,8 +5,10 @@ import { useRouter } from 'next/navigation'
 import Link from 'next/link'
 
 // 包裝專區入口（D36 / D42）：比照工程專區，包裝站排程相關功能都掛在這一頁底下。
-// P0 只有「待排池」可用；P1/P2 功能先灰掉標「即將推出」，讓使用者知道路線圖。
-// 權限：admin 或 packaging（唯讀）/ packaging_admin（編輯，P1 起才有編輯功能）。
+// P1 起「排程工作台」「每日產能」「版本歷史」可用（後兩者連到工作台並自動開對應面板）；
+// P2 的 AI 規則仍灰掉標「即將推出」，讓使用者知道路線圖。
+// 權限（D30）：admin 或 packaging（唯讀，可進入檢視）/ packaging_admin（可編輯）。
+// 編輯提示只給有編輯權的人看；唯讀者一樣進得去，只是看到「唯讀檢視」。
 // 頁面自查只是體驗；真正的資料守門在 /api/packaging/* 各路由：guardAuth() 後再判斷 admin || packaging || packaging_admin。
 
 type ZoneItem = {
@@ -16,10 +18,12 @@ type ZoneItem = {
   icon: string
   /** 可用時的連結；未上線為 null */
   href: string | null
-  /** 未上線時的期別標籤 */
-  phase?: 'P1' | 'P2'
+  /** 未上線時的期別標籤（有 href 的項目不設） */
+  phase?: 'P2'
   /** 需要額外權限才進得去（塔台看板在 /admin 底下，proxy 要求 production_admin） */
   needsProductionAdmin?: boolean
+  /** 編輯類入口：有編輯權（packaging_admin/admin）時顯示這段提示；唯讀者改顯示「唯讀檢視」 */
+  editHint?: string
 }
 
 const ZONE_ITEMS: ZoneItem[] = [
@@ -34,24 +38,24 @@ const ZONE_ITEMS: ZoneItem[] = [
     name: '排程工作台',
     en: 'Workbench',
     desc: '把待排池卡片拖到日期欄排定包裝日，可拆卡、自動儲存與復原。',
-    href: null,
-    phase: 'P1',
+    href: '/packaging/schedule',
+    editHint: '可拖曳排程・同一時間只有一人能編輯',
     icon: 'M9 17V7m0 10a2 2 0 01-2 2H5a2 2 0 01-2-2V7a2 2 0 012-2h2a2 2 0 012 2m0 10a2 2 0 002 2h2a2 2 0 002-2M9 7a2 2 0 012-2h2a2 2 0 012 2m0 10V7m0 10a2 2 0 002 2h2a2 2 0 002-2V7a2 2 0 00-2-2h-2a2 2 0 00-2 2',
   },
   {
     name: '每日產能',
     en: 'Capacity',
     desc: '設定每天的包裝人力與工時，對照已排工時看是否超載。',
-    href: null,
-    phase: 'P1',
+    href: '/packaging/schedule?panel=capacity',
+    editHint: '可設定人數、工時與週六加班',
     icon: 'M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z',
   },
   {
     name: '版本歷史',
     en: 'Versions',
     desc: '每次排程的快照與異動紀錄，可比對、可還原。',
-    href: null,
-    phase: 'P1',
+    href: '/packaging/schedule?panel=versions',
+    editHint: '可存版本、還原快照',
     icon: 'M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z',
   },
   {
@@ -142,12 +146,12 @@ export default function PackagingPage() {
                 ? 'border-violet-500/40 bg-violet-500/10 text-violet-300'
                 : 'border-slate-600 bg-slate-800/60 text-slate-400'
             }`}>
-              {canEdit ? '主管編輯權限（P1 起啟用）' : '唯讀'}
+              {canEdit ? '主管編輯權限' : '唯讀'}
             </span>
           </div>
           <p className="text-slate-400 text-sm mt-1">包裝站排程：待排池、排程工作台、每日產能 (Packaging)</p>
           <p className="text-slate-500 text-xs mt-2 leading-relaxed">
-            目前為第一階段（P0）：待排池唯讀檢視，不會寫入任何資料；排程、產能與 AI 規則陸續推出。
+            目前為第二階段（P1）：可在工作台排定包裝日、設定每日產能、存取版本；排程只存在 EIP，不回寫塔台。AI 規則將於 P2 推出。
           </p>
         </div>
 
@@ -164,7 +168,7 @@ export default function PackagingPage() {
                     {item.en}
                   </span>
                 </div>
-                {item.phase && (
+                {item.phase && !available && (
                   <div className="absolute top-3 left-3 px-2 py-1 rounded border border-slate-700 bg-slate-800/60">
                     <span className="text-[10px] text-slate-400 font-bold">即將推出・{item.phase}</span>
                   </div>
@@ -184,6 +188,11 @@ export default function PackagingPage() {
                 <p className={`text-xs px-2 ${available ? 'text-slate-500 group-hover:text-slate-300' : 'text-slate-500'}`}>
                   {item.desc}
                 </p>
+                {item.editHint && available && (
+                  <p className={`mt-2 text-[11px] ${canEdit ? 'text-violet-400/80' : 'text-slate-600'}`}>
+                    {canEdit ? `✎ ${item.editHint}` : '唯讀檢視（編輯需包裝主管權限）'}
+                  </p>
+                )}
                 {item.needsProductionAdmin && (
                   <p className={`mt-2 text-[11px] ${locked ? 'text-amber-500/80' : 'text-slate-600'}`}>
                     {locked ? '🔒 需生產管理權限（production_admin）' : '需生產管理權限'}

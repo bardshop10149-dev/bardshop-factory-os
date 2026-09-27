@@ -13,6 +13,7 @@
 //   塔台 POC/MPO 批（轉運站完工＝到台 D18）─┘
 //   塔台 MOT/MOS 批 ── schedule ∪ records 推前站(§3.7) → 區塊 4/4x
 //   出單表 30 天內已發單、未上塔台、無採購/製令來源的 SO 行 → 區塊 ns（D44）
+//     （「素材單/包裝單」不算，D46；「上過塔台」另以製令號解碼的 SO 數字＋項次比對，D47）
 //   同一 SO 行、同區塊的切片合併成一張卡；落在不同區塊 → 拆卡（D7）
 //   最後套 D43 範圍：只留「與塔台未結案批相連」∪「30 天內已發單、未上塔台」的卡（規格 §十二）
 
@@ -34,6 +35,7 @@ import {
   type StaleUnsyncedRow,
   type WorkEstimate,
 } from '@/lib/packaging/types'
+import { decodedTowerKeys, isNonScheduleDocType, soLineDigitsKey } from '@/lib/packaging/saraKeys'
 import { CHANGPING_PACK_HINT_RE, CHANGPING_UNPACKED_RE } from '@/lib/packaging/stdTime'
 import { addWorkdays, isCovered, workdaysBetween } from '@/lib/packaging/workdays'
 import { CP_SHIP_NOTE_TAG } from '@/lib/purchasing/types'
@@ -184,6 +186,12 @@ export interface PoolRawData {
    * records 4 萬多列不全抓，pool.ts 只以 unresolvedSheetMoRefs() 的單號精確查（見該函式）。
    */
   saraRefMos: string[]
+  /**
+   * D47 製令號解碼用的塔台報工紀錄（只要 mo_nbr、lot_nbr，已去重）：
+   * sara_wip_records 全部 MOT／MOS ＋ 舊式製令號（＝SO／SOB／RO 號本身）以 legacySaraCandidates() 的單號精確查到的列。
+   * lots／schedule／records 另外直接解碼，不必重複放進來。
+   */
+  saraDecodedMos: { mo_nbr: string; lot_nbr: string | null }[]
 }
 
 /** 與 lib/packaging/stdTime.ts computeStdTime 的 input 同形 */
@@ -414,27 +422,58 @@ function openLotSoLineKeys(lots: RawLot[]): Set<string> {
  * 規則 ③（出單表沒記項次、塔台只有 {單號}-n）需要前綴查詢，records 4 萬多列、前綴 like 實測要多 8 秒，
  * 所以不補查：只靠已載入的批／排程／報工紀錄（常平 POC 近 180 天的採購行已在第 ③ 波整批抓進來）。
  */
-export function unresolvedSheetMoRefs(raw: Pick<PoolRawData, 'sheetRows' | 'soLines' | 'lots' | 'schedule' | 'records'>): string[] {
-  const openLines = new Set(raw.soLines.map((l) => {
-    const line = lineStr(l.line_no)
-    return line ? soLineKeyOf(l.project_id.toUpperCase(), line) : ''
-  }))
-  const lotKeys = openLotSoLineKeys(raw.lots)
-  const idx = saraMoIndex([...raw.lots, ...raw.schedule, ...raw.records].map((r) => r.mo_nbr))
+export function unresolvedSheetMoRefs(raw: SheetSaraInput): string[] {
   const bases = new Set<string>()
-  for (const r of raw.sheetRows) {
-    const line = lineStr(r.line_no)
-    if (!line) continue
-    const key = soLineKeyOf(r.order_number.toUpperCase(), line)
-    if (!openLines.has(key) || lotKeys.has(key)) continue
-    const refs = sheetMoRefs(r)
-    if (refs.length === 0 || refsOnSara(refs, idx)) continue
+  for (const { refs } of unresolvedSheetRows(raw)) {
+    if (refs.length === 0) continue
     for (const x of refs) {
       bases.add(x)
       if (MO_SUFFIX_RE.test(x)) bases.add(stripMoSuffix(x))
     }
   }
   return [...bases].sort()
+}
+
+/**
+ * D47 pool.ts 補查舊式製令號用：與 unresolvedSheetMoRefs 同一批「仍對不到塔台」的出單列，回傳其訂單號本身
+ * （舊式製令號＝SO／SOB／RO 號，lot＝項次；sara_wip_records 裡這類列約 3.5 萬筆，不全抓，只精確查候選）。
+ * 只收 decodeSaraMo 認得的舊式格式（SO／SOB／RO＋純數字）。
+ */
+export function legacySaraCandidates(raw: SheetSaraInput): string[] {
+  const out = new Set<string>()
+  for (const { so } of unresolvedSheetRows(raw)) if (/^(SOB|SO|RO)\d+$/.test(so)) out.add(so)
+  return [...out].sort()
+}
+
+type SheetSaraInput = Pick<PoolRawData, 'sheetRows' | 'soLines' | 'lots' | 'schedule' | 'records' | 'saraDecodedMos'>
+
+/**
+ * ERP SO 行仍開放、出單表有這一行、但在 塔台批／排程／已抓的報工紀錄 都對不到的出單列（pool.ts 補查的共同候選）。
+ * 已排除：D46 素材單/包裝單、塔台未結案批的 SO 行、出單表單號已命中（規則 ①②③）、D47 製令號解碼已命中。
+ */
+function unresolvedSheetRows(raw: SheetSaraInput): { so: string; refs: string[] }[] {
+  const openLines = new Set(raw.soLines.map((l) => {
+    const line = lineStr(l.line_no)
+    return line ? soLineKeyOf(l.project_id.toUpperCase(), line) : ''
+  }))
+  const lotKeys = openLotSoLineKeys(raw.lots)
+  const idx = saraMoIndex([...raw.lots, ...raw.schedule, ...raw.records].map((r) => r.mo_nbr))
+  const digitKeys = decodedTowerKeys([...raw.lots, ...raw.schedule, ...raw.records, ...raw.saraDecodedMos])
+  const out: { so: string; refs: string[] }[] = []
+  for (const r of raw.sheetRows) {
+    if (isNonScheduleDocType(r.doc_type)) continue // D46
+    const line = lineStr(r.line_no)
+    if (!line) continue
+    const so = r.order_number.toUpperCase()
+    const key = soLineKeyOf(so, line)
+    if (!openLines.has(key) || lotKeys.has(key)) continue
+    const dk = soLineDigitsKey(so, line)
+    if (dk && digitKeys.has(dk)) continue // D47
+    const refs = sheetMoRefs(r)
+    if (refs.length > 0 && refsOnSara(refs, idx)) continue
+    out.push({ so, refs })
+  }
+  return out
 }
 
 const isChangpingPo = (po: RawPoLine) => (po.customer_vendor ?? '').trim().toUpperCase() === CHANGPING_VENDOR
@@ -1494,18 +1533,42 @@ export function classifyPool(raw: PoolRawData, estimate: WorkEstimator): Classif
     for (const doc of pocDocsBySo.get(so) ?? []) for (const it of items) if (saraLegacyKeys.has(`${doc}|${it}|${line}`)) return true
     return false
   }
+  /**
+   * D47：塔台製令號解碼出的「SO 數字＋項次」（批／排程／已載入報工紀錄 ＋ pool.ts 另抓的 MOT／MOS 與舊式報工紀錄）。
+   * 只用來判斷「上過塔台」（ns 與異常清單），不擴大 D43 範圍 (A)：未結案批的 SO 行本來就由 doc_nbr／lot_nbr、so_line_no 認得。
+   */
+  const towerDigitKeys = decodedTowerKeys([...saraRows, ...raw.saraDecodedMos])
+  const decodedOnSara = (so: string, line: string) => {
+    const dk = soLineDigitsKey(so, line)
+    return !!dk && towerDigitKeys.has(dk)
+  }
   const nsFrom = addCalendarDays(today, -(NOT_ON_SARA_WINDOW_DAYS - 1)) // 30 個日曆天含今天
   // 出單表以 SO 行彙整：出單日取最新一張，單號取所有出單列的聯集（重發單時任一張對到塔台就算已上塔台）
   const sheetLines = new Map<string, { so: string; line: string; latest: RawSheetRow; refs: Set<string> }>()
+  /** D46：出現在「素材單/包裝單」出單列的 SO 行（之後扣掉也有正常出單列的，另計排除計數） */
+  const nonScheduleLines = new Map<string, { so: string; line: string }>()
   for (const r of raw.sheetRows) {
     const line = lineStr(r.line_no)
     if (!line) continue
     const so = r.order_number.toUpperCase()
     const k = soLineKeyOf(so, line)
+    // D46：素材單/包裝單本來就不上塔台 → 不出 ns 卡、不進異常清單，也不刷新這一行的最新出單日（包裝單晚發不會重啟 30 天窗）；
+    // 同一行若另有正常出單列，照正常列判定
+    if (isNonScheduleDocType(r.doc_type)) {
+      bump('sheet_non_schedule_doc')
+      nonScheduleLines.set(k, { so, line })
+      continue
+    }
     let e = sheetLines.get(k)
     if (!e) { e = { so, line, latest: r, refs: new Set() }; sheetLines.set(k, e) }
     else if (r.sheet_date > e.latest.sheet_date) e.latest = r
     for (const x of sheetMoRefs(r)) e.refs.add(x)
+  }
+  /** D46 排除計數：ERP 仍未結案、只出現在素材單/包裝單（沒有任何正常出單列）的 SO 行 */
+  let nonScheduleDocLines = 0
+  for (const [k, x] of nonScheduleLines) {
+    if (sheetLines.has(k) || !findSoLine(x.so, x.line)) continue
+    nonScheduleDocLines++
   }
   /** 有採購行或製令對到的 SO 行：由原本區塊判定，不另出 ns 卡 */
   const sourcedLines = new Set(ctxs.filter((c) => c.line).map((c) => soLineKeyOf(c.so, c.line!)))
@@ -1515,8 +1578,12 @@ export function classifyPool(raw: PoolRawData, estimate: WorkEstimator): Classif
   for (const [k, e] of sheetLines) {
     const sl = findSoLine(e.so, e.line)
     if (!sl) continue // ERP SO 行已結案（同步會刪掉結案單）或項次不存在 → 不必追
-    if (openLotLines.has(k) || refsOnSara([...e.refs], saraIdx) || lineOnSaraByPo(e.so, e.line, sl)) continue // 已上塔台：交給 D43 範圍判定
     const recent = e.latest.sheet_date >= nsFrom
+    if (openLotLines.has(k) || refsOnSara([...e.refs], saraIdx) || lineOnSaraByPo(e.so, e.line, sl)) continue // 已上塔台：交給 D43 範圍判定
+    if (decodedOnSara(e.so, e.line)) { // D47：只靠製令號解碼命中（壓克力集單以 MOS 上塔台、舊式製令號＝SO 號…）→ 同樣交給 D43
+      bump(recent ? 'd47_hit_recent' : 'd47_hit_stale')
+      continue
+    }
     if (isNonPhysicalLine(sl.mbp_part, sl.description)) { // D12 費用行本來就不會上塔台
       if (recent) nonPhysicalKeys.add(k)
       continue
@@ -1798,7 +1865,7 @@ export function classifyPool(raw: PoolRawData, estimate: WorkEstimator): Classif
     blocks,
     excluded,
     calendarFallback: cal.fallback,
-    staleUnsynced: { windowDays: NOT_ON_SARA_WINDOW_DAYS, count: staleRows.length, rows: staleRows },
+    staleUnsynced: { windowDays: NOT_ON_SARA_WINDOW_DAYS, count: staleRows.length, rows: staleRows, nonScheduleDocLines },
     stats,
   }
 }
