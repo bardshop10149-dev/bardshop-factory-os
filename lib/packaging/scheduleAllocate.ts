@@ -8,6 +8,7 @@
 // 不 import supabase、不讀時鐘；相對路徑 import、不用 enum。
 
 import {
+  MANUAL_BLOCK_ID,
   MIN_CARD_MINUTES,
   PLACEABLE_BLOCKS,
   type LineAllocation,
@@ -70,6 +71,9 @@ export function lineSupply(soLineKey: string, cards: readonly PackagingCard[]): 
   for (const c of basis) {
     if (c.work.perUnit != null && c.qtyCard > 0) { wSum += c.work.perUnit * c.qtyCard; qSum += c.qtyCard }
   }
+  // D103：手動行（buildManualBlock 保證一行最多一張 'mn' 卡，且該行不在正常區塊）帶出手動總量 T。
+  //   其他行一律不加這個鍵 → 輸出形狀與 D103 前逐位相同（非手動行的供給、分配完全不變）。
+  const mt = placeable.length === 1 && placeable[0].block === MANUAL_BLOCK_ID ? placeable[0].manualTotalQty : undefined
   return {
     soLineKey,
     segments,
@@ -77,6 +81,7 @@ export function lineSupply(soLineKey: string, cards: readonly PackagingCard[]): 
     readyTotal: r3(ready.reduce((s, x) => s + x.qty, 0)),
     nonPlaceableQty: r3(cards.filter((c) => !isPlaceableBlock(c.block)).reduce((s, c) => s + Math.max(0, c.qtyCard), 0)),
     perUnit: qSum > 0 ? Math.round((wSum / qSum) * 10000) / 10000 : null,
+    ...(mt != null && Number.isFinite(mt) ? { manualTotal: mt } : {}),
   }
 }
 
@@ -86,14 +91,22 @@ export function lineSupply(soLineKey: string, cards: readonly PackagingCard[]): 
  *   drop = max(0, B − S)（第一次勾完成到現在，待排池少了多少＝塔台報工已反映的量）
  *   U = clamp(C − drop, 0, C)
  * 委外（塔台沒有包裝工序）：池不會減 → U＝C；常平／製令之後塔台報工：池減少 → U 跟著變小，不重複扣。
+ *
+ * D103（Snow 確認：手動加入的「改數量」改的是這筆訂單的總量，含已完成）：手動行多給 manualTotal＝T，B 改用 min(B, T)。
+ *   手動行的池量就是手動量，塔台報工不會動它；會讓 S 變少的只有 D73 銷貨封頂與主管改量。
+ *   舊公式把「改量」也算進 drop（當成已反映的完成量）→ 手動 100、完成 50、改成 50 算出「還剩 50」，與 Snow 的意思相反。
+ *   B 封頂在 T 之後，改總量永遠不算反映；只有第一次完成之後 D73 封頂造成的減少（min(B,T) − S）才算。
+ *   completed_pool_qty 的意義不變（仍是勾完成當下的 S）、DB 不動，只在讀取時封頂。
+ *   非手動行不給 manualTotal → 與舊公式逐位相同。
  */
-export function unreflectedCompletedQty(completed: readonly Placement[], supplyTotal: number): number {
+export function unreflectedCompletedQty(completed: readonly Placement[], supplyTotal: number, manualTotal?: number | null): number {
   const done = completed.filter((p) => p.completed)
   if (done.length === 0) return 0
   const C = r3(done.reduce((s, p) => s + p.qty, 0))
   let earliest = done[0]
   for (const p of done) if (tsOf(p.completed!.at) < tsOf(earliest.completed!.at)) earliest = p
-  const B = earliest.completed!.poolQtyAt ?? supplyTotal
+  const B0 = earliest.completed!.poolQtyAt ?? supplyTotal
+  const B = manualTotal != null && Number.isFinite(manualTotal) ? Math.min(B0, manualTotal) : B0 // D103
   const drop = Math.max(0, B - supplyTotal)
   return r3(Math.min(C, Math.max(0, C - drop)))
 }
@@ -133,7 +146,8 @@ export function allocateLine(input: {
   const completed = input.placements.filter((p) => !!p.completed)
   const S = supply.total
 
-  const U = unreflectedCompletedQty(completed, S)
+  // D103：手動行帶 supply.manualTotal（總量語意）；其他行 undefined＝舊公式
+  const U = unreflectedCompletedQty(completed, S, supply.manualTotal)
   const E = r3(Math.max(0, S - U))
 
   // 片段剩餘量（可變副本）；U 從最前面（可包片）開始扣

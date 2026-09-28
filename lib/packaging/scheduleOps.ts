@@ -697,7 +697,15 @@ export function applyOps(state: OpsState, ops: readonly PlacementOp[], ctx: OpsC
         const a = alloc(row.soLineKey)
         if (!supply || !a) return fail('line_not_in_pool', i, '這個品項已不在待排池（可能已完成或結案），不需勾完成', row)
         const eff = a.placements.find((x) => x.placementId === row.id)?.effectiveQty ?? 0
-        if (eff <= EPS) return fail('qty_invalid', i, '這張卡已由待排池扣完，不需勾完成，請用「移除」', row)
+        if (eff <= EPS) {
+          // D103：手動行且總量 < 已完成＋已排（塔台報工不會動手動量；多半是 D103 前把數量當剩餘量改低過）
+          //   → 講清楚最少要把總量改到多少（＝PATCH 下限）；其他情況（含非手動行）訊息不變
+          const floor = supply.manualTotal != null ? r3(lineRows(row.soLineKey, next).reduce((s, p) => s + p.qty, 0)) : 0
+          if (supply.manualTotal != null && supply.manualTotal + EPS < floor) {
+            return fail('qty_invalid', i, `這張卡沒有可包的量：手動總量 ${r3(supply.manualTotal)} 少於已完成＋已排 ${floor}，不需勾完成；還要包請先到待排池頁把總量改到至少 ${floor}，否則請用「移除」`, row)
+          }
+          return fail('qty_invalid', i, '這張卡已由待排池扣完，不需勾完成，請用「移除」', row)
+        }
         // D24／規格 §3.4：延誤卡或待排區卡勾完成＝「實際在今天完成」→ 日期改 rollTarget；被修剪過 → qty 改成有效量
         const planDate = row.planDate == null || row.planDate < today ? rollTarget(today, openWeekends) : row.planDate
         const qty = eff < row.qty ? r3(eff) : row.qty

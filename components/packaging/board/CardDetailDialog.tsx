@@ -40,12 +40,12 @@ export function manualTag(m: ManualInclusionMeta): string {
   return `手動・${m.addedByName ?? m.addedBy}・${clock(m.addedAt)}`
 }
 
-/** D66 手動加入的說明（詳情與滑過提示） */
+/** D66 手動加入的說明（詳情與滑過提示）；D103：數量是這筆訂單的總量（含已完成），標「總量」免得讀成剩餘量 */
 function ManualInfo({ m }: { m: ManualInclusionMeta }) {
   return (
     <div className="break-words text-violet-200">
       <span className="text-slate-400">手動加入　</span>
-      {m.addedByName ?? m.addedBy}（{clock(m.addedAt)}）・{fmtQty(m.qty)}・{m.routeType}
+      {m.addedByName ?? m.addedBy}（{clock(m.addedAt)}）・總量 {fmtQty(m.qty)}・{m.routeType}
       {m.reason && <span className="text-slate-400">・原因：{m.reason}</span>}
     </div>
   )

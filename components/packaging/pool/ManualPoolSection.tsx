@@ -199,11 +199,12 @@ function ManualCard({ card, line, today, canEdit, changpingSyncLabel, onOpenOrde
       {m && (
         <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 rounded bg-amber-900/30 px-2 py-1 text-[11px] text-amber-100">
           <span className="font-semibold">{manualTag(m)}</span>
-          <span className="text-amber-200/80">{m.routeType}・手動量 {fmtQty(m.qty)}</span>
+          {/* D103：手動加入的數量＝這筆訂單的總量（含已完成），不是剩餘量 */}
+          <span className="text-amber-200/80" title="總量＝這筆訂單要包的全部數量（含已完成）">{m.routeType}・總量 {fmtQty(m.qty)}</span>
           {m.reason && <span className="min-w-0 break-words text-amber-200/70">原因：{m.reason}</span>}
           {showProgress && line && (
             <span className="ml-auto text-slate-300"
-              title="已排＝還沒完成的排定卡合計；可排＝還能從待排池拿去排的量（同排程工作台）">
+              title="已排＝還沒完成的排定卡合計；可排＝還能從待排池拿去排的量（同排程工作台）；沒有出貨時 總量＝已完成＋已排＋可排">
               {line.placedQty > 0 && <>已排 {fmtQty(line.placedQty)}・</>}
               {line.completedQty > 0 && <>已完成 {fmtQty(line.completedQty)}・</>}
               可排 <b className="text-white">{fmtQty(line.remainingQty)}</b>
@@ -250,7 +251,7 @@ function EndedList({ manual, canEdit, onOpenOrder, onRemove }: {
             <button type="button" onClick={() => onOpenOrder(card.so)} title="開啟訂單詳情"
               className="font-mono text-sky-300 hover:underline">{card.soLineKey}</button>
             <span className="min-w-0 flex-1 break-words text-slate-300">{card.itemName ?? '（無品名）'}</span>
-            <span className="whitespace-nowrap">手動 {fmtQty(line.meta.qty)}・已完成 {fmtQty(line.completedQty)}</span>
+            <span className="whitespace-nowrap">總量 {fmtQty(line.meta.qty)}・已完成 {fmtQty(line.completedQty)}</span>
             {canEdit && (
               <button type="button" onClick={() => onRemove(card, line)}
                 aria-label={`把已完成的 ${card.soLineKey} 移出`}

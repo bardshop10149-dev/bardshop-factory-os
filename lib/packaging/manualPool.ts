@@ -103,6 +103,8 @@ export function manualCardOf(inc: ManualInclusion, sl: RawSoLine, estimate: Work
     sample: { isSample, reason: isSample ? 'line_name' : null },
     flags,
     hasSketch: false,
+    // D103：手動量＝這筆訂單的總量（含已完成）。D73 銷貨封頂只改 qtyCard，這個值不動（applySoldToCards 用 spread 會保留）
+    manualTotalQty: inc.qty,
   }
 }
 
@@ -207,6 +209,7 @@ export interface PoolManualLine {
    * 還可排＝max(0, 卡片量 − U − 未完成擺放)，U＝scheduleAllocate.unreflectedCompletedQty（已完成但待排池還沒扣掉的量）。
    * 為什麼不直接用「卡片量 − 已完成量」：D73 部分銷貨時卡片量已扣掉出貨量，而出貨的多半就是已包完的那批；
    * 用 U 才和工作台 cardMeta.remainingQty（assembleBoard → allocateLine）一模一樣，兩頁數字不會對不起來。
+   * D103：沒有銷貨時＝max(0, 總量 − 已完成 − 未完成擺放)（U 帶卡上的 manualTotalQty，與 lineSupply 同一個來源）。
    */
   remainingQty: number
 }
@@ -266,7 +269,8 @@ export function splitManualForPoolPage(input: {
     const done = ps.filter((p) => !!p.completed)
     const placedQty = r3(open.reduce((s, p) => s + p.qty, 0))
     const completedQty = r3(done.reduce((s, p) => s + p.qty, 0))
-    const u = unreflectedCompletedQty(done, card.qtyCard)
+    // D103：與 lineSupply 同一個來源（卡上的手動總量），工作台／待排池頁／AI 三處數字才一致
+    const u = unreflectedCompletedQty(done, card.qtyCard, card.manualTotalQty)
     const remainingQty = r3(Math.max(0, card.qtyCard - u - placedQty))
     const meta = input.meta[card.soLineKey]
     // meta 只含有出卡的行，理論上一定有；萬一沒有就照常顯示卡、不給管理按鈕（不能憑空組 inclusionId）
@@ -293,6 +297,45 @@ export function mergeManualIntoPool(pool: PoolOk, block: PoolBlock): PoolOk {
   return { ...pool, blocks: [block, ...pool.blocks.filter((b) => b.id !== MANUAL_BLOCK_ID)] }
 }
 
+const fmtQ = (n: number): string => String(r3(n))
+const MOVE_BACK_HINT = '請先到排程工作台把排定卡拖回待排池'
+
+/**
+ * D103 改總量的下限（PATCH 寫前檢查、寫後回讀共用；待排池頁 ManualEditDialog 的預警用同樣兩個數字、同樣的判斷順序）：
+ * - 總量 < 已完成 → qty_below_completed「已完成 X，總量不能少於 X」
+ * - 總量 < 已完成＋未完成擺放 → qty_below_placed（沿用既有代碼；已完成 0 時訊息與 D102 逐字相同）
+ * - 總量＝已完成（沒有未完成擺放）→ 允許：剩 0，卡片從待排池消失、進「已全數完成」
+ * 已完成＝這一行全部已勾完成擺放（含舊紀錄時期完成的；同 U 公式看的範圍），未完成＝原始 qty、不修剪。
+ * concurrent：寫後回讀才發現（排程工作台剛好在排）→ 訊息講清楚「這次沒有修改」。
+ */
+export function manualQtyFloorError(
+  qty: number,
+  completedQty: number,
+  placedQty: number,
+  opts: { concurrent?: boolean } = {},
+): { code: 'qty_below_completed' | 'qty_below_placed'; error: string; minQty: number } | null {
+  let code: 'qty_below_completed' | 'qty_below_placed'
+  let core: string
+  let minQty: number
+  if (qty + EPS < completedQty) {
+    code = 'qty_below_completed'
+    minQty = r3(completedQty)
+    core = `已完成 ${fmtQ(completedQty)}，總量不能少於 ${fmtQ(completedQty)}（數量是這筆訂單的總量、含已完成）`
+  } else if (qty + EPS < completedQty + placedQty) {
+    code = 'qty_below_placed'
+    minQty = r3(completedQty + placedQty)
+    core = completedQty > EPS
+      ? `已完成 ${fmtQ(completedQty)}、已排出 ${fmtQ(placedQty)}（未完成），總量不能少於 ${fmtQ(minQty)}`
+      : `已排出 ${fmtQ(placedQty)}（未完成），數量不可低於已排量`
+  } else {
+    return null
+  }
+  // 已完成的量拖不回待排池 → 只有「低於已排」才給「拖回待排池」的指引
+  const hint = code === 'qty_below_placed' ? `；${MOVE_BACK_HINT}` : ''
+  const error = opts.concurrent ? `排程工作台剛好在排這個品項，${core}，這次沒有修改${hint}` : `${core}${hint}`
+  return { code, error, minQty }
+}
+
 /** D12／訂單量：加入時「不可勾選」的判斷（查詢與加入 API 共用） */
 export function manualBlockedReason(sl: Pick<RawSoLine, 'mbp_part' | 'description' | 'order_qty_oru'>): string | null {
   if (isNonPhysicalLine(sl.mbp_part, sl.description)) return '費用行（運費、設計費等）不需包裝'
@@ -306,6 +349,7 @@ export function manualBlockedReason(sl: Pick<RawSoLine, 'mbp_part' | 'descriptio
  * - 'so_gone'：ERP 查無此行（結案被同步刪除 → 不出卡）
  * - null：仍在作用中（含 backInPool：正常區塊有卡時紀錄保留，之後可能回來）
  * 用途：MAX_ACTIVE_MANUAL 名額只算作用中的紀錄，已結束的紀錄不再佔位（否則 300 格會被完成的紀錄塞滿、畫面又清不掉）。
+ * D103：inc.qty＝總量（含已完成），這裡本來就是總量語意；D103 起工作台／待排池頁／AI 的剩餘量也改成同一個語意，不再互相矛盾。
  */
 export function manualRecordEnded(
   inc: Pick<ManualInclusion, 'soLineKey' | 'qty'>,
@@ -371,11 +415,14 @@ export function manualReconcileCandidates(input: {
  * 回讀到的有效紀錄 → 要恢復什麼：
  * - restore：這行已沒有有效紀錄（排程驗證之後被移出）→ 恢復排程驗證時那筆紀錄
  * - requantify：數量在排程驗證之後被改低、低於寫入後的已排量 → 恢復成排程驗證時的數量（CAS：數量仍是回讀到的值）
+ *   D103：手動量是總量（含已完成）→「已排量」＝已完成＋未完成擺放（completedByKey；省略＝0，與 D102 相同）
  * 有效紀錄換了一筆（被移出又重新加入）→ 新紀錄已提供供給，不動（新紀錄的數量是別人剛輸入的事實，不覆寫）。
  */
 export function planManualReconcile(
   candidates: readonly ManualReconcileCandidate[],
   active: readonly Pick<ManualInclusion, 'soLineKey' | 'inclusionId' | 'qty'>[],
+  /** D103：寫入後各行「已勾完成」擺放合計；省略＝0（D102 舊行為） */
+  completedByKey?: ReadonlyMap<string, number>,
 ): {
   restore: { soLineKey: string; inclusionId: number }[]
   requantify: { soLineKey: string; inclusionId: number; from: number; to: number }[]
@@ -386,7 +433,8 @@ export function planManualReconcile(
   for (const c of candidates) {
     const a = byKey.get(c.soLineKey)
     if (!a) { restore.push({ soLineKey: c.soLineKey, inclusionId: c.inclusionId }); continue }
-    if (a.inclusionId === c.inclusionId && a.qty + EPS < c.openQty && a.qty + EPS < c.validatedQty) {
+    const need = r3(c.openQty + (completedByKey?.get(c.soLineKey) ?? 0)) // D103：總量要蓋住已完成＋未完成
+    if (a.inclusionId === c.inclusionId && a.qty + EPS < need && a.qty + EPS < c.validatedQty) {
       requantify.push({ soLineKey: c.soLineKey, inclusionId: a.inclusionId, from: a.qty, to: c.validatedQty })
     }
   }

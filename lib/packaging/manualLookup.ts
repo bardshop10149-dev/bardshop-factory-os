@@ -61,6 +61,11 @@ export interface ManualLookupInput {
   moItemCodes: readonly string[]
   /** D73：這張 SO 各行的已銷貨分配（allocateSoldToLines）；null／省略＝銷貨同步未啟用 */
   sold?: ReadonlyMap<string, LineSold> | null
+  /**
+   * D103：各行已勾完成的擺放合計（soLineKey → 量；不分何時完成）。手動加入的數量是總量（含已完成），
+   * 加入前就有的完成量也會算進去 → 查詢結果帶出來給加入對話框提示。省略＝不帶（與 D103 前相同）。
+   */
+  completedByKey?: ReadonlyMap<string, number>
 }
 
 const up = (s: string | null | undefined) => String(s ?? '').trim().toUpperCase()
@@ -200,6 +205,8 @@ export function explainManualLines(input: ManualLookupInput): ManualLookupLine[]
       }
     }
 
+    // D103：已完成量（> 0 才帶鍵，其他行的輸出形狀與 D103 前相同）
+    const completedQty = Math.round((input.completedByKey?.get(soLineKey) ?? 0) * 1000) / 1000
     const state: ManualLookupLine['state'] = inPoolBlocks.length > 0 ? 'in_pool' : manual ? 'manual' : 'absent'
     const blockedReason = state === 'in_pool'
       ? `已在待排池（${inPoolBlocks.map((b) => b.title).join('、')}），不需手動加入`
@@ -224,6 +231,7 @@ export function explainManualLines(input: ManualLookupInput): ManualLookupLine[]
       blockedReason,
       suggestedRouteType,
       suggestedQty: orderQty > 0 ? orderQty : 0,
+      ...(completedQty > 1e-9 ? { completedQty } : {}),
     })
   }
   return out

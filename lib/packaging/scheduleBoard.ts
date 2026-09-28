@@ -101,6 +101,25 @@ function cardWithQty(base: PackagingCard, qty: number, readyQty: number, minutes
 }
 
 /**
+ * D103：手動行（supply.manualTotal 有值）的排定卡被修剪／扣完時的原因文字。
+ * 手動行的待排池量就是主管填的總量（含已完成），塔台報工不會動它 → 不能沿用「多半是塔台已報包裝完工」。
+ * 沒有銷貨時，修剪只會是「總量 < 已完成＋已排」（例：D103 前把數量當剩餘量改低過的舊紀錄），
+ * 告訴主管去待排池頁把總量改到至少多少（＝PATCH 下限 manualQtyFloorError 的 minQty，改到這個數就不再修剪）。
+ * 有 D73 部分銷貨時，減少多半是出貨；總量真的不夠時才另外點出來。非手動行不呼叫（旗標文字逐位不變）。
+ */
+export function manualShortfallWhy(manualTotal: number, pls: readonly Pick<Placement, 'qty' | 'completed'>[], partialSold: boolean): string {
+  let done = 0, open = 0
+  for (const p of pls) { if (p.completed) done += p.qty; else open += p.qty }
+  const floor = r3(done + open)
+  const short = manualTotal + EPS < floor
+  if (partialSold) return short ? `ARGO 已部分銷貨出貨，或手動總量 ${r3(manualTotal)} 少於已完成＋已排 ${floor}` : 'ARGO 已部分銷貨出貨'
+  // 沒有銷貨時修剪⇔總量 < 已完成＋已排（U＝已完成）；不是 short 只剩數量 0 的髒資料 → 只陳述數字、不下結論
+  return short
+    ? `手動總量 ${r3(manualTotal)} 少於已完成＋已排 ${floor}；要照排請到待排池頁把總量改到至少 ${floor}`
+    : `手動總量 ${r3(manualTotal)}，已完成＋已排 ${floor}`
+}
+
+/**
  * 分線輪（lines.md §3.9）輸入新增：
  * - lines：全部線（含停用）；lineRows：各線產能列（D71 總時數＝啟用線加總，D49 各線各自沿用）
  * - capacityRows（daily）仍要：週末開加班旗標一天一個、不分線（D63）
@@ -205,13 +224,21 @@ export function assembleBoard(input: {
           }
           if (al.trimmedQty > EPS) {
             // D73：底卡帶「部分已出貨」→ 待排池減少多半是 ARGO 已出貨
-            const why = base.flags.some((f) => f.code === 'partial_sold')
-              ? 'ARGO 已部分銷貨出貨，或塔台已報包裝完工'
-              : '可能塔台已報包裝完工或訂單／採購量變更'
+            const partial = base.flags.some((f) => f.code === 'partial_sold')
+            // D103：手動行另有原因文字（總量不夠已完成＋已排）；其他行照舊
+            const why = supply.manualTotal != null
+              ? manualShortfallWhy(supply.manualTotal, pls, partial)
+              : partial
+                ? 'ARGO 已部分銷貨出貨，或塔台已報包裝完工'
+                : '可能塔台已報包裝完工或訂單／採購量變更'
             flags.push({ code: 'trimmed', label: `待排池減少 ${al.trimmedQty}（${why}）`, level: 'info' })
           }
         } else if (supply.total <= EPS && supply.nonPlaceableQty > 0) {
           flags.push({ code: 'not_placeable_now', label: '目前只剩未寄出／待確認的量，不能排', level: 'warn' })
+        } else if (supply.manualTotal != null) {
+          // D103：手動行被扣完不是塔台報工造成的 → 講真正的原因與補救方法
+          const why = manualShortfallWhy(supply.manualTotal, pls, base.flags.some((f) => f.code === 'partial_sold'))
+          flags.push({ code: 'pool_consumed', label: `已由待排池扣完（${why}）`, level: 'info' })
         } else {
           flags.push({ code: 'pool_consumed', label: '已由待排池扣完（多半是塔台已報包裝完工）', level: 'info' })
         }

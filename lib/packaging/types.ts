@@ -173,6 +173,12 @@ export interface PackagingCard {
   flags: DangerFlag[]
   /** 出單表是否有這一行的示意圖（詳情彈窗再呼叫 sketches API 取網址） */
   hasSketch: boolean
+  /**
+   * D103：只有 D66 手動加入的 'mn' 卡才有＝手動總量 T（packaging_manual_inclusions.qty，這筆訂單的總量、含已完成）。
+   * qtyCard 可能被 D73 銷貨封頂而小於它；lineSupply 把它帶進 LineSupply.manualTotal，U 公式據此不把「總量改低」當成已反映的完成量。
+   * 其他區塊的卡沒有這個鍵（形狀與 D103 前相同）。
+   */
+  manualTotalQty?: number
 }
 
 export interface PoolBlock {

@@ -8,6 +8,7 @@
 // - 途程類型預設用查詢給的建議值（有常平採購＝常平、其他廠商採購＝委外、否則自製），用來估工時。
 // - 已在待排池、已手動加入、費用行、訂單量 0 的行不能勾（伺服器加入時還會再驗一次，不信任前端）。
 // 同檔另有：ManualEditDialog（改手動加入數量／途程／原因，PATCH）、ManualRemoveDialog（移出待排池，POST /manual/remove）。
+// D103（Snow 確認）：手動加入的數量＝這筆訂單的「總量」（含已完成），不是剩餘量；改數量對話框的欄位與預警都照這個語意。
 // 手動加入／移出是「供給」的事實輸入，不進 Undo；誤加可移出、誤移出可再加入。
 // D102：入口搬到待排池頁（components/packaging/pool/usePoolManual），工作台側欄不再開這三個對話框。
 //   寫入只要 packaging_admin，不再需要編輯鎖（Snow 確認；伺服器理由見 app/api/packaging/manual/route.ts 檔頭），
@@ -110,13 +111,31 @@ function stateBadge(l: ManualLookupLine, action?: React.ReactNode) {
     // 已全數完成的手動紀錄：待排池已無此卡 → 右鍵入口消失，改在這裡提供「移出」（D66 紀錄要有終點）
     return (
       <div className="text-[10px] text-violet-300">
-        手動・{l.manual.addedByName ?? l.manual.addedBy}・{clock(l.manual.addedAt)}（{fmtQty(l.manual.qty)}，
+        手動・{l.manual.addedByName ?? l.manual.addedBy}・{clock(l.manual.addedAt)}（總量 {fmtQty(l.manual.qty)}
+        {(l.completedQty ?? 0) > 0 && <>・已完成 {fmtQty(l.completedQty ?? 0)}</>}，
         {l.manualDone ? '已全數完成，待排池已無此卡；不再需要可移出' : '改數量／移出請用待排池頁「手動加入」區該卡的按鈕'}）
         {action}
       </div>
     )
   }
   return null
+}
+
+/**
+ * D103：加入前這一行就有已勾完成的量（正常區塊時期、或舊手動紀錄移出前完成的）→ 加入後會算進總量。
+ * 數量 ≤ 已完成 → 黃字提醒（不擋，伺服器加入也不設下限）：加入後這筆立刻算包完、待排池不出卡。
+ * 已完成 0 → 不顯示（總量＝還要包的量，沒有歧義）。
+ */
+export function ManualAddCompletedHint({ completedQty, qtyText }: { completedQty: number | undefined; qtyText: string }) {
+  const done = completedQty ?? 0
+  if (!(done > 0)) return null
+  const atOrBelow = isQtyText(qtyText) && Number(qtyText.trim()) <= done + 1e-9
+  return (
+    <div className={`text-[10px] ${atOrBelow ? 'text-amber-300' : 'text-slate-400'}`}>
+      此行已完成 {fmtQty(done)}（會算進總量）
+      {atOrBelow && <>；總量不大於已完成，加入後立刻算包完、不出卡。還要再包 N 請填 {fmtQty(done)}＋N</>}
+    </div>
+  )
 }
 
 /** D102：唯讀時 footer 的預設說明（加入不再需要編輯鎖，只看權限） */
@@ -356,6 +375,7 @@ export default function ManualAddDialog({ editable, onClose, onChanged, readOnly
                                 onChange={e => setForm(l.soLineKey, { qty: e.target.value, checked: editable ? true : f.checked })}
                                 className={`w-20 rounded border bg-slate-950 px-1 py-0.5 text-right tabular-nums text-slate-100 ${on && !isQtyText(f.qty) ? 'border-rose-500' : 'border-slate-700'}`} />
                               {over && <div className="text-[10px] text-amber-300">超過訂單量（單位可能不同，請確認）</div>}
+                              <ManualAddCompletedHint completedQty={l.completedQty} qtyText={f.qty} />
                             </>
                           ) : <span className="text-slate-600">—</span>}
                         </td>
@@ -401,11 +421,27 @@ export default function ManualAddDialog({ editable, onClose, onChanged, readOnly
 // 改手動加入數量／途程類型／原因（PATCH /api/packaging/manual）
 // ─────────────────────────────────────────────────────────────────────
 
-export function ManualEditDialog({ card, meta, placedQty, onClose, onChanged }: {
+/**
+ * D103 改總量的預警：與伺服器 manualPool.manualQtyFloorError 同樣兩段、同樣順序、同樣的比較式
+ * （前端不 import manualPool：它會把 classify、salesAlloc 等伺服器邏輯打包進瀏覽器）。
+ * completed＝總量 < 已完成；placed＝總量 < 已完成＋未完成擺放。floorQty＝最少要填多少。
+ */
+export function manualEditFloorWarning(qty: number, completedQty: number, placedQty: number): { kind: 'completed' | 'placed'; floorQty: number } | null {
+  if (qty + 1e-9 < completedQty) return { kind: 'completed', floorQty: Math.round(completedQty * 1000) / 1000 }
+  if (qty + 1e-9 < completedQty + placedQty) return { kind: 'placed', floorQty: Math.round((completedQty + placedQty) * 1000) / 1000 }
+  return null
+}
+
+export function ManualEditDialog({ card, meta, placedQty, completedQty = 0, onClose, onChanged }: {
   card: PackagingCard
   meta: ManualInclusionMeta
-  /** 目前已排出去的量（參考；伺服器以「未完成擺放合計」檢查，低於它回 qty_below_placed） */
+  /** 目前已排出去（未完成）的量（PoolManualLine.placedQty；伺服器同一個算法） */
   placedQty: number
+  /**
+   * D103：已勾完成的量（PoolManualLine.completedQty）。數量＝這筆訂單的總量（含已完成），
+   * 伺服器下限＝已完成＋未完成（manualPool.manualQtyFloorError）；省略＝0（D102 前的呼叫端）。
+   */
+  completedQty?: number
   /** @deprecated D102 起不需要編輯鎖，不再使用 */
   getLockToken?: () => string | null
   onClose: () => void
@@ -422,7 +458,8 @@ export function ManualEditDialog({ card, meta, placedQty, onClose, onChanged }: 
   const changedRoute = route !== meta.routeType
   const reasonTrim = reason.trim()
   const changedReason = (reasonTrim || null) !== (meta.reason ?? null)
-  const belowPlaced = qtyOk && Number(qty) < placedQty
+  // D103：伺服器只在數量有變時檢查下限，這裡也只在有變時提醒
+  const warn = changedQty ? manualEditFloorWarning(Number(qty), completedQty, placedQty) : null
   const canSave = !saving && qtyOk && (changedQty || changedRoute || changedReason)
 
   const save = async () => {
@@ -457,16 +494,26 @@ export function ManualEditDialog({ card, meta, placedQty, onClose, onChanged }: 
       <form className="space-y-2 text-xs" onSubmit={e => { e.preventDefault(); void save() }}>
         <div className="break-words text-slate-200">{card.itemName ?? '（無品名）'}</div>
         <div className="text-[11px] text-slate-400">
-          {meta.addedByName ?? meta.addedBy} 於 {clock(meta.addedAt)} 加入・目前 {fmtQty(meta.qty)}
+          {meta.addedByName ?? meta.addedBy} 於 {clock(meta.addedAt)} 加入・目前總量 {fmtQty(meta.qty)}
+          {completedQty > 0 && <>・已完成 {fmtQty(completedQty)}</>}
           {placedQty > 0 && <>・已排 {fmtQty(placedQty)}</>}
         </div>
-        <label className="flex items-center gap-2">
-          <span className="w-16 text-slate-400">數量</span>
+        <label className="flex flex-wrap items-center gap-2">
+          <span className="w-16 text-slate-400">總量</span>
           <input autoFocus value={qty} inputMode="decimal" onChange={e => setQty(e.target.value)}
+            aria-label="總量（含已完成）"
             className={`w-28 rounded border bg-slate-950 px-1.5 py-0.5 text-right tabular-nums text-slate-100 ${qtyOk ? 'border-slate-600' : 'border-rose-500'}`} />
+          <span className="text-[11px] text-slate-500">含已完成</span>
           {!qtyOk && <span className="text-[11px] text-rose-300">須大於 0、最多 3 位小數</span>}
-          {belowPlaced && <span className="text-[11px] text-orange-300">低於已排量，會被擋下（請先到排程工作台把排定卡拖回待排池）</span>}
+          {warn?.kind === 'completed' && <span className="text-[11px] text-orange-300">已完成 {fmtQty(completedQty)}，總量不能少於 {fmtQty(warn.floorQty)}，會被擋下</span>}
+          {warn?.kind === 'placed' && (completedQty > 0
+            ? <span className="text-[11px] text-orange-300">已完成 {fmtQty(completedQty)}＋已排 {fmtQty(placedQty)}，總量不能少於 {fmtQty(warn.floorQty)}，會被擋下（請先到排程工作台把排定卡拖回待排池）</span>
+            : <span className="text-[11px] text-orange-300">低於已排量，會被擋下（請先到排程工作台把排定卡拖回待排池）</span>)}
         </label>
+        <p className="text-[11px] text-slate-500">
+          總量＝這筆訂單要包的全部數量（含已完成），不是「還剩多少」。例：已完成 50、還要再包 30 → 填 80；
+          填成等於已完成＝這筆包完了，卡片會移到「已全數完成」。
+        </p>
         <label className="flex items-center gap-2">
           <span className="w-16 text-slate-400">途程類型</span>
           <select value={route} onChange={e => setRoute(e.target.value as ManualRouteType)}
@@ -527,9 +574,10 @@ export function ManualRemoveDialog({ card, meta, onClose, onChanged }: {
       </>}
     >
       <div className="space-y-2 text-xs">
-        <div className="break-words text-slate-200">{card.itemName ?? '（無品名）'}・{fmtQty(meta.qty)}</div>
+        {/* D103：手動加入的數量＝這筆訂單的總量（含已完成），標清楚免得讀成剩餘量 */}
+        <div className="break-words text-slate-200">{card.itemName ?? '（無品名）'}・總量 {fmtQty(meta.qty)}</div>
         <ul className="list-disc space-y-0.5 pl-4 text-[11px] text-slate-400">
-          <li>這一行會從「手動加入」區塊消失；紀錄保留，之後可以再加入。</li>
+          <li>這一行會從「手動加入」區塊消失；紀錄保留，之後可以再加入（已勾完成的量會算進再加入時填的總量）。</li>
           <li>還有未完成的排定卡時不能移出，請先到排程工作台把排定卡拖回待排池。已勾完成的卡不受影響。</li>
           <li>不進復原（Undo）。</li>
         </ul>

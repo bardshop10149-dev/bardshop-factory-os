@@ -424,6 +424,8 @@ export interface LineSupply {
   nonPlaceableQty: number
   /** 可排卡的每件分鐘（以 qtyCard 加權平均；全部未知為 null） */
   perUnit: number | null
+  /** D103：手動行（可排供給只有一張 'mn' 卡）的手動總量 T（含已完成）；其他行不帶這個鍵 */
+  manualTotal?: number
 }
 
 export type Readiness = 'ready' | 'pre' | 'pre_unknown'
@@ -1174,6 +1176,12 @@ export interface ManualLookupLine {
   suggestedRouteType: ManualRouteType
   /** 建議數量＝ERP 訂單量（D66「預設 ERP 訂單量可改」） */
   suggestedQty: number
+  /**
+   * D103：這一行「已勾完成」的擺放合計（不分何時完成：正常區塊時期、舊手動紀錄移出前的都算）。
+   * 手動加入的數量是總量（含已完成）→ 加入後這些量會算進總量；加入對話框據此提示、數量 ≤ 它時黃字提醒（不擋）。
+   * 0 時省略（舊回應也沒有）。
+   */
+  completedQty?: number
 }
 
 export type ManualLookupResponse =
@@ -1198,7 +1206,8 @@ export type ManualErrorCode =
   | 'already_manual'         // 已手動加入（未移出）
   | 'not_selectable'         // 費用行、訂單量 0
   | 'qty_invalid'
-  | 'qty_below_placed'       // 改數量低於已排出（未完成）的量
+  | 'qty_below_placed'       // 改數量低於已排出（未完成）的量；D103 起＝低於「已完成＋已排出（未完成）」
+  | 'qty_below_completed'    // D103：總量（含已完成）低於已完成量
   | 'manual_has_placements'  // 移出前還有未完成的排定卡（附 cardCount），請先放回待排池
   | 'too_many'               // 超過 MAX_MANUAL_ITEMS_PER_REQUEST 或 MAX_ACTIVE_MANUAL
   | 'migration_required'

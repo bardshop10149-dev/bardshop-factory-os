@@ -46,7 +46,13 @@ export async function reconcileManualAfterPlacementWrite(
   if (candidates.length === 0) return NONE
   try {
     const active = await loadActiveInclusionsByKeys(sb, candidates.map((c) => c.soLineKey))
-    const plan = planManualReconcile(candidates, active)
+    // D103：手動量是總量（含已完成）→ 要蓋住「已完成＋未完成擺放」。next 已含觸及行的全部擺放（含已完成），不必多查 DB
+    const keys = new Set(candidates.map((c) => c.soLineKey))
+    const completedByKey = new Map<string, number>()
+    for (const p of input.res.next.values()) {
+      if (keys.has(p.soLineKey) && p.completed) completedByKey.set(p.soLineKey, Math.round(((completedByKey.get(p.soLineKey) ?? 0) + p.qty) * 1000) / 1000)
+    }
+    const plan = planManualReconcile(candidates, active, completedByKey)
     if (plan.restore.length === 0 && plan.requantify.length === 0) return NONE
     const nowIso = new Date().toISOString()
     const restored: string[] = []

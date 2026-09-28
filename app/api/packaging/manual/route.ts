@@ -17,7 +17,7 @@ import { isLineKey, isQty } from '@/lib/packaging/scheduleOps'
 import { explainManualLines } from '@/lib/packaging/manualLookup'
 import { allocateSoldToLines } from '@/lib/packaging/salesAlloc'
 import { loadSalesForSos } from '@/lib/packaging/salesSync'
-import { manualBlockedReason, manualMetaOf, manualRecordEnded, normalPoolLineKeys, soLineNoStr } from '@/lib/packaging/manualPool'
+import { manualBlockedReason, manualMetaOf, manualQtyFloorError, manualRecordEnded, normalPoolLineKeys, soLineNoStr } from '@/lib/packaging/manualPool'
 import { invalidateManualCache } from '@/lib/packaging/manualCache'
 import {
   insertInclusion,
@@ -46,10 +46,15 @@ export const maxDuration = 60
 // GET  ?so=SO260924020（讀）→ ManualLookupResponse：該 SO 全部品項行＋逐行「不在待排池的原因」
 //      （in_pool／manual_active／non_physical／zero_qty／non_schedule_doc／tower_closed／packaged_done／sheet_stale／waiting_source／unknown），
 //      以及建議途程類型與建議數量（廠商代碼不外露）。so 白名單 ^(SO|SOB|RO)[A-Z0-9-]{4,30}$（轉大寫）。
+//      D103：各行另帶 completedQty（已勾完成擺放合計，不分何時完成；0 省略）——加入的數量是總量（含已完成），
+//      加入前就有的完成量（正常區塊時期、舊紀錄移出前）也算進去，加入對話框據此提示。
 // POST ManualAddRequest { items[1..50] }（packaging_admin）→ ManualMutationResponse
 //      逐行驗證（伺服器重查 erp_so_lines，不信任前端），不合格的列進 skipped、其餘照常加入。
+//      D103：加入不設下限（數量 ≤ 已完成＝加入即算包完、不出卡，可移出；畫面黃字提醒、不擋）。
 // PATCH ManualUpdateRequest { soLineKey, qty?, routeType?, reason? }（packaging_admin）→ ManualMutationResponse
 //      qty 不可低於該行未完成擺放合計（qty_below_placed；解讀：手動輸入的量直接擋下，比悄悄修剪已排的卡清楚）。
+//      D103（Snow 確認）：qty＝這筆訂單的總量（含已完成），不是剩餘量 → 下限＝已完成＋未完成擺放：
+//      低於已完成 → qty_below_completed；低於已完成＋未完成 → qty_below_placed；剛好等於已完成 → 允許（剩 0、進已全數完成）。
 // 移出：POST /api/packaging/manual/remove（軟刪除）。
 // 三者都寫 op_log（kind 'manual'）、不進 Undo（同產能：是「供給」的事實輸入；誤加可移出、誤移出可再加）。
 // 資料一律用 EIP 鏡像（erp_so_lines、erp_pj_sync、erp_mo_lines、sara_*、daily_order_sheets），不查 ARGO；
@@ -59,7 +64,7 @@ export const maxDuration = 60
 //   為什麼可以拿掉：手動加入改的是「供給」（待排池有哪些卡、量多少），不是「排程」（哪張卡排哪天）。
 //   編輯鎖保護的是排程不被兩個人同時拖亂；供給本來就會被 ERP／塔台同步隨時改變，工作台每次讀取都用
 //   當下供給重新分配（scheduleAllocate），所以多一個人改供給不會讓排程壞掉。真正要守的「數量不超排」仍在伺服器：
-//   PATCH 不可低於未完成擺放（qty_below_placed）、移出前不可有未完成排定卡（manual_has_placements）、
+//   PATCH 不可低於未完成擺放（qty_below_placed；D103 起＝已完成＋未完成）、移出前不可有未完成排定卡（manual_has_placements）、
 //   排程寫入（placements）照舊驗供給。仍要求 packaging_admin（guardPackaging('write')）、requireJson（擋 CSRF）、noStore。
 //   沒有鎖就沒有序列化：「先讀已排量、後寫」會被工作台同時寫入的擺放穿過 → 改量／移出都「寫完再讀一次」，撞到就撤回；
 //   工作台那邊也寫後回讀（manualReconcile.ts），兩邊成對才把窗口關掉（D102 驗證修正，見 manualPool.ts 說明）。
@@ -111,10 +116,16 @@ export async function GET(request: NextRequest) {
     const poolCards = pool.blocks.flatMap((b) => b.cards).filter((c) => c.soLineKey.toUpperCase().startsWith(`${so}-`))
     const manual = new Map<string, ManualInclusionMeta>(active.map((i) => [i.soLineKey, manualMetaOf(i)]))
     // 已全數完成的手動紀錄另外標出（待排池已無卡，畫面才能提示改由查詢結果移出）
-    const placements = active.length > 0 ? await loadPlacementsByLines(sb, active.map((i) => i.soLineKey)) : []
+    // D103：手動數量是總量（含已完成），加入前就有的完成量（正常區塊時期、舊紀錄移出前）也會算進去
+    //   → 這張 SO 全部行的擺放一次讀出（同一個查詢，原本只讀有效紀錄的行），各行已完成量帶給加入對話框提示。
+    const lineKeys = new Set(active.map((i) => i.soLineKey))
+    for (const sl of data.soLines) { const n = soLineNoStr(sl.line_no); if (n) lineKeys.add(`${so}-${n}`) }
+    const placements = lineKeys.size > 0 ? await loadPlacementsByLines(sb, [...lineKeys]) : []
     const manualDone = new Set(active.filter((i) => manualRecordEnded(i, placements, true) === 'done').map((i) => i.soLineKey))
+    const completedByKey = new Map<string, number>()
+    for (const p of placements) if (p.completed) completedByKey.set(p.soLineKey, (completedByKey.get(p.soLineKey) ?? 0) + p.qty)
     const sold = soSales ? allocateSoldToLines(data.soLines, soSales).byLine : null
-    const lines = explainManualLines({ so, today, poolCards, manual, manualDone, ...data, sold })
+    const lines = explainManualLines({ so, today, poolCards, manual, manualDone, ...data, sold, completedByKey })
     return noStore<ManualLookupResponse>({
       success: true,
       so,
@@ -257,12 +268,23 @@ export async function PATCH(request: NextRequest) {
     const sb = getSupabaseAdminClient()
     const cur = await loadActiveInclusionByKey(sb, key)
     if (!cur) return fail(404, { code: 'not_found', error: '找不到有效的手動加入紀錄（可能已移出）' })
-    if (patch.qty !== undefined && patch.qty < cur.qty) {
-      const placed = (await loadPlacementsByLines(sb, [key])).filter((p) => !p.completed).reduce((s, p) => s + p.qty, 0)
-      if (patch.qty + 1e-9 < placed) {
-        // D102：改量在待排池頁做、把排定卡拖回待排池要在排程工作台做 → 訊息講清楚去哪裡處理
-        return fail(422, { code: 'qty_below_placed', error: `已排出 ${Math.round(placed * 1000) / 1000}（未完成），數量不可低於已排量；請先到排程工作台把排定卡拖回待排池` })
-      }
+    // D103：這一行的已完成／未完成擺放合計（寫前檢查與寫後回讀共用）
+    const sums = async () => {
+      let placed = 0, completed = 0
+      for (const p of await loadPlacementsByLines(sb, [key])) { if (p.completed) completed += p.qty; else placed += p.qty }
+      return { placed: Math.round(placed * 1000) / 1000, completed: Math.round(completed * 1000) / 1000 }
+    }
+    // D103：數量＝總量（含已完成）→ 下限＝已完成＋未完成擺放。改低一定查；改高也查（多一次單行查詢）：
+    //   只有「舊紀錄已低於下限」會被擋（例：D103 前把數量當剩餘量改低過），訊息告訴主管最少要填多少。
+    //   沒有銷貨（或總量 ≤ 訂單量）時，過了下限就保證不修剪已排的卡。
+    //   已知限制（D103 前就有，不是回歸）：D73 部分銷貨且總量 > 訂單量時，salesAlloc 改用比例封頂
+    //   （可排＝總量 × 未出貨 ÷ 訂單量），改低總量會把可排壓到低於未完成擺放 → 過了下限仍可能修剪已排的卡。
+    //   要完全擋住得用新總量重建卡片、跑 allocateLine 再比；很少見（單位不同的單才會總量 > 訂單量），先列限制（lines.md §6.3）。
+    if (patch.qty !== undefined && patch.qty !== cur.qty) {
+      const s = await sums()
+      const floor = manualQtyFloorError(patch.qty, s.completed, s.placed)
+      // D102：改量在待排池頁做、把排定卡拖回待排池要在排程工作台做 → 訊息講清楚去哪裡處理
+      if (floor) return fail(422, { code: floor.code, error: floor.error })
     }
     const updated = await updateInclusion(sb, cur.inclusionId, patch, actor, nowIso)
     if (!updated) return fail(404, { code: 'not_found', error: '找不到有效的手動加入紀錄（可能已移出）' })
@@ -270,9 +292,11 @@ export async function PATCH(request: NextRequest) {
     // D102 寫後回讀（同 manual/remove）：改低數量時，工作台（持鎖者）可能正好在「上面讀已排量」與「寫入」之間又排了卡
     //   （它用舊數量驗證供給 → 通過）。寫完再加總一次未完成擺放：超過新數量 → 把這次的修改改回（CAS：updated_at 仍是這次寫的值，
     //   免得蓋掉別人剛做的修改），回 422。工作台那邊也會寫後回讀（manualReconcile.ts），兩邊至少一邊看得到另一邊。
+    //   D103：比的是「已完成＋未完成」（總量語意），與寫前檢查同一個函式。
     if (patch.qty !== undefined && patch.qty < cur.qty) {
-      const placedAfter = (await loadPlacementsByLines(sb, [key])).filter((p) => !p.completed).reduce((s, p) => s + p.qty, 0)
-      if (patch.qty + 1e-9 < placedAfter) {
+      const after = await sums()
+      const floorAfter = manualQtyFloorError(patch.qty, after.completed, after.placed, { concurrent: true })
+      if (floorAfter) {
         const back = await restoreInclusionFields(sb, cur.inclusionId, { updatedAt: updated.updatedAt }, {
           qty: cur.qty,
           ...(patch.route_type !== undefined ? { route_type: cur.routeType } : {}),
@@ -280,7 +304,7 @@ export async function PATCH(request: NextRequest) {
         }, actor, new Date().toISOString())
         invalidateManualCache()
         if (!back) console.error(`[packaging/manual PATCH] ${key} 改回數量時紀錄已被改動（CAS 未命中）`)
-        return fail(422, { code: 'qty_below_placed', error: `排程工作台剛好在排這個品項，已排出 ${Math.round(placedAfter * 1000) / 1000}（未完成），數量不可低於已排量，這次沒有修改；請先到排程工作台把排定卡拖回待排池` })
+        return fail(422, { code: floorAfter.code, error: floorAfter.error })
       }
     }
     const opId = await insertOpLog(sb, {

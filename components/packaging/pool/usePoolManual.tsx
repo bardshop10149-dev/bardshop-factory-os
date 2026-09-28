@@ -66,11 +66,13 @@ export function usePoolManual(opts: {
   if (dialog?.t === 'add') {
     dialogs = <ManualAddDialog editable={canEdit} readOnlyNote={READONLY_NOTE} onClose={close} onChanged={changed} />
   } else if (dialog?.t === 'edit') {
+    // D103：數量＝總量（含已完成）→ 對話框要知道已完成多少，預警才和伺服器下限（已完成＋未完成）一致
     dialogs = (
       <ManualEditDialog
         card={dialog.card}
         meta={dialog.line.meta}
         placedQty={dialog.line.placedQty}
+        completedQty={dialog.line.completedQty}
         onClose={close}
         onChanged={changed}
       />
