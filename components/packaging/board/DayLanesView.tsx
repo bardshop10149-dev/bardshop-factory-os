@@ -105,7 +105,8 @@ function buildLaneModels(day: BoardDay): LaneModel[] {
   return lanes.map(lane => {
     const cards = byLane.get(lane.lineId) ?? []
     const scale = laneScale(lane.capacity)
-    const layouts = layoutLane(cards.map(c => ({ placementId: c.placementId, minutes: c.minutes })), scale)
+    // D108：已完成的卡不推進時間尺（只佔最小高度），時間尺才會和「已排工時」對得上
+    const layouts = layoutLane(cards.map(c => ({ placementId: c.placementId, minutes: c.completed ? 0 : c.minutes })), scale)
     const entries = cards.map((bc, i) => ({ bc, layout: layouts[i] }))
     const last = layouts[layouts.length - 1]
     return { lane, scale, entries, bottomPx: last ? last.topPx + last.heightPx : 0 }

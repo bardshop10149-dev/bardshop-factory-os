@@ -384,14 +384,16 @@ export function assembleBoard(input: {
     const cards = dayCards.get(d)!.sort(dayCmp)
     // D71：整天產能＝各啟用線加總；D49 各線各自沿用
     const capacity = resolveDayCapacity(d, { daily: capRows, lineRows, lines })
-    const usedMinutes = round1(cards.reduce((s, c) => s + (c.minutes ?? 0), 0))
-    const openMinutes = round1(cards.reduce((s, c) => s + (c.completed ? 0 : c.minutes ?? 0), 0))
+    // D108（Snow 2026-09-28）：勾完成的卡不佔當天工時——主管常用「勾完成」清掉早已做完但塔台／銷貨沒跟上的卡，
+    // 若仍計入，產能會被不存在的工作佔住。usedMinutes 與 openMinutes 因此同值（保留兩欄讓前端／AI 不必改契約）。
+    const usedMinutes = round1(cards.reduce((s, c) => s + (c.completed ? 0 : c.minutes ?? 0), 0))
+    const openMinutes = usedMinutes
     // D67／D72：每條啟用線一個 lane，只帶彙總；卡片由前端以 laneId 從 day.cards 篩出（順序沿用 §3.6 排序）
     const lanes: BoardLane[] = activeLines.map((l) => {
       const lc = capacity.lines?.find((x) => x.lineId === l.id)
         ?? { date: d, lineId: l.id, kind: isWeekend(d) ? 'weekend' : 'weekday', regularMinutes: null, overtimeMinutes: 0, source: 'unset', inheritedFrom: null }
       const laneCards = cards.filter((c) => c.laneId === l.id)
-      const used = round1(laneCards.reduce((s, c) => s + (c.minutes ?? 0), 0))
+      const used = round1(laneCards.reduce((s, c) => s + (c.completed ? 0 : c.minutes ?? 0), 0))  // D108 已完成不佔線工時
       return {
         lineId: l.id,
         code: l.code,
@@ -400,7 +402,7 @@ export function assembleBoard(input: {
         capacity: lc,
         cardCount: laneCards.length,
         usedMinutes: used,
-        openMinutes: round1(laneCards.reduce((s, c) => s + (c.completed ? 0 : c.minutes ?? 0), 0)),
+        openMinutes: used,
         unknownMinutesCards: laneCards.filter((c) => c.minutes == null).length,
         load: dayLoad(used, lc),
         remainingMinutes: laneRemaining(lc, used),

@@ -630,8 +630,9 @@ export interface BoardLane {
    * 前端以 day.cards.filter(c => c.laneId === lane.lineId) 取得，順序沿用 day.cards 的排序（D74 線內順序）；日檢視依此順序沿時間往下疊。
    */
   cardCount: number
-  /** 已排工時（分鐘，含已完成、不含工時未知） */
+  /** 已排工時（分鐘，**不含已完成**（D108：勾完成的卡不佔產能）、不含工時未知） */
   usedMinutes: number
+  /** 與 usedMinutes 同值（D108 起已完成一律不計；保留欄位以免前端／AI 契約變動） */
   openMinutes: number
   unknownMinutesCards: number
   load: DayLoad
@@ -657,9 +658,9 @@ export interface BoardDay {
    * （延誤 → 預排到期 → 打樣 → 交期 → 建立時間）；其後依 sortIndex 由小到大。前端依 laneId 篩出即為各線順序。
    */
   cards: BoardCard[]
-  /** 已排工時（分鐘，含已完成、不含工時未知的卡） */
+  /** 已排工時（分鐘，**不含已完成**（D108）、不含工時未知的卡） */
   usedMinutes: number
-  /** 其中未完成的部分 */
+  /** 與 usedMinutes 同值（保留欄位） */
   openMinutes: number
   unknownMinutesCards: number
   load: DayLoad

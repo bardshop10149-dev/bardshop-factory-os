@@ -361,7 +361,7 @@ function tempCardFromPool(
   }
 }
 
-/** 各線負荷（同伺服器 assembleBoard：已排含已完成、不含工時未知） */
+/** 各線負荷（同伺服器 assembleBoard：D108 已完成不佔工時、不含工時未知） */
 function recomputeLane(lane: BoardLane, cards: BoardCard[]): BoardLane {
   let used = 0
   let open = 0
@@ -371,8 +371,9 @@ function recomputeLane(lane: BoardLane, cards: BoardCard[]): BoardLane {
     if (c.laneId !== lane.lineId) continue
     count++
     if (c.minutes == null) { unknown++; continue }
+    if (c.completed) continue  // D108：勾完成的卡不佔工時
     used += c.minutes
-    if (!c.completed) open += c.minutes
+    open += c.minutes
   }
   used = Math.round(used * 10) / 10
   return {
@@ -392,8 +393,9 @@ function recomputeDay(day: BoardDay, cards: BoardCard[]): BoardDay {
   let unknown = 0
   for (const c of cards) {
     if (c.minutes == null) { unknown++; continue }
+    if (c.completed) continue  // D108：勾完成的卡不佔工時
     used += c.minutes
-    if (!c.completed) open += c.minutes
+    open += c.minutes
   }
   return {
     ...day,
