@@ -65,7 +65,7 @@ export interface PoolManualProps {
 
 export default function PoolSidebar({
   blocks, cardMeta, today, rollTarget, canDrag, editable, dragKind, onOpenOrder, onPoolAction, children, manual,
-  showManualTag, manualManageHref,
+  showManualTag, manualManageHref, onCloseLine,
 }: {
   blocks: PoolBlockData[]
   cardMeta: Record<string, PoolCardMeta>
@@ -86,6 +86,8 @@ export default function PoolSidebar({
   showManualTag?: boolean
   /** D102：手動加入的管理頁（工作台傳 '/packaging/pool'；AI 模擬區不傳＝不提示） */
   manualManageHref?: string
+  /** D104：右鍵「結案」（不需編輯鎖，只需 packaging_admin；工作台在 me.canEdit 時傳；AI 模擬區由該區自己決定） */
+  onCloseLine?: (card: PackagingCard) => void
 }) {
   const [keyword, setKeyword] = useState('')
   const deferred = useDeferredValue(keyword)
@@ -248,6 +250,20 @@ export default function PoolSidebar({
                   改數量／移出：到待排池頁 ↗
                   <span className="block text-[10px] leading-snug text-slate-500">新分頁開啟；改完回這裡按「重新整理」</span>
                 </Link>
+              </div>
+            )}
+            {onCloseLine && (
+              <div className="border-t border-slate-800">
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => { onCloseLine(menu.card); setMenu(null) }}
+                  title="整個 SO 品項行永久不再進待排池；同行未完成的排定卡一併放回；可在已結案清單復原"
+                  className="block w-full px-3 py-1.5 text-left text-rose-300 hover:bg-slate-800"
+                >
+                  結案（不再拉回待排池）
+                  <span className="block text-[10px] leading-snug text-slate-500">已完工但漏銷貨／沒改交期時用；不需編輯權</span>
+                </button>
               </div>
             )}
             <MenuItem label="訂單詳情" onClick={() => { onOpenOrder(menu.card.so); setMenu(null) }} />

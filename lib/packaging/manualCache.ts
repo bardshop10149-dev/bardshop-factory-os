@@ -4,7 +4,11 @@
 // D102 GET /api/packaging/pool（待排池頁＝可排卡片的唯一控制台：手動加入的加入／改數量／移出都在那一頁，getPoolPageManual）。
 // （舊規格 lines.md §6.4「P0 頁不加手動區塊」已由 D102 推翻；'mn' 區塊在待排池頁由 ManualPoolSection 自己畫，不經過 PoolBlock.tsx。）
 //
-// 快取：以「待排池 blocks 物件（WeakMap）＋有效紀錄指紋（筆數＋最大 updated_at）」為鍵、最長 120 秒；寫入 API 成功後清掉。
+// 快取：以「待排池 blocks 物件（WeakMap）＋有效紀錄指紋（筆數＋最大 updated_at）＋結案指紋」為鍵、最長 120 秒；寫入 API 成功後清掉。
+// D104 結案：併入手動區塊後，再把「未復原的結案行」從所有區塊（含 'mn'）拿掉（closures.ts applyClosuresToPool）。
+//   為什麼在這一層而不是 pool.ts／classify.ts：待排池本體有 120 秒讀取快取、寫入驗證吃 10 分鐘舊資料；這一層每次讀都
+//   重新查（一個小查詢），結案後下一次讀取就消失、寫入驗證也立刻擋下。結案表未建（migration 20260928d 未套用）→ 不排除，
+//   在 notes 最前面說明。
 // 為什麼要讓併入後的 pool 物件在內容不變時「同一個參考」：scheduleBoard.poolDigest 以 blocks 陣列做 WeakMap 記憶，
 // 每次都產生新陣列就得每 60 秒重算一次整包待排池的 sha1（數百 KB），D52 的 unchanged 省流量也會失效。
 
@@ -20,6 +24,8 @@ import {
   type PoolManualSection,
 } from '@/lib/packaging/manualPool'
 import { loadActiveInclusions, loadSoLinesForSos, manualFingerprint } from '@/lib/packaging/manualDb'
+import { CLOSURES_MISSING_NOTE, applyClosuresToPool, closedKeySet } from '@/lib/packaging/closures'
+import { loadActiveClosures } from '@/lib/packaging/closuresDb'
 import { loadSalesForSos } from '@/lib/packaging/salesSync'
 import { loadPlacementsByLines, type SupabaseAdmin } from '@/lib/packaging/scheduleDb'
 
@@ -34,6 +40,8 @@ export interface ManualMerged {
   meta: Record<string, ManualInclusionMeta>
   backInPoolKeys: ReadonlySet<string>
   skipped: { soGone: number; backInPool: number; soldOut: number }
+  /** D104：未復原的結案行（一律大寫）；結案表未建時為空集合 */
+  closedKeys: ReadonlySet<string>
 }
 
 let stdTables: { at: number; data: StdTimeTables } | null = null
@@ -58,17 +66,20 @@ export function invalidateManualCache(): void {
  * 表不存在（migration 未套用）會丟 ScheduleDbError（pgCode PGRST205／42P01），由呼叫端轉成 migration_required 訊息。
  */
 export async function getManualMergedPool(sb: SupabaseAdmin, pool: PoolOk): Promise<ManualMerged> {
-  const fp = `${generation}|${await manualFingerprint(sb)}`
+  const [manualFp, closed] = await Promise.all([manualFingerprint(sb), loadActiveClosures(sb)])
+  const fp = `${generation}|${manualFp}|c:${closed.fingerprint}`
   const hit = memo.get(pool.blocks)
-  // 回傳時換成這次 pool 的其他欄位（cached 等），blocks 陣列沿用同一個參考
-  if (hit && hit.fp === fp && Date.now() - hit.at < MANUAL_CACHE_MAX_AGE_MS) return { ...hit.value, pool: { ...pool, blocks: hit.value.pool.blocks } }
+  // 回傳時換成這次 pool 的其他欄位（cached 等），blocks 陣列沿用同一個參考；excluded／notes 是這一層改過的（D104），也沿用
+  if (hit && hit.fp === fp && Date.now() - hit.at < MANUAL_CACHE_MAX_AGE_MS) {
+    return { ...hit.value, pool: { ...pool, blocks: hit.value.pool.blocks, excluded: hit.value.pool.excluded, notes: hit.value.pool.notes } }
+  }
 
   const inclusions = await loadActiveInclusions(sb)
   let value: ManualMerged
   if (inclusions.length === 0) {
     // 沒有手動紀錄：仍放一個空的 'mn' 區塊，畫面可固定顯示「手動加入」與「＋加入訂單」
     const built = buildManualBlock({ inclusions: [], soLines: [], normalLineKeys: new Set(), estimate: () => { throw new Error('unused') }, today: pool.today })
-    value = { pool: mergeManualIntoPool(pool, built.block), meta: {}, backInPoolKeys: new Set(), skipped: built.skipped }
+    value = { pool: mergeManualIntoPool(pool, built.block), meta: {}, backInPoolKeys: new Set(), skipped: built.skipped, closedKeys: new Set() }
   } else {
     const [soLines, tables, soSales] = await Promise.all([
       loadSoLinesForSos(sb, inclusions.map((i) => i.so)),
@@ -78,10 +89,28 @@ export async function getManualMergedPool(sb: SupabaseAdmin, pool: PoolOk): Prom
     ])
     const estimate: WorkEstimator = (input) => computeStdTime(input, tables).work
     const built = buildManualBlock({ inclusions, soLines, normalLineKeys: normalPoolLineKeys(pool), estimate, today: pool.today, soSales })
-    value = { pool: mergeManualIntoPool(pool, built.block), meta: built.meta, backInPoolKeys: built.backInPoolKeys, skipped: built.skipped }
+    value = { pool: mergeManualIntoPool(pool, built.block), meta: built.meta, backInPoolKeys: built.backInPoolKeys, skipped: built.skipped, closedKeys: new Set() }
   }
+  value = applyClosures(value, closed)
   memo.set(pool.blocks, { fp, at: Date.now(), value })
   return value
+}
+
+/**
+ * D104：把未復原的結案行從併好的待排池拿掉（含 'mn'）；meta 只留還有出卡的行。
+ * 結案表未建 → 不排除，notes 最前面加說明（同 D73 銷貨鏡像未啟用的做法）。
+ * 沒有任何命中時 applyClosuresToPool 回同一個 pool 物件（blocks 參考不變 → poolDigest 不必重算）。
+ */
+function applyClosures(value: ManualMerged, closed: Awaited<ReturnType<typeof loadActiveClosures>>): ManualMerged {
+  if (!closed.available) {
+    return { ...value, pool: { ...value.pool, notes: [CLOSURES_MISSING_NOTE, ...value.pool.notes] } }
+  }
+  const closedKeys = closedKeySet(closed.closures)
+  const applied = applyClosuresToPool(value.pool, closedKeys)
+  if (applied.removedKeys.size === 0) return { ...value, closedKeys }
+  const meta: Record<string, ManualInclusionMeta> = {}
+  for (const [k, m] of Object.entries(value.meta)) if (!applied.removedKeys.has(k.toUpperCase())) meta[k] = m
+  return { ...value, pool: applied.pool, meta, closedKeys }
 }
 
 /**

@@ -489,7 +489,7 @@ export async function verifyAndTouchLock(
 // 操作紀錄、指紋
 // ─────────────────────────────────────────────────────────────────────
 
-export type OpLogKind = 'placements' | 'complete' | 'capacity' | 'version_create' | 'version_restore' | 'lock' | 'lines' | 'manual'
+export type OpLogKind = 'placements' | 'complete' | 'capacity' | 'version_create' | 'version_restore' | 'lock' | 'lines' | 'manual' | 'closure'
 
 /** 寫入成功後記一列；失敗只 console.error，不影響回應（規格 §3.8） */
 export async function insertOpLog(

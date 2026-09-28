@@ -26,7 +26,7 @@ import { LOCK_REASON_LABEL, SIM_SOURCE_LABEL } from './simText'
 
 export default function SimCardDetail({
   bc, state, today, lines, editable, busy, onClose, onOpenOrder, onToggleCardLock, onToggleOrderLock, onSubmitMinutes,
-  laneOrder, focusMinutes = false, minutesReadonlyHint,
+  laneOrder, focusMinutes = false, minutesReadonlyHint, onCloseCase, closeCaseHint,
 }: {
   /** 未加工的原始卡 */
   bc: BoardCard
@@ -48,6 +48,10 @@ export default function SimCardDetail({
   focusMinutes?: boolean
   /** D100：工時不能改的原因（null＝可以改）；省略時依 editable／鎖定推 */
   minutesReadonlyHint?: string | null
+  /** D107：對這一行（SO-項次）結案（開確認對話框）；不傳＝不顯示 */
+  onCloseCase?: () => void
+  /** D107：不能結案的原因（null＝可以）；有 onCloseCase 時才看 */
+  closeCaseHint?: string | null
 }) {
   const card = bc.card
   const overdue = card.dueDate != null && card.dueDate < today
@@ -139,6 +143,18 @@ export default function SimCardDetail({
             </div>
             {lockedLine && <div className="text-[11px] text-slate-500">這條線整條被鎖：到工具列的「鎖定」清單解除。</div>}
             {!editable && <div className="text-[11px] text-slate-500">唯讀檢視：只有模擬區的主人可以改鎖定。</div>}
+          </>
+        )}
+
+        {onCloseCase && !bc.completed && (
+          // D107：結案是正式區的事實（這一行永久不再拉回待排池；正式區與所有模擬區的卡一起移除），不走模擬區 undo
+          <>
+            <div className="my-1 border-t border-slate-800" />
+            <div className="text-[11px] font-semibold text-slate-400">結案（D104：已完工卻漏銷貨／沒改交期、永遠排不掉的卡）</div>
+            <div className="flex flex-wrap items-center gap-2 pt-1">
+              <Btn tone="danger" onClick={onCloseCase} disabled={busy || closeCaseHint != null} title={closeCaseHint ?? undefined}>結案（不再拉回待排池）…</Btn>
+              <span className="text-[11px] text-slate-500">{closeCaseHint ?? '整行 SO-項次一起結案；「退回上一步」退不回，復原要到「已結案」清單'}</span>
+            </div>
           </>
         )}
 

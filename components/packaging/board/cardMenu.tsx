@@ -23,6 +23,11 @@ export interface CardMenuHandlers {
   moveLines?: readonly { id: number; name: string }[]
   /** D69 調整工時（開卡片詳情；已完成的卡也可以改，記錄實際花的時間） */
   onEditMinutes?: (bc: BoardCard) => void
+  /**
+   * D104 結案（整個 SO 品項行永久不再進待排池；這張與同行的未完成排定卡一併放回）。
+   * 不需編輯鎖（結案是單據事實）→ 不看 editable，只看有沒有給（BoardLayout 只在 me.canEdit 時給）。
+   */
+  onCloseLine?: (bc: BoardCard) => void
 }
 
 export interface MenuItem {
@@ -69,6 +74,10 @@ export function cardMenuItems(bc: BoardCard, opts: {
     }
     if (handlers.onEditMinutes && (!consumed || done)) items.push({ label: '調整工時…', onClick: () => handlers.onEditMinutes!(bc) })
     if (!done) items.push({ label: '放回待排池', onClick: () => handlers.onUnplace(bc), danger: true })
+  }
+  // D104：結案不需編輯鎖（唯讀持鎖狀態也能按）；已完成的卡不提供（完成量已計入，結掉整行沒有意義）
+  if (handlers?.onCloseLine && !done) {
+    items.push({ label: '結案（不再拉回待排池）', onClick: () => handlers.onCloseLine!(bc), danger: true, hint: '整個 SO 品項行永久不再進待排池；同行未完成的排定卡一併放回' })
   }
   items.push({ label: '訂單詳情', onClick: () => onOpenOrder(bc.card.so) })
   return items

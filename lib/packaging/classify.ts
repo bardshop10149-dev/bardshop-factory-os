@@ -764,7 +764,7 @@ export function classifyPool(raw: PoolRawData, estimate: WorkEstimator): Classif
   const cal = makeCal(today)
   const stats: Record<string, number> = {}
   const bump = (k: string, n = 1) => { stats[k] = (stats[k] ?? 0) + n }
-  const excluded: PoolExcluded = { nonPhysical: 0, closedSo: 0, packagedDone: 0, notInPool: 0, materialPurchase: 0, poExceedsSo: 0, saraClosedOrAbsent: 0, soldOut: 0 }
+  const excluded: PoolExcluded = { nonPhysical: 0, closedSo: 0, packagedDone: 0, notInPool: 0, materialPurchase: 0, poExceedsSo: 0, saraClosedOrAbsent: 0, soldOut: 0, closed: 0 }
   const nonPhysicalKeys = new Set<string>()
 
   // ── 索引：SO 行 ──

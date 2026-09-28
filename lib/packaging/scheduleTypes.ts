@@ -1142,6 +1142,7 @@ export type ManualAbsenceCode =
   | 'packaged_done'      // D45 塔台包裝站已報完工
   | 'sheet_stale'        // D44 發單超過 30 天仍未上塔台
   | 'sold_out'           // D73 ARGO 已全數銷貨（出貨）：不可勾選（加入後也會被排除）
+  | 'closed'             // D104 主管已結案（packaging_closures 未復原）：不可勾選（加入後也會被排除；要復原請到已結案清單）
   | 'waiting_source'     // 有採購／製令來源但尚未達進池條件（常平未寄且不緊張、委外未到交期、前站未開工…）
   | 'unknown'            // 以上皆非（可能尚未發單、資料未同步）
 
@@ -1263,6 +1264,95 @@ export type ManualMutationResponse =
       lock?: LockState
     }
   | { success: false; error: string; code: ManualErrorCode; cardCount?: number; lock?: LockState }
+
+// ─────────────────────────────────────────────────────────────────────
+// D104 結案（POST／GET /api/packaging/closures，lines.md 第十四章）
+// ─────────────────────────────────────────────────────────────────────
+// 主管對「SO-項次」按結案：該行永久不再進待排池（含手動加入），除非在「已結案清單」復原。
+// 不需編輯鎖（結案是單據事實、不是排程動作；主管常在模擬區操作、沒拿鎖）；需 packaging_admin。
+// 結案時正式區該行未完成的排定卡以 id＋version 條件刪除、模擬區該行的卡以 version CAS 移除；不進 Undo。
+
+/** 結案備註上限（同 packaging_closures.note 的 check） */
+export const CLOSURE_NOTE_MAX = 200
+
+/** packaging_closures 一列（DB 形狀） */
+export interface ClosureRow {
+  id: number | string
+  so_line_key: string
+  so: string
+  so_line: string
+  item_code: string | null
+  item_name: string | null
+  customer: string | null
+  qty_at_close: number | string
+  due_date: string | null
+  block_at_close: string | null
+  sold_qty_at_close: number | string | null
+  note: string | null
+  closed_by: string
+  closed_by_name: string | null
+  closed_at: string
+  restored_at: string | null
+  restored_by: string | null
+  restored_by_name: string | null
+  created_at: string
+}
+
+/** 結案紀錄（API 回應；email 不回、只回名字） */
+export interface Closure {
+  id: number
+  soLineKey: string
+  so: string
+  soLine: string
+  itemCode: string | null
+  itemName: string | null
+  customer: string | null
+  /** 結案當下待排池裡這一行的剩餘量（不在池內＝ERP 訂單量） */
+  qtyAtClose: number
+  dueDate: YMD | null
+  /** 結案當下卡片所在區塊；不在池內＝null */
+  blockAtClose: PoolBlockId | null
+  /** D73 鏡像在結案當下分配到本行的已銷貨量；鏡像未啟用＝null */
+  soldQtyAtClose: number | null
+  note: string | null
+  closedByName: string | null
+  closedAt: string
+  restoredAt: string | null
+  restoredByName: string | null
+}
+
+/** POST /api/packaging/closures（packaging_admin；不需編輯鎖） */
+export interface ClosureRequest {
+  action: 'close' | 'restore'
+  soLineKey: string
+  /** close 時的備註（選填，≤ CLOSURE_NOTE_MAX 字） */
+  note?: string | null
+}
+
+export type ClosureErrorCode =
+  | 'forbidden'
+  | 'bad_request'
+  | 'not_found'            // restore：沒有未復原的結案；close：ERP 與待排池都查無此行
+  | 'already_closed'       // close：這一行已有未復原的結案
+  | 'pool_unavailable'
+  | 'migration_required'
+  | 'db_error'
+
+export type ClosureResponse =
+  | {
+      success: true
+      closure: Closure
+      /** close：正式區這一行被放回（刪除）的未完成排定卡張數；restore 恆 0 */
+      unplaced: number
+      /** close：從各人模擬區移除的模擬卡張數（AI 表未建＝0）；restore 恆 0 */
+      simRemoved: number
+    }
+  | { success: false; error: string; code: ClosureErrorCode }
+
+/** GET /api/packaging/closures?from=&to=（packaging 讀權；台北日、含首尾；預設近 30 天）：含已復原的（restoredAt 有值） */
+export type ClosuresListResponse =
+  | { success: true; from: YMD; to: YMD; closures: Closure[] }
+  | { success: false; error: string; code: ClosureErrorCode }
 
 // ─────────────────────────────────────────────────────────────────────
 // D69 工時修改紀錄（GET /api/packaging/adjustments，lines.md §四.6）

@@ -76,6 +76,7 @@ import SplitDialog from '@/components/packaging/board/SplitDialog'
 import QtyDateDialog from '@/components/packaging/board/QtyDateDialog'
 import CapacityEditor, { type CapacityEditorSource } from '@/components/packaging/board/CapacityEditor'
 import Modal, { Btn } from '@/components/packaging/board/Modal'
+import SimCloseDialog, { type ClosureDone } from './SimCloseDialog'
 import { useSim } from './useSim'
 import {
   AI_MARK, LIVE_MARK, LOCK_MARK, SIM_LANE_REASON, decorateSimBoard, locksCount, simAutoLane, simCardState, simLaneReorder, simLaneStep, simLaneStepInfo,
@@ -146,6 +147,10 @@ type Dialog =
   | { t: 'partial'; card: PackagingCardData }
   /** D101：date 省略＝表格模式（工具列「產線時數」）；有 date＝單日（線頭 ⚙） */
   | { t: 'capacity'; date?: YMD; lineId?: number }
+  /** D106 ②：模擬區已有內容時先確認「將覆蓋目前模擬區」 */
+  | { t: 'pull' }
+  /** D107：對這張卡的 SO-項次結案（確認對話框） */
+  | { t: 'closeCase'; bc: BoardCard }
 
 type DrawerKind = 'run' | 'history' | 'rules' | 'locks'
 
@@ -547,6 +552,15 @@ export default function SimLayout({ meEmail }: { meEmail: string | null }) {
   }, [lockModeOn, toggleCard])
   const openOrder = useCallback((so: string) => { setDetailId(null); setOrderSo(so) }, [])
 
+  const { reload: reloadSim } = sim
+  /** D107 結案成功：伺服器已把這一行的卡從正式區與模擬區移除 → 關對話框、重抓模擬區、回饋 */
+  const onClosureDone = useCallback((r: ClosureDone) => {
+    setDialog(null)
+    const n = typeof r.response.simRemoved === 'number' ? r.response.simRemoved : Array.isArray(r.response.simRemoved) ? r.response.simRemoved.length : null
+    showToast('info', `已結案 ${r.soLineKey}：這一行不再拉回待排池${n != null ? `，已從模擬區移除 ${n} 張卡` : ''}；正在重新載入模擬區`)
+    void reloadSim()
+  }, [showToast, reloadSim])
+
   const onPoolAction = useCallback((card: PackagingCardData, action: PoolAction) => {
     if (action === 'partial') { setDialog({ t: 'partial', card }); return }
     showToast('warn', action === 'complete' ? '模擬區不能勾完成；完成請在正式排程工作台勾' : '模擬區沒有待排區；直接拖到模擬範圍內的日期即可')
@@ -708,6 +722,14 @@ export default function SimLayout({ meEmail }: { meEmail: string | null }) {
         : runBusy ? 'AI 執行中，請等結果出來'
           : sim.pending > 0 || sim.saving ? '還有操作儲存中'
             : busy ? '請等目前的動作完成' : null
+  // D106 兩個整批按鈕：本人、沒有 AI 在跑、佇列清空、沒有其他動作進行中（清空不看 stale；拉正式區另外看）
+  const bulkBlock = !isOwner ? '別人的模擬區只能檢視'
+    : !session ? '請先建立模擬區'
+      : runBusy ? 'AI 執行中，請等結果出來'
+        : sim.pending > 0 || sim.saving ? '還有操作儲存中'
+          : busy ? '請等目前的動作完成' : null
+  const capacityCount = (v?.capacity?.cells.length ?? 0) + (v?.capacity?.weekendsOpened.length ?? 0)
+  const simHasContent = !!session && (session.placementCount > 0 || capacityCount > 0 || locksCount(locks) > 0)
   const runBlock = !isOwner ? '別人的模擬區只能檢視'
     : !session ? '請先建立模擬區'
       : stale ? '起始日已過，請先重設模擬區'
@@ -781,6 +803,17 @@ export default function SimLayout({ meEmail }: { meEmail: string | null }) {
             {isOwner && (
               <button type="button" onClick={() => setDialog({ t: 'reset' })} disabled={busy || runBusy || sim.pending > 0} className={TOOL_BTN}
                 title="換範圍（2／4／6 天）、起始日或開始方式（複製／清空）；目前狀態會先存進退回上一步">重設…</button>
+            )}
+            {isOwner && (
+              // D106 ①：一鍵清空（不另開確認：伺服器清空前先存進退回上一步，按一下就回來）；產線時數覆寫保留
+              <button type="button" onClick={() => void sim.clearAll()} disabled={bulkBlock != null} className={TOOL_BTN}
+                title={bulkBlock ?? '清掉模擬區全部排定卡（產線時數保留）；清空前自動存進退回上一步'}>清空排程</button>
+            )}
+            {isOwner && (
+              // D106 ②：模擬區有內容（模擬列／產能覆寫／鎖定）先確認覆蓋；空的直接拉
+              <button type="button" onClick={() => { if (simHasContent) setDialog({ t: 'pull' }); else void sim.pullLive() }}
+                disabled={bulkBlock != null || stale} className={TOOL_BTN}
+                title={bulkBlock ?? (stale ? '起始日已過，請先重設模擬區' : '把正式排程範圍內未完成的卡（日期、線、順序、工時）與各線產能 1:1 拉進模擬區；執行前自動存進退回上一步')}>拉正式區 1:1</button>
             )}
             <button
               type="button"
@@ -1063,6 +1096,38 @@ export default function SimLayout({ meEmail }: { meEmail: string | null }) {
       )}
 
       {/* ─── 對話框 ─── */}
+      {dialog?.t === 'pull' && session && (
+        <Modal
+          title="拉正式區 1:1，覆蓋目前的模擬區？"
+          onClose={() => setDialog(null)}
+          footer={<>
+            <Btn onClick={() => setDialog(null)}>取消</Btn>
+            <Btn tone="primary" disabled={busy || bulkBlock != null} onClick={() => { void sim.pullLive().then(ok => { if (ok) { setDialog(null); setLockMode(false) } }) }}>
+              {busy ? '處理中…' : '確定覆蓋並拉進來'}
+            </Btn>
+          </>}
+        >
+          <div className="mb-3 rounded-lg border border-amber-700/60 bg-amber-950/30 px-3 py-2 text-xs leading-relaxed text-amber-100">
+            將覆蓋目前模擬區：模擬 {session.placementCount} 張卡
+            {capacityCount > 0 ? `、調整過的產線時數 ${capacityCount} 項` : ''}
+            {locksCount(locks) > 0 ? `、鎖定 ${locksCount(locks)} 項` : ''}
+            。執行前會自動存進「退回上一步」，按一下就能回來。
+          </div>
+          <ul className="list-disc space-y-1 pl-5 text-xs leading-relaxed text-slate-200">
+            <li>範圍 {mdw(session.windowDates[0])}～{mdw(session.windowDates[session.windowDates.length - 1])} 內，正式排程<b>未完成</b>的卡（日期、線、線內順序、改過的工時）整份複製進來；已完成的卡不複製。</li>
+            <li>各線產能回到<b>正式產能表的值</b>（模擬區調整過的時數與模擬才開的週末加班會拿掉）。</li>
+            <li>範圍外的正式卡與待排區的卡本來就以「正式排程的卡（唯讀）」顯示，不用複製。</li>
+            <li>鎖定：訂單鎖與整條線鎖保留；卡片鎖只保留「複製自正式卡」的那些。</li>
+          </ul>
+        </Modal>
+      )}
+      {dialog?.t === 'closeCase' && (
+        <SimCloseDialog
+          bc={dialog.bc}
+          onClose={() => setDialog(null)}
+          onDone={onClosureDone}
+        />
+      )}
       {dialog?.t === 'reset' && session && (
         <SimCreateDialog
           initial={{ horizon: session.horizon, mode: session.mode }}
@@ -1230,6 +1295,12 @@ export default function SimLayout({ meEmail }: { meEmail: string | null }) {
             changeLocks(toggleOrderLock(locks, detailRaw.soLineKey), `${on ? '解除鎖定' : '鎖定'}訂單 ${so}`)
           }}
           onSubmitMinutes={(m, reason) => setMinutes(detailRaw, m, reason, 'dialog')}
+          // D107：結案是正式區的事實（只需 packaging_admin，不看模擬區的鎖）；但要等模擬區沒有東西在儲存，
+          //   否則佇列裡的操作會撞到伺服器順手移除模擬卡後的新 version
+          onCloseCase={() => { setDetailId(null); setDialog({ t: 'closeCase', bc: detailRaw }) }}
+          closeCaseHint={!isOwner ? '請回到自己的模擬區再結案（結案會動到正式區與所有人的模擬區）'
+            : sim.pending > 0 || sim.saving ? '還有操作儲存中，請稍候'
+              : busy ? '請等目前的動作完成' : null}
         />
         )
       })()}

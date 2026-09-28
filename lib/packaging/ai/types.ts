@@ -1409,6 +1409,23 @@ export interface SimUndoRequest {
   version: number
 }
 
+/**
+ * D106 ① POST /api/packaging/ai/session/clear：一鍵清空模擬區排程（模擬列全清、模式改 clear；產線時數覆寫與範圍保留）→ SimViewResponse。
+ * 清空前整份推 undo（kind 'reset'），按「退回上一步」可回來。
+ */
+export interface SimClearRequest {
+  version: number
+}
+
+/**
+ * D106 ② POST /api/packaging/ai/session/pull-live：拉正式區 1:1（範圍 × 目前啟用中的線內，正式區未完成擺放整份複製；
+ * 產能覆寫清空＝各線各日用正式值；模擬才開的週末關掉）→ SimViewResponse。執行前整份推 undo（kind 'reset'）。
+ * 「模擬區已有內容時先確認覆蓋」由畫面做；伺服器靠 version CAS 保證覆蓋的就是主管確認時看到的那一版。
+ */
+export interface SimPullLiveRequest {
+  version: number
+}
+
 /** POST /api/packaging/ai/session/run（route：maxDuration 300、runtime nodejs、dynamic force-dynamic） */
 export interface SimRunRequest {
   version: number

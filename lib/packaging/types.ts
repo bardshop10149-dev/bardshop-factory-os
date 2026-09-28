@@ -235,6 +235,12 @@ export interface PoolExcluded {
    * 未出貨量 ≤ 0 → 該行不出卡。銷貨同步尚未啟用時為 0。
    */
   soldOut: number
+  /**
+   * D104：主管在排程工作台按「結案」的 SO 品項行（以 SO 品項行計）：packaging_closures 有未復原的紀錄 → 該行的卡一律不出
+   * （含 D66 手動加入的卡）。在讀取時套用（lib/packaging/closures.ts applyClosuresToPool，經 manualCache 併入），
+   * 不吃待排池 120 秒快取——結案後下一次讀取就消失。結案表未建（migration 未套用）時為 0。
+   */
+  closed: number
 }
 
 /** D44：出單日超過 30 天、ERP SO 行仍未結案、卻比對不到任何塔台批的一列（異常清單，給生管／Snow 追查） */

@@ -44,7 +44,9 @@ import {
   postLoadRun,
   postSimLocks,
   postSimCapacity,
+  postSimClear,
   postSimOps,
+  postSimPullLive,
   postSimRun,
   postSimUndo,
   type AiApiResult,
@@ -459,6 +461,21 @@ export function useSim(opts: {
     })
   }, [runAction])
 
+  /** D106 ① 一鍵清空模擬區排程（產線時數覆寫保留；伺服器清空前先推 undo） */
+  const clearAll = useCallback(() => {
+    const n = viewRef.current?.session?.placementCount ?? 0
+    return runAction('清空模擬區排程', version => postSimClear({ version: version ?? 0 }), {
+      successMsg: `已清空模擬區排程（${n} 張；產線時數保留，按「退回上一步」可回來）`,
+    })
+  }, [runAction])
+
+  /** D106 ② 拉正式區 1:1（覆蓋模擬列、產能覆寫回到正式值；伺服器執行前先推 undo）。「已有內容先確認」由畫面做 */
+  const pullLive = useCallback(() => {
+    return runAction('拉正式區 1:1', version => postSimPullLive({ version: version ?? 0 }), {
+      successMsg: '已把正式排程與各線產能 1:1 拉進模擬區（按「退回上一步」可回到拉之前）',
+    })
+  }, [runAction])
+
   /** 退回上一步（D77；整份快照還原） */
   const undoStep = useCallback(() => {
     const label = viewRef.current?.session?.undo.at(-1)?.label
@@ -643,6 +660,8 @@ export function useSim(opts: {
     submitOps,
     submitLocks,
     createOrReset,
+    clearAll,
+    pullLive,
     undoStep,
     loadRun,
     startRun,

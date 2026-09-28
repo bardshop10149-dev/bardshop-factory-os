@@ -255,3 +255,10 @@ C 線:以壓克力及委外回來的貨為主。
 - **規則文字去識別化(§4.3 修改)**:送出前把規則裡的客戶全名(≥ 3 字)換成本次 C 代號、SO 單號換成 K 代號(這批沒有 → `#`);prompt 說明對照卡片 c/k。AI 的規則建議照舊把代號換回全名顯示(代號每次重編,主管照抄全名進規則,下次送出前會再換掉)。
 - **送出前掃描(fail-closed)**:`payload.scanPayloadLeaks` 對卡片 name/pack/cat、規則、門檻 key、產線名稱再掃一次(email、電話、SO 單號、本批客戶全名),命中 → run failed `ai_pii_blocked`(訊息只列欄位),payload 不存、不送。
 - **採用預覽文字**:「範圍內一模一樣」與「有變更但全部會被自動略過」分開顯示(後者自動展開略過清單)。
+
+## 十二、D106／D107 補充(2026-09-28)
+
+- **一鍵清空模擬區排程** `POST session/clear { version }`:模擬列全清、模式改 clear、只丟卡片鎖;`sim_capacity`/`window_dates`/`line_ids` 不碰。清空前整份推 undo(kind `reset`)。
+- **拉正式區 1:1** `POST session/pull-live { version }`:範圍不變、線換成目前啟用中的線,範圍內未完成正式擺放整份複製(`copyPlacementsFromLive`:日期/線/順序/覆寫工時);產能覆寫清空(＝各線各日用正式值)、模擬才開的週末關掉;卡片鎖經 `livePlacementId` 搬家。執行前推 undo;模擬區有內容時畫面先確認覆蓋。純函式 `lib/packaging/ai/simBulk.ts`。
+- **模擬區結案(D107)**:卡片詳情「結案(不再拉回待排池)…」→ `SimCloseDialog` → `POST /api/packaging/closures {action:'close', soLineKey, note?}` → 重載模擬區。不走模擬區 undo。右鍵選單因共用檔 `cardMenu.tsx` 無擴充槽而未接。
+- 測試:`scratchpad/sim-buttons/sim-bulk.test.mjs`(5 個核心案例)。

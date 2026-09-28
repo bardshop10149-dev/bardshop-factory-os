@@ -12,6 +12,9 @@ import type {
   BoardResponse,
   CapacityInput,
   CapacityResponse,
+  ClosureRequest,
+  ClosureResponse,
+  ClosuresListResponse,
   CompleteRequest,
   LineCreateRequest,
   LineMutationResponse,
@@ -238,6 +241,22 @@ export function updateManual(req: ManualUpdateRequest) {
 /** 移出待排池＝軟刪除（紀錄保留）；用 POST 子路徑而不是 DELETE：寫入 API 一律只收 JSON body */
 export function removeManual(req: ManualRemoveRequest) {
   return call<ManualMutationResponse>('/api/packaging/manual/remove', { method: 'POST', json: req })
+}
+
+// ── D104 結案（寫入要 packaging_admin；不需編輯鎖；不進 Undo） ─────────────────
+
+/** 結案／復原一個 SO 品項行；結案時伺服器一併放回該行未完成的排定卡、清掉各人模擬區裡該行的卡 */
+export function postClosure(req: ClosureRequest) {
+  return call<ClosureResponse>('/api/packaging/closures', { method: 'POST', json: req })
+}
+
+/** 已結案清單（台北日區間，含已復原的） */
+export function fetchClosures(opts: { from?: string | null; to?: string | null } = {}) {
+  const q = new URLSearchParams()
+  if (opts.from) q.set('from', opts.from)
+  if (opts.to) q.set('to', opts.to)
+  const qs = q.toString()
+  return call<ClosuresListResponse>(`/api/packaging/closures${qs ? `?${qs}` : ''}`)
 }
 
 // ── D69 工時修改紀錄（唯讀） ─────────────────────────────────────────────

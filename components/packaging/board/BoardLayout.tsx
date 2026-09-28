@@ -103,6 +103,7 @@ import SplitDialog from './SplitDialog'
 import QtyDateDialog, { type LineChoice } from './QtyDateDialog'
 import CapacityEditor from './CapacityEditor'
 import VersionsPanel from './VersionsPanel'
+import ClosureDialog, { type CloseTarget } from './ClosureDialog'
 import PaneResizer, { MIN_POOL_WIDTH } from './PaneResizer'
 // P3 AI 模擬排程（規格 §八）：正式工作台只新增「AI 採用紀錄」按鈕與對話框（退回採用），不動既有拖曳／儲存／鎖邏輯
 import AdoptionsDialog from '@/components/packaging/ai/AdoptionsDialog'
@@ -139,6 +140,8 @@ type Dialog =
   | { t: 'capacity-day'; date: YMD; lineId?: number }
   | { t: 'capacity-table' }
   | { t: 'versions' }
+  /** D104 結案確認（待排池卡或排定卡的右鍵） */
+  | { t: 'close'; target: CloseTarget }
 
 /** 桌機（≥ 1024px）才提供拖曳（D54 現場裝置先不處理） */
 function useIsDesktop(): boolean {
@@ -392,9 +395,26 @@ export default function BoardLayout() {
     )
   }, [lineName, showToast, submit])
 
+  // D104 結案：不需編輯鎖，只要 packaging_admin（me.canEdit）；待排池卡與排定卡共用同一個對話框
+  const canClose = !!me?.canEdit
+  const openPlacementsOf = useCallback((soLineKey: string): number => {
+    if (!data) return 0
+    return [...data.holding, ...data.days.flatMap(d => d.cards)].filter(c => c.card.soLineKey === soLineKey && !c.completed).length
+  }, [data])
+  const openCloseDialog = useCallback((card: PackagingCardData, qty: number) => {
+    setDialog({
+      t: 'close',
+      target: {
+        soLineKey: card.soLineKey, so: card.so, soLine: card.soLine, customer: card.customer, itemCode: card.itemCode, itemName: card.itemName,
+        qty, unit: card.unit, dueDate: card.dueDate, block: card.block, openPlacements: openPlacementsOf(card.soLineKey),
+      },
+    })
+  }, [openPlacementsOf])
+
   const handlersFor = useCallback((bc: BoardCard, siblings: BoardCard[]): CardMenuHandlers => {
     const others = mergeCandidates(siblings, bc)
     return {
+      ...(canClose ? { onCloseLine: (c: BoardCard) => openCloseDialog(c.card, c.qty) } : {}),
       onToggleComplete: c => {
         if (c.completed) {
           submit([{ op: 'uncomplete', id: c.placementId, version: c.version }], `取消完成 ${lineLabel(c.card)}`,
@@ -424,7 +444,7 @@ export default function BoardLayout() {
         )
       } : undefined,
     }
-  }, [submit, actor, moveCard, unplaceCard, activeLines])
+  }, [submit, actor, moveCard, unplaceCard, activeLines, canClose, openCloseDialog])
 
   const onPoolAction = useCallback((card: PackagingCardData, action: PoolAction) => {
     if (!data) return
@@ -806,6 +826,7 @@ export default function BoardLayout() {
               // D102：手動加入的加入／改數量／移出搬到待排池頁；這裡只顯示「手動」標記＋到待排池頁的連結
               showManualTag
               manualManageHref="/packaging/pool"
+              onCloseLine={canClose ? c => openCloseDialog(c, data.pool.cardMeta[c.cardId]?.remainingQty ?? c.qtyCard) : undefined}
             >
               <ParkingArea
                 cards={holdingCards}
@@ -992,6 +1013,21 @@ export default function BoardLayout() {
           onRestored={msg => {
             undo.clear()
             board.showToast('info', msg)
+            void board.reload()
+          }}
+        />
+      )}
+
+      {dialog?.t === 'close' && (
+        <ClosureDialog
+          target={dialog.target}
+          busyHint={board.pending > 0 || board.saving ? '工作台還有操作在儲存中，請等自動儲存完成再結案' : null}
+          onClose={() => setDialog(null)}
+          onDone={r => {
+            setDialog(null)
+            // 伺服器已刪掉該行未完成的排定卡：Undo 堆疊裡對這些卡的反向操作已對不上 → 清空（同版本還原）
+            if (r.unplaced > 0) undo.clear()
+            board.showToast('info', r.message)
             void board.reload()
           }}
         />

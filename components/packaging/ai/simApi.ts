@@ -23,10 +23,12 @@ import type {
   RevertRequest,
   RevertResponse,
   SimCapacityRequest,
+  SimClearRequest,
   SimCreateRequest,
   SimLoadRunRequest,
   SimLocksRequest,
   SimOpsRequest,
+  SimPullLiveRequest,
   SimRunRequest,
   SimRunResponse,
   SimUndoRequest,
@@ -159,6 +161,48 @@ export function postLoadRun(req: SimLoadRunRequest) {
 /** D101 模擬區調整產線時數（rows 與正式產能表 PUT 同形；或 clearAll 全部回到正式值） */
 export function postSimCapacity(req: SimCapacityRequest) {
   return call<SimViewResponse>(`${BASE}/session/capacity`, { method: 'POST', json: req })
+}
+
+/** D106 ① 一鍵清空模擬區排程（保留產線時數覆寫；清空前伺服器先推 undo） */
+export function postSimClear(req: SimClearRequest) {
+  return call<SimViewResponse>(`${BASE}/session/clear`, { method: 'POST', json: req })
+}
+
+/** D106 ② 拉正式區 1:1（覆蓋目前模擬列與產能覆寫；執行前伺服器先推 undo） */
+export function postSimPullLive(req: SimPullLiveRequest) {
+  return call<SimViewResponse>(`${BASE}/session/pull-live`, { method: 'POST', json: req })
+}
+
+// ── D104／D107 結案（POST /api/packaging/closures，另一個 session 實作） ─────────────────────
+//
+// 這支 API 不在 lib/packaging/ai/types.ts 的契約裡（它是正式區的功能，只需 packaging_admin、不需編輯鎖）；
+// 這裡只定義「模擬區用得到」的最小型別，欄位照對方公告的形狀 { success, closure, unplaced, simRemoved }，
+// 沒公告細節的一律 unknown —— API 還沒部署時前端也要能編譯與執行（404 會回明確訊息）。
+
+export interface ClosureCloseRequest {
+  action: 'close'
+  soLineKey: string
+  /** 備註（選填；空字串不送） */
+  note?: string
+}
+
+export type ClosureCloseResponse =
+  | {
+    success: true
+    closure?: unknown
+    /** 正式區被移出（放回待排池／消失）的擺放數（形狀由對方定義，可能是數字或清單） */
+    unplaced?: unknown
+    /** 從各人模擬區移除的模擬列數（形狀由對方定義） */
+    simRemoved?: unknown
+  }
+  | { success: false; error: string; code?: string }
+
+/** D107 對一張卡（SO-項次）結案：永久不再拉回待排池；伺服器會一併從正式區與所有模擬區移除該行的卡 */
+export async function postClosure(req: ClosureCloseRequest): Promise<AiApiResult<ClosureCloseResponse>> {
+  const r = await call<ClosureCloseResponse>('/api/packaging/closures', { method: 'POST', json: req })
+  // call() 把「路由不存在」翻成 AI API 的說法；結案 API 是另一支，訊息要指對地方
+  if (r.status === 404 && !r.json) return { ...r, error: '結案功能尚未部署（/api/packaging/closures 回 404），請稍後再試或通知管理員' }
+  return r
 }
 
 // ── 採用（§6.1） ────────────────────────────────────────────────────────

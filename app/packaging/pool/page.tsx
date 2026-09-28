@@ -76,6 +76,10 @@ const FRESHNESS_ITEMS: { key: keyof PoolFreshness; label: string; staleMins: num
  * 顯示順序＝物件鍵的順序。
  */
 const EXCLUDED_ITEMS: Record<keyof PoolExcluded, { label: string; desc: string }> = {
+  closed: {
+    label: '主管已結案',
+    desc: '以 SO 品項行計。包裝主管在排程工作台對卡片按「結案」（已完工但漏銷貨、沒改交期等，D104）；結案的行永久不再進待排池（含手動加入），要拉回只能由主管在「已結案清單」復原。結案功能未啟用（migration 未套用）時為 0',
+  },
   soldOut: {
     label: '已全數銷貨',
     desc: '以 SO 品項行計。ARGO 銷貨單已出貨完（銷貨量依項次由小到大分配到同品號各行，本行未出貨量 ≤ 0，D73）；部分銷貨的仍在池內，只留未出貨量並標「部分已出貨」。銷貨同步尚未啟用時為 0',

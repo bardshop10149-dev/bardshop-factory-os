@@ -66,6 +66,11 @@ export interface ManualLookupInput {
    * 加入前就有的完成量也會算進去 → 查詢結果帶出來給加入對話框提示。省略＝不帶（與 D103 前相同）。
    */
   completedByKey?: ReadonlyMap<string, number>
+  /**
+   * D104：這張 SO 各行「未復原」的結案（soLineKey → 誰／何時／備註）。有 → 原因 closed、不可勾選
+   * （加入後也會被待排池排除；要拉回請到「已結案清單」復原）。省略＝沒有（或結案表未建）。
+   */
+  closed?: ReadonlyMap<string, { closedByName: string | null; closedAt: string; note: string | null }>
 }
 
 const up = (s: string | null | undefined) => String(s ?? '').trim().toUpperCase()
@@ -120,6 +125,7 @@ function suggestRoute(purchases: readonly ManualLookupPurchase[]): ManualRouteTy
  * 7 packaged_done（未結案批的包裝站工序已人工報完工，D45）；8 sheet_stale（出單日超過 30 天且塔台查無，D44）；
  * 9 waiting_source（有採購或製令來源，但 5～8 都不是）；10 unknown（以上皆非）。
  * D73：sold_out（ARGO 已全數銷貨）排在 4 之後、不可勾選（加入後也會被待排池排除）。
+ * D104：closed（主管已結案、未復原）排在 sold_out 之後、不可勾選（加入後也會被待排池排除；要拉回請先復原）。
  * 解讀：塔台未結案批、但前站未開工的行歸在 waiting_source（P0 只列前站已開工）。
  */
 export function explainManualLines(input: ManualLookupInput): ManualLookupLine[] {
@@ -166,7 +172,15 @@ export function explainManualLines(input: ManualLookupInput): ManualLookupLine[]
     if (soldOut) {
       reasons.push({ code: 'sold_out', label: `ARGO 已全數銷貨（${Math.min(sold.soldQty, orderQty)}/${orderQty}${sold.lastSaleDate ? `，最後 ${mdOf(sold.lastSaleDate)}` : ''}）` })
     }
-    const blocked = manualBlockedReason(sl) ?? (soldOut ? 'ARGO 已全數銷貨（出貨），不需包裝；加入後也會被待排池排除' : null)
+    // D104：主管已結案（未復原）
+    const closed = input.closed?.get(soLineKey) ?? null
+    if (closed) {
+      const who = `${closed.closedByName ?? '主管'}・${closed.closedAt.slice(5, 10).replace('-', '/')}`
+      reasons.push({ code: 'closed', label: `主管已結案（${who}${closed.note ? `，${closed.note}` : ''}）` })
+    }
+    const blocked = manualBlockedReason(sl)
+      ?? (soldOut ? 'ARGO 已全數銷貨（出貨），不需包裝；加入後也會被待排池排除' : null)
+      ?? (closed ? '主管已結案，加入後也會被待排池排除；要拉回請先到「已結案清單」復原' : null)
 
     // 採購來源：POC 項次＝本行、或品號相同；出單表記的採購單號-行對到本行也算
     const sheetForLine = input.sheetRows.filter((r) => up(r.order_number) === soU && soLineNoStr(r.line_no) === lineNo)

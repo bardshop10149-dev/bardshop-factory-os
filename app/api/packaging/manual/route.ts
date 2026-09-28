@@ -37,6 +37,8 @@ import {
   publicDbError,
 } from '@/lib/packaging/scheduleDb'
 import { todayTaipei } from '@/lib/packaging/workdays'
+import { loadActiveClosures, loadActiveClosuresBySo } from '@/lib/packaging/closuresDb'
+import { closedKeySet } from '@/lib/packaging/closures'
 
 export const dynamic = 'force-dynamic'
 export const maxDuration = 60
@@ -106,14 +108,19 @@ export async function GET(request: NextRequest) {
   const today = todayTaipei()
   try {
     const sb = getSupabaseAdminClient()
-    const [data, active, pool, soSales] = await Promise.all([
+    const [data, active, pool, soSales, closures] = await Promise.all([
       loadManualLookupData(sb, so, today),
       loadActiveInclusionsBySo(sb, so),
       getPool({ maxAgeMs: POOL_READ_MAX_AGE_MS }),
       // D73：這張 SO 的銷貨鏡像（表不存在／讀取失敗 → null，不判 sold_out）
       loadSalesForSos(sb, [so]),
+      // D104：這張 SO 未復原的結案（表不存在 → 空）
+      loadActiveClosuresBySo(sb, so),
     ])
-    const poolCards = pool.blocks.flatMap((b) => b.cards).filter((c) => c.soLineKey.toUpperCase().startsWith(`${so}-`))
+    // D104：已結案的行不算「已在待排池」（待排池讀取層已把它拿掉，這裡看的是快取的原始 pool）
+    const closedKeys = closedKeySet(closures)
+    const poolCards = pool.blocks.flatMap((b) => b.cards).filter((c) => c.soLineKey.toUpperCase().startsWith(`${so}-`) && !closedKeys.has(c.soLineKey.toUpperCase()))
+    const closed = new Map(closures.map((c) => [c.soLineKey, { closedByName: c.closedByName, closedAt: c.closedAt, note: c.note }]))
     const manual = new Map<string, ManualInclusionMeta>(active.map((i) => [i.soLineKey, manualMetaOf(i)]))
     // 已全數完成的手動紀錄另外標出（待排池已無卡，畫面才能提示改由查詢結果移出）
     // D103：手動數量是總量（含已完成），加入前就有的完成量（正常區塊時期、舊紀錄移出前）也會算進去
@@ -125,7 +132,7 @@ export async function GET(request: NextRequest) {
     const completedByKey = new Map<string, number>()
     for (const p of placements) if (p.completed) completedByKey.set(p.soLineKey, (completedByKey.get(p.soLineKey) ?? 0) + p.qty)
     const sold = soSales ? allocateSoldToLines(data.soLines, soSales).byLine : null
-    const lines = explainManualLines({ so, today, poolCards, manual, manualDone, ...data, sold, completedByKey })
+    const lines = explainManualLines({ so, today, poolCards, manual, manualDone, ...data, sold, completedByKey, closed })
     return noStore<ManualLookupResponse>({
       success: true,
       so,
@@ -178,12 +185,14 @@ export async function POST(request: NextRequest) {
   const actor = { email: g.member.email, name: g.member.realName }
   try {
     const sb = getSupabaseAdminClient()
-    const [soLines, active, pool] = await Promise.all([
+    const [soLines, active, pool, closures] = await Promise.all([
       loadSoLinesForSos(sb, wanted.map((w) => w.so)),
       loadActiveInclusions(sb),
       getPool({ maxAgeMs: POOL_WRITE_MAX_AGE_MS }),
+      loadActiveClosures(sb), // D104：已結案的行不可加入（表未建＝沒有）
     ])
     const normal = normalPoolLineKeys(pool)
+    const closedKeys = closedKeySet(closures.closures)
     const activeKeys = new Set(active.map((a) => a.soLineKey))
     const slByKey = new Map(soLines.map((sl) => [`${sl.project_id.trim().toUpperCase()}-${soLineNoStr(sl.line_no) ?? ''}`, sl]))
     // 名額只算「作用中」的紀錄：已全數完成、或 ERP 已查無此行的紀錄不佔位（它們在待排池已不出卡）。
@@ -208,6 +217,7 @@ export async function POST(request: NextRequest) {
       if (activeKeys.has(w.soLineKey)) { skipped.push({ soLineKey: w.soLineKey, code: 'already_manual', message: '已手動加入（請改用「改數量」）' }); continue }
       const blocked = manualBlockedReason(sl)
       if (blocked) { skipped.push({ soLineKey: w.soLineKey, code: 'not_selectable', message: blocked }); continue }
+      if (closedKeys.has(w.soLineKey)) { skipped.push({ soLineKey: w.soLineKey, code: 'not_selectable', message: '主管已結案，要拉回待排池請先到「已結案清單」復原' }); continue }
       if (room <= 0) { skipped.push({ soLineKey: w.soLineKey, code: 'too_many', message: `手動加入同時最多 ${MAX_ACTIVE_MANUAL} 行，請先移出不需要的` }); continue }
       // 同一行兩人同時加入：DB 唯一索引只讓一筆成功，另一筆回 'duplicate' → 列入 skipped（不靠編輯鎖也不會重複）
       const r = await insertInclusion(sb, w, actor, nowIso)
