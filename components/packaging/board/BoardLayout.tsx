@@ -225,6 +225,8 @@ export default function BoardLayout() {
       undo.clear()
       if (why === 'lost' || why === 'released') boardRef.current?.clearQueue()
     },
+    // D98 ④：App 內換頁時還在等合併的批會在卸載時送出；等它送完才釋放編輯鎖（否則兩者競速、搶輸的存檔靜默遺失）
+    releaseAfter: () => boardRef.current?.whenSaved() ?? Promise.resolve(),
   })
   const board = useBoard({
     enabled: !denied,

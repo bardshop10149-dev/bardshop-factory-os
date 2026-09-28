@@ -8,6 +8,7 @@
 //   只有 active=true 伺服器才延長 last_action_at，所以「開著分頁去吃飯」5 分鐘後鎖會自然釋放，不需要清鎖排程。
 // - token 存 sessionStorage（每個分頁各自一份）：同一個人開兩個分頁，只有拿到 token 的那個分頁能寫。
 // - 關分頁（pagehide）或 App 內切到別頁（元件卸載）都送 keepalive release；送不到也沒關係，5 分鐘後自然逾時。
+//   卸載時若呼叫端給了 releaseAfter（工作台：還有存檔在送），等它送完才釋放（D98 ④ 之後卸載時常有等合併的批）。
 // - 被接手：下一次心跳或寫入收到 lock_lost → 轉唯讀，由呼叫端清空 Undo 與佇列。
 
 import { useCallback, useEffect, useRef, useState } from 'react'
@@ -66,6 +67,11 @@ export function useEditLock(opts: {
   onGained?: () => void
   /** 失去鎖（被接手、逾時、自己結束）：呼叫端清空 Undo 與佇列 */
   onLost?: (why: 'lost' | 'expired' | 'released') => void
+  /**
+   * 卸載（App 內換頁）時等它 resolve 才送釋放（例：工作台等存檔送完，useBoard.whenSaved）。
+   * 省略＝立刻釋放（原行為）。關分頁（pagehide）不等：頁面正在結束，等不到。
+   */
+  releaseAfter?: () => Promise<unknown>
 }): EditLockApi {
   const [lock, setLock] = useState<LockState | null>(null)
   const [token, setTokenState] = useState<string | null>(null)
@@ -256,7 +262,17 @@ export function useEditLock(opts: {
       // App 內用 Next Link 切到別頁不會觸發 pagehide，只會卸載元件 → 這裡也要釋放，
       // 否則鎖會被佔住最多 5 分鐘、別人只能「接手」。代價：切回來要重按「開始編輯」（token 一併清掉）。
       // （開發模式 StrictMode 的「掛載→卸載→再掛載」發生在第一次掛載時，此時 phase 還是 'none'，不會誤放。）
-      onHide()
+      const t = tokenRef.current
+      if (!t || phaseRef.current !== 'mine') return
+      const after = cbRef.current.releaseAfter
+      if (!after) { onHide(); return }
+      // 有 releaseAfter（工作台還有存檔在送）：sessionStorage 的 token 現在就清（很快切回來的新畫面不會拿它續用，
+      // 否則稍後這裡的釋放會把新畫面的鎖放掉）；釋放本身等存檔送完——App 內換頁 JS 還活著，promise 與 fetch 照常完成。
+      // tokenRef 不清：卸載後還在送的存檔要用它。
+      writeToken(null)
+      let wait: Promise<unknown>
+      try { wait = after() } catch { wait = Promise.resolve() }
+      void wait.catch(() => undefined).then(() => { beaconRelease(t) })
     }
   }, [])
 
