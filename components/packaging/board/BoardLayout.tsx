@@ -22,7 +22,16 @@
 // D74 線內上下排序：日檢視把排定卡拖回「它自己的那條線」＝重排（不改日期與線）：
 //   拖曳中追蹤游標 y → boardLocal.laneDropPlan 算出插入位置，LaneColumn 畫插入線；放下 → laneReorderChanges 算出要改的
 //   sort_index（其他卡都有值時只改一張；還有 null 時整條線重新編號），同一批送出＝一步 Undo（Ctrl+Z）。
-//   從別處拖進來（待排池、別條線、別天）一律放在該線最後（插入線畫在最後）。週／兩週不支援重排，順序與日檢視相同。
+//   從別處拖進來（待排池、別條線、別天）一律放在該線最後（插入線畫在最後）。
+// D100 週／兩週也能線內插隊（Snow：「週檢視拖不動」——原本只有日檢視會走重排，拖回自己那格會變成 move 到同日同線而直接 return）：
+//   拖回自己那格（boardLocal.isOwnLaneDrop）一律＝重排；插入點依檢視量法不同：日＝時間尺 y（laneDropPlan），
+//   週／兩週＝量清單裡每張卡的 DOM 位置（laneDrag.measureLaneItems → multiDayDropPlan），MultiDayView 畫插入線。
+//   行為和日檢視一致：拖回原位＝不送、延誤照舊；拖延誤卡到別的位置＝replan（move＋sortIndex、解除延誤）。
+//   「原位」看的是畫面上看得到的順序（multiDayDropPlan.stay）：隱藏已完成時，被拖的卡正下方那張看不到的完成卡不算越過（不送）。
+//   延誤＋預排、還沒到預估可包日的卡：replan 會被伺服器 D22 擋 → 自己那格不當「同線重排」（ownLaneKey null＝照 D22 遮住），上移／下移也停用。
+//   （以前週／兩週把延誤卡拖回自己那格＝解除延誤、停用線的卡拖回原格＝換到預設線；現在和日檢視 D74 相同，要解除延誤請拖到別的位置或按「下移」）
+//   卡片詳情加「上移／下移」（LaneOrderRow）：任何檢視都能用，送出的 op 與拖曳相同（laneStepPlan → planLaneReorder），
+//   走同一個 submit 佇列（D98 合併規則：同一張卡連按＝觸及同一 id → 不併，每按一次＝一步 Undo）。
 //
 // 資料一律經 /api/packaging/*（瀏覽器端 Supabase 是 anon，不直接查表）。
 // 每次操作立即送出（自動儲存）；唯讀者與沒有編輯鎖的人看得到但不能拖、不能勾。
@@ -46,6 +55,7 @@ import {
   MAX_OPS_PER_REQUEST,
   MINUTES_SNAP,
   type BoardCard,
+  type BoardDay,
   type PlacementOp,
   type YMD,
 } from '@/lib/packaging/scheduleTypes'
@@ -66,9 +76,13 @@ import type { PackagingCard as PackagingCardData } from '@/lib/packaging/types'
 import PackagingOrderModal from '@/components/packaging/PackagingOrderModal'
 import { fmtQty } from '@/components/packaging/poolStyles'
 import {
-  autoLaneFor, boardActiveLines, laneDropPlan, laneReorderChanges, mergeCandidates, newId, parseDropId, ruleForBoardCard, ruleForPoolCard,
-  type BoardOk, type DragRule, type LocalAction,
+  autoLaneFor, boardActiveLines, isOwnLaneDrop, laneDropPlan, laneReplanBlockedReason, laneStepInfo, laneStepPlan, mergeCandidates, newId, ownLaneDropChanges,
+  parseDropId, ruleForBoardCard, ruleForPoolCard,
+  type DragRule, type LaneDropPlan, type LocalAction,
 } from './boardLocal'
+import type { ReorderChange } from '@/lib/packaging/laneOrder'
+import { ownLanePlan, pointerClientY, sameHint, type LaneReorderHint } from './laneDrag'
+import type { LaneOrderProps } from './LaneOrderControls'
 import { ago, clock, hours, md, mdw } from './boardFormat'
 import { useUndo } from './useUndo'
 import { useEditLock } from './useEditLock'
@@ -115,23 +129,7 @@ type ActiveDrag =
   | { kind: 'pool'; card: PackagingCardData; rule: DragRule }
   | { kind: 'placement'; bc: BoardCard; rule: DragRule }
 
-/** D74 拖曳中的插入線（日檢視）：laneKey＝`${date}:${lineId}`；topPx＝該線時間軸本體內的位置 */
-type ReorderHint = { laneKey: string; topPx: number; mode: 'insert' | 'append' }
-
-/** 游標的 client y：優先用視窗 pointermove 追到的最新值；沒有時退回 dnd-kit 的起點＋位移（容器捲動過會有誤差） */
-function pointerClientY(tracked: { y: number } | null, e: { activatorEvent: Event | null; delta: { y: number } }): number | null {
-  if (tracked) return tracked.y
-  const a = e.activatorEvent as (Event & { clientY?: number; touches?: TouchList }) | null
-  const y0 = typeof a?.clientY === 'number' ? a.clientY : a?.touches?.[0]?.clientY
-  return typeof y0 === 'number' ? y0 + e.delta.y : null
-}
-
-/** 游標在某條線時間軸本體內的 y（本體＝LaneColumn 的 data-lane-body；量不到回 null＝放最後） */
-function laneBodyY(laneKey: string, clientY: number | null): number | null {
-  if (clientY == null || typeof document === 'undefined') return null
-  const el = document.querySelector(`[data-lane-body="${laneKey}"]`)
-  return el ? clientY - el.getBoundingClientRect().top : null
-}
+// D74／D100 拖曳中的插入線、游標位置、量 DOM：laneDrag.ts（與 AI 模擬區 SimLayout 共用）
 
 type Dialog =
   | { t: 'split'; bc: BoardCard }
@@ -172,12 +170,14 @@ export default function BoardLayout() {
   const [orderSo, setOrderSo] = useState<string | null>(null)
   /** D61 排定卡的卡片詳情：記 placementId＋點開當下的快照（輪詢更新後顯示最新資料；卡片已不在畫面上時留快照） */
   const [detail, setDetail] = useState<BoardCard | null>(null)
-  const openDetail = useCallback((bc: BoardCard) => setDetail(bc), [])
+  /** D100：從卡片上的「工時」小標／右鍵「調整工時…」打開 → 直接聚焦工時輸入框；點卡片本身打開 → 不聚焦 */
+  const [detailFocus, setDetailFocus] = useState(false)
+  const openDetail = useCallback((bc: BoardCard) => { setDetail(bc); setDetailFocus(false) }, [])
   // 開訂單詳情時一併關掉排定卡的卡片詳情：訂單詳情（SoOrderModal，全站共用 z-50）比卡片詳情（Modal z-[60]）低，
   // 兩個同時開著時訂單詳情會被壓在後面看不到
   const openOrder = useCallback((so: string) => { setDetail(null); setOrderSo(so) }, [])
   const [activeDrag, setActiveDrag] = useState<ActiveDrag | null>(null)
-  const [reorderHint, setReorderHint] = useState<ReorderHint | null>(null)
+  const [reorderHint, setReorderHint] = useState<LaneReorderHint | null>(null)
   /** 拖曳中游標的最新位置（D74 算插入點；dnd-kit 的 delta 含容器捲動量，不能直接當游標位置） */
   const pointerRef = useRef<{ x: number; y: number } | null>(null)
   const dragging = activeDrag != null
@@ -369,30 +369,28 @@ export default function BoardLayout() {
   }, [submit])
 
   /**
-   * D74 同一條線內上下重排：beforeId＝放在哪張卡之前（null＝最後）。
-   * 只送 sort_index 有變的卡（其他卡都有值時只有被拖的這張）；一次拖曳＝一批＝一步 Undo。
+   * D74／D100 同一條線內上下重排（拖曳＝how 'drag'；卡片詳情的上移／下移＝'up'／'down'）：changes 由呼叫端算好
+   * （拖曳＝laneReorderChanges、按鈕＝laneStepPlan，兩者都走 planLaneReorder）。position＝移動後是第幾張（寫在標籤）。
+   * 只送 sort_index 有變的卡（其他卡都有值時只有被拖的這張）；一次操作＝一批＝一步 Undo。
    * 被拖的是延誤卡（釘在最上面）→ 那一筆改送 move：排到它目前顯示的那天、解除延誤（D50「拖到任何一天即解除」）＋指定位置。
    */
-  const reorderInLane = useCallback((d: BoardOk, bc: BoardCard, date: YMD, lineId: number, clientY: number | null) => {
-    const day = d.days.find(x => x.date === date)
-    if (!day) return
-    const plan = laneDropPlan(day, lineId, bc.placementId, laneBodyY(`${date}:${lineId}`, clientY), hideDone)
-    const changes = laneReorderChanges(day, lineId, bc.placementId, plan.beforeId)
+  const submitLaneOrder = useCallback((bc: BoardCard, date: YMD, lineId: number, changes: ReorderChange[], how: 'drag' | 'up' | 'down', position: number) => {
     if (changes.length === 0) return
     if (changes.length > MAX_OPS_PER_REQUEST) {
       showToast('warn', `這條線的卡太多（要重新編號 ${changes.length} 張，一次最多 ${MAX_OPS_PER_REQUEST} 張），無法調整順序`)
       return
     }
+    const verb = how === 'drag' ? '調整順序' : how === 'up' ? '上移' : '下移'
     submit(
       changes.map((c): PlacementOp => (c.replan
         ? { op: 'move', id: c.id, version: c.version, toDate: date, lineId, sortIndex: c.sortIndex }
         : { op: 'reorder', id: c.id, version: c.version, sortIndex: c.sortIndex })),
-      `調整順序 ${lineLabel(bc.card)}（${lineName(lineId)} 第 ${plan.index + 1} 張${changes.some(c => c.replan) ? '，解除延誤' : ''}）`,
+      `${verb} ${lineLabel(bc.card)}（${lineName(lineId)} 第 ${position} 張${changes.some(c => c.replan) ? '，解除延誤' : ''}）`,
       changes.map((c): LocalAction => (c.replan
         ? { t: 'move', id: c.id, toDate: date, lineId, sortIndex: c.sortIndex }
         : { t: 'reorder', id: c.id, sortIndex: c.sortIndex })),
     )
-  }, [hideDone, lineName, showToast, submit])
+  }, [lineName, showToast, submit])
 
   const handlersFor = useCallback((bc: BoardCard, siblings: BoardCard[]): CardMenuHandlers => {
     const others = mergeCandidates(siblings, bc)
@@ -416,7 +414,8 @@ export default function BoardLayout() {
       // D67 同一天換線（延誤卡＝移到它目前顯示的那天，順便解除延誤，同拖曳）
       onMoveLine: (c, lineId) => { if (c.displayDate) moveCard(c, c.displayDate, lineId) },
       moveLines: activeLines,
-      onEditMinutes: c => setDetail(c),
+      // D100：「調整工時…」與卡片上的「工時」小標都直接聚焦工時輸入框
+      onEditMinutes: c => { setDetail(c); setDetailFocus(true) },
       onMerge: others.length > 0 ? c => {
         submit(
           [{ op: 'merge', targetId: c.placementId, targetVersion: c.version, sources: others.map(o => ({ id: o.placementId, version: o.version })) }],
@@ -480,35 +479,59 @@ export default function BoardLayout() {
     board.setDragging(true)
   }
 
-  /** D74 拖曳中（日檢視）：算插入線的位置；只有位置真的變了才 setState（每次滑鼠移動都重畫整個工作台太重） */
+  /**
+   * D74／D100 拖曳中：算插入線（日檢視＝時間尺位置；週／兩週＝清單中哪張卡之前）。
+   * 只有位置真的變了才 setState（每次滑鼠移動都重畫整個工作台太重）。
+   */
   const onDragMove = (e: DragMoveEvent) => {
     const drag = activeDrag
     const t = e.over ? parseDropId(String(e.over.id)) : null
-    const day = view === 'day' && drag && data && t?.kind === 'lane' ? data.days.find(x => x.date === t.date) : undefined
+    const day = drag && data && t?.kind === 'lane' ? data.days.find(x => x.date === t.date) : undefined
     if (!drag || !day || t?.kind !== 'lane') { setReorderHint(h => (h ? null : h)); return }
     const laneKey = `${t.date}:${t.lineId}`
-    const own = drag.kind === 'placement' && drag.bc.displayDate === t.date && drag.bc.laneId === t.lineId
-    const y = own ? laneBodyY(laneKey, pointerClientY(pointerRef.current, e)) : null
-    const plan = laneDropPlan(day, t.lineId, own && drag.kind === 'placement' ? drag.bc.placementId : null, y, hideDone)
-    const next: ReorderHint = { laneKey, topPx: Math.round(plan.topPx), mode: own ? 'insert' : 'append' }
-    setReorderHint(h => (h && h.laneKey === next.laneKey && h.topPx === next.topPx && h.mode === next.mode ? h : next))
+    const timeline = view === 'day'
+    let next: LaneReorderHint
+    if (drag.kind === 'placement' && isOwnLaneDrop(drag.bc, t)) {
+      const plan = ownLanePlan({
+        mode: timeline ? 'timeline' : 'list', day, lineId: t.lineId, movingId: drag.bc.placementId,
+        clientY: pointerClientY(pointerRef.current, e), hideCompleted: hideDone,
+      })
+      next = { laneKey, topPx: timeline ? Math.round(plan.topPx) : 0, mode: 'insert', beforeId: plan.beforeId }
+    } else {
+      // 從別處拖進來（待排池、別條線、別天）一律放在該線最後（D74）
+      next = { laneKey, topPx: timeline ? Math.round(laneDropPlan(day, t.lineId, null, null, hideDone).topPx) : 0, mode: 'append', beforeId: null }
+    }
+    setReorderHint(h => (sameHint(h, next) ? h : next))
   }
 
   const onDragEnd = (e: DragEndEvent) => {
     const drag = activeDrag
     const clientY = pointerClientY(pointerRef.current, e)
+    const target = e.over ? parseDropId(String(e.over.id)) : null
+    // D100：拖回自己那條線的插入點——在 setState 之前量（DOM 還是拖曳中的樣子）
+    let own: { day: BoardDay; lineId: number; plan: LaneDropPlan } | null = null
+    if (drag?.kind === 'placement' && target?.kind === 'lane' && data && isOwnLaneDrop(drag.bc, target)) {
+      const day = data.days.find(x => x.date === target.date)
+      if (day) {
+        own = {
+          day, lineId: target.lineId,
+          plan: ownLanePlan({ mode: view === 'day' ? 'timeline' : 'list', day, lineId: target.lineId, movingId: drag.bc.placementId, clientY, hideCompleted: hideDone }),
+        }
+      }
+    }
     setActiveDrag(null)
     setReorderHint(null)
     board.setDragging(false)
-    if (!drag || !e.over || !data) return
-    const target = parseDropId(String(e.over.id))
-    if (!target) return
+    if (!drag || !e.over || !data || !target) return
     // 擺放卡拖回待排池＝放回
     if (target.kind === 'pool') { if (drag.kind === 'placement') unplaceCard(drag.bc); return }
-    // D74：日檢視拖回自己的那條線＝上下重排（不改日期、線，所以不套 D22 的日期限制）
-    if (view === 'day' && drag.kind === 'placement' && target.kind === 'lane'
-      && drag.bc.displayDate === target.date && drag.bc.laneId === target.lineId) {
-      reorderInLane(data, drag.bc, target.date, target.lineId, clientY)
+    // D74／D100：拖回自己的那條線（日／週／兩週）＝上下重排（不改日期、線，所以不套 D22 的日期限制）
+    if (drag.kind === 'placement' && isOwnLaneDrop(drag.bc, target)) {
+      if (own) {
+        // D100：放回原位（看得到的順序沒變，含隱藏已完成時正下方是看不到的完成卡）＝不送
+        const changes = ownLaneDropChanges(own.day, own.lineId, drag.bc.placementId, own.plan)
+        submitLaneOrder(drag.bc, own.day.date, own.lineId, changes, 'drag', own.plan.index + 1)
+      }
       return
     }
     if (drag.rule.blocked) return
@@ -573,6 +596,11 @@ export default function BoardLayout() {
 
   const loadErr = board.loadError
   const holdingCards = data.holding
+  // 被拖的排定卡所在的線（同線重排不套 D22 日期限制；日／週／兩週共用）。
+  // D100：延誤＋預排、還沒到預估可包日的卡除外——它在線內換位置＝move（解除延誤）會被伺服器 D22 擋，自己那格照樣遮住並寫原因
+  const ownLaneKey = activeDrag?.kind === 'placement' && activeDrag.bc.displayDate != null && activeDrag.bc.laneId != null
+    && !laneReplanBlockedReason(activeDrag.bc)
+    ? `${activeDrag.bc.displayDate}:${activeDrag.bc.laneId}` : null
 
   // ── 檢視（D56）的衍生值 ──────────────────────────────────────────────────
   // 目前畫面上的資料是不是「現在要的那一段」（換日／換檢視後、新資料回來前為 false → 蓋一層載入中）
@@ -836,8 +864,7 @@ export default function BoardLayout() {
                   onResizing={board.setDragging}
                   loadingOverlay={loadingOverlay}
                   reorderHint={reorderHint}
-                  ownLaneKey={activeDrag?.kind === 'placement' && activeDrag.bc.displayDate != null && activeDrag.bc.laneId != null
-                    ? `${activeDrag.bc.displayDate}:${activeDrag.bc.laneId}` : null}
+                  ownLaneKey={ownLaneKey}
                 />
               ) : (
                 <div className="flex h-40 items-center justify-center rounded-xl border border-dashed border-slate-800 text-xs text-slate-500">載入中…</div>
@@ -860,6 +887,8 @@ export default function BoardLayout() {
                   onOpenDetail={openDetail}
                   onPickDay={d => go('day', d <= data.rollTarget ? null : d)}
                   onEditCapacity={editCapacity}
+                  reorderHint={reorderHint}
+                  ownLaneKey={ownLaneKey}
                 />
                 {loadingOverlay}
               </div>
@@ -991,6 +1020,26 @@ export default function BoardLayout() {
       {detail && (() => {
         // 用最新資料（輪詢／操作後）；找不到（已放回待排池、已結案隱藏）就顯示點開當下的快照
         const fresh = [...data.holding, ...data.days.flatMap(d => d.cards)].find(c => c.placementId === detail.placementId) ?? detail
+        // D100 順序列（上移／下移）：排在日期上、那天在畫面上的卡才有；按下後對話框不關，fresh 跟著樂觀更新 → 可以連按
+        const laneId = fresh.laneId ?? null
+        const laneDay = fresh.planDate != null && fresh.displayDate != null && laneId != null
+          ? data.days.find(d => d.date === fresh.displayDate) : undefined
+        let laneOrder: LaneOrderProps | null = null
+        if (laneDay && laneId != null) {
+          const info = laneStepInfo(laneDay, laneId, fresh.placementId, { hideCompleted: hideDone })
+          const lockedOut = editable ? null : '唯讀：取得編輯權（開始編輯）後才能調整順序'
+          laneOrder = {
+            lineName: lineName(laneId),
+            info: lockedOut ? { ...info, up: lockedOut, down: lockedOut } : info,
+            hint: '每按一次＝一步「復原」（Ctrl+Z）',
+            onStep: dir => {
+              if (!editable) return
+              const r = laneStepPlan(laneDay, laneId, fresh.placementId, dir, { hideCompleted: hideDone })
+              if (!r.ok) { showToast('warn', r.reason); return }
+              submitLaneOrder(fresh, laneDay.date, laneId, r.changes, dir, r.position)
+            },
+          }
+        }
         return (
           <CardDetailDialog
             card={fresh.card}
@@ -999,6 +1048,8 @@ export default function BoardLayout() {
             onClose={() => setDetail(null)}
             onOpenOrder={openOrder}
             lines={data.lines}
+            laneOrder={laneOrder}
+            focusMinutes={detailFocus}
             // D69：排定卡的工時編輯（minutes 已由 (b) 換算成「以本列 qty 為準」；null＝回到標準值）
             minutesEdit={{
               editable,

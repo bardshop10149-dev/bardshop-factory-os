@@ -28,7 +28,10 @@ import type { PackagingCard, PoolBlock, PoolBlockId } from '@/lib/packaging/type
 import { dayLoad } from '@/lib/packaging/scheduleCapacity'
 import { activeLinesOf, laneRemaining, laneStopped, pickAutoLane, resolveLaneId } from '@/lib/packaging/scheduleLines'
 import { effectiveMinutes, mergeOverride, overrideFromEffective, splitOverride } from '@/lib/packaging/scheduleMinutes'
-import { appendSortIndex, insertIndexAt, planLaneReorder, sortByLaneOrder, type ReorderChange } from '@/lib/packaging/laneOrder'
+import {
+  appendSortIndex, insertIndexAt, planLaneReorder, sortByLaneOrder, stepTarget,
+  type ReorderChange, type StepBlock, type StepDir,
+} from '@/lib/packaging/laneOrder'
 import { laneScale, layoutLane } from '@/lib/packaging/laneTimeline'
 
 export type BoardOk = Extract<BoardResponse, { success: true; unchanged?: false }>
@@ -583,7 +586,9 @@ export function applyLocal(d: BoardOk, a: LocalAction): BoardOk {
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// D74 線內上下排序（日檢視拖曳）
+// D74 線內上下排序（D100 起：日／週／兩週檢視拖曳，與卡片詳情的上移／下移共用）
+//   插入點：日檢視＝時間尺版面（laneDropPlan）、週／兩週＝DOM 量到的清單位置（multiDayDropPlan），兩者都走 planLaneDrop；
+//   要改哪些 sort_index：一律 laneOrder.planLaneReorder（拖曳＝laneReorderChanges、按鈕＝laneStepPlan）。
 // ─────────────────────────────────────────────────────────────────────
 
 /** 某天某條線的卡（順序＝day.cards；不在任何 lane 的卡歸第一條線，同 DayLanesView） */
@@ -608,19 +613,60 @@ export function laneDropPlan(
   movingId: string | null,
   yBodyPx: number | null,
   hideCompleted: boolean,
-): { beforeId: string | null; topPx: number; index: number; visibleCount: number } {
+): LaneDropPlan {
   const lane = day.lanes?.find(l => l.lineId === laneId)
   const cards = laneCardsOf(day, laneId)
   if (!lane || cards.length === 0) return { beforeId: null, topPx: 0, index: 0, visibleCount: 0 }
   const layouts = layoutLane(cards.map(c => ({ placementId: c.placementId, minutes: c.minutes })), laneScale(lane.capacity))
-  const visible = cards
-    .map((c, i) => ({ c, l: layouts[i] }))
-    .filter(x => x.c.placementId !== movingId && !(hideCompleted && x.c.completed))
+  return planLaneDrop(cards, layouts, movingId, yBodyPx, hideCompleted)
+}
+
+export interface LaneDropPlan {
+  /** 放在哪張卡之前（null＝最後） */
+  beforeId: string | null
+  /** 插入線位置（與 layouts 同一個座標系：日檢視＝時間軸本體內 px；多日檢視＝client 座標，畫面不用它） */
+  topPx: number
+  /** 插在第幾個「看得到的卡」之前（0 起算；＋1＝放下後是第幾張） */
+  index: number
+  visibleCount: number
+  /**
+   * D100（只有週／兩週的 multiDayDropPlan 會設）：插入點就是被拖的卡自己目前的位置（看得到的順序沒變）＝放回原位、不送。
+   * 為什麼要另外標：隱藏已完成時，完成卡在清單裡不畫也不佔位；被拖的卡正下方若是看不到的完成卡，beforeId 會是「下一張看得到的卡」，
+   *   交給 laneReorderChanges 就變成「排到那張完成卡之後」→ 畫面看起來原位、卻送出寫入（延誤卡還會被 replan＝解除延誤）。
+   *   日檢視（時間尺）的完成卡照樣佔位、空位看得到，插入線畫在空位下方＝真的會越過它 → 不標，維持 D74 原行為。
+   */
+  stay?: boolean
+}
+
+/** 一張卡在畫面上的位置（日檢視：layoutLane 算的；多日檢視：DOM 量的 getBoundingClientRect） */
+export interface LaneRect {
+  topPx: number
+  heightPx: number
+}
+
+/**
+ * D100 插入點的通用算法（日檢視 laneDropPlan、多日檢視 multiDayDropPlan 共用）：座標系由呼叫端決定，這裡只比大小。
+ * layouts 與 cards 一一對應；null＝畫面上沒有這張（隱藏、沒畫出來、量不到）→ 不當插入點。
+ * 被拖的卡自己、隱藏的已完成卡不當插入點；延誤卡釘在最上面（插入點夾到最後一張延誤卡之後）。
+ * 為什麼抽出來而不是另寫一份多日版：兩種檢視只差在「卡片在哪裡」（時間尺 vs 清單），夾延誤卡、排除自己等規則要一模一樣。
+ */
+export function planLaneDrop(
+  cards: readonly Pick<BoardCard, 'placementId' | 'completed' | 'delayWorkdays'>[],
+  layouts: readonly (LaneRect | null | undefined)[],
+  movingId: string | null,
+  y: number | null,
+  hideCompleted: boolean,
+): LaneDropPlan {
+  const visible: { c: (typeof cards)[number]; l: LaneRect }[] = []
+  cards.forEach((c, i) => {
+    const l = layouts[i]
+    if (l && c.placementId !== movingId && !(hideCompleted && c.completed)) visible.push({ c, l })
+  })
   let pinned = visible.findIndex(x => !isPinned(x.c))
   if (pinned < 0) pinned = visible.length
-  const index = yBodyPx == null || movingId == null
+  const index = y == null || movingId == null
     ? visible.length
-    : Math.max(pinned, insertIndexAt(visible.map(x => ({ topPx: x.l.topPx, heightPx: x.l.heightPx })), yBodyPx))
+    : Math.max(pinned, insertIndexAt(visible.map(x => ({ topPx: x.l.topPx, heightPx: x.l.heightPx })), y))
   const at = visible[index]
   const last = visible[visible.length - 1]
   return {
@@ -631,8 +677,201 @@ export function laneDropPlan(
   }
 }
 
+/**
+ * D100 週／兩週檢視（清單排版，卡高與工時無關）：rects＝DOM 量到的每張卡位置（client 座標、已含捲動），y＝游標 clientY。
+ * 被拖的卡以半透明留在原處也沒關係：它不當插入點（planLaneDrop 排除 movingId）。
+ * stay：插入點＝被拖的卡目前在「看得到的卡」中的位置 → 放回原位（見 LaneDropPlan.stay；呼叫端用 ownLaneDropChanges）。
+ */
+export function multiDayDropPlan(
+  day: Pick<BoardDay, 'cards' | 'lanes'>,
+  laneId: number,
+  movingId: string | null,
+  rects: ReadonlyMap<string, LaneRect>,
+  clientY: number | null,
+  hideCompleted: boolean,
+): LaneDropPlan {
+  const cards = laneCardsOf(day, laneId)
+  const plan = planLaneDrop(cards, cards.map(c => rects.get(c.placementId) ?? null), movingId, clientY, hideCompleted)
+  const mi = movingId == null ? -1 : cards.findIndex(c => c.placementId === movingId)
+  if (mi < 0) return plan
+  // 排在被拖的卡上面、當得了插入點的卡數（條件同 planLaneDrop 的 visible）＝它自己那格的插入位置
+  const own = cards.slice(0, mi).filter(c => rects.has(c.placementId) && !(hideCompleted && c.completed)).length
+  return plan.index === own ? { ...plan, stay: true } : plan
+}
+
+/**
+ * D100 拖回自己那條線放下時要送的 sort_index 變更：放回原位（plan.stay）＝不送；其餘＝laneReorderChanges（D74）。
+ * 正式區 BoardLayout.onDragEnd 用；模擬區同樣先看 stay 再交給 simLaneReorder。
+ */
+export function ownLaneDropChanges(
+  day: Pick<BoardDay, 'cards' | 'lanes'>,
+  laneId: number,
+  movingId: string,
+  plan: Pick<LaneDropPlan, 'beforeId' | 'stay'>,
+): ReorderChange[] {
+  return plan.stay ? [] : laneReorderChanges(day, laneId, movingId, plan.beforeId)
+}
+
+/**
+ * D100 日檢視插入線畫在哪（本體內 px）：「放在 beforeId 之前」的位置（null＝最後一張看得到的卡底部）。
+ * 模擬區實際落點和游標算出的不同時（被夾到固定在最上面的唯讀卡之後，simBoard.simLaneReorder），用它把插入線畫到實際落點。
+ */
+export function laneLineTopPx(
+  day: Pick<BoardDay, 'cards' | 'lanes'>,
+  laneId: number,
+  movingId: string | null,
+  beforeId: string | null,
+  hideCompleted: boolean,
+): number {
+  const lane = day.lanes?.find(l => l.lineId === laneId)
+  const cards = laneCardsOf(day, laneId)
+  if (!lane || cards.length === 0) return 0
+  const layouts = layoutLane(cards.map(c => ({ placementId: c.placementId, minutes: c.minutes })), laneScale(lane.capacity))
+  let lastBottom = 0
+  for (let i = 0; i < cards.length; i++) {
+    const c = cards[i]
+    if (c.placementId === movingId || (hideCompleted && c.completed)) continue
+    if (c.placementId === beforeId) return layouts[i].topPx
+    lastBottom = layouts[i].topPx + layouts[i].heightPx
+  }
+  return lastBottom
+}
+
+/**
+ * D100 放下的目標是不是「被拖的卡自己那條線」（同一天、同一條顯示中的線）→ 走線內重排，不是移動。
+ * D74 只在日檢視成立；週／兩週拖回自己那格原本會變成 move 到同日同線 → moveCard 直接 return，畫面沒反應（Snow 回報「拖不動」）。
+ * 延誤卡以 displayDate（目前顯示的那天）比對：拖回原位＝不送、延誤照舊（同 D74）；拖到別的位置＝replan。
+ */
+export function isOwnLaneDrop(bc: Pick<BoardCard, 'displayDate' | 'laneId'>, target: DropTarget): boolean {
+  return target.kind === 'lane' && bc.displayDate === target.date && bc.laneId === target.lineId
+}
+
 /** 延誤卡（D50 順延進來、還沒被主管重排）：釘在最上面、不看 sortIndex（laneOrder.effectiveSortIndex） */
-const isPinned = (c: Pick<BoardCard, 'delayWorkdays' | 'completed'>): boolean => !c.completed && c.delayWorkdays > 0
+export const isPinned = (c: Pick<BoardCard, 'delayWorkdays' | 'completed'>): boolean => !c.completed && c.delayWorkdays > 0
+
+/**
+ * D100 延誤卡在自己那條線換位置（拖曳或上移／下移）一定送 move（排到目前顯示的那天＝解除延誤，D74），伺服器會對 move 驗 D22；
+ * 這張又是預排卡、預估可包日在顯示日之後 → 必回 before_est_ready（整批回滾）。回傳原因＝不能在線內調整順序（null＝可以）。
+ * 會出現在：排定後預估可包日又延後、卡又順延進今天。一般卡（非延誤）換位置只送 reorder、不驗 D22，不受影響。
+ * 用在：卡片詳情的上移／下移（laneStepPlan）、拖曳時要不要把自己那格當「同線重排」而免 D22 遮罩（BoardLayout／SimLayout 的 ownLaneKey）。
+ */
+export function laneReplanBlockedReason(c: Pick<BoardCard, 'delayWorkdays' | 'completed' | 'readiness' | 'preReadyDate' | 'displayDate'>): string | null {
+  if (!isPinned(c) || c.readiness !== 'pre' || !c.preReadyDate || !c.displayDate || c.displayDate >= c.preReadyDate) return null
+  return `延誤卡調整順序＝改排到 ${md(c.displayDate)}（解除延誤），但這張是預排卡、預估 ${md(c.preReadyDate)} 才可包（D22），不能排在那之前；請用「移到…」排到 ${md(c.preReadyDate)} 或之後`
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// D100 卡片詳情「上移／下移」（正式區、模擬區共用；與拖曳同一套 planLaneReorder）
+// ─────────────────────────────────────────────────────────────────────
+
+export type LaneStepCode = StepBlock | 'completed' | 'pre_ready'
+
+/** 上移／下移不能按的原因（按鈕 title 與停用時的小字；手機沒有 hover，兩個都停用時要直接顯示） */
+export const LANE_STEP_REASON: Record<LaneStepCode, string> = {
+  missing: '這張卡不在這條線上（已移走或不在畫面上）',
+  completed: '已完成的卡不調整順序（要先取消完成）',
+  pinned: '延誤卡固定在最上面；按「下移」可解除延誤並往下排一格',
+  first: '已經是這條線的第一張（延誤卡固定在最上面，不能排到它上面）',
+  last: '已經是這條線的最後一張',
+  // 實際顯示用 laneReplanBlockedReason 帶日期的版本；這裡是沒有日期時的通用說法
+  pre_ready: '延誤的預排卡還沒到預估可包日，調整順序會解除延誤並改排到今天（D22 不允許）',
+}
+
+export type LaneStepResult =
+  | {
+    ok: true
+    beforeId: string | null
+    changes: ReorderChange[]
+    /** 移動後是這條線看得到的卡中的第幾張（1 起算；寫在操作標籤「A 線 第 n 張」） */
+    position: number
+    total: number
+  }
+  | { ok: false; code: LaneStepCode; reason: string }
+
+/**
+ * 卡片詳情按一下「上移／下移」要送什麼（D100）：stepTarget 找目標 → laneReorderChanges（＝拖到那個位置）。
+ * hideCompleted：隱藏的已完成卡不當錨點（照樣參與編號，同拖曳）。
+ * 延誤＋預排、還沒到預估可包日的卡：兩個方向都停用（laneReplanBlockedReason；送出去伺服器一定擋 D22）。
+ * （模擬區有唯讀卡時的退回路徑在 simBoard.simLaneStep，用 laneOrder.planLaneReorderAnchored，不在這裡）
+ */
+export function laneStepPlan(
+  day: Pick<BoardDay, 'cards' | 'lanes'>,
+  laneId: number,
+  movingId: string,
+  dir: StepDir,
+  opts: { hideCompleted?: boolean } = {},
+): LaneStepResult {
+  const lane = laneCardsOf(day, laneId)
+  const moving = lane.find(c => c.placementId === movingId)
+  if (!moving) return { ok: false, code: 'missing', reason: LANE_STEP_REASON.missing }
+  if (moving.completed) return { ok: false, code: 'completed', reason: LANE_STEP_REASON.completed }
+  const d22 = laneReplanBlockedReason(moving)
+  if (d22) return { ok: false, code: 'pre_ready', reason: d22 }
+  const anchor = (c: BoardCard) => !(opts.hideCompleted && c.completed)
+  const t = stepTarget(lane.map(c => ({ id: c.placementId, pinned: isPinned(c), anchor: anchor(c) })), movingId, dir)
+  if ('reason' in t) return { ok: false, code: t.reason, reason: LANE_STEP_REASON[t.reason] }
+  const entries = lane.map(c => ({ placementId: c.placementId, version: c.version, sortIndex: c.sortIndex ?? null, pinned: isPinned(c) }))
+  const plan = planLaneReorder(entries, movingId, t.beforeId)
+  const changes = plan?.changes ?? []
+  if (!plan || changes.length === 0) {
+    const code = dir === 'up' ? 'first' : 'last'
+    return { ok: false, code, reason: LANE_STEP_REASON[code] }
+  }
+  const byId = new Map(lane.map(c => [c.placementId, c]))
+  const seen = plan.order.filter(id => id === movingId || anchor(byId.get(id)!))
+  return { ok: true, beforeId: t.beforeId, changes, position: seen.indexOf(movingId) + 1, total: seen.length }
+}
+
+/**
+ * 套上 changes 之後 movingId 是這條線看得到的卡中的第幾張（1 起算；操作標籤「A 線 第 n 張」用）。
+ * 用和樂觀更新 applyLocal 同一套穩定排序（sortByLaneOrder），畫面上看到的就是這個位置；replan＝解除延誤（不再釘在最上面）。
+ */
+export function lanePositionAfter(
+  day: Pick<BoardDay, 'cards' | 'lanes'>,
+  laneId: number,
+  movingId: string,
+  changes: readonly ReorderChange[],
+  hideCompleted = false,
+): number {
+  const next = new Map(changes.map(c => [c.id, c]))
+  const lane = laneCardsOf(day, laneId).map(c => {
+    const ch = next.get(c.placementId)
+    return ch ? { ...c, sortIndex: ch.sortIndex, delayWorkdays: ch.replan ? 0 : c.delayWorkdays } : c
+  })
+  const seen = sortByLaneOrder(lane).filter(c => c.placementId === movingId || !(hideCompleted && c.completed))
+  return seen.findIndex(c => c.placementId === movingId) + 1
+}
+
+/** 卡片詳情的「順序」列：目前第幾張、上移／下移能不能按（不能＝原因） */
+export interface LaneStepInfo {
+  position: number
+  total: number
+  up: string | null
+  down: string | null
+  /** 延誤卡（下移＝解除延誤） */
+  pinned: boolean
+}
+
+/** 兩個方向各試算一次（一條線不到幾十張卡，render 時直接算即可） */
+export function laneStepInfo(
+  day: Pick<BoardDay, 'cards' | 'lanes'>,
+  laneId: number,
+  id: string,
+  opts: { hideCompleted?: boolean } = {},
+): LaneStepInfo {
+  const lane = laneCardsOf(day, laneId)
+  const self = lane.find(c => c.placementId === id)
+  const seen = lane.filter(c => c.placementId === id || !(opts.hideCompleted && c.completed))
+  const up = laneStepPlan(day, laneId, id, 'up', opts)
+  const down = laneStepPlan(day, laneId, id, 'down', opts)
+  return {
+    position: seen.findIndex(c => c.placementId === id) + 1,
+    total: seen.length,
+    up: up.ok ? null : up.reason,
+    down: down.ok ? null : down.reason,
+    pinned: !!self && isPinned(self),
+  }
+}
 
 /**
  * 同一條線內把 moving 拖到 beforeId 之前（null＝最後）要改的 sort_index（D74）。

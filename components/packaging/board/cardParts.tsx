@@ -9,7 +9,7 @@ import { createPortal } from 'react-dom'
 import { useDraggable } from '@dnd-kit/core'
 import type { BoardCard } from '@/lib/packaging/scheduleTypes'
 import { fmtQty } from '@/components/packaging/poolStyles'
-import { hoursText, moText, placementState } from '@/lib/packaging/boardView'
+import { hoursText, moText, placementState, type CardSize } from '@/lib/packaging/boardView'
 import { clock, md } from './boardFormat'
 import { lineLabel } from './CardFace'
 import { MenuPopup, cardMenuItems, type CardMenuHandlers } from './cardMenu'
@@ -46,19 +46,74 @@ export function cardTitle(bc: BoardCard, mini = false): string {
  * 分線輪的小角標（CardFace 不能改，D58 的 7 項外觀不動；新資訊由外框元件加，lines.md §5.0）：
  *   手＝D66 手動加入的品項　✎＝D69 主管調整過工時　⚠＝所屬線已停用、暫顯示在預設線
  */
-export function PlacementBadges({ bc, className = '' }: { bc: BoardCard; className?: string }) {
+export function PlacementBadges({ bc, className = '', hideMinutes = false }: {
+  bc: BoardCard
+  className?: string
+  /** D100：卡片上已有「工時」小標（MinutesChip，調整過會標 ✎）→ 角標不再重複畫 ✎；日檢視 LaneCard 不傳，照舊 */
+  hideMinutes?: boolean
+}) {
   const inactive = bc.flags.find(f => f.code === 'line_inactive')
-  if (!bc.manual && !bc.minutesOverride && !inactive) return null
+  const ov = !!bc.minutesOverride && !hideMinutes
+  if (!bc.manual && !ov && !inactive) return null
   return (
     <span className={`pointer-events-none flex items-center gap-0.5 text-[9px] font-bold leading-3 ${className}`}>
       {bc.manual && (
         <span className="rounded bg-violet-700/90 px-0.5 text-white" title={`手動加入：${bc.manual.addedByName ?? bc.manual.addedBy}（${clock(bc.manual.addedAt)}）`}>手</span>
       )}
-      {bc.minutesOverride && (
+      {ov && bc.minutesOverride && (
         <span className="rounded bg-slate-700 px-0.5 text-amber-200" title={`工時已由 ${bc.minutesOverride.byName ?? bc.minutesOverride.by} 調整（標準 ${hoursText(bc.minutesStd) ?? '未知'} h）`}>✎</span>
       )}
       {inactive && <span className="rounded bg-orange-700 px-0.5 text-white" title={inactive.label}>⚠</span>}
     </span>
+  )
+}
+
+/**
+ * D100 卡片上的「工時 X.Xh」小標（週 sm、待排區／窄螢幕 md、兩週迷你卡）。
+ * 為什麼：週／兩週卡片原本完全看不到工時，唯一線索是 9px、點不到的 ✎ 角標，要改工時只能點整張卡再往下找——
+ *   Snow 回報「改時數的入口縮成小圖示，看不懂」。日檢視有時間列與拉下緣，這裡補上文字入口。
+ * - 調整過（覆寫）＝琥珀色＋✎；工時未知＝橘色「工時 ?」（照樣可以點進去設定，設定後才計入負荷）
+ * - md／sm 且有 onEdit：按鈕（開卡片詳情並直接聚焦工時輸入框）。照 OrderNo 的寫法在 pointerdown／click／keydown 都 stopPropagation：
+ *   按住小標不會起拖曳、點了不會冒泡成「點卡片」。
+ * - 迷你卡一律純文字：迷你卡上的按鈕會吃掉拖曳與點擊（PlacementCard 檔頭記錄過的問題）；點整張迷你卡本來就會開詳情。
+ *   迷你卡內容寬只有約 45px（清單出捲軸時約 35px）：「✎工時 12.5h」放不下、被截成「✎工時 1…」，最需要看的數字反而不見（D100 驗證 F5）
+ *   → 迷你卡只寫「✎12.5h」／「3.5h」（約 32px，數字完整；「工時」兩字留給讀屏軟體，滑過提示是整張卡的 cardTitle，已含工時與標準值）；
+ *   工時未知寫「工時?」。兩週欄頭本來就用「A 3.5h」表示已排時數，同一種寫法。
+ * - 已由待排池扣完（有效數量 0、未完成）：純文字（右鍵選單也不給「調整工時…」）。
+ */
+export function MinutesChip({ bc, size, onEdit }: { bc: BoardCard; size: CardSize; onEdit?: (bc: BoardCard) => void }) {
+  const s = placementState(bc)
+  const h = hoursText(bc.minutes)
+  const ov = !!bc.minutesOverride
+  const tone = h == null ? 'text-orange-300' : ov ? 'text-amber-200' : 'text-slate-300'
+  if (size === 'mini') {
+    return (
+      // 截斷只是防呆（極端值不撐破卡片）；一般工時一定放得下
+      <span className={`min-w-0 truncate whitespace-nowrap text-[9px] leading-3 tabular-nums ${tone}`}>
+        {h == null ? '工時?' : <><span className="sr-only">工時 </span>{`${ov ? '✎' : ''}${h}h`}</>}
+      </span>
+    )
+  }
+  const text = `${ov ? '✎' : ''}工時 ${h ?? '?'}h`
+  const title = h == null
+    ? '工時未知（未計入負荷）'
+    : `工時 ${h} h${ov ? `（已調整，標準 ${hoursText(bc.minutesStd) ?? '未知'} h）` : '（標準估計）'}`
+  const clickable = !!onEdit && !(s.consumed && !s.done)
+  if (!clickable) {
+    return <span className={`shrink-0 whitespace-nowrap text-[10px] leading-4 tabular-nums ${tone}`} title={title}>{text}</span>
+  }
+  return (
+    <button
+      type="button"
+      onPointerDown={e => e.stopPropagation()}
+      onClick={e => { e.stopPropagation(); onEdit!(bc) }}
+      onKeyDown={e => e.stopPropagation()}
+      title={`${title}・點一下調整工時`}
+      aria-label={`${lineLabel(bc.card)} 工時 ${h ?? '未知'} 小時，點一下調整`}
+      className={`shrink-0 whitespace-nowrap rounded border px-1 text-[10px] leading-4 tabular-nums hover:bg-slate-700 ${
+        ov ? 'border-amber-700/70 bg-amber-950/40' : 'border-slate-600 bg-slate-800/80'
+      } ${tone}`}
+    >{text}</button>
   )
 }
 

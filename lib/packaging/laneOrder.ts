@@ -154,3 +154,184 @@ export function planLaneReorder(
   })
   return { order, changes, renumbered: true }
 }
+
+/** planLaneReorderAnchored 的一張卡：fixed＝這張的 sort_index 不能改（模擬區的正式區唯讀卡、鎖定的模擬列） */
+export interface AnchoredLaneEntry extends LaneOrderEntry {
+  fixed?: boolean
+}
+
+export type AnchoredReorder =
+  | {
+    order: string[]
+    changes: ReorderChange[]
+    /** 實際落點：排在哪張卡之前（null＝最後）；拖曳中的插入線畫在這裡 */
+    beforeId: string | null
+    /** 要求的位置在「固定在最上面」的卡上面，被夾到它們之後 */
+    clamped: boolean
+  }
+  | { blocked: 'frozen' | 'no_gap' }
+
+/**
+ * k 個嚴格遞增、落在 (lo, hi) 開區間內的合法 sort_index（lo／hi 可以是 ±Infinity）；放不下回 null。
+ * 優先用整數（和 planLaneReorder 重新編號的 1、2、3… 同一種值），整數塞不下才平均切小數。
+ */
+function fillGap(lo: number, hi: number, k: number): number[] | null {
+  if (k <= 0) return []
+  const start = Number.isFinite(lo) ? Math.floor(lo) + 1
+    : !Number.isFinite(hi) || k < hi - EPS ? 1
+      : Math.ceil(hi - EPS) - k
+  let vs = Array.from({ length: k }, (_, i) => start + i)
+  if (Number.isFinite(hi) && !(vs[k - 1] < hi - EPS)) {
+    const step = (hi - lo) / (k + 1)
+    vs = Array.from({ length: k }, (_, i) => round4(lo + step * (i + 1)))
+  }
+  let prev = lo
+  for (const v of vs) {
+    if (!(v > prev + EPS) || !isValidSortIndex(v)) return null
+    prev = v
+  }
+  return Number.isFinite(hi) && !(prev < hi - EPS) ? null : vs
+}
+
+/**
+ * D100 有「不能改順序值的卡」（fixed）時的線內重排——AI 模擬區的退回路徑（simBoard.simLaneReorder／simLaneStep）。
+ * 為什麼不能直接用 planLaneReorder：要重新編號時它會把整條線（含 fixed 卡）編成 1、2、3…；fixed 卡的值改不了，
+ *   只編其他卡的話，null 的 fixed 卡會一律跳到最上面、有值的 fixed 卡會和新的 1..n 交錯或平手
+ *   → 「上移」反而往下掉、插入線和落點不一致、前端（穩定排序）和伺服器（固定排序決勝）排出來不一樣（D100 驗證 F2）。
+ * 規則（結果一定是「只有被拖的卡換位置、其他卡相對順序不變」，做不到就回 blocked，不會亂排）：
+ *   - fixed 卡不改（不會出現在 changes）；延誤卡（pinned，被拖的那張除外）也不改（要 replan 才會解除，只有被拖的卡會送 move）
+ *   - 固定在最上面、位置改不了的卡＝延誤卡，以及 fixed 且 sort_index 為 null 的卡（null 一律排最上面、彼此依伺服器固定排序）：
+ *       延誤卡照 D74 夾到其後；被拖的卡原本在它們下面 → 最高只能到最後一張之後（clamped）；
+ *       被拖的卡原本夾在它們中間 → 往下＝排到它們之後，往上或在中間換位置做不到 → blocked 'frozen'
+ *   - 其餘依新順序給值：開頭連續、原本就是 null 的卡維持 null（位置由固定排序決定、沒變）；之後每張都要有值且嚴格遞增：
+ *       優先只改被拖的那一張（前後兩張的中間值，同 planLaneReorder）；不行就以 fixed 卡的值當錨點，
+ *       只把「含被拖的卡或含 null」的那幾段可改的卡填進錨點之間的空隙（不從 1 開始，避免和 fixed 卡交錯或平手）
+ *   - 空隙不夠（錨點平手、間距 < 0.0001）→ blocked 'no_gap'
+ *   - 最後依排序規則驗一次：平手只允許發生在「兩張都沒改、原本就是這個先後」的卡（伺服器平手用固定排序、前端用穩定排序，兩邊才一致）
+ * lane：這條線目前的顯示順序（＝伺服器排好的順序）。回傳 null＝movingId 不在這條線；changes 空＝位置沒變。
+ */
+export function planLaneReorderAnchored(
+  lane: readonly AnchoredLaneEntry[],
+  movingId: string,
+  beforeId: string | null,
+): AnchoredReorder | null {
+  const mi = lane.findIndex((c) => c.placementId === movingId)
+  if (mi < 0) return null
+  const moving = lane[mi]
+  const rest = lane.filter((c) => c.placementId !== movingId)
+  const effNull = (c: AnchoredLaneEntry) => !!c.pinned || c.sortIndex == null
+  let pinnedFloor = rest.findIndex((c) => !c.pinned)
+  if (pinnedFloor < 0) pinnedFloor = rest.length
+  let floor = pinnedFloor
+  rest.forEach((c, i) => { if (c.pinned || (c.fixed && c.sortIndex == null)) floor = Math.max(floor, i + 1) })
+
+  let pos = beforeId == null ? rest.length : rest.findIndex((c) => c.placementId === beforeId)
+  if (pos < 0) pos = rest.length
+  pos = Math.max(pos, pinnedFloor) // D74：延誤卡釘在最上面（同 planLaneReorder）
+  let clamped = false
+  if (pos < floor && pos !== mi) {
+    if (mi < floor && pos < mi) return { blocked: 'frozen' }
+    pos = floor
+    clamped = true
+  }
+  const next = [...rest.slice(0, pos), moving, ...rest.slice(pos)]
+  const order = next.map((c) => c.placementId)
+  const after = rest[pos]?.placementId ?? null
+  if (order.every((id, i) => id === lane[i].placementId)) return { order, changes: [], beforeId: after, clamped }
+
+  // 開頭維持 null 的一段（被拖的卡除外：它換了位置，一定要給值）
+  let q = 0
+  while (q < next.length && next[q] !== moving && effNull(next[q])) q++
+  const tail = next.slice(q)
+  // 防呆：後段不該有改不了的 null 卡（fixed null、延誤卡都在固定段裡）；有＝傳進來的順序不是排好的
+  if (tail.some((c) => c !== moving && (c.pinned || (c.fixed && c.sortIndex == null)))) return { blocked: 'no_gap' }
+  const val = new Map<string, number>()
+  const k = tail.indexOf(moving)
+  // ① 只改被拖的那一張
+  if (tail.every((c) => c === moving || !effNull(c))) {
+    const prev = k > 0 ? (tail[k - 1].sortIndex as number) : null
+    const nxt = k < tail.length - 1 ? (tail[k + 1].sortIndex as number) : null
+    const cand = round4(prev != null && nxt != null ? (prev + nxt) / 2 : prev != null ? prev + 1 : nxt != null ? nxt - 1 : 1)
+    if ((prev == null || cand > prev + EPS) && (nxt == null || cand < nxt - EPS) && isValidSortIndex(cand)) val.set(moving.placementId, cand)
+  }
+  // ② 以 fixed 卡的值當錨點，分段填空隙
+  if (!val.has(moving.placementId)) {
+    let i = 0
+    while (i < tail.length) {
+      if (tail[i].fixed) { i++; continue }
+      let j = i
+      while (j < tail.length && !tail[j].fixed) j++
+      const run = tail.slice(i, j)
+      if (run.some((c) => c === moving || effNull(c))) {
+        const lo = i > 0 ? (tail[i - 1].sortIndex as number) : -Infinity
+        const hi = j < tail.length ? (tail[j].sortIndex as number) : Infinity
+        const vs = fillGap(lo, hi, run.length)
+        if (!vs) return { blocked: 'no_gap' }
+        run.forEach((c, t) => val.set(c.placementId, vs[t]))
+      }
+      i = j
+    }
+  }
+
+  const replan = moving.pinned ? { replan: true as const } : {}
+  const changes: ReorderChange[] = []
+  for (const c of next) {
+    const v = val.get(c.placementId)
+    if (v == null) continue
+    const isMoving = c === moving
+    if (c.sortIndex == null || Math.abs(c.sortIndex - v) > EPS || (isMoving && moving.pinned)) {
+      changes.push({ id: c.placementId, version: c.version, sortIndex: v, ...(isMoving ? replan : {}) })
+    }
+  }
+  // 驗算：套上新值後依 D74 規則排序＝next（平手只允許兩張都沒改、原本就是這個先後）
+  const changed = new Set(changes.map((c) => c.id))
+  const eff = (c: AnchoredLaneEntry): number | null =>
+    c === moving ? (val.get(c.placementId) ?? (moving.pinned ? null : c.sortIndex ?? null))
+      : c.pinned ? null : (val.get(c.placementId) ?? c.sortIndex ?? null)
+  const laneIdx = new Map(lane.map((c, i) => [c.placementId, i]))
+  for (let t = 1; t < next.length; t++) {
+    const a = next[t - 1]
+    const b = next[t]
+    const cmp = compareSortIndex(eff(a), eff(b))
+    if (cmp > 0) return { blocked: 'no_gap' }
+    if (cmp === 0 && (a === moving || b === moving || changed.has(a.placementId) || changed.has(b.placementId)
+      || (laneIdx.get(a.placementId) as number) > (laneIdx.get(b.placementId) as number))) return { blocked: 'no_gap' }
+  }
+  return { order, changes, beforeId: after, clamped }
+}
+
+export type StepDir = 'up' | 'down'
+/** 上移／下移不能按的原因：missing＝不在這條線、pinned＝延誤卡不能再往上、first／last＝已經在最上面／最下面 */
+export type StepBlock = 'missing' | 'pinned' | 'first' | 'last'
+
+/**
+ * D100 卡片詳情「上移／下移」的目標：回傳要交給 planLaneReorder 的 beforeId（null＝放到最後），或不能按的原因。
+ * 為什麼只算 beforeId、不自己改 sort_index：上移／下移＝「拖到上一張之前／下下一張之前」的捷徑，
+ *   交給同一個 planLaneReorder，延誤卡夾住、只改一張或整條重新編號的規則才會和拖曳（D74）完全一樣，不會分岔。
+ * order＝這條線目前的顯示順序（含看不到的卡）；anchor＝畫面上看得到、可以排在它前後的卡（「隱藏已完成」時完成卡不是錨點，
+ *   否則按一下「上移」看起來沒動——其實是越過了一張看不到的卡）。
+ * 延誤卡（pinned，D50 釘在最上面）：一般卡不能上移到它上面；延誤卡自己不能上移；下移＝和一般卡一樣往下一格
+ *   （planLaneReorder 會把它夾到其他延誤卡之後、標 replan → 呼叫端送 move＝解除延誤，同 D50「拖到任何位置即解除」）。
+ *   不採「只解除延誤、留在原位」：只有一張延誤卡時畫面位置不變，按了看起來沒反應。
+ */
+export function stepTarget(
+  order: readonly { id: string; pinned: boolean; anchor: boolean }[],
+  movingId: string,
+  dir: StepDir,
+): { beforeId: string | null } | { reason: StepBlock } {
+  const mi = order.findIndex((c) => c.id === movingId)
+  if (mi < 0) return { reason: 'missing' }
+  const moving = order[mi]
+  const anchors = order.filter((c) => c.anchor && c.id !== movingId)
+  // k＝排在自己上面、看得到的卡數；pinned＝錨點開頭連續幾張是延誤卡
+  const k = order.slice(0, mi).filter((c) => c.anchor).length
+  let pinned = anchors.findIndex((c) => !c.pinned)
+  if (pinned < 0) pinned = anchors.length
+  if (dir === 'up') {
+    if (moving.pinned) return { reason: 'pinned' }
+    if (k <= pinned) return { reason: 'first' }
+    return { beforeId: anchors[k - 1].id }
+  }
+  if (k >= anchors.length) return { reason: 'last' }
+  return { beforeId: anchors[k + 1]?.id ?? null }
+}

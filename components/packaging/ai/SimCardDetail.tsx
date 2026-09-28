@@ -6,6 +6,10 @@
 // 工時學習紀錄（模擬列的 id 不在正式表，查了也是空的、還會誤導）。這裡重用它匯出的 CardInfo（卡片本身的資訊）
 // 與 MinutesEditor（改工時＝模擬區 setMinutes 操作），模擬區專屬的部分自己畫。
 // 顯示一律用「未加工」的原始卡（品名不含 🔒／〔AI〕標記）。
+// D100（與正式區 CardDetailDialog 一致）：
+//   - 工時段移到最上面、加外框「工時（可調整）」；MinutesEditor 用 variant='sim'（不收原因、說明「不留學習紀錄、用退回上一步」），
+//     不能改時顯示具體原因（別人的模擬區／起始日已過／鎖定…）；focusMinutes＝直接聚焦輸入框。
+//   - 「線」下面加「順序」列（LaneOrderRow 上移／下移），由 SimLayout 算好按鈕狀態傳進來。
 
 import type { BoardCard, PackagingLine } from '@/lib/packaging/scheduleTypes'
 import { lineNameOf } from '@/lib/packaging/scheduleLines'
@@ -15,12 +19,14 @@ import Modal, { Btn } from '@/components/packaging/board/Modal'
 import { CardInfo } from '@/components/packaging/board/CardDetailDialog'
 import MinutesEditor from '@/components/packaging/board/MinutesEditor'
 import { lineLabel } from '@/components/packaging/board/CardFace'
+import LaneOrderRow, { type LaneOrderProps } from '@/components/packaging/board/LaneOrderControls'
 import { md, mdw } from '@/components/packaging/board/boardFormat'
 import { soNumberOfKey, type SimCardState } from './simBoard'
 import { LOCK_REASON_LABEL, SIM_SOURCE_LABEL } from './simText'
 
 export default function SimCardDetail({
   bc, state, today, lines, editable, busy, onClose, onOpenOrder, onToggleCardLock, onToggleOrderLock, onSubmitMinutes,
+  laneOrder, focusMinutes = false, minutesReadonlyHint,
 }: {
   /** 未加工的原始卡 */
   bc: BoardCard
@@ -36,6 +42,12 @@ export default function SimCardDetail({
   onToggleOrderLock: () => void
   /** 模擬區 setMinutes（minutes＝以本列 qty 為準；null＝回到標準值） */
   onSubmitMinutes: (minutes: number | null, reason: string | null) => void
+  /** D100：線內順序（上移／下移）；不傳＝不顯示 */
+  laneOrder?: LaneOrderProps | null
+  /** D100：打開時直接聚焦工時輸入框 */
+  focusMinutes?: boolean
+  /** D100：工時不能改的原因（null＝可以改）；省略時依 editable／鎖定推 */
+  minutesReadonlyHint?: string | null
 }) {
   const card = bc.card
   const overdue = card.dueDate != null && card.dueDate < today
@@ -46,6 +58,10 @@ export default function SimCardDetail({
   const lockedLine = state.lockedBy.includes('line')
   const locked = state.lockedBy.length > 0
   const so = soNumberOfKey(bc.soLineKey)
+  // 工時段：模擬列、未完成才能改（正式區唯讀的卡、已完成的卡只在「排程」列看工時）
+  const showMinutes = !!sim && !bc.completed
+  const minutesHint = minutesReadonlyHint !== undefined ? minutesReadonlyHint
+    : !editable ? '唯讀檢視，不能改工時' : locked ? '鎖定的卡不能改工時，先解除鎖定' : null
   const row = (k: string, v: React.ReactNode) => (
     <div><span className="text-slate-400">{k}</span>{v}</div>
   )
@@ -67,6 +83,22 @@ export default function SimCardDetail({
           <span><span className="text-slate-400">數量　</span>{fmtQty(bc.effectiveQty)}{card.unit ? ` ${card.unit}` : ''}</span>
         </div>
 
+        {showMinutes && (
+          <section aria-label="工時（可調整）" className="mt-2 space-y-1 rounded-lg border border-amber-700/50 bg-amber-950/10 p-2">
+            <div className="text-[11px] font-semibold text-amber-200">工時（可調整）<span className="ml-1 font-normal text-slate-400">只改模擬區；採用時才會寫進正式排程</span></div>
+            <MinutesEditor
+              key={`${bc.placementId}:${bc.minutes ?? 'x'}`}
+              bc={bc}
+              variant="sim"
+              editable={minutesHint == null}
+              readonlyHint={minutesHint}
+              busy={busy}
+              autoFocus={focusMinutes}
+              onSubmit={(m, reason) => { onSubmitMinutes(m, reason); onClose() }}
+            />
+          </section>
+        )}
+
         <div className="my-1 border-t border-slate-800" />
         <div className="text-[11px] font-semibold text-slate-400">模擬區</div>
         {sim ? (
@@ -84,7 +116,8 @@ export default function SimCardDetail({
         )}
         {row('排定日　　', bc.planDate ? mdw(bc.planDate) : '待排區')}
         {bc.planDate && row('線　　　　', <span className="font-semibold">{lineNameOf(lines, bc.laneId ?? bc.lineId ?? null)}</span>)}
-        {row('工時　　　', bc.minutes != null ? <span className="tabular-nums">{hoursText(bc.minutes)} h</span> : <span className="text-orange-300">未知（未計入負荷）</span>)}
+        {bc.planDate && laneOrder && <LaneOrderRow {...laneOrder} />}
+        {!showMinutes && row('工時　　　', bc.minutes != null ? <span className="tabular-nums">{hoursText(bc.minutes)} h</span> : <span className="text-orange-300">未知（未計入負荷）</span>)}
         {s.pre && !s.done && row('預排　　　', <span className="text-sky-200">
           {bc.readiness === 'pre' && bc.preReadyDate ? `預估 ${md(bc.preReadyDate)} 可包` : '可包日未知'}
           <span className="text-slate-400">（可包 {fmtQty(bc.readyQty)}／{fmtQty(bc.effectiveQty)}，D22）</span>
@@ -106,21 +139,6 @@ export default function SimCardDetail({
             </div>
             {lockedLine && <div className="text-[11px] text-slate-500">這條線整條被鎖：到工具列的「鎖定」清單解除。</div>}
             {!editable && <div className="text-[11px] text-slate-500">唯讀檢視：只有模擬區的主人可以改鎖定。</div>}
-          </>
-        )}
-
-        {sim && !bc.completed && (
-          <>
-            <div className="my-1 border-t border-slate-800" />
-            <div className="text-[11px] font-semibold text-slate-400">工時（D69，只改模擬區；採用時才會寫進正式排程）</div>
-            <MinutesEditor
-              key={`${bc.placementId}:${bc.minutes ?? 'x'}`}
-              bc={bc}
-              editable={editable && !locked}
-              busy={busy}
-              onSubmit={(m, reason) => { onSubmitMinutes(m, reason); onClose() }}
-            />
-            {locked && editable && <div className="text-[11px] text-slate-500">鎖定的卡不能改工時，先解除鎖定。</div>}
           </>
         )}
 

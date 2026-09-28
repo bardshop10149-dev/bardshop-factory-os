@@ -34,7 +34,7 @@ export interface LaneEntry {
 
 export default function LaneColumn({
   date, lane, scale, entries, bodyHeightPx, weekend, today, dragRule, stale, editable, canDrag, canResize, hideCompleted,
-  handlerMap, onOpenOrder, onOpenDetail, onResize, onResizing, onEditCapacity, dropLine, ownLane,
+  handlerMap, onOpenOrder, onOpenDetail, onResize, onResizing, onEditCapacity, dropLine, ownLane, capacityReadOnly = false,
 }: {
   date: YMD
   lane: BoardLane
@@ -61,6 +61,8 @@ export default function LaneColumn({
   dropLine?: { topPx: number; mode: 'insert' | 'append' } | null
   /** 被拖的卡就在這條線（同線重排不改日期 → 不套 D22 的日期限制） */
   ownLane?: boolean
+  /** D100 產能只能看（模擬區）：⚙ 的說明寫「查看」 */
+  capacityReadOnly?: boolean
 }) {
   const blocked = ownLane ? null : dropBlockedReason(dragRule, date)
   const { setNodeRef, isOver } = useDroppable({ id: `lane:${date}:${lane.lineId}`, disabled: !!blocked || stale })
@@ -104,7 +106,7 @@ export default function LaneColumn({
           <button
             type="button"
             onClick={() => onEditCapacity(date, lane.lineId)}
-            title={editable ? `設定 ${lane.name} 這天的正常／加班時數` : `查看 ${lane.name} 的產能設定`}
+            title={editable && !capacityReadOnly ? `設定 ${lane.name} 這天的正常／加班時數` : `查看 ${lane.name} 的產能設定`}
             aria-label={`${lane.name} 產能設定`}
             className="shrink-0 rounded px-1 text-[12px] text-slate-400 hover:bg-slate-800 hover:text-white"
           >⚙</button>

@@ -16,6 +16,7 @@
 // 寬度 < 1024px（手機／平板，不能拖）→ 各線上下堆疊、不畫時間尺（lines.md §5.2）。
 // 換日載入中（stale）所有 droppable 關閉：遮罩只擋畫面、擋不住 dnd-kit。
 // D74 同一條線內上下拖曳＝重排：插入線位置由 BoardLayout 算（reorderHint），這裡只轉交給對應的 LaneColumn。
+// D100 capacityReadOnly（選填）：產能只能看（AI 模擬區沿用正式產能）→ 按鈕一律寫「查看產能」；不傳＝照舊依 editable。
 
 import { useMemo, type ReactNode } from 'react'
 import { useDroppable } from '@dnd-kit/core'
@@ -114,7 +115,7 @@ function buildLaneModels(day: BoardDay): LaneModel[] {
 export default function DayLanesView({
   day, today, prevDate, nextDate, dragRule, dragging, editable, canDrag, canResize, stale, stacked, hideCompleted,
   defaultLineName, handlersFor, onOpenOrder, onOpenDetail, onEditCapacity, onGoDate, onResize, onResizing, loadingOverlay,
-  reorderHint, ownLaneKey,
+  reorderHint, ownLaneKey, capacityReadOnly = false,
 }: {
   day: BoardDay
   today: YMD
@@ -148,6 +149,8 @@ export default function DayLanesView({
   reorderHint?: { laneKey: string; topPx: number; mode: 'insert' | 'append' } | null
   /** 被拖的排定卡所在的線（`${date}:${lineId}`）：同線重排不套日期限制 */
   ownLaneKey?: string | null
+  /** D100 產能只能看（模擬區）：按鈕寫「查看產能」 */
+  capacityReadOnly?: boolean
 }) {
   const handlerMap = useHandlerMap(day.cards, handlersFor)
   const models = useMemo(() => buildLaneModels(day), [day])
@@ -217,7 +220,7 @@ export default function DayLanesView({
               type="button"
               onClick={() => onEditCapacity(day.date)}
               className="rounded border border-slate-600 px-2 py-0.5 text-[11px] text-slate-200 hover:bg-slate-800"
-            >{editable ? '設定產能' : '查看產能'}</button>
+            >{editable && !capacityReadOnly ? '設定產能' : '查看產能'}</button>
           </div>
           <div className="max-w-3xl">
             <CapacityBar used={day.usedMinutes} cap={cap} load={day.load} unknownCards={day.unknownMinutesCards} weekend={isWeekendOt} size="xl" showReach={false} />
@@ -295,6 +298,7 @@ export default function DayLanesView({
                   onEditCapacity={onEditCapacity}
                   dropLine={reorderHint?.laneKey === `${day.date}:${m.lane.lineId}` ? reorderHint : null}
                   ownLane={ownLaneKey === `${day.date}:${m.lane.lineId}`}
+                  capacityReadOnly={capacityReadOnly}
                 />
               ))}
             </div>

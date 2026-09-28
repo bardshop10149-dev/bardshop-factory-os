@@ -12,6 +12,8 @@
 //
 // 排定卡的狀態標記（完成 ✓、已扣完、延誤 N 天、預排、拆卡 i/n）由呼叫端傳入 marks，放在「客戶名稱」那一行的右側：
 // 不另佔一行（D60），客戶名稱被擠時先截斷客戶名稱（它是 7 項裡最不影響排程判斷的）。
+// D100：選填的 tail 放在第 5 行（PACKING）右側——排定卡（PlacementCard）用來放「工時」小標與角標；
+//   不傳（待排池 SimplePoolCard、拖曳中的浮動卡、日檢視 LaneCard）時外觀與原本完全相同，7 項的排版不動。
 
 import type { ReactNode } from 'react'
 import type { PackagingCard } from '@/lib/packaging/types'
@@ -79,7 +81,7 @@ export function OrderNo({ card, onOpenOrder, className = '' }: {
   )
 }
 
-export default function CardFace({ card, today, size = 'md', onOpenOrder, bar, marks, check, muted = false }: {
+export default function CardFace({ card, today, size = 'md', onOpenOrder, bar, marks, check, muted = false, tail }: {
   card: PackagingCard
   today: string
   size?: 'md' | 'sm'
@@ -92,6 +94,8 @@ export default function CardFace({ card, today, size = 'md', onOpenOrder, bar, m
   check?: ReactNode
   /** 已完成：內容變淡（勾選框不受影響） */
   muted?: boolean
+  /** D100：第 5 行（PACKING）右側的附加內容（排定卡的工時小標、角標）；已完成時跟著變淡 */
+  tail?: ReactNode
 }) {
   const overdue = card.dueDate != null && card.dueDate < today && !muted
   const mo = moText(card)
@@ -133,10 +137,11 @@ export default function CardFace({ card, today, size = 'md', onOpenOrder, bar, m
         </div>
         {/* 第 4 行：品項名稱（最多 2 行） */}
         <div className={`line-clamp-2 break-words font-medium text-slate-100 ${fade}`}>{card.itemName ?? '（無品名）'}</div>
-        {/* 第 5 行：PACKING（1 行） */}
+        {/* 第 5 行：PACKING（1 行）＋ tail（D100；沒有 tail 時與原本完全相同） */}
         <div className={`flex items-baseline gap-1.5 ${fade}`}>
           {label('PACKING')}
           <span className={`min-w-0 truncate text-amber-100/80 ${sm ? 'text-[10px]' : 'text-xs'}`} title={sm && packing ? `PACKING ${packing}` : undefined}>{packing ?? '—'}</span>
+          {tail && <span className="ml-auto flex shrink-0 items-center gap-0.5 self-center">{tail}</span>}
         </div>
       </div>
     </div>

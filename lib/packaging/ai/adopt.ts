@@ -35,6 +35,27 @@ const FAR_FUTURE_ISO = '9999-12-31T00:00:00.000Z'
 const sameNum = (a: number | null | undefined, b: number | null | undefined): boolean =>
   a == null || b == null ? a == null && b == null : Math.abs(a - b) <= 1e-6
 
+/**
+ * D100 覆寫的「每件分鐘」相同：把正式列的覆寫依數量等比換成 target 的量，四捨五入到 0.1 分後等於 target 的覆寫
+ * （validate 3c／沿用列／拆卡都是等比換算再取 1 位小數，所以用 0.05 分的容差）。
+ */
+const sameRate = (sMin: number, sQty: number, lMin: number, lQty: number): boolean =>
+  sQty > EPS && lQty > EPS && Math.abs(sMin - (lMin * sQty) / lQty) <= 0.05 + 1e-9
+
+/**
+ * D100 配對時的覆寫相容度：2＝都沒覆寫、或都有且每件分鐘相同；1＝都有覆寫但每件不同；0＝一邊有一邊沒有。
+ * 為什麼要看：同一 SO 行有多張正式卡時，validate 3c 把組長的覆寫依 AI 順序分給新列，而配對原本只看日期／線／固定順序，
+ *   兩邊沒對齊 → 覆寫落到另一張正式卡（L1 被寫上 90、L2 被清成標準），還多兩筆「採用 AI 模擬」學習紀錄（D100 驗證 F3）。
+ *   同一輪配對條件下，優先配給覆寫相容的正式卡；相容度相同才照原本的固定順序。
+ */
+const overrideFit = (s: AdoptionTargetRow, l: Placement): number => {
+  const a = s.estMinutesOverride
+  const b = l.minutesOverride?.minutes ?? null
+  if (a == null && b == null) return 2
+  if (a == null || b == null) return 0
+  return sameRate(a, s.qty, b, l.qty) ? 2 : 1
+}
+
 const cmpTarget = (a: AdoptionTargetRow, b: AdoptionTargetRow): number => {
   const c = compareSimRows(
     { planDate: a.planDate, lineId: a.lineId, sortIndex: a.sortIndex, id: a.pairId ?? '' },
@@ -59,9 +80,11 @@ const targetAsPlacement = (id: string, s: AdoptionTargetRow): Placement => ({
  * target：呼叫端保證都在 scope 內；防呆：範圍外的 target 列直接忽略（不產生 op、不計數）。
  * 對每個 SO 行：L＝live 中 isInSimScope 且未完成的列，S＝target 同 SO 行的列。配對優先序：
  *   S.pairId === L.id → 同（日, 線）→ 同日 → 其餘（依日期、線、sortIndex、id 固定順序）。
+ *   D100：每一輪裡優先配「覆寫相容」的 L（都沒覆寫、或每件分鐘相同；overrideFit），相同才照固定順序——覆寫才會回到原本那張正式卡。
  * - 配到的 (s, l)：日／線不同 → move（id＝l.id、version＝l.version、toDate、lineId、sortIndex＝s.sortIndex）；
  *   數量不同 → setQty（減量排在同 SO 行的增量之前，讓 applyOps 的守恆逐步檢查過得去）；
  *   沒有 move 而 sortIndex 不同 → reorder；s.estMinutesOverride 與 l.minutesOverride?.minutes 不同 → setMinutes（via 'dialog'、reason '採用 AI 模擬'）。
+ *   D100：數量變了但每件分鐘沒變（兩邊都有覆寫、等比換算相同）→ 覆寫併進 setQty（minutesOverride，沿用原作者、不寫學習紀錄），不送 setMinutes。
  *   都相同 → counts.unchanged。
  * - S 多出來的 → restore（row＝{ id: env.newId(), soLineKey, qty, planDate, originalDate: planDate, source: s.source, originCardId,
  *   lineId, estMinutesOverride, sortIndex }）。restore 不檢查停用線、不可排區塊與 D22 → 這裡先檢查：
@@ -111,7 +134,15 @@ export function planAdoption(
     const pairRound = (match: (s: AdoptionTargetRow, l: Placement) => boolean) => {
       const left: AdoptionTargetRow[] = []
       for (const s of restS) {
-        const l = Ls.find((x) => freeL.has(x.id) && match(s, x))
+        // 同一輪符合條件的正式卡中，優先覆寫相容的（overrideFit 高的）；相同才取固定順序的第一張（D100）
+        let l: Placement | undefined
+        let best = -1
+        for (const x of Ls) {
+          if (!freeL.has(x.id) || !match(s, x)) continue
+          const fit = overrideFit(s, x)
+          if (fit > best) { l = x; best = fit }
+          if (fit === 2) break
+        }
         if (l) { freeL.delete(l.id); pairs.push({ s, l }) } else left.push(s)
       }
       restS = left
@@ -142,8 +173,15 @@ export function planAdoption(
         counts.moved++
         touched = true
       }
-      if (Math.abs(s.qty - l.qty) > EPS) {
-        (s.qty < l.qty ? decOps : incOps).push({ op: 'setQty', id: l.id, version: l.version, qty: s.qty })
+      const lOv = l.minutesOverride?.minutes ?? null
+      const qtyChanged = Math.abs(s.qty - l.qty) > EPS
+      // D100：只有數量變、每件分鐘沒變（組長的覆寫跟著數量等比換算）→ 覆寫放進 setQty 一起改：沿用原作者、不寫學習紀錄
+      //   （同拆卡 D69 規則 2 的 overrideKeepMeta）。另送 setMinutes 會把組長的覆寫記成「採用 AI 模擬」改的，污染 D69 學習資料。
+      const scaleWithQty = qtyChanged && s.estMinutesOverride != null && lOv != null && sameRate(s.estMinutesOverride, s.qty, lOv, l.qty)
+      if (qtyChanged) {
+        (s.qty < l.qty ? decOps : incOps).push({
+          op: 'setQty', id: l.id, version: l.version, qty: s.qty, ...(scaleWithQty ? { minutesOverride: s.estMinutesOverride } : {}),
+        })
         counts.qtyChanged++
         touched = true
       }
@@ -152,7 +190,7 @@ export function planAdoption(
         counts.reordered++
         touched = true
       }
-      if (!sameNum(s.estMinutesOverride, l.minutesOverride?.minutes ?? null)) {
+      if (!scaleWithQty && !sameNum(s.estMinutesOverride, lOv)) {
         minuteOps.push({ op: 'setMinutes', id: l.id, version: l.version, minutes: s.estMinutesOverride, via: 'dialog', reason: ADOPT_MINUTES_REASON })
         counts.minutesChanged++
         touched = true

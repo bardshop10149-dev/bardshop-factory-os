@@ -12,9 +12,13 @@
 // 鎖定規則與伺服器 lib/packaging/ai/simState.ts 的 lockReasonsOf 相同（D88）；前端自己算是為了樂觀更新——
 // 按下鎖頭立刻變灰，不用等伺服器回應。伺服器仍是最後把關（鎖定的列動不了，回 locked）。
 
-import type { BoardCard, BoardDay, BoardLane, LockState, YMD } from '@/lib/packaging/scheduleTypes'
-import type { BoardBody, SimCardMeta, SimLockReason, SimLocks, SimView } from '@/lib/packaging/ai/types'
-import { applyLocal, autoLaneFor, type BoardOk, type LocalAction } from '@/components/packaging/board/boardLocal'
+import type { BoardCard, BoardDay, BoardLane, LockState, PlacementOp, YMD } from '@/lib/packaging/scheduleTypes'
+import { SIM_MAX_OPS_PER_REQUEST, type BoardBody, type SimCardMeta, type SimLockReason, type SimLocks, type SimView } from '@/lib/packaging/ai/types'
+import { planLaneReorder, planLaneReorderAnchored, type ReorderChange, type StepDir } from '@/lib/packaging/laneOrder'
+import {
+  LANE_STEP_REASON, applyLocal, autoLaneFor, isPinned, laneCardsOf, laneStepPlan,
+  type BoardOk, type LaneStepCode, type LaneStepInfo, type LocalAction,
+} from '@/components/packaging/board/boardLocal'
 
 export const LOCK_MARK = '🔒'
 export const AI_MARK = '〔AI〕'
@@ -213,6 +217,179 @@ export function toggleLineLock(locks: SimLocks, lineId: number): SimLocks {
 
 export function locksCount(locks: SimLocks): number {
   return locks.placementIds.length + locks.soNumbers.length + locks.lineIds.length
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// D100 模擬區線內順序（日／全部天數檢視拖曳、卡片詳情上移／下移共用）
+// ─────────────────────────────────────────────────────────────────────
+
+/** 判斷「哪些卡能改順序」需要的模擬區狀態 */
+export interface SimOrderCtx {
+  simCards: Record<string, SimCardMeta>
+  locks: SimLocks
+  scopeLineIds: readonly number[]
+}
+
+export type SimReorderFail = 'not_sim' | 'locked_moving' | 'locked_renumber' | 'too_many' | 'frozen_top' | 'no_gap'
+
+/** 模擬區調整順序不能做的原因（toast 與按鈕停用說明） */
+export const SIM_LANE_REASON: Record<SimReorderFail | 'readonly_neighbor', string> = {
+  not_sim: '正式排程的卡（唯讀）：模擬區不能調整它的順序',
+  locked_moving: '已鎖定的卡不能調整順序，先解除鎖定',
+  locked_renumber: '這條線的卡還沒有順序值，調整要整條重新編號，其中有鎖定的卡（鎖定＝連順序都不動）；先解除那張卡的鎖定再調整',
+  too_many: `這條線要重新編號的卡超過一次上限（${SIM_MAX_OPS_PER_REQUEST} 張），無法調整順序`,
+  // D100 退回路徑（laneOrder.planLaneReorderAnchored）：唯讀卡、鎖定卡的順序值改不了 → 當固定錨點
+  frozen_top: '上面是正式區唯讀（或已鎖定）、還沒有順序值的卡：它們固定排在最上面、模擬區改不了，這張卡排不到它們上面',
+  no_gap: '前後是正式區唯讀（或已鎖定）的卡，順序值之間沒有空隙可以放；請改放到別的位置',
+  readonly_neighbor: '這個方向相鄰的是正式區唯讀（或已鎖定）、還沒有順序值的卡：它們固定排在最上面、模擬區改不了，不能越過它們',
+}
+
+function orderHelpers(day: Pick<BoardDay, 'cards' | 'lanes'>, lineId: number, ctx: SimOrderCtx) {
+  const lane = laneCardsOf(day, lineId)
+  const byId = new Map(lane.map(c => [c.placementId, c]))
+  const isSim = (id: string) => !!ctx.simCards[id]
+  /** 模擬列而且沒鎖（伺服器 applySimOps 對 reorder 只准這種列：非模擬列回 not_sim_row、鎖定回 locked） */
+  const movable = (id: string) => {
+    const c = byId.get(id)
+    if (!c) return false
+    const st = simCardState(c, ctx.simCards, ctx.locks, ctx.scopeLineIds)
+    return !!st.sim && st.lockedBy.length === 0
+  }
+  const movingCheck = (id: string): SimReorderFail | null => {
+    const c = byId.get(id)
+    if (!c) return null
+    const st = simCardState(c, ctx.simCards, ctx.locks, ctx.scopeLineIds)
+    return !st.sim ? 'not_sim' : st.lockedBy.length > 0 ? 'locked_moving' : null
+  }
+  return { lane, byId, isSim, movable, movingCheck }
+}
+
+/**
+ * 模擬區把 movingId 放到 beforeId 之前（null＝最後）要改哪些 sort_index。
+ * 為什麼分兩步（修正 D74 模擬區版「插入線畫在唯讀卡前、卡卻依唯讀卡的數值落在別處」）：
+ *   1. 先拿「整條線」（含正式區唯讀卡）交給 planLaneReorder（與正式區 D74 同一套）：
+ *      要改的卡全是「模擬列而且沒鎖」（通常只改被拖的那一張）→ 直接用，結果和插入線完全一致，也可以排到已完成卡的前後。
+ *   2. 否則（這條線還有 null、要整條重新編號而會碰到唯讀卡或鎖定卡）→ D100 改用 laneOrder.planLaneReorderAnchored：
+ *      唯讀卡、鎖定卡當固定錨點（值不改）；沒有順序值的錨點固定在最上面，插入點夾到它們之後；可改的卡填進錨點之間的空隙。
+ *      修正前是「只拿模擬列從 1 開始重新編號」：null 的唯讀卡會跳到最上面、有值的唯讀卡會和 1..n 交錯或平手
+ *      → 按「上移」反而往下掉、插入線畫的地方和放下後的位置不同、前端和伺服器排出來不一樣（D100 驗證 F2）。
+ *   做不到（要往上越過固定在最上面的卡、錨點之間沒空隙）→ ok:false 附原因（frozen_top／no_gap），不送、不亂排。
+ *   最後檢查：超過一次上限 → too_many；要改的卡有鎖定的 → locked_renumber（防呆；錨點做法不會改到鎖定卡）。
+ * 回傳的 beforeId＝實際落點（被夾到固定段之後時和游標不同），拖曳中的插入線畫在這裡。
+ * 不動 laneOrder.planLaneReorder／boardLocal.laneReorderChanges：正式區樂觀更新、applyOps、採用都依賴它們，模擬區專用邏輯只包在外面。
+ */
+export function simLaneReorder(
+  day: Pick<BoardDay, 'cards' | 'lanes'>,
+  lineId: number,
+  movingId: string,
+  beforeId: string | null,
+  ctx: SimOrderCtx,
+): { ok: true; changes: ReorderChange[]; beforeId: string | null; fallback: boolean } | { ok: false; reason: SimReorderFail; changes: ReorderChange[] } {
+  const h = orderHelpers(day, lineId, ctx)
+  if (!h.byId.has(movingId)) return { ok: true, changes: [], beforeId, fallback: false }
+  const bad = h.movingCheck(movingId)
+  if (bad) return { ok: false, reason: bad, changes: [] }
+  const entries = h.lane.map(c => ({ placementId: c.placementId, version: c.version, sortIndex: c.sortIndex ?? null, pinned: isPinned(c) }))
+  const plan = planLaneReorder(entries, movingId, beforeId)
+  let changes = plan?.changes ?? []
+  // 實際落點＝結果順序裡被拖的卡的下一張（要求排到延誤卡上面時 D74 會夾到延誤卡之後，和要求的 beforeId 不同）
+  let used = plan ? plan.order[plan.order.indexOf(movingId) + 1] ?? null : beforeId
+  let fallback = false
+  if (!changes.every(c => h.movable(c.id))) {
+    fallback = true
+    const a = planLaneReorderAnchored(entries.map(e => ({ ...e, fixed: !h.movable(e.placementId) })), movingId, beforeId)
+    if (!a) return { ok: true, changes: [], beforeId, fallback }
+    if ('blocked' in a) return { ok: false, reason: a.blocked === 'frozen' ? 'frozen_top' : 'no_gap', changes: [] }
+    // 被夾到固定段之後、結果就是原位＝想往上卻一格也上不去 → 說明原因（不要默默沒反應）
+    if (a.clamped && a.changes.length === 0) return { ok: false, reason: 'frozen_top', changes: [] }
+    changes = a.changes
+    used = a.beforeId
+  }
+  if (changes.length > SIM_MAX_OPS_PER_REQUEST) return { ok: false, reason: 'too_many', changes }
+  if (changes.some(c => !h.movable(c.id))) return { ok: false, reason: 'locked_renumber', changes }
+  return { ok: true, changes, beforeId: used, fallback }
+}
+
+export type SimStepResult =
+  | { ok: true; changes: ReorderChange[]; beforeId: string | null; position: number; total: number; fallback: boolean }
+  | { ok: false; code: LaneStepCode | SimReorderFail | 'readonly_neighbor'; reason: string }
+
+/**
+ * 模擬區卡片詳情的「上移／下移」。同 simLaneReorder 的兩步：
+ *   1. 整條線（看得到的卡都是錨點，含唯讀卡）→ 上一張／下下一張之前；要改的卡都能改就用（畫面上真的往上／下一格）。
+ *   2. 否則 D100 用 planLaneReorderAnchored（唯讀卡、鎖定卡當固定錨點、值不改）排到同一個目標：
+ *      往下若會夾在兩張固定在最上面的卡中間，就排到它們之後（同方向多移幾格，「第 n 張」照實寫）；
+ *      結果沒有往要求的方向移動（往上越不過固定在最上面的卡）→ 停用並寫原因，不會「按了反而往下掉」或「按了沒反應」。
+ */
+export function simLaneStep(
+  day: Pick<BoardDay, 'cards' | 'lanes'>,
+  lineId: number,
+  movingId: string,
+  dir: StepDir,
+  ctx: SimOrderCtx,
+): SimStepResult {
+  const h = orderHelpers(day, lineId, ctx)
+  if (!h.byId.has(movingId)) return { ok: false, code: 'missing', reason: LANE_STEP_REASON.missing }
+  const bad = h.movingCheck(movingId)
+  if (bad) return { ok: false, code: bad, reason: SIM_LANE_REASON[bad] }
+  const full = laneStepPlan(day, lineId, movingId, dir)
+  if (!full.ok) return full
+  if (full.changes.every(c => h.movable(c.id))) {
+    if (full.changes.length > SIM_MAX_OPS_PER_REQUEST) return { ok: false, code: 'too_many', reason: SIM_LANE_REASON.too_many }
+    return { ...full, fallback: false }
+  }
+  const entries = h.lane.map(c => ({
+    placementId: c.placementId, version: c.version, sortIndex: c.sortIndex ?? null, pinned: isPinned(c), fixed: !h.movable(c.placementId),
+  }))
+  const a = planLaneReorderAnchored(entries, movingId, full.beforeId)
+  if (!a) return { ok: false, code: 'missing', reason: LANE_STEP_REASON.missing }
+  if ('blocked' in a) {
+    return a.blocked === 'no_gap'
+      ? { ok: false, code: 'no_gap', reason: SIM_LANE_REASON.no_gap }
+      : { ok: false, code: 'readonly_neighbor', reason: SIM_LANE_REASON.readonly_neighbor }
+  }
+  const oldAt = h.lane.findIndex(c => c.placementId === movingId)
+  const newAt = a.order.indexOf(movingId)
+  if (a.changes.length === 0 || (dir === 'up' ? newAt >= oldAt : newAt <= oldAt)) {
+    return { ok: false, code: 'readonly_neighbor', reason: SIM_LANE_REASON.readonly_neighbor }
+  }
+  if (a.changes.length > SIM_MAX_OPS_PER_REQUEST) return { ok: false, code: 'too_many', reason: SIM_LANE_REASON.too_many }
+  if (a.changes.some(c => !h.movable(c.id))) return { ok: false, code: 'locked_renumber', reason: SIM_LANE_REASON.locked_renumber }
+  // 第幾張：planLaneReorderAnchored 已驗算「套上新值後的排序＝order」（前端穩定排序與伺服器固定排序一致）
+  return { ok: true, changes: a.changes, beforeId: a.beforeId, fallback: true, position: newAt + 1, total: h.lane.length }
+}
+
+/** 模擬區卡片詳情的「順序」列（模擬區不隱藏已完成：每張卡都看得到） */
+export function simLaneStepInfo(day: Pick<BoardDay, 'cards' | 'lanes'>, lineId: number, id: string, ctx: SimOrderCtx): LaneStepInfo {
+  const h = orderHelpers(day, lineId, ctx)
+  const self = h.byId.get(id)
+  const up = simLaneStep(day, lineId, id, 'up', ctx)
+  const down = simLaneStep(day, lineId, id, 'down', ctx)
+  return {
+    position: h.lane.findIndex(c => c.placementId === id) + 1,
+    total: h.lane.length,
+    up: up.ok ? null : up.reason,
+    down: down.ok ? null : down.reason,
+    pinned: !!self && isPinned(self),
+  }
+}
+
+type ReorderOp = Extract<PlacementOp, { op: 'reorder' }>
+const isReorderOp = (o: PlacementOp): o is ReorderOp => o.op === 'reorder'
+
+/**
+ * useSim 佇列：還在排隊（尚未送出）的一批與新一批「都只有 reorder」時併成一批（同一張卡後者覆蓋）；不能併回 null。
+ * 為什麼：模擬區每個請求推一格「退回上一步」（上限 SIM_UNDO_LIMIT 30 格）；連按上移／下移十幾次會把「AI 排程前」那格擠掉。
+ * 為什麼可以併：reorder 只設 sort_index（同一張卡「設 a 再設 b」＝設 b；不同卡互不影響，順序無關），
+ *   模擬列版本固定是 1（simState SIM_ROW_VERSION）不會因前一步 +1 而衝突；move／setMinutes 等不併（會改分配或版本語意）。
+ */
+export function mergeQueuedReorderOps(prev: readonly PlacementOp[], next: readonly PlacementOp[], max: number): PlacementOp[] | null {
+  if (prev.length === 0 || next.length === 0) return null
+  if (!prev.every(isReorderOp) || !next.every(isReorderOp)) return null
+  const byId = new Map<string, ReorderOp>()
+  for (const o of [...prev, ...next] as ReorderOp[]) byId.set(o.id, o)
+  const out = [...byId.values()]
+  return out.length > max ? null : out
 }
 
 /** 兩組日期是否相同（歷史結果能不能載入目前模擬區：範圍要一樣） */

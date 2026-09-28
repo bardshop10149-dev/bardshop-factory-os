@@ -115,6 +115,9 @@ interface AiRowInfo {
  *    （同線、比原日晚、該天有產能；adjusted: moved_to_ready_day），移不了就整筆丟棄（dropped before_est_ready），重複到沒有違規。
  *    產能削減（第 4 步）之後再檢查一次（削減只會減量，理論上不會產生新違規；保險起見有就丟棄，不再移動以免又超產能）。
  *    鎖定列、保留列不動（不是 AI 放的；正式工作台對「放一張卡讓別張變早」也是同樣只檢查被操作的卡）。
+ * 3c. D100 工時覆寫額度：被重排的列若有覆寫工時（主管在模擬區改的、或從正式區複製來的），AI 新放的列依 AI 順序分到覆寫
+ *    （每個 SO 行的額度＝被重排列中有覆寫的量與分鐘；沿用列帶走的先扣；跨過額度的那張混算標準工時；額度用完＝標準）。
+ *    AI 看到的 min（payload）與結果一致，採用時也不會把正式區原有的覆寫清成標準值。
  * 4. 產能：以 assembleBoard 重算（simState.assembleSimBoard）每線每日 usedMinutes；
  *    超過 regular + overtime（over_overtime，紅）→ 從該線當天 AI order 最後的卡開始移除（整筆或減量，減量後仍守 10 分鐘下限）直到不超，
  *    移除量回待排池 → report.capacityTrimmed；超過 regular（橘或紅）→ 記 report.overtimeUsed（D94）。
@@ -493,6 +496,56 @@ export function validateAiResult(input: ValidateAiInput): ValidateAiResult {
     const ov = p.minutesOverride?.minutes
     if (ov != null) return p.qty > 0 ? round1((ov * q) / p.qty) : 0
     return minutesForQty(perUnitOf(p.soLineKey), q) ?? 0
+  }
+
+  // ── 3c. D100 工時覆寫額度（見函式說明第 3c 點）──
+  // 為什麼：payload 給 AI 的 min 已經是覆寫後工時（主管在模擬區改的、或從正式區複製來的），但 AI 新放的列覆寫一律 null
+  //   （只有 copy 模式同日同線沿用的列會保留）→ 卡片回到標準工時、線負荷和 AI 規劃時對不上；採用時還會對原正式列送
+  //   setMinutes(null)，把組長改過的工時清掉並記一筆「採用 AI 模擬」（D69 學習資料被污染）。
+  // 規則：每個 SO 行把「被重排的列」裡有覆寫的量與分鐘加總成額度（以本列 qty 為準），先扣掉已帶著覆寫的列（沿用列等比換算的值），
+  //   其餘依 AI 順序分給新列：整張在額度內＝額度的每件分鐘 × 件數；跨過額度的那張＝剩下的額度＋其餘件數的標準工時；額度用完＝null（標準）。
+  //   在產能削減（第 4 步）之前做：削減要用和 AI 規劃時同一套工時算。
+  const budget = new Map<string, { qty: number; min: number }>()
+  for (const s of session.placements) {
+    if (keptById.has(s.id) || s.estMinutesOverride == null || !(s.qty > EPS)) continue
+    const b = budget.get(s.soLineKey) ?? { qty: 0, min: 0 }
+    b.qty += s.qty
+    b.min += s.estMinutesOverride
+    budget.set(s.soLineKey, b)
+  }
+  if (budget.size > 0) {
+    const rankOf = new Map(ordered.map((v, i) => [v.idx, i]))
+    const rows: { id: string; rank: number; p: Placement }[] = []
+    for (const [id, info] of aiRows) {
+      const p = state.get(id)
+      if (p && budget.has(p.soLineKey)) rows.push({ id, rank: rankOf.get(info.idx) ?? Number.MAX_SAFE_INTEGER, p })
+    }
+    rows.sort((x, y) => x.rank - y.rank || (x.id < y.id ? -1 : x.id > y.id ? 1 : 0))
+    // 已帶覆寫的列（copy 沿用、或沿用後被 D22 移日的列）先扣，額度不重複分給別張
+    for (const { p } of rows) {
+      const ov = p.minutesOverride?.minutes
+      if (ov == null) continue
+      const b = budget.get(p.soLineKey)!
+      b.qty = Math.max(0, b.qty - p.qty)
+      b.min = Math.max(0, b.min - ov)
+    }
+    for (const { id, p } of rows) {
+      if (p.minutesOverride != null) continue
+      const b = budget.get(p.soLineKey)!
+      if (b.qty <= EPS || b.min <= EPS) continue
+      let ov: number
+      if (b.qty >= p.qty - EPS) {
+        ov = (b.min * p.qty) / b.qty
+        b.min = Math.max(0, b.min - ov)
+        b.qty = Math.max(0, b.qty - p.qty)
+      } else {
+        const pu = perUnitOf(p.soLineKey)
+        ov = b.min + (pu != null ? pu * (p.qty - b.qty) : 0)
+        b.qty = 0
+        b.min = 0
+      }
+      state.set(id, { ...p, minutesOverride: { minutes: clampOverride(ov), by: session.ownerEmail, byName: session.ownerName, at: session.updatedAt } })
+    }
   }
 
   // ── 4. 產能 ──

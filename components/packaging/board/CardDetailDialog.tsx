@@ -10,6 +10,11 @@
 //   - D69 排定卡多「工時」段（MinutesEditor：標準估計、目前值、主管修改）與「修改歷程」（MinutesHistory）
 //     ——只有 (a) 傳了 minutesEdit 才顯示；待排池卡不傳（工時覆寫的顆粒度是擺放列，不是待排池卡）
 //   - D66 手動加入的卡（待排池 'mn' 區塊、或由它排出去的卡）顯示「手動加入：誰、何時、原因」
+// D100：
+//   - 工時段移到最上面（標題資訊正下方、加外框「工時（可調整）」）：從週／兩週小卡點進來不用往下找；
+//     有工時段時「排程」一段不再重複列唯讀的「工時」。focusMinutes＝直接聚焦輸入框（點卡片上的「工時」小標／右鍵「調整工時…」）。
+//   - 「排程」段的「線」下面加「順序」列（LaneOrderRow：第 n／m 張＋上移／下移），laneOrder 不傳就不顯示（待排池卡、待排區卡）。
+//   - MinutesEditor 的 key 不再用 version：上移／下移寫入後 version +1，會重掛元件、清掉還沒送出的工時輸入。
 
 import type { ReactNode } from 'react'
 import type { BoardCard, ManualInclusionMeta, PackagingLine, PlacementFlag, PoolCardMeta } from '@/lib/packaging/scheduleTypes'
@@ -22,6 +27,7 @@ import Modal, { Btn } from './Modal'
 import { lineLabel } from './CardFace'
 import MinutesEditor from './MinutesEditor'
 import MinutesHistory from './MinutesHistory'
+import LaneOrderRow, { type LaneOrderProps } from './LaneOrderControls'
 
 const FLAG_TONE: Record<DangerFlag['level'] | PlacementFlag['level'], string> = {
   danger: 'text-red-300',
@@ -90,8 +96,16 @@ export function CardInfo({ card, meta, placed = false }: { card: PackagingCard; 
   )
 }
 
-/** 排定卡才有的「排程」資訊 */
-function PlacementInfo({ bc, lines }: { bc: BoardCard; lines?: PackagingLine[] }) {
+/**
+ * 排定卡才有的「排程」資訊。
+ * hideMinutes：上方已有「工時（可調整）」段時不重複列唯讀的工時；laneOrder：D100 順序列（接在「線」後面）
+ */
+function PlacementInfo({ bc, lines, hideMinutes = false, laneOrder }: {
+  bc: BoardCard
+  lines?: PackagingLine[]
+  hideMinutes?: boolean
+  laneOrder?: LaneOrderProps | null
+}) {
   const s = placementState(bc)
   // 待排池卡本身的旗標（CardInfo 會列）和擺放的旗標可能是同一件事（例：預估可包日已過），同字的只列一次
   const cardFlagLabels = new Set(bc.card.flags.map(f => f.label))
@@ -104,13 +118,14 @@ function PlacementInfo({ bc, lines }: { bc: BoardCard; lines?: PackagingLine[] }
         ? <>{mdw(bc.planDate)}{bc.displayDate && bc.displayDate !== bc.planDate ? <span className="text-slate-400">（目前顯示在 {mdw(bc.displayDate)}）</span> : null}</>
         : <span className="text-slate-300">待排區（擱置、未排日期）</span>)}
       {bc.planDate && lines && lines.length > 0 && row('線　　　　', <LineText bc={bc} lines={lines} />)}
+      {bc.planDate && laneOrder && <LaneOrderRow {...laneOrder} />}
       {bc.originalDate && bc.originalDate !== bc.planDate && row('原排日　　', mdw(bc.originalDate))}
       {s.delayed && bc.delayWorkdays > 0 && row('延誤　　　', <span className="font-bold text-orange-300">{bc.delayWorkdays} 個工作日（D50：已自動順延到今天）</span>)}
       {row('數量　　　', <>
         <span className="tabular-nums">{fmtQty(bc.effectiveQty)}</span>
         {bc.effectiveQty !== bc.qty && <span className="text-slate-400">（排定時 {fmtQty(bc.qty)}，待排池數量減少後自動扣減）</span>}
       </>)}
-      {row('工時　　　', bc.minutes != null ? <span className="tabular-nums">{hoursText(bc.minutes)} h</span> : <span className="text-orange-300">未知（未計入負荷）</span>)}
+      {!hideMinutes && row('工時　　　', bc.minutes != null ? <span className="tabular-nums">{hoursText(bc.minutes)} h</span> : <span className="text-orange-300">未知（未計入負荷）</span>)}
       {bc.split && row('拆卡　　　', `第 ${bc.split.index} 張／共 ${bc.split.total} 張（同一訂單行）`)}
       {s.pre && !s.done && row('預排　　　', <span className={s.warnFrame ? 'text-orange-300' : 'text-sky-200'}>
         {bc.readiness === 'pre' && bc.preReadyDate ? `預估 ${md(bc.preReadyDate)} 可包` : '可包日未知'}
@@ -143,7 +158,7 @@ function LineText({ bc, lines }: { bc: BoardCard; lines: PackagingLine[] }) {
   )
 }
 
-export default function CardDetailDialog({ card, meta, placement, today, onClose, onOpenOrder, lines, minutesEdit }: {
+export default function CardDetailDialog({ card, meta, placement, today, onClose, onOpenOrder, lines, minutesEdit, laneOrder, focusMinutes = false }: {
   /** 待排池卡；排定卡傳 placement.card */
   card: PackagingCard
   meta?: PoolCardMeta
@@ -164,6 +179,10 @@ export default function CardDetailDialog({ card, meta, placement, today, onClose
     busy?: boolean
     onSubmit: (minutes: number | null, reason: string | null) => void
   } | null
+  /** D100：排定卡的線內順序（上移／下移）；不傳＝不顯示（待排池卡、待排區卡） */
+  laneOrder?: LaneOrderProps | null
+  /** D100：打開時直接聚焦工時輸入框（從卡片上的「工時」小標或右鍵「調整工時…」打開） */
+  focusMinutes?: boolean
 }) {
   const overdue = card.dueDate != null && card.dueDate < today
   // 標準每件分鐘（修改歷程沒有紀錄可參考時用）：標準工時 ÷ 有效數量（有最少 10 分的下限，只當參考）
@@ -186,25 +205,31 @@ export default function CardDetailDialog({ card, meta, placement, today, onClose
           <span><span className="text-slate-400">交期　</span><span className={overdue ? 'font-bold text-red-300' : ''}>{md(card.dueDate)}</span></span>
           <span><span className="text-slate-400">數量　</span>{fmtQty(card.qtyCard)}{card.unit ? ` ${card.unit}` : ''}</span>
         </div>
+        {placement && minutesEdit && (
+          <section aria-label="工時（可調整）" className="mt-2 space-y-1 rounded-lg border border-amber-700/50 bg-amber-950/10 p-2">
+            <div className="text-[11px] font-semibold text-amber-200">工時（可調整）</div>
+            <MinutesEditor
+              // 不用 version：上移／下移、別的操作寫入後 version +1，會重掛元件、清掉還沒送出的輸入（D100）；
+              // 工時本身變了（覆寫值、標準值）才重掛，輸入框回到新的目前值
+              key={`${placement.placementId}:${placement.minutesOverride?.minutes ?? 'std'}:${placement.minutesStd ?? 'x'}`}
+              bc={placement}
+              editable={minutesEdit.editable}
+              busy={minutesEdit.busy}
+              autoFocus={focusMinutes}
+              onSubmit={(m, reason) => { minutesEdit.onSubmit(m, reason); onClose() }}
+            />
+          </section>
+        )}
         {placement && (
           <>
             <div className="my-1 border-t border-slate-800" />
             <div className="text-[11px] font-semibold text-slate-400">排程</div>
-            <PlacementInfo bc={placement} lines={lines} />
+            <PlacementInfo bc={placement} lines={lines} hideMinutes={!!minutesEdit} laneOrder={laneOrder} />
           </>
         )}
         {placement && minutesEdit && (
           <>
-            <div className="my-1 border-t border-slate-800" />
-            <div className="text-[11px] font-semibold text-slate-400">工時（D69）</div>
-            <MinutesEditor
-              key={`${placement.placementId}:${placement.version}`}
-              bc={placement}
-              editable={minutesEdit.editable}
-              busy={minutesEdit.busy}
-              onSubmit={(m, reason) => { minutesEdit.onSubmit(m, reason); onClose() }}
-            />
-            <div className="mt-1 text-[11px] font-semibold text-slate-400">修改歷程</div>
+            <div className="mt-1 text-[11px] font-semibold text-slate-400">工時修改歷程（D69）</div>
             <MinutesHistory placementId={placement.placementId} itemCode={card.itemCode} stdPerUnit={stdPerUnit} lines={lines} />
           </>
         )}

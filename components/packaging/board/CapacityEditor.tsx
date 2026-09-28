@@ -63,7 +63,7 @@ function CellPair({ a, b }: { a: ReactNode; b: ReactNode }) {
   return <>{a}{b}</>
 }
 
-export default function CapacityEditor({ mode, today, editable, getLockToken, onClose, onSaved }: {
+export default function CapacityEditor({ mode, today, editable, getLockToken, onClose, onSaved, readonlyHint }: {
   /** day 模式可指定 lineId：從日檢視某條線的線頭 ⚙ 打開時，該線欄位自動聚焦 */
   mode: { kind: 'day'; date: YMD; lineId?: number } | { kind: 'table' }
   today: YMD
@@ -73,6 +73,8 @@ export default function CapacityEditor({ mode, today, editable, getLockToken, on
   onClose: () => void
   /** 產能或線別有任何儲存成功都呼叫（父層據此重新載入工作台） */
   onSaved: () => void
+  /** D100 唯讀時底部的說明（省略＝「取得編輯權後才能修改」；AI 模擬區就算有編輯權也改不了，要說清楚去哪改） */
+  readonlyHint?: string
 }) {
   const [rows, setRows] = useState<CapacityFormRow[] | null>(null)
   const [allLines, setAllLines] = useState<PackagingLine[]>([])
@@ -420,7 +422,7 @@ export default function CapacityEditor({ mode, today, editable, getLockToken, on
         footer={<>
           {error && <span className="mr-auto text-xs text-rose-300">{error}</span>}
           {!error && firstErr && <span className="mr-auto text-xs text-orange-300">{firstErr}</span>}
-          {!error && !firstErr && !editable && <span className="mr-auto text-xs text-slate-400">唯讀：取得編輯權後才能修改</span>}
+          {!error && !firstErr && !editable && <span className="mr-auto text-xs text-slate-400">{readonlyHint ?? '唯讀：取得編輯權後才能修改'}</span>}
           <Btn onClick={() => setLinesOpen(true)} disabled={dirty.length > 0 || saving || (!rows && !loadErr)}
             title={dirty.length > 0 ? '有未儲存的修改：請先儲存或取消，再調整線別' : '新增、改名、停用產線，調整順序'}>線別管理</Btn>
           <Btn onClick={onClose}>{editable ? '取消' : '關閉'}</Btn>

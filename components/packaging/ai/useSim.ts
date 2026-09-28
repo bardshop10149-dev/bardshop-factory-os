@@ -16,6 +16,8 @@
 //        locked／out_of_window／not_sim_row／其他驗證錯誤 → 回滾到上一次伺服器確認的畫面、顯示原因
 //        網路／5xx → 1s、3s、9s 重試，仍失敗就停下來讓主管選「重試」或「放棄」
 //   鎖定（D88）走同一個佇列（整份替換 locks），順序才不會亂。
+//   D100：連按上移／下移時，還在排隊（尚未送出）的「只調整順序」那一批與新的一批併成一個請求（simBoard.mergeQueuedReorderOps）——
+//     每個請求推一格「退回上一步」（上限 30 格），連按十幾次會把「AI 排程前」那格擠掉。
 //   建立／重設、退回上一步、載入歷史、AI 排程：佇列清空才能做（要帶最新 version），做完以回應為準。
 //
 // 「過時回應」防護（同 useBoard）：GET 發出時記下 genRef，回來時若已有新寫入＝寫入前的快照 → 丟掉再抓。
@@ -25,6 +27,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   AI_POLL_MS,
+  SIM_MAX_OPS_PER_REQUEST,
   type AiRunDetail,
   type SimCreateRequest,
   type SimLocks,
@@ -44,7 +47,8 @@ import {
   postSimUndo,
   type AiApiResult,
 } from './simApi'
-import { applyLocalToBody, applyLocalToSimCards, withLocks } from './simBoard'
+import { mergeLabels } from '@/components/packaging/board/queueMerge'
+import { applyLocalToBody, applyLocalToSimCards, mergeQueuedReorderOps, withLocks } from './simBoard'
 import { RUN_ERROR_LABEL } from './simText'
 
 export interface SimToast {
@@ -63,7 +67,8 @@ export interface SimLoadError {
 type NewQueueItem =
   | { kind: 'ops'; ops: PlacementOp[]; label: string }
   | { kind: 'locks'; locks: SimLocks; label: string }
-type QueueItem = NewQueueItem & { key: number; attempts: number }
+/** labels：D100 併進這一批的各次操作標籤（合併後的標籤由它重組，不會越併越長巢狀） */
+type QueueItem = NewQueueItem & { key: number; attempts: number; labels?: string[] }
 
 /** 網路錯誤／5xx 的重試間隔（同正式工作台 1s、3s、9s） */
 const RETRY_DELAYS = [1000, 3000, 9000]
@@ -338,7 +343,22 @@ export function useSim(opts: {
 
   const enqueue = useCallback((item: NewQueueItem) => {
     genRef.current++
-    queueRef.current.push({ ...item, key: ++keyRef.current, attempts: 0 })
+    const q = queueRef.current
+    const last = q[q.length - 1]
+    // D100：佇列第 2 個以後的項目一定還沒送出過（pump 一次只送第 1 個；第 1 個可能正在送、或送過正在等重試 → 絕不改它）。
+    //   新的一批與最後一批都只有 reorder → 併成一批（同一張卡後者覆蓋；模擬列版本固定 1，不會衝突）
+    if (item.kind === 'ops' && q.length >= 2 && last.kind === 'ops') {
+      const merged = mergeQueuedReorderOps(last.ops, item.ops, SIM_MAX_OPS_PER_REQUEST)
+      if (merged) {
+        const labels = [...(last.labels ?? [last.label]), item.label]
+        last.ops = merged
+        last.labels = labels
+        last.label = mergeLabels(labels)
+        syncPending()
+        return
+      }
+    }
+    q.push({ ...item, key: ++keyRef.current, attempts: 0 })
     syncPending()
     void pump()
   }, [pump, syncPending])

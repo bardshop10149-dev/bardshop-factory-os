@@ -15,6 +15,13 @@
 //   正式區唯讀列＝已完成、延誤順延、範圍外的線、待排區——照樣顯示、照樣佔產能，但模擬區與 AI 都不動它。
 // 拖放規則（伺服器 applySimOps 會再驗一次，這裡先擋、講清楚原因）：
 //   只能排進模擬範圍內的日期與線；鎖定的卡／訂單／線不能動；沒有待排區（要先不排＝拖回待排池）；不能勾完成。
+// D100（與正式工作台一致）：
+//   - 「全部 N 天」檢視也能線內拖曳插隊（原本只有日檢視；Snow 在全部天數檢視拖回自己那格＝moveCard 同日同線直接 return，看起來拖不動）。
+//     插入點：日＝時間尺 y、全部天數＝量清單 DOM（laneDrag，限定 .sim-board 底下）；要改哪些卡＝simBoard.simLaneReorder
+//     （先整條線含唯讀卡 → 結果和插入線一致；要整條重新編號而碰到唯讀卡／鎖定卡時改用 planLaneReorderAnchored：它們當固定錨點、值不改，插入線畫在實際落點；做不到就不畫插入線、放下時說明原因）。
+//   - 卡片詳情加「上移／下移」（simLaneStep），停用時說明原因（唯讀卡、鎖定、別人的模擬區、起始日已過、鎖定模式…）。
+//   - 工時：卡片上顯示「工時 X.Xh」可點（MinutesChip），詳情工時段在最上面（MinutesEditor variant='sim'）；
+//     產能入口一律「查看產能」（模擬區沿用正式產能），唯讀提示說明要去正式工作台改。
 
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { useRouter } from 'next/navigation'
@@ -34,7 +41,6 @@ import {
 import {
   AI_DEFAULT_HORIZON,
   EMPTY_SIM_LOCKS,
-  SIM_MAX_OPS_PER_REQUEST,
   type SimLocks,
 } from '@/lib/packaging/ai/types'
 import { MINUTES_SNAP, type BoardCard, type BoardDay, type PlacementOp, type YMD } from '@/lib/packaging/scheduleTypes'
@@ -44,9 +50,10 @@ import { effectiveMinutes, overrideFromEffective } from '@/lib/packaging/schedul
 import PackagingOrderModal from '@/components/packaging/PackagingOrderModal'
 import { fmtQty } from '@/components/packaging/poolStyles'
 import {
-  laneCardsOf, laneDropPlan, laneReorderChanges, mergeCandidates, newId, parseDropId, ruleForBoardCard, ruleForPoolCard, storedOverrideOf,
-  type DragRule, type LocalAction,
+  isOwnLaneDrop, laneDropPlan, laneLineTopPx, lanePositionAfter, laneReplanBlockedReason, mergeCandidates, newId, parseDropId, ruleForBoardCard, ruleForPoolCard, storedOverrideOf,
+  type DragRule, type LaneDropPlan, type LocalAction,
 } from '@/components/packaging/board/boardLocal'
+import type { ReorderChange } from '@/lib/packaging/laneOrder'
 import { ago, clock, hours, md, mdw } from '@/components/packaging/board/boardFormat'
 import PoolSidebar, { type PoolAction } from '@/components/packaging/board/PoolSidebar'
 import ParkingArea from '@/components/packaging/board/ParkingArea'
@@ -56,14 +63,16 @@ import { lineLabel } from '@/components/packaging/board/CardFace'
 import { PlacementCardOverlay } from '@/components/packaging/board/PlacementCard'
 import DayLanesView from '@/components/packaging/board/DayLanesView'
 import MultiDayView from '@/components/packaging/board/MultiDayView'
+import { ownLanePlan, pointerClientY, sameHint, type LaneReorderHint } from '@/components/packaging/board/laneDrag'
+import type { LaneOrderProps } from '@/components/packaging/board/LaneOrderControls'
 import SplitDialog from '@/components/packaging/board/SplitDialog'
 import QtyDateDialog from '@/components/packaging/board/QtyDateDialog'
 import CapacityEditor from '@/components/packaging/board/CapacityEditor'
 import Modal, { Btn } from '@/components/packaging/board/Modal'
 import { useSim } from './useSim'
 import {
-  AI_MARK, LIVE_MARK, LOCK_MARK, decorateSimBoard, locksCount, simAutoLane, simCardState, soNumberOfKey,
-  toggleCardLock, toggleLineLock, toggleOrderLock, type SimCardState,
+  AI_MARK, LIVE_MARK, LOCK_MARK, SIM_LANE_REASON, decorateSimBoard, locksCount, simAutoLane, simCardState, simLaneReorder, simLaneStep, simLaneStepInfo,
+  soNumberOfKey, toggleCardLock, toggleLineLock, toggleOrderLock, type SimCardState, type SimOrderCtx,
 } from './simBoard'
 import { MODE_LABEL, UNDO_KIND_LABEL, horizonLabel } from './simText'
 import { SimCreateForm, type SimCreateValue } from './SimCreateDialog'
@@ -108,7 +117,10 @@ type ActiveDrag =
   | { kind: 'pool'; card: PackagingCardData; rule: DragRule }
   | { kind: 'placement'; bc: BoardCard; rule: DragRule }
 
-type ReorderHint = { laneKey: string; topPx: number; mode: 'insert' | 'append' }
+/** D100 量 DOM 時限定在模擬區畫面底下（laneDrag） */
+const SIM_SCOPE = '.sim-board'
+/** D100 產能對話框在模擬區的唯讀說明（就算有正式區編輯權，模擬區也改不了產能） */
+const SIM_CAPACITY_READONLY = '模擬區沿用正式產能，這裡只能查看；要改請到正式排程工作台的「產能表」（需要編輯權）'
 
 type Dialog =
   | { t: 'reset' }
@@ -120,19 +132,6 @@ type Dialog =
   | { t: 'capacity'; date: YMD; lineId?: number }
 
 type DrawerKind = 'run' | 'history' | 'rules' | 'locks'
-
-function pointerClientY(tracked: { y: number } | null, e: { activatorEvent: Event | null; delta: { y: number } }): number | null {
-  if (tracked) return tracked.y
-  const a = e.activatorEvent as (Event & { clientY?: number; touches?: TouchList }) | null
-  const y0 = typeof a?.clientY === 'number' ? a.clientY : a?.touches?.[0]?.clientY
-  return typeof y0 === 'number' ? y0 + e.delta.y : null
-}
-
-function laneBodyY(laneKey: string, clientY: number | null): number | null {
-  if (clientY == null || typeof document === 'undefined') return null
-  const el = document.querySelector(`.sim-board [data-lane-body="${laneKey}"]`)
-  return el ? clientY - el.getBoundingClientRect().top : null
-}
 
 /** 桌機（≥ 1024px）才提供拖曳（同正式工作台 D54） */
 function useIsDesktop(): boolean {
@@ -162,11 +161,13 @@ export default function SimLayout({ meEmail }: { meEmail: string | null }) {
   const [view, setView] = useState<'day' | 'all'>(() => (readLS(VIEW_KEY) === 'day' ? 'day' : 'all'))
   const [pickedDate, setPickedDate] = useState<YMD | null>(null)
   const [detailId, setDetailId] = useState<string | null>(null)
+  /** D100：從「工時」小標／右鍵「調整工時…」打開 → 直接聚焦工時輸入框 */
+  const [detailFocus, setDetailFocus] = useState(false)
   const [orderSo, setOrderSo] = useState<string | null>(null)
   const [poolHidden, setPoolHidden] = useState<boolean>(() => readLS(POOL_HIDDEN_KEY) === '1')
   const [createValue, setCreateValue] = useState<SimCreateValue>({ horizon: AI_DEFAULT_HORIZON, mode: 'copy', start: 'today' })
   const [activeDrag, setActiveDrag] = useState<ActiveDrag | null>(null)
-  const [reorderHint, setReorderHint] = useState<ReorderHint | null>(null)
+  const [reorderHint, setReorderHint] = useState<LaneReorderHint | null>(null)
   const pointerRef = useRef<{ x: number; y: number } | null>(null)
   const isDesktop = useIsDesktop()
 
@@ -236,6 +237,8 @@ export default function SimLayout({ meEmail }: { meEmail: string | null }) {
     [rawBoard, simCards, locks, scopeLineIds],
   )
   const cardState = useCallback((bc: BoardCard): SimCardState => simCardState(bc, simCards, locks, scopeLineIds), [simCards, locks, scopeLineIds])
+  /** D100 線內順序判斷用（哪些卡能改順序） */
+  const simCtx = useMemo<SimOrderCtx>(() => ({ simCards, locks, scopeLineIds }), [simCards, locks, scopeLineIds])
   const usableLineIds = useMemo(() => scopeLineIds.filter(id => !locks.lineIds.includes(id)), [scopeLineIds, locks.lineIds])
   const usableLines = useMemo(
     () => lines.filter(l => l.active && usableLineIds.includes(l.id)).sort((a, b) => a.sortOrder - b.sortOrder),
@@ -340,46 +343,44 @@ export default function SimLayout({ meEmail }: { meEmail: string | null }) {
   }, [setMinutes])
 
   /**
-   * D74 同一條線內上下重排。線上可能夾著正式區唯讀的卡（今天已完成的卡）：
-   * 它們不能改 sort_index（伺服器回 not_sim_row），所以只拿「模擬列」來算要改哪幾張；
-   * 游標落在唯讀卡前面時，改成「放在它後面第一張模擬列之前」。
+   * D74／D100 線內順序的送出（拖曳＝'drag'、卡片詳情上移／下移＝'up'／'down'）：changes 由 simLaneReorder／simLaneStep 算好
+   * （已排除唯讀卡、鎖定卡、超過上限）。position＝移動後是第幾張（標籤「A 線 第 n 張」，同正式區）。
    */
-  const reorderInLane = useCallback((bc: BoardCard, date: YMD, lineId: number, clientY: number | null) => {
-    const day = rawBoard?.days.find(d => d.date === date)
-    if (!day) return
-    const isSim = (id: string) => !!simCards[id]
-    const plan = laneDropPlan(day, lineId, bc.placementId, laneBodyY(`${date}:${lineId}`, clientY), false)
-    let beforeId = plan.beforeId
-    if (beforeId && !isSim(beforeId)) {
-      const lane = laneCardsOf(day, lineId)
-      const at = lane.findIndex(c => c.placementId === beforeId)
-      beforeId = lane.slice(at).find(c => isSim(c.placementId) && c.placementId !== bc.placementId)?.placementId ?? null
-    }
-    const simDay = { ...day, cards: day.cards.filter(c => isSim(c.placementId)) }
-    const changes = laneReorderChanges(simDay, lineId, bc.placementId, beforeId)
+  const submitLaneOrder = useCallback((bc: BoardCard, date: YMD, lineId: number, changes: ReorderChange[], how: 'drag' | 'up' | 'down', position: number) => {
     if (changes.length === 0) return
-    if (changes.length > SIM_MAX_OPS_PER_REQUEST) {
-      showToast('warn', `這條線的卡太多（要重新編號 ${changes.length} 張，一次最多 ${SIM_MAX_OPS_PER_REQUEST} 張），無法調整順序`)
-      return
-    }
-    const lockedIds = changes.filter(c => {
-      const row = rawCard(c.id)
-      return row ? cardState(row).lockedBy.length > 0 : false
-    })
-    if (lockedIds.length > 0) {
-      showToast('warn', '這條線有鎖定的卡、需要一起重新編號，無法調整順序（先解除鎖定，或把卡拖到最後）')
-      return
-    }
+    const verb = how === 'drag' ? '調整順序' : how === 'up' ? '上移' : '下移'
     submitOps(
       changes.map((c): PlacementOp => (c.replan
         ? { op: 'move', id: c.id, version: c.version, toDate: date, lineId, sortIndex: c.sortIndex }
         : { op: 'reorder', id: c.id, version: c.version, sortIndex: c.sortIndex })),
-      `調整順序 ${lineLabel(bc.card)}（${lineName(lineId)}）`,
+      `${verb} ${lineLabel(bc.card)}（${lineName(lineId)} 第 ${position} 張）`,
       changes.map((c): LocalAction => (c.replan
         ? { t: 'move', id: c.id, toDate: date, lineId, sortIndex: c.sortIndex }
         : { t: 'reorder', id: c.id, sortIndex: c.sortIndex })),
     )
-  }, [rawBoard, simCards, rawCard, cardState, lineName, showToast, submitOps])
+  }, [lineName, submitOps])
+
+  /** D74／D100 拖曳放回自己那條線：beforeId＝游標算出的插入點（simLaneReorder 會處理唯讀卡與鎖定） */
+  const reorderInLane = useCallback((bc: BoardCard, day: BoardDay, lineId: number, beforeId: string | null) => {
+    const r = simLaneReorder(day, lineId, bc.placementId, beforeId, simCtx)
+    if (!r.ok) {
+      showToast('warn', r.reason === 'too_many' ? `${SIM_LANE_REASON.too_many}（這次要改 ${r.changes.length} 張）` : SIM_LANE_REASON[r.reason])
+      return
+    }
+    submitLaneOrder(bc, day.date, lineId, r.changes, 'drag', lanePositionAfter(day, lineId, bc.placementId, r.changes))
+  }, [simCtx, showToast, submitLaneOrder])
+
+  /** D100 卡片詳情的上移／下移（用最新的樂觀畫面算，連按也對得上） */
+  const stepInLane = useCallback((id: string, dir: 'up' | 'down') => {
+    const bc = rawCard(id)
+    if (!bc || !rawBoard || bc.displayDate == null || bc.laneId == null) return
+    if (!assertMovable(bc)) return
+    const day = rawBoard.days.find(d => d.date === bc.displayDate)
+    if (!day) return
+    const r = simLaneStep(day, bc.laneId, id, dir, simCtx)
+    if (!r.ok) { showToast('warn', r.reason); return }
+    submitLaneOrder(bc, day.date, bc.laneId, r.changes, dir, r.position)
+  }, [rawCard, rawBoard, assertMovable, simCtx, showToast, submitLaneOrder])
 
   // ── 鎖定（D88） ────────────────────────────────────────────────────────
   const changeLocks = useCallback((next: SimLocks, label: string) => submitLocks(next, label), [submitLocks])
@@ -400,11 +401,16 @@ export default function SimLayout({ meEmail }: { meEmail: string | null }) {
   const handlersFor = useCallback((bc: BoardCard, siblings: BoardCard[]): CardMenuHandlers => {
     const st = cardState(bc)
     const deny = () => { assertMovable(bc) }
+    // D100「調整工時…」與卡片上的「工時」小標（MinutesChip 有 onEdit 才是按鈕）：
+    //   - 鎖定模式開著：點卡片＝鎖定／解鎖（onOpenDetail）；小標若是按鈕會攔下點擊改成開詳情 → 不給，小標變純文字、點了照樣切換鎖定
+    //   - 正式區唯讀的卡：詳情裡沒有工時編輯器（SimCardDetail 只對模擬列顯示）→ 不給，免得小標寫「點一下調整工時」卻改不了
+    //   - 鎖定的模擬列：照給——詳情的工時段會寫「鎖定的卡不能改工時，先解除鎖定」
+    const editMinutes = lockModeOn || !st.sim ? undefined : (c: BoardCard) => { setDetailId(c.placementId); setDetailFocus(true) }
     if (!st.sim || st.lockedBy.length > 0) {
       return {
         onToggleComplete: () => showToast('warn', '模擬區不能勾完成；完成請在正式排程工作台勾'),
         onSplit: deny, onMoveTo: deny, onToHolding: deny, onUnplace: deny,
-        onEditMinutes: c => setDetailId(c.placementId),
+        onEditMinutes: editMinutes,
       }
     }
     const others = mergeCandidates(siblings, bc).filter(o => {
@@ -419,7 +425,8 @@ export default function SimLayout({ meEmail }: { meEmail: string | null }) {
       onUnplace: c => unplaceCard(c),
       onMoveLine: (c, lineId) => { if (c.displayDate && assertTarget(c.displayDate, lineId)) moveCard(c, c.displayDate, lineId) },
       moveLines: usableLines,
-      onEditMinutes: c => setDetailId(c.placementId),
+      // D100：「調整工時…」與卡片上的「工時」小標都直接聚焦工時輸入框（鎖定模式時不給，見上）
+      onEditMinutes: editMinutes,
       onMerge: others.length > 0 ? c => {
         submitOps(
           [{ op: 'merge', targetId: c.placementId, targetVersion: c.version, sources: others.map(o => ({ id: o.placementId, version: o.version })) }],
@@ -428,11 +435,12 @@ export default function SimLayout({ meEmail }: { meEmail: string | null }) {
         )
       } : undefined,
     }
-  }, [cardState, assertMovable, assertTarget, moveCard, unplaceCard, usableLines, submitOps, showToast])
+  }, [cardState, assertMovable, assertTarget, moveCard, unplaceCard, usableLines, submitOps, showToast, lockModeOn])
 
   const onOpenDetail = useCallback((bc: BoardCard) => {
     if (lockModeOn) { toggleCard(bc); return }
     setDetailId(bc.placementId)
+    setDetailFocus(false)
   }, [lockModeOn, toggleCard])
   const openOrder = useCallback((so: string) => { setDetailId(null); setOrderSo(so) }, [])
 
@@ -455,34 +463,60 @@ export default function SimLayout({ meEmail }: { meEmail: string | null }) {
     sim.setDragging(true)
   }
 
+  /** D74／D100 拖曳中：插入線（日＝時間尺、全部天數＝清單）；模擬區畫在「實際落點」（simLaneReorder 的 beforeId） */
   const onDragMove = (e: DragMoveEvent) => {
     const drag = activeDrag
     const t = e.over ? parseDropId(String(e.over.id)) : null
-    const day = view === 'day' && drag && rawBoard && t?.kind === 'lane' ? rawBoard.days.find(x => x.date === t.date) : undefined
+    const day = drag && rawBoard && t?.kind === 'lane' ? rawBoard.days.find(x => x.date === t.date) : undefined
     if (!drag || !day || t?.kind !== 'lane') { setReorderHint(h => (h ? null : h)); return }
     const laneKey = `${t.date}:${t.lineId}`
-    const own = drag.kind === 'placement' && drag.bc.displayDate === t.date && drag.bc.laneId === t.lineId
-    const y = own ? laneBodyY(laneKey, pointerClientY(pointerRef.current, e)) : null
-    const plan = laneDropPlan(day, t.lineId, own && drag.kind === 'placement' ? drag.bc.placementId : null, y, false)
-    const next: ReorderHint = { laneKey, topPx: Math.round(plan.topPx), mode: own ? 'insert' : 'append' }
-    setReorderHint(h => (h && h.laneKey === next.laneKey && h.topPx === next.topPx && h.mode === next.mode ? h : next))
+    const timeline = view === 'day'
+    let next: LaneReorderHint
+    if (drag.kind === 'placement' && isOwnLaneDrop(drag.bc, t)) {
+      const movingId = drag.bc.placementId
+      const plan = ownLanePlan({
+        mode: timeline ? 'timeline' : 'list', day, lineId: t.lineId, movingId,
+        clientY: pointerClientY(pointerRef.current, e), hideCompleted: false, scope: SIM_SCOPE,
+      })
+      // 要整條重新編號、會碰到唯讀卡／鎖定卡時，實際落點可能被夾到「固定在最上面」的卡之後 → 插入線畫在實際落點，說的和做的一樣。
+      // 放回原位（stay）＝不送，插入線照游標畫；做不到（r.ok false：唯讀、鎖定、越不過固定卡、沒空隙）→ 不畫插入線，放下時 toast 說明原因
+      const r = plan.stay ? null : simLaneReorder(day, t.lineId, movingId, plan.beforeId, simCtx)
+      if (r && !r.ok) { setReorderHint(h => (h ? null : h)); return }
+      const beforeId = r ? r.beforeId : plan.beforeId
+      const topPx = !timeline ? 0 : beforeId === plan.beforeId ? plan.topPx : laneLineTopPx(day, t.lineId, movingId, beforeId, false)
+      next = { laneKey, topPx: Math.round(topPx), mode: 'insert', beforeId }
+    } else {
+      next = { laneKey, topPx: timeline ? Math.round(laneDropPlan(day, t.lineId, null, null, false).topPx) : 0, mode: 'append', beforeId: null }
+    }
+    setReorderHint(h => (sameHint(h, next) ? h : next))
   }
 
   const onDragEnd = (e: DragEndEvent) => {
     const drag = activeDrag
     const clientY = pointerClientY(pointerRef.current, e)
+    const target = e.over ? parseDropId(String(e.over.id)) : null
+    // D100：拖回自己那條線的插入點——在 setState 之前量（DOM 還是拖曳中的樣子）
+    let own: { day: BoardDay; lineId: number; plan: LaneDropPlan } | null = null
+    if (drag?.kind === 'placement' && target?.kind === 'lane' && rawBoard && isOwnLaneDrop(drag.bc, target)) {
+      const day = rawBoard.days.find(x => x.date === target.date)
+      if (day) {
+        own = {
+          day, lineId: target.lineId,
+          plan: ownLanePlan({ mode: view === 'day' ? 'timeline' : 'list', day, lineId: target.lineId, movingId: drag.bc.placementId, clientY, hideCompleted: false, scope: SIM_SCOPE }),
+        }
+      }
+    }
     setActiveDrag(null)
     setReorderHint(null)
     sim.setDragging(false)
-    if (!drag || !e.over || !rawBoard || !session) return
-    const target = parseDropId(String(e.over.id))
-    if (!target) return
+    if (!drag || !e.over || !rawBoard || !session || !target) return
     if (drag.kind === 'placement' && !assertMovable(drag.bc)) return
     if (target.kind === 'pool') { if (drag.kind === 'placement') unplaceCard(drag.bc); return }
     if (target.kind === 'holding') { showToast('warn', '模擬區沒有待排區；要先不排這張卡，請拖回待排池'); return }
-    if (view === 'day' && drag.kind === 'placement' && target.kind === 'lane'
-      && drag.bc.displayDate === target.date && drag.bc.laneId === target.lineId) {
-      reorderInLane(drag.bc, target.date, target.lineId, clientY)
+    // D74／D100：拖回自己那條線（日／全部天數）＝上下重排
+    if (drag.kind === 'placement' && isOwnLaneDrop(drag.bc, target)) {
+      // D100：放回原位（看得到的順序沒變）＝不送
+      if (own && !own.plan.stay) reorderInLane(drag.bc, own.day, own.lineId, own.plan.beforeId)
       return
     }
     if (drag.rule.blocked) return
@@ -557,6 +591,11 @@ export default function SimLayout({ meEmail }: { meEmail: string | null }) {
   }
 
   const ownerLabel = v.owner.name ?? v.owner.email
+  // 被拖的排定卡所在的線（同線重排不套 D22 日期限制；日／全部天數共用）。
+  // D100：延誤＋預排、還沒到預估可包日的卡除外（線內換位置＝move 會被 D22 擋；同正式工作台 BoardLayout）
+  const ownLaneKey = activeDrag?.kind === 'placement' && activeDrag.bc.displayDate != null && activeDrag.bc.laneId != null
+    && !laneReplanBlockedReason(activeDrag.bc)
+    ? `${activeDrag.bc.displayDate}:${activeDrag.bc.laneId}` : null
   const lastUndo = session?.undo[session.undo.length - 1] ?? null
   const runBusy = !!running || sim.polling
   const detailRaw = detailId ? rawCard(detailId) : null
@@ -866,8 +905,8 @@ export default function SimLayout({ meEmail }: { meEmail: string | null }) {
                     onResize={resizeMinutes}
                     onResizing={sim.setDragging}
                     reorderHint={reorderHint}
-                    ownLaneKey={activeDrag?.kind === 'placement' && activeDrag.bc.displayDate != null && activeDrag.bc.laneId != null
-                      ? `${activeDrag.bc.displayDate}:${activeDrag.bc.laneId}` : null}
+                    ownLaneKey={ownLaneKey}
+                    capacityReadOnly
                   />
                 ) : (
                   <div className="flex h-40 items-center justify-center rounded-xl border border-dashed border-slate-800 text-xs text-slate-500">沒有日期</div>
@@ -891,6 +930,9 @@ export default function SimLayout({ meEmail }: { meEmail: string | null }) {
                     onOpenDetail={onOpenDetail}
                     onPickDay={d => { setPickedDate(d); goView('day') }}
                     onEditCapacity={(date, lineId) => setDialog({ t: 'capacity', date, lineId })}
+                    reorderHint={reorderHint}
+                    ownLaneKey={ownLaneKey}
+                    capacityReadOnly
                   />
                 </div>
               )}
@@ -1024,16 +1066,43 @@ export default function SimLayout({ meEmail }: { meEmail: string | null }) {
           mode={{ kind: 'day', date: dialog.date, lineId: dialog.lineId }}
           today={v.today}
           editable={false}
+          readonlyHint={SIM_CAPACITY_READONLY}
           getLockToken={() => null}
           onClose={() => setDialog(null)}
           onSaved={() => void sim.reload()}
         />
       )}
 
-      {detailRaw && (
+      {detailRaw && (() => {
+        const st = cardState(detailRaw)
+        // D100 不能改（順序、工時）的共同原因：不是本人、起始日已過、有動作進行中
+        const writeBlock = !isOwner ? '別人的模擬區只能檢視'
+          : stale ? '模擬起始日已過，請先重設模擬區'
+            : busy ? '請等目前的動作完成' : null
+        // D100 順序列：排在日期上、那天在畫面上的卡；鎖定模式開著時點卡片是鎖定，這裡也先停用免得混淆
+        const laneId = detailRaw.laneId ?? null
+        const laneDay = detailRaw.planDate != null && detailRaw.displayDate != null && laneId != null
+          ? rawBoard?.days.find(d => d.date === detailRaw.displayDate) : undefined
+        let laneOrder: LaneOrderProps | null = null
+        if (laneDay && laneId != null) {
+          const info = simLaneStepInfo(laneDay, laneId, detailRaw.placementId, simCtx)
+          const block = writeBlock ?? (lockModeOn ? `鎖定模式開著：先按「${LOCK_MARK} 鎖定模式」結束，再調整順序` : null)
+          laneOrder = {
+            lineName: lineName(laneId),
+            info: block ? { ...info, up: block, down: block } : info,
+            hint: '每按一次＝一格「退回上一步」（連按時還沒送出的會併成一格）',
+            onStep: dir => { if (!block) stepInLane(detailRaw.placementId, dir) },
+          }
+        }
+        const minutesHint = writeBlock ? `${writeBlock}，不能改工時`
+          : st.lockedBy.length > 0 ? '鎖定的卡不能改工時，先解除鎖定' : null
+        return (
         <SimCardDetail
           bc={detailRaw}
-          state={cardState(detailRaw)}
+          state={st}
+          laneOrder={laneOrder}
+          focusMinutes={detailFocus}
+          minutesReadonlyHint={minutesHint}
           today={v.today}
           lines={lines}
           editable={editable}
@@ -1048,7 +1117,8 @@ export default function SimLayout({ meEmail }: { meEmail: string | null }) {
           }}
           onSubmitMinutes={(m, reason) => setMinutes(detailRaw, m, reason, 'dialog')}
         />
-      )}
+        )
+      })()}
       {orderSo && <PackagingOrderModal so={orderSo} open onClose={() => setOrderSo(null)} />}
 
       {/* ─── 抽屜 ─── */}
