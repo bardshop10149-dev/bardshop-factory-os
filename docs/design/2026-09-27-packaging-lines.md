@@ -870,14 +870,20 @@ I/O（新 `lib/packaging/manualDb.ts` `loadManualLookupData(sb, so)`，全部唯
 
 ---
 
-## 十四、D104 主管結案／D105 每日通知信（2026-09-28；D105 延後）
+## 十四、D104 主管結案／D105 每日通知信（2026-09-28）
 
 依據 `需求決策紀錄.md` **D104**（＋Snow 補充 D107：不需編輯鎖、同時清模擬區）。Migration：`sql/20260928d_packaging_closures.sql`（冪等、單一交易；前提＝已依序套用 20260927 → 20260927b → 20260928 → 20260928b；套用前先備份）。
 - **資料**：新表 `packaging_closures`（一列＝主管對「SO-項次」按結案：結案當下的品名／數量／交期／原區塊／已銷貨量快照、備註、誰何時；復原＝寫 `restored_*`，紀錄保留；部分唯一索引＝同一行同時只有一筆未復原）；`packaging_op_log.kind` 加 `'closure'`；RLS 只給 service_role。
 - **待排池**：讀取層 `manualCache.getManualMergedPool` 併入手動區塊後套 `closures.applyClosuresToPool`——未復原的結案行在所有區塊（含 `'mn'`）不出卡、`excluded.closed` 以 SO 行計（待排池頁尾「主管已結案」）；每次讀都重查結案表（不吃待排池 120 秒快取，結案後下一次讀取就消失、寫入驗證立刻擋「行已不在待排池」）；結案表未建 → 不排除、notes 最前面說明。D66 查詢對已結案行標 `closed`、不可勾選；加入 API 略過（`not_selectable`）。
 - **API** `POST /api/packaging/closures` `{ action: 'close' | 'restore', soLineKey, note? }`（packaging_admin；**不需編輯鎖**、只收 JSON）→ `{ success, closure, unplaced, simRemoved }`；close 同時以 id＋version 條件刪該行未完成排定卡（撞到重讀再刪一輪）、以 version CAS 從各人 `packaging_sim_sessions.placements` 移除該行（`locks.placementIds` 同步清；undo 堆疊不動）、記 op_log `closure`；不進 Undo。錯誤碼：`already_closed`（409）、`not_found`（404）、`pool_unavailable`、`migration_required`（409）、`db_error`。`GET ?from=&to=`（packaging 讀權；台北日、預設近 30 天、含已復原）→ `{ closures[] }`。
 - **畫面**：工作台待排池卡與排定卡右鍵「結案（不再拉回待排池）」（`me.canEdit` 即可、不看鎖）→ `ClosureDialog` 確認（單號-項次、客戶、品名、數量、交期、原區塊、會放回的排定卡張數、備註）→ 成功後清 Undo（有放回時）、重新載入。**延後**：「已結案清單／復原」面板（先只有 GET／restore API）、D66 對話框已結案標示的樣式微調。
-- **D105 每日通知信：延後**（不建 cron route、不改 vercel.json）。表已預留 `sold_qty_at_close` 供「結案後 ARGO 仍未銷貨」對照；屆時前提：Vercel 設 `RESEND_API_KEY`＋寄件人（沿用 `DAILY_MACHINE_OUTPUT_FROM` 或另設），收件人以 `app_settings.packaging_closure_email_recipients` 覆寫、預設 Snow。
+- **D105 每日通知信**（`app/api/cron/packaging-closure-email/route.ts`＋純函式 `lib/packaging/closureEmail.ts`；`vercel.json` cron `0 10 * * *`＝台北 18:00）：
+  - **觸發**：GET／POST，`Authorization: Bearer <CRON_SECRET 或 WEBHOOK_SECRET>`（同 daily-machine-output-email）。參數 `dry=1`（或 POST `{ dry: true }`）＝組好內容回 `{ html, subject, counts, recipients, attachment }` 不寄、不寫 op_log、不檢查寄信變數；`date=YYYY-MM-DD` 指定台北日（預設今天）。
+  - **資料**：`listClosures(date, date)` 取 closed_at 落在台北當日的結案列（含當日又復原的，信裡標「已於 … 復原」）；**當日 0 筆 → `{ success: true, skipped: true, reason: 'no_closures' }` 不寄**。本月（1 日～當日）結案列算累計（只計未復原）與原區塊分布。「結案後 ARGO 仍未銷貨」＝本月未復原結案列 ×（`loadSalesForSos` 只查這些 SO 的）`erp_so_sales`：同 SO＋品號（不分大小寫）的 `sold_qty` 累計 < `qty_at_close` 的列出（差額、現在已銷、結案時已銷、無銷貨紀錄標示；沒有品號的略過並計數）。同一 SO 同品號多行各自拿同一累計比（不做行別分配——通知信只是提醒，結案行常已被 ERP 結案／刪行、拿不到 erp_so_lines）。鏡像表未建／讀取失敗 → 信裡寫明「無法對照」；信尾標 `erp_so_sales_sync.last_ok_at`。
+  - **信件**：HTML 繁中三段（①當日明細：單號-項次、客戶、品號／品名、結案時數量、交期、原區塊、誰、時間、備註 ②本月累計＋區塊分布 ③「請補銷貨或改交期」對照表）＋ Excel 附件 `包裝結案_<日期>.xlsx`（`xlsx` 套件 → base64 → Resend `attachments`；分頁「當日結案」「ARGO 未銷貨對照」）。
+  - **收件人**：`app_settings` key `packaging_closure_email_recipients`（JSON 陣列或逗號分隔字串，唯讀查）；沒有或解析後為空 → `Snow@bardshoptw.com`。
+  - **不重寄**：寄出後 `packaging_op_log` 記 kind `'closure'`、label `結案通知信已寄 <日期>`、ops `[{ action: 'email_sent', date, recipients, counts, resendId }]`；寄前以 kind＋label 查到就回 `skipped: 'already_sent'`。op_log 寫失敗只 log（信已寄出，同日再觸發會重寄一次）。
+  - **前提（Vercel 正式站）**：環境變數 `RESEND_API_KEY`、`DAILY_MACHINE_OUTPUT_FROM`（沿用機台產出通知信的寄件人變數；專案沒有更通用的寄件人變數，不另設），未設 → 非 dry 觸發回 500「未設定寄信服務」不靜默；`CRON_SECRET` 已有。migration `sql/20260928d` 未套用 → 409 `migration_required`。只寫 `packaging_op_log`，其餘唯讀、不查 ARGO。
 
 ## 附：本輪（規格輪）產出
 
