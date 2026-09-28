@@ -6,6 +6,7 @@ import { parseOps } from '@/lib/packaging/scheduleOps'
 import { todayTaipei } from '@/lib/packaging/workdays'
 import { loadSimWorld, updateSimSessionCas } from '@/lib/packaging/ai/db'
 import { SIM_ALLOWED_OPS, applySimOps, pushUndo, simPlacementsTooLarge, snapshotForUndo } from '@/lib/packaging/ai/simState'
+import { withSimCapacity } from '@/lib/packaging/ai/simCapacity'
 import { stateOf } from '@/lib/packaging/ai/runner'
 import { SIM_LABEL_MAX, SIM_MAX_PLACEMENTS, type SimViewResponse } from '@/lib/packaging/ai/types'
 import { actorOf, aiFail, aiServerError, buildSimView, loadOwnSession, logAi, parseVersion } from '../../_lib/aiRoute'
@@ -48,7 +49,8 @@ export async function POST(request: NextRequest) {
     const session = own.session
 
     const world = await loadSimWorld(sb, { today, nowIso, actor: me, poolMaxAgeMs: POOL_WRITE_MAX_AGE_MS })
-    const r = applySimOps({ world, session, ops: parsed.ops })
+    // D101：驗證用「疊了模擬產能」的 world（模擬開的週末才是可排日）；buildSimView 仍傳正式 world（它自己疊）
+    const r = applySimOps({ world: withSimCapacity(world, session), session, ops: parsed.ops })
     if (!r.ok) return aiFail(r.code, r.message, { opIndex: r.opIndex })
     // 張數與 jsonb 位元組（DB check 量的是 UTF-8 位元組，不是字元數）都要在上限內
     if (simPlacementsTooLarge(r.placements)) {

@@ -219,15 +219,16 @@ export function patchLine(req: LinePatchRequest) {
   return call<LineMutationResponse>('/api/packaging/lines', { method: 'PATCH', json: req })
 }
 
-// ── D66 手動加入（寫入要 packaging_admin＋編輯鎖；不進 Undo） ──────────────────
+// ── D66 手動加入（寫入要 packaging_admin；D102 起不需編輯鎖；不進 Undo） ─────────
 
 /** 查詢某張 SO 的全部品項行與「不在待排池的原因」 */
 export function lookupManual(so: string) {
   return call<ManualLookupResponse>(`/api/packaging/manual?${new URLSearchParams({ so }).toString()}`)
 }
 
-export function addManual(lockToken: string, items: ManualAddItem[]) {
-  return call<ManualMutationResponse>('/api/packaging/manual', { method: 'POST', json: { lockToken, items } })
+/** D102：手動加入不需編輯鎖（伺服器已不檢查 lockToken），所以不再帶 */
+export function addManual(items: ManualAddItem[]) {
+  return call<ManualMutationResponse>('/api/packaging/manual', { method: 'POST', json: { items } })
 }
 
 export function updateManual(req: ManualUpdateRequest) {

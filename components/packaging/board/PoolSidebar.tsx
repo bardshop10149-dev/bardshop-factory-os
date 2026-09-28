@@ -7,21 +7,24 @@
 // 拖曳：每張簡化卡片自己是 draggable（不再用事件委派）。
 // 右鍵選單提供鍵盤／精準操作的替代：「排部分數量…」「直接勾完成」「放到待排區」；卡片根元素帶 data-pool-card-id，這裡依它找回卡片。
 //
-// D66 手動加入（分線輪，lines.md §5.3）：父層傳了 manual 才啟用——
-//   - 待排池標題列「＋加入訂單」→ ManualAddDialog（查單號、勾品項行、加入）
-//   - 「手動加入」區塊（'mn'）排在最上面；手動卡右鍵多「改手動加入數量…」「移出待排池」
-//   對話框與 API 呼叫都在這裡（(b)）完成，成功後呼叫 manual.onChanged，由父層重新載入工作台。
-//   寫入佇列忙碌中（busy）時停用加入／移出，避免與拖曳的寫入交錯。
+// D66 手動加入（分線輪，lines.md §5.3）：「手動加入」區塊（'mn'）排在最上面，手動卡上方有「手動・誰・何時」標記，
+//   照樣可拖、可「排部分數量／直接勾完成／放到待排區」。
+// D102（Snow：「所有可排的卡片都在那張卡裡面控制」）：手動加入的「＋加入訂單」「改數量」「移出待排池」
+//   全部搬到待排池頁（/packaging/pool），這裡不再有任何管理入口（標題列按鈕、右鍵項目、對話框都拿掉）。
+//   - showManualTag：是否顯示手動標記（工作台傳 true；AI 模擬區不傳＝維持原樣不顯示）
+//   - manualManageHref：傳了就在說明列與手動卡右鍵放「到待排池頁」連結（新分頁開：工作台的編輯權、
+//     尚未存完的操作與 Undo 紀錄都留在原分頁；改完回來按「重新整理」即可）
+//   - manual（舊 prop）：@deprecated，只剩「傳了＝顯示手動標記」的作用，讓舊呼叫端能編譯、行為不出錯
 
 import { useCallback, useDeferredValue, useMemo, useState, type MouseEvent, type ReactNode } from 'react'
+import Link from 'next/link'
 import { useDroppable } from '@dnd-kit/core'
-import { MANUAL_BLOCK_ID, PLACEABLE_BLOCKS, type ManualInclusionMeta, type PoolCardMeta, type YMD } from '@/lib/packaging/scheduleTypes'
+import { MANUAL_BLOCK_ID, PLACEABLE_BLOCKS, type PoolCardMeta, type YMD } from '@/lib/packaging/scheduleTypes'
 import type { PackagingCard, PoolBlock as PoolBlockData, PoolBlockId } from '@/lib/packaging/types'
 import SimplePool from './SimplePool'
 import { fmtQty } from '@/components/packaging/poolStyles'
 import { isPlaceableBlock, ruleForPoolCard } from './boardLocal'
 import { md } from './boardFormat'
-import ManualAddDialog, { ManualEditDialog, ManualRemoveDialog } from './ManualAddDialog'
 
 /**
  * 側欄區塊順序：D66「手動加入」最上面（主管特地加進來的，最常要找）；
@@ -48,25 +51,21 @@ function haystack(c: PackagingCard): string {
 
 export type PoolAction = 'partial' | 'complete' | 'holding'
 
-/** D66 手動加入的設定（父層傳了才顯示「＋加入訂單」與手動卡的選單） */
+/**
+ * @deprecated D102：手動加入的管理已搬到待排池頁。保留型別只為舊呼叫端能編譯；
+ * 傳了 manual 只會讓手動卡顯示「手動」標記（等同 showManualTag），不再啟用任何加入／改量／移出入口。
+ */
 export interface PoolManualProps {
-  /** 持有編輯鎖 */
   editable: boolean
-  /** 寫入佇列忙碌中（useBoard.pending > 0）時停用加入／移出，避免與拖曳交錯 */
   busy: boolean
-  getLockToken: () => string | null
+  getLockToken?: () => string | null
   today: YMD
-  /** 加入／改數量／移出成功（父層重新載入工作台） */
   onChanged: () => void
 }
 
-type ManualDialog =
-  | { t: 'add' }
-  | { t: 'edit'; card: PackagingCard; meta: ManualInclusionMeta; placedQty: number }
-  | { t: 'remove'; card: PackagingCard; meta: ManualInclusionMeta }
-
 export default function PoolSidebar({
   blocks, cardMeta, today, rollTarget, canDrag, editable, dragKind, onOpenOrder, onPoolAction, children, manual,
+  showManualTag, manualManageHref,
 }: {
   blocks: PoolBlockData[]
   cardMeta: Record<string, PoolCardMeta>
@@ -81,18 +80,18 @@ export default function PoolSidebar({
   onPoolAction: (card: PackagingCard, action: PoolAction) => void
   /** 待排池下方（待排區、頁尾資訊） */
   children?: ReactNode
-  /**
-   * D66：傳了才顯示「＋加入訂單」與手動卡的「改數量／移出待排池」選單。
-   * 對話框與 API 呼叫都在這裡完成；成功後呼叫 onChanged，父層重新載入工作台。
-   */
+  /** @deprecated D102：見 PoolManualProps。只剩「傳了＝顯示手動標記」的作用 */
   manual?: PoolManualProps
+  /** D102：手動卡顯示「手動・誰・何時」標記。省略＝跟著 manual（舊行為：傳了 manual 才顯示） */
+  showManualTag?: boolean
+  /** D102：手動加入的管理頁（工作台傳 '/packaging/pool'；AI 模擬區不傳＝不提示） */
+  manualManageHref?: string
 }) {
   const [keyword, setKeyword] = useState('')
   const deferred = useDeferredValue(keyword)
   const [collapsed, setCollapsed] = useState<Set<PoolBlockId>>(() => (typeof window === 'undefined' ? new Set() : readCollapsed()))
   const [menu, setMenu] = useState<{ x: number; y: number; card: PackagingCard } | null>(null)
-  const [manualDialog, setManualDialog] = useState<ManualDialog | null>(null)
-  const manualWritable = !!manual && manual.editable && !manual.busy
+  const manualTagOn = showManualTag ?? !!manual
 
   const blockMap = useMemo(() => new Map(blocks.map(b => [b.id, b])), [blocks])
   const ordered = useMemo(() => SIDEBAR_ORDER.map(id => blockMap.get(id)).filter((b): b is PoolBlockData => !!b), [blockMap])
@@ -133,7 +132,8 @@ export default function PoolSidebar({
   }, [viewCards])
 
   const onContextMenu = (e: MouseEvent) => {
-    if (!editable && !(manual?.editable)) return
+    // D102 前是 !editable && !manual.editable；manual.editable 本來就等於 editable，拿掉 manual 後結果相同
+    if (!editable) return
     const card = cardFromEvent(e)
     if (!card) return
     e.preventDefault()
@@ -151,16 +151,6 @@ export default function PoolSidebar({
       >
       <div className="flex flex-wrap items-center gap-2">
         <h2 className="text-sm font-bold text-slate-100">待排池 <span className="font-normal text-slate-400">（{totalCards} 張）</span></h2>
-        {manual && (
-          <button
-            type="button"
-            onClick={() => setManualDialog({ t: 'add' })}
-            disabled={manual.busy}
-            title={!manual.editable ? '查詢訂單品項為什麼不在待排池；取得編輯權後才能加入'
-              : manual.busy ? '儲存中，請稍候' : '手動把不在待排池的訂單品項加進來排程（D66）'}
-            className="rounded border border-violet-700 bg-violet-950/40 px-2 py-0.5 text-[11px] font-semibold text-violet-200 hover:bg-violet-900/50 disabled:opacity-40"
-          >＋加入訂單</button>
-        )}
         <div className="flex-1" />
         <button type="button" onClick={() => setAll(false)} className="rounded border border-slate-700 px-2 py-0.5 text-[11px] text-slate-400 hover:text-white">全部展開</button>
         <button type="button" onClick={() => setAll(true)} className="rounded border border-slate-700 px-2 py-0.5 text-[11px] text-slate-400 hover:text-white">全部收合</button>
@@ -180,6 +170,14 @@ export default function PoolSidebar({
       ) : (
         <p className="text-[11px] leading-snug text-slate-500">點卡片看卡片詳情（工時、備註、提醒），點單號看訂單詳情。</p>
       )}
+      {manualManageHref && (
+        // D102：工作台不再有「＋加入訂單」；告訴主管去哪裡做，並說明回來要按重新整理
+        <p className="text-[11px] leading-snug text-slate-500">
+          手動加入訂單、改數量、移出請到
+          <Link href={manualManageHref} target="_blank" rel="noopener" className="mx-0.5 text-amber-300 underline decoration-dotted hover:text-amber-200">待排池頁 ↗</Link>
+          （新分頁開啟；改完回這裡按「重新整理」就看得到）。
+        </p>
+      )}
       {dragKind === 'placement' && (
         <div className="rounded-lg border border-dashed border-sky-600 bg-sky-950/30 px-3 py-2 text-center text-xs text-sky-200">放到這裡＝放回待排池</div>
       )}
@@ -192,7 +190,7 @@ export default function PoolSidebar({
           filtered={!!q}
           collapsed={collapsed}
           onToggle={toggle}
-          showManualTag={!!manual}
+          showManualTag={manualTagOn}
           today={today}
           canDrag={canDrag}
           dragging={dragKind != null}
@@ -236,54 +234,27 @@ export default function PoolSidebar({
             ) : !isPlaceableBlock(menu.card.block) ? (
               <div className="px-3 py-1.5 text-slate-500">這一區不能排</div>
             ) : null}
-            {(() => {
-              // D66 手動卡：改數量／移出（寫入佇列忙碌中先停用）
-              const m = cardMeta[menu.card.cardId]
-              if (!manual || menu.card.block !== MANUAL_BLOCK_ID || !m?.manual) return null
-              const mm = m.manual
-              const hint = !manual.editable ? '需要編輯權' : manual.busy ? '儲存中，請稍候' : undefined
-              return (
-                <div className="border-t border-slate-800">
-                  <MenuItem label="改手動加入數量…" disabled={!manualWritable} hint={hint}
-                    onClick={() => { setManualDialog({ t: 'edit', card: menu.card, meta: mm, placedQty: m.placedQty }); setMenu(null) }} />
-                  <MenuItem label="移出待排池" disabled={!manualWritable} hint={hint}
-                    onClick={() => { setManualDialog({ t: 'remove', card: menu.card, meta: mm }); setMenu(null) }} />
-                </div>
-              )
-            })()}
+            {manualManageHref && menu.card.block === MANUAL_BLOCK_ID && (
+              // D102：手動卡的改數量／移出在待排池頁；這裡只留一個連結（新分頁，工作台的鎖與未存操作不受影響）
+              <div className="border-t border-slate-800">
+                <Link
+                  href={manualManageHref}
+                  target="_blank"
+                  rel="noopener"
+                  role="menuitem"
+                  onClick={() => setMenu(null)}
+                  className="block w-full px-3 py-1.5 text-left text-amber-200 hover:bg-slate-800"
+                >
+                  改數量／移出：到待排池頁 ↗
+                  <span className="block text-[10px] leading-snug text-slate-500">新分頁開啟；改完回這裡按「重新整理」</span>
+                </Link>
+              </div>
+            )}
             <MenuItem label="訂單詳情" onClick={() => { onOpenOrder(menu.card.so); setMenu(null) }} />
           </div>
         </>
       )}
 
-      {/* ── D66 手動加入的對話框 ── */}
-      {manual && manualDialog?.t === 'add' && (
-        <ManualAddDialog
-          editable={manual.editable && !manual.busy}
-          getLockToken={manual.getLockToken}
-          onClose={() => setManualDialog(null)}
-          onChanged={manual.onChanged}
-        />
-      )}
-      {manual && manualDialog?.t === 'edit' && (
-        <ManualEditDialog
-          card={manualDialog.card}
-          meta={manualDialog.meta}
-          placedQty={manualDialog.placedQty}
-          getLockToken={manual.getLockToken}
-          onClose={() => setManualDialog(null)}
-          onChanged={manual.onChanged}
-        />
-      )}
-      {manual && manualDialog?.t === 'remove' && (
-        <ManualRemoveDialog
-          card={manualDialog.card}
-          meta={manualDialog.meta}
-          getLockToken={manual.getLockToken}
-          onClose={() => setManualDialog(null)}
-          onChanged={manual.onChanged}
-        />
-      )}
     </div>
   )
 }

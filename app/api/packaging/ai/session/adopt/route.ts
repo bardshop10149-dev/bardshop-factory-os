@@ -14,8 +14,13 @@ import {
   type SupabaseAdmin,
 } from '@/lib/packaging/scheduleDb'
 import { todayTaipei } from '@/lib/packaging/workdays'
+import { executeCapacityPlan } from '@/lib/packaging/capacityWrite'
+import { rowsAfterPlan } from '@/lib/packaging/capacityPlan'
+import { normalPoolLineKeys } from '@/lib/packaging/manualPool'
+import { reconcileManualAfterPlacementWrite } from '@/lib/packaging/manualReconcile'
 import { getSimSession, insertAdoption, isSimSessionStale, listAiRuns, loadSimWorld, updateSimSessionCas } from '@/lib/packaging/ai/db'
 import { buildSimOpsContext } from '@/lib/packaging/ai/simState'
+import { isEmptySimCapacity, normalizeSimCapacity, pruneAdoptedCells, sameSimCapacity, sameWorkdays, withSimCapacity } from '@/lib/packaging/ai/simCapacity'
 import { safeErrorTag } from '@/lib/packaging/ai/runner'
 import {
   AI_RUN_HISTORY_LIMIT,
@@ -32,9 +37,9 @@ import {
   lockedLineConflicts,
   openDeltaOf,
   planAndApply,
-  sameDates,
   type AdoptionRun,
 } from '../../_lib/adoptFlow'
+import { capacityErrorText, describeCapacityBefore, logCapacity, planAdoptCapacity } from '../../_lib/capacityFlow'
 
 export const dynamic = 'force-dynamic'
 // 採用可能上百張 move／restore：writeApplied 的更新是一列一個請求（數秒～十餘秒），比一般寫入 API 的 60 秒多留餘裕
@@ -60,6 +65,16 @@ export const maxDuration = 120
 // D69：寫進正式區的工時覆寫（setMinutes）一律留學習紀錄（packaging_time_adjustments），reason 固定「採用 AI 模擬」
 //   （adopt.ADOPT_MINUTES_REASON），學習端可據此與主管在正式區親手改的分開（其中也含驗算等比換算的值）。
 // ⚠ 正式區只經由既有 writeApplied 寫入；模擬列本身絕不寫進 packaging_placements（寫進去的是 applyOps 產生的正式列）。
+//
+// D101 模擬產線時數一起匯入正式產能表（與排程同一個請求）：
+//   - 排程差異用「疊了模擬產能」的 world 算（simWorld：模擬開的週末才是可排日，否則那天的卡放不進去）；
+//     產能差異用正式 world 算（capacityFlow.planAdoptCapacity：只寫有差異的格＋範圍後的保值列，D87 範圍外不動）。
+//   - 寫入順序：佔用模擬區 → 存 auto_before_ai →【先產能】→【再排程】→ 採用紀錄（含 capacity_changes）→ op_log（'capacity'＋ai_adopt）。
+//     為什麼先產能：排程的驗算已在記憶體用模擬產能做完，DB 寫入順序只影響失敗時留下的狀態——先排程後產能，產能失敗時正式區會有卡
+//     落在「正式沒開的週末」，要補救得把排程也倒回；先產能後排程，產能寫入量小（各線列、daily 列兩批），失敗時用 capacity_changes
+//     反向寫回即可，主管看到的是「兩邊都沒動」。排程寫入失敗也同樣先把產能改回採用前。
+//   - 只改時數、排程沒有差異也能採用（「只匯入產線時數」）；產能這段通不過正式產能表的驗證 → 整個採用擋下、什麼都不寫。
+//   - 採用成功後（盡力而為）清掉模擬區中「已與正式相同」的覆寫：否則之後組長改正式 9/30，模擬區還被舊覆寫壓著，下一次採用會蓋回去。
 
 /**
  * 這次採用來自哪一次 AI（adoption.run_id 與版本標籤用；推定）：模擬區有 AI 排的列時，取同一個模擬區、同範圍、最近一次成功的 run；
@@ -68,18 +83,24 @@ export const maxDuration = 120
 async function inferRunId(sb: SupabaseAdmin, me: Actor, session: SimSession): Promise<number | null> {
   if (!session.placements.some((p) => p.simSource === 'ai')) return null
   const runs = await listAiRuns(sb, me.email, AI_RUN_HISTORY_LIMIT)
-  const hit = runs.find((r) => r.sessionId === session.id && r.status === 'done' && sameDates(r.windowDates, session.windowDates))
+  // D101：模擬開的週末會改變 window，比工作日即可
+  const hit = runs.find((r) => r.sessionId === session.id && r.status === 'done' && sameWorkdays(r.windowDates, session.windowDates))
   return hit?.id ?? null
 }
 
 const versionLabelOf = (runId: number | null) => `採用 AI 模擬前（${runId != null ? `#${runId}` : '手動'}）`
 
-/** 採用的差異＋鎖定線不一致檢查（GET 預覽與 POST 共用，保證畫面看到的就是會擋下的） */
-function planAdopt(world: SimWorld, session: SimSession) {
+/**
+ * 採用的差異＋鎖定線不一致檢查（GET 預覽與 POST 共用，保證畫面看到的就是會擋下的）。
+ * D101：排程用 simWorld（疊了模擬產能：模擬開的週末是可排日、D69 等比換算的 ctx 也一樣）；產能段另用正式 world 算。
+ */
+function planAdopt(world: SimWorld, session: SimSession, me: Actor) {
+  const simWorld = withSimCapacity(world, session)
   const { scope, lockedLineIds } = adoptScopeOf(session)
-  const run: AdoptionRun = planAndApply(world, adoptionTargetOf(session, scope, world.live), scope)
-  const conflicts = run.tooManyOps ? [] : lockedLineConflicts(world, session, run)
-  return { scope, lockedLineIds, run, conflicts }
+  const run: AdoptionRun = planAndApply(simWorld, adoptionTargetOf(session, scope, simWorld.live), scope)
+  const conflicts = run.tooManyOps ? [] : lockedLineConflicts(simWorld, session, run)
+  const cap = planAdoptCapacity({ world, session, scope, lockedLineIds, actor: me })
+  return { simWorld, scope, lockedLineIds, run, conflicts, cap }
 }
 
 export async function GET() {
@@ -95,7 +116,7 @@ export async function GET() {
     if (!session) return aiFail('no_session', '還沒有建立模擬區')
     if (isSimSessionStale(session, today)) return aiFail('session_stale', '模擬區的起始日已經過了，請先重設模擬區再採用')
     const world = await loadSimWorld(sb, { today, nowIso, actor: me, poolMaxAgeMs: POOL_WRITE_MAX_AGE_MS })
-    const { scope, lockedLineIds, run, conflicts } = planAdopt(world, session)
+    const { scope, lockedLineIds, run, conflicts, cap } = planAdopt(world, session, me)
     if (run.tooManyOps) return aiFail('too_many_ops', '範圍內要變動的卡太多，無法一次採用；請縮小範圍或先鎖定部分線')
     const runId = await inferRunId(sb, me, session)
     return noStore<AdoptPreviewResponse>({
@@ -105,6 +126,8 @@ export async function GET() {
       skipped: run.skipped,
       versionLabel: versionLabelOf(runId),
       lockedConflicts: conflicts,
+      // D101：模擬區有調整時數才回（沒有＝null，畫面不顯示產線時數段）
+      capacity: isEmptySimCapacity(normalizeSimCapacity(session.simCapacity, session)) ? null : cap.cap.preview,
     })
   } catch (e) {
     return aiServerError('session/adopt GET', e, '採用預覽')
@@ -141,12 +164,16 @@ export async function POST(request: NextRequest) {
     if (session.version !== version) return aiFail('version_conflict', '模擬區剛被更新，請重新載入、確認後再採用', { lock })
     if (isSimSessionStale(session, today)) return aiFail('session_stale', '模擬區的起始日已經過了，請先重設模擬區再採用', { lock })
 
-    // 2. 差異 → 逐筆模擬套用
+    // 2. 差異 → 逐筆模擬套用（排程用疊了模擬產能的 world；產能段用正式 world）
     const world = await loadSimWorld(sb, { today, nowIso, actor: me, poolMaxAgeMs: POOL_WRITE_MAX_AGE_MS })
-    const { scope, run, conflicts } = planAdopt(world, session)
+    const { simWorld, scope, run, conflicts, cap } = planAdopt(world, session, me)
     if (run.tooManyOps) return aiFail('too_many_ops', '範圍內要變動的卡太多，無法一次採用；請縮小範圍或先鎖定部分線', { lock })
     if (conflicts.length > 0) return aiFail('locked_line_diverged', lockedConflictMessage(conflicts.length), { conflicts, lock })
-    if (run.res.applied.length === 0) {
+    // D101：產能段通不過正式產能表的驗證 → 整個採用擋下（什麼都不寫）
+    if (cap.error) return aiFail(cap.error.code, capacityErrorText(cap.error), { lock, date: cap.error.date }, cap.error.status)
+    const capPlan = cap.put
+    const capRecord = capPlan ? cap.cap.record : null
+    if (run.res.applied.length === 0 && !capPlan) {
       return aiFail('nothing_to_adopt', run.plan.ops.length === 0 && run.skipped.length === 0
         ? '範圍內模擬版與正式排程相同，沒有需要採用的變更'
         : `範圍內的 ${run.skipped.length} 項變更都無法套用（已完成、已銷貨或已不在待排池），正式排程沒有被修改`, { lock })
@@ -169,25 +196,76 @@ export async function POST(request: NextRequest) {
 
     const backup = await insertVersion(sb, { label: versionLabel, source: 'auto_before_ai', snapshot, actorEmail: me.email, actorName: me.name })
 
-    // requiresSortIndex false：sort_index 欄若尚未建立，只是線內順序回到固定排序，日期／線／數量照寫（順序只影響顯示）
-    const w = await writeApplied(sb, run.res, { requiresSortIndex: false })
-    if (!w.ok) {
-      console.error(`[packaging/ai/session/adopt] 寫入失敗 ${w.code}${w.partial ? ' (partial)' : ''}`)
-      if (w.partial) {
-        return aiFail(w.code, `採用寫到一半失敗，部分卡片已寫入正式區；請到「版本歷史」從版本 #${backup.id}「${versionLabel}」還原`, { partial: true, versionId: backup.id, lock }, 500)
+    /** D101 補償：把產能改回採用前（以採用前的正式列事先算好的計畫）；回 true＝已改回 */
+    const rollbackCapacity = async (why: string): Promise<boolean> => {
+      if (!capPlan || !capRecord) return true
+      let ok = false
+      if (cap.rollback) {
+        try {
+          await executeCapacityPlan(sb, cap.rollback, nowIso)
+          ok = true
+        } catch (e2) {
+          console.error(`[packaging/ai/session/adopt] 產能補償失敗 ${safeErrorTag(e2)}`)
+        }
       }
-      return aiFail(w.code, `${w.message}（正式排程沒有被修改，請重新載入後再試）`, { versionId: backup.id, lock })
+      // 產能有寫就一定要記 'capacity'（正式工作台刷新的訊號），含補償
+      await logCapacity(sb, me, `產能表（採用 AI 模擬失敗，${ok ? '已自動改回' : '未能自動改回'}）`, [{ via: 'ai_adopt_rollback', why, restored: ok, record: capRecord }])
+      return ok
+    }
+    const capBeforeText = () => (capRecord ? describeCapacityBefore(capRecord, world.lines) : '')
+
+    // 3a.【先產能】（D101）
+    if (capPlan) {
+      try {
+        await executeCapacityPlan(sb, capPlan, nowIso)
+      } catch (e) {
+        console.error(`[packaging/ai/session/adopt] 產能寫入失敗 ${safeErrorTag(e)}`)
+        const restored = await rollbackCapacity('capacity_write_failed')
+        return aiFail('db_error', restored
+          ? '匯入產線時數失敗，已自動改回；正式排程與產能都沒有被修改，請稍後再試'
+          : `匯入產線時數失敗，自動改回也失敗；正式排程沒有被修改。請到產能表把下列各格手動改回：${capBeforeText()}`,
+        { versionId: backup.id, lock }, 500)
+      }
     }
 
-    // D69：工時覆寫有變的卡留學習紀錄（先改工時、後記紀錄，同 scheduleWrite；記錄失敗不擋採用，只 log）
-    if (run.res.minuteEdits.length > 0) {
-      const ctx = buildSimOpsContext(world)
-      const adj = buildMinuteAdjustments(run.res, { supplyOf: ctx.supplyOf, cards: ctx.cards, today, openWeekends: ctx.openWeekends, actor: me })
-      if (!(await insertTimeAdjustments(sb, adj))) console.error('[packaging/ai/session/adopt] 工時修改紀錄寫入失敗（D69）')
+    // 3b.【再排程】；requiresSortIndex false：sort_index 欄若尚未建立，只是線內順序回到固定排序，日期／線／數量照寫（順序只影響顯示）
+    let touched: { id: string; version: number }[] = []
+    if (run.res.applied.length > 0) {
+      const capMsgOf = (restored: boolean) => (!capPlan ? ''
+        : restored ? '產線時數已自動改回採用前。' : `產線時數未能自動改回，請到產能表把下列各格手動改回：${capBeforeText()}。`)
+      let w: Awaited<ReturnType<typeof writeApplied>>
+      try {
+        w = await writeApplied(sb, run.res, { requiresSortIndex: false })
+      } catch (e) {
+        // 寫排程時丟例外（不是一般的寫入失敗回報）：一樣先把產能改回，再請主管從版本還原排程
+        console.error(`[packaging/ai/session/adopt] 寫入排程時發生例外 ${safeErrorTag(e)}`)
+        const restored = await rollbackCapacity('schedule_write_threw')
+        return aiFail('db_error', `採用寫入正式排程時發生錯誤，可能只寫入了一部分；請到「版本歷史」從版本 #${backup.id}「${versionLabel}」還原。${capMsgOf(restored)}`, { partial: true, versionId: backup.id, lock }, 500)
+      }
+      if (!w.ok) {
+        console.error(`[packaging/ai/session/adopt] 寫入失敗 ${w.code}${w.partial ? ' (partial)' : ''}`)
+        const restored = await rollbackCapacity(`schedule_write_failed:${w.code}`)
+        const capMsg = capMsgOf(restored)
+        if (w.partial) {
+          return aiFail(w.code, `採用寫到一半失敗，部分卡片已寫入正式區；請到「版本歷史」從版本 #${backup.id}「${versionLabel}」還原。${capMsg}`, { partial: true, versionId: backup.id, lock }, 500)
+        }
+        return aiFail(w.code, `${w.message}（正式排程沒有被修改，請重新載入後再試）${capMsg}`, { versionId: backup.id, lock })
+      }
+      touched = w.rows.map((r) => ({ id: r.id, version: r.version }))
+      // D102 寫後回讀：待排池頁同時移出／改低了手動加入的品項 → 以排程為準恢復供給（同 scheduleWrite）
+      await reconcileManualAfterPlacementWrite(sb, {
+        meta: world.manual?.meta ?? {}, normalKeys: normalPoolLineKeys(world.pool), res: run.res, actor: me, via: '採用 AI 模擬',
+      })
+
+      // D69：工時覆寫有變的卡留學習紀錄（先改工時、後記紀錄，同 scheduleWrite；記錄失敗不擋採用，只 log）
+      if (run.res.minuteEdits.length > 0) {
+        const ctx = buildSimOpsContext(simWorld)
+        const adj = buildMinuteAdjustments(run.res, { supplyOf: ctx.supplyOf, cards: ctx.cards, today, openWeekends: ctx.openWeekends, actor: me })
+        if (!(await insertTimeAdjustments(sb, adj))) console.error('[packaging/ai/session/adopt] 工時修改紀錄寫入失敗（D69）')
+      }
     }
 
     // 4. 採用紀錄＋op_log
-    const touched = w.rows.map((r) => ({ id: r.id, version: r.version }))
     let adoptionId: number
     try {
       const adoption = await insertAdoption(sb, {
@@ -202,18 +280,55 @@ export async function POST(request: NextRequest) {
         skipped: run.skipped,
         actorEmail: me.email,
         actorName: me.name,
+        capacityChanges: capRecord,
       }, nowIso)
       adoptionId = adoption.id
     } catch (e) {
       console.error(`[packaging/ai/session/adopt] 採用紀錄寫入失敗 ${safeErrorTag(e)}`)
-      return aiFail('db_error', `已套用到正式排程，但採用紀錄寫入失敗，無法從「AI 採用紀錄」退回；如需退回請從版本 #${backup.id} 還原`, { partial: true, versionId: backup.id, lock }, 500)
+      if (capPlan && capRecord) {
+        await logCapacity(sb, me, '產能表（採用 AI 模擬；採用紀錄寫入失敗）', [...capPlan.logged, { via: 'ai_adopt', adoptionId: null, record: capRecord }])
+      }
+      const capMsg = capRecord
+        ? `；產線時數已更新 ${capRecord.cells.length} 格（原值已記在操作紀錄），無法從「AI 採用紀錄」退回產能，要改回請到產能表：${capBeforeText()}`
+        : ''
+      return aiFail('db_error', `已套用到正式排程，但採用紀錄寫入失敗，無法從「AI 採用紀錄」退回；如需退回請從版本 #${backup.id} 還原${capMsg}`, { partial: true, versionId: backup.id, lock }, 500)
     }
     await deleteExpiredVersions(sb, nowMs)
+    // D101：產能有寫 → 'capacity'（正式工作台刷新的訊號；ops 與產能表手動儲存同格式＋這次採用的前後值）
+    if (capPlan && capRecord) {
+      await logCapacity(sb, me, `產能表（採用 AI 模擬 #${adoptionId}）`, [...capPlan.logged, { via: 'ai_adopt', adoptionId, record: capRecord }])
+    }
+    const capSummary = capRecord
+      ? {
+        cellsWritten: capRecord.cells.filter((c) => c.kind === 'sim').length,
+        anchors: capRecord.cells.filter((c) => c.kind === 'anchor').length,
+        weekendsOpened: capRecord.weekends.filter((w) => !w.beforeOpen && w.afterOpen).map((w) => w.date),
+      }
+      : null
     await logAi(sb, me, 'ai_adopt', `採用 AI 模擬（採用 #${adoptionId}${runId != null ? `，AI #${runId}` : ''}）`, [{
       adoptionId, sessionId: session.id, runId, versionId: backup.id,
       scope: { windowDates: session.windowDates, lineIds: scope.lineIds }, counts: run.counts, ops: run.res.applied,
+      ...(capSummary ? { capacity: capSummary } : {}),
     }])
-    return noStore<AdoptResponse>({ success: true, adoptionId, counts: run.counts, skipped: run.skipped, versionId: backup.id, lock })
+
+    // 5. D101（盡力而為）：清掉模擬區中「已與正式相同」的覆寫；失敗只 log（模擬值不變，只是之後組長改的正式值會被舊覆寫壓住）
+    if (capPlan) {
+      try {
+        const after = rowsAfterPlan(capPlan, { daily: world.capacityRows, lineRows: world.lineRows }, nowIso)
+        const pruned = pruneAdoptedCells({
+          simCapacity: session.simCapacity, session, liveAfter: { capacityRows: after.daily, lineRows: after.lineRows },
+          adoptLineIds: scope.lineIds, lines: world.lines,
+        })
+        if (!sameSimCapacity(pruned, session.simCapacity)) {
+          // 佔用時 version 已 +1；這裡再 +1（前端採用後本來就會重新載入模擬區）
+          const upd = await updateSimSessionCas(sb, session.id, version + 1, { simCapacity: pruned }, nowIso)
+          if (!upd) console.error('[packaging/ai/session/adopt] 清理模擬產能覆寫時模擬區已被更新（略過）')
+        }
+      } catch (e) {
+        console.error(`[packaging/ai/session/adopt] 清理模擬產能覆寫失敗 ${safeErrorTag(e)}`)
+      }
+    }
+    return noStore<AdoptResponse>({ success: true, adoptionId, counts: run.counts, skipped: run.skipped, versionId: backup.id, lock, capacity: capSummary })
   } catch (e) {
     return aiServerError('session/adopt POST', e, '採用')
   }

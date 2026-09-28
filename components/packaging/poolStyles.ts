@@ -100,8 +100,8 @@ const COLUMN_BLOCKS = {
 /** 跨來源、畫在三欄上方整列寬的區塊（ns：已發單・未上塔台，來源只是推定，放哪一欄都不對） */
 export const POOL_WIDE_BLOCKS = ['ns'] as const satisfies readonly PoolBlockId[]
 /**
- * 只在 P1 工作台待排池出現的區塊（D66 手動加入 'mn'）：P0 唯讀待排池頁的 API 不產生它，所以不放進三欄或整列區
- * （放進 POOL_WIDE_BLOCKS 會讓 P0 頁多畫一個永遠空的區塊）。工作台側欄自行排在最上面。
+ * 各頁自行決定位置的區塊（D66 手動加入 'mn'）：不放進三欄或整列區（PoolBlock 畫不出手動卡的管理按鈕）。
+ * D102 起待排池頁由 components/packaging/pool/ManualPoolSection 畫在最上面；工作台側欄也自行排在最上面。
  */
 export const BOARD_ONLY_POOL_BLOCKS = BOARD_ONLY_BLOCKS
 

@@ -1189,7 +1189,7 @@ export type ManualLookupResponse =
 
 export type ManualErrorCode =
   | 'forbidden'
-  | 'lock_required'
+  | 'lock_required'          // D102 起手動加入 API 不再回這兩個（保留給舊前端的錯誤翻譯）
   | 'lock_lost'
   | 'bad_request'
   | 'not_found'              // 找不到有效的手動加入紀錄
@@ -1213,24 +1213,31 @@ export interface ManualAddItem {
   reason?: string | null
 }
 
-/** POST /api/packaging/manual（packaging_admin＋鎖）：一次加入 1～MAX_MANUAL_ITEMS_PER_REQUEST 行 */
+/**
+ * POST /api/packaging/manual（packaging_admin）：一次加入 1～MAX_MANUAL_ITEMS_PER_REQUEST 行。
+ * D102（Snow 確認）：手動加入／改數量／移出不受編輯權（編輯鎖）限制——工作台有人在編輯也照樣能加；
+ * 數量安全靠伺服器存檔時的重新檢查（改量不可低於已排量、移出前不可有未完成排定卡、排程寫入驗供給）。
+ */
 export interface ManualAddRequest {
-  lockToken: string
+  /** @deprecated D102 起伺服器不再檢查；舊前端送了也無妨 */
+  lockToken?: string | null
   items: ManualAddItem[]
 }
 
-/** PATCH /api/packaging/manual：改數量／途程類型／原因 */
+/** PATCH /api/packaging/manual：改數量／途程類型／原因（D102：不需編輯鎖） */
 export interface ManualUpdateRequest {
-  lockToken: string
+  /** @deprecated D102 起伺服器不再檢查 */
+  lockToken?: string | null
   soLineKey: string
   qty?: number
   routeType?: ManualRouteType
   reason?: string | null
 }
 
-/** POST /api/packaging/manual/remove：移出待排池（軟刪除，紀錄保留） */
+/** POST /api/packaging/manual/remove：移出待排池（軟刪除，紀錄保留；D102：不需編輯鎖） */
 export interface ManualRemoveRequest {
-  lockToken: string
+  /** @deprecated D102 起伺服器不再檢查 */
+  lockToken?: string | null
   soLineKey: string
   reason?: string | null
 }
@@ -1243,7 +1250,8 @@ export type ManualMutationResponse =
       /** 批次加入時被略過的行（其他行照常加入） */
       skipped: { soLineKey: string; code: ManualErrorCode; message: string }[]
       revision: string
-      lock: LockState
+      /** D102 起不再回傳（手動加入不經編輯鎖）；保留欄位型別讓舊程式能編譯 */
+      lock?: LockState
     }
   | { success: false; error: string; code: ManualErrorCode; cardCount?: number; lock?: LockState }
 

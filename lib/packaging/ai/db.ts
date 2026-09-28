@@ -31,6 +31,8 @@ import {
   type SupabaseAdmin,
 } from '@/lib/packaging/scheduleDb'
 import { getPool, POOL_READ_MAX_AGE_MS } from '@/lib/packaging/poolCache'
+import { isEmptySimCapacity, parseSimCapacity } from '@/lib/packaging/ai/simCapacity'
+import { parseCapacityChangeRecord } from '@/lib/packaging/ai/capacityAdopt'
 import { getManualMergedPool } from '@/lib/packaging/manualCache'
 import { addDays, isValidYmd } from '@/lib/packaging/scheduleCalendar'
 import type { Placement, PlacementOp, PlacementSource, YMD } from '@/lib/packaging/scheduleTypes'
@@ -100,6 +102,13 @@ export const AI_TBL = {
 
 /** AI 模擬排程 migration 檔名（錯誤訊息提示用） */
 export const AI_MIGRATION_FILE = 'sql/20260928b_packaging_ai.sql'
+/**
+ * D101 模擬產線時數的 migration（只在 20260928b 的三張表加欄位）。套用前新程式照常可用：
+ * 讀取時缺欄＝空覆寫；寫入只在「有值／有變」時才帶新欄 → 只有「改模擬產能」會得到 PGRST204 → migration_required。
+ */
+export const AI_CAPACITY_MIGRATION_FILE = 'sql/20260928c_packaging_sim_capacity.sql'
+/** 錯誤訊息提到這幾個欄位＝D101 的 migration 還沒套用 */
+const CAPACITY_COLUMN_RE = /sim_capacity|capacity_changes/
 
 /** 產能沿用要看「較早的平日列」，讀近 400 天（同 GET /api/packaging/board） */
 const CAPACITY_LOOKBACK_DAYS = 400
@@ -115,9 +124,15 @@ export function isAiMissingSchema(e: unknown): boolean {
   return isMissingSchema(e)
 }
 
-/** migration 未套用時回給前端的訊息（保留「找不到資料表」字樣，前端 boardApi.isMissingTableMessage 認得） */
+/**
+ * migration 未套用時回給前端的訊息（保留「找不到資料表」字樣，前端 boardApi.isMissingTableMessage 認得）。
+ * D101：缺的是 sim_capacity／capacity_changes 欄 → 指向 20260928c（PostgREST 的 PGRST204 訊息會帶欄名）。
+ */
 export function aiMigrationMessage(e?: unknown): string {
   const code = e instanceof ScheduleDbError ? e.pgCode : null
+  if (e instanceof Error && CAPACITY_COLUMN_RE.test(e.message)) {
+    return `找不到資料表欄位（AI 模擬產線時數${code ? `，${code}` : ''}），請先套用 ${AI_CAPACITY_MIGRATION_FILE}`
+  }
   return `找不到資料表（AI 模擬排程${code ? `，${code}` : ''}），請先套用 ${AI_MIGRATION_FILE}`
 }
 
@@ -190,7 +205,7 @@ const asSimSource = (v: unknown): SimSource => (v === 'ai' || v === 'manual' ? v
 const asSource = (v: unknown): PlacementSource => (v === 'ai' ? 'ai' : 'manual')
 const RUN_STATUSES: readonly RunStatus[] = ['running', 'done', 'failed']
 const RUN_PHASES: readonly RunPhase[] = ['preparing', 'thinking', 'validating', 'done', 'failed']
-const UNDO_KINDS: readonly SimUndoKind[] = ['ops', 'ai_run', 'reset', 'load_run', 'locks']
+const UNDO_KINDS: readonly SimUndoKind[] = ['ops', 'ai_run', 'reset', 'load_run', 'locks', 'capacity']
 const asStatus = (v: unknown): RunStatus => (RUN_STATUSES.includes(v as RunStatus) ? (v as RunStatus) : 'failed')
 const asPhase = (v: unknown): RunPhase => (RUN_PHASES.includes(v as RunPhase) ? (v as RunPhase) : 'failed')
 
@@ -244,6 +259,8 @@ function parseSessionState(v: unknown): SimSessionState | null {
     lineIds: intArray(v.lineIds),
     placements: parseSimPlacements(v.placements),
     locks: parseSimLocks(v.locks),
+    // D101：舊程式（穩定站）推的格沒有 simCapacity＝「不知道」→ 不帶這個鍵（退回時保留目前產能，見 session/undo）
+    ...('simCapacity' in v && v.simCapacity !== undefined ? { simCapacity: parseSimCapacity(v.simCapacity) } : {}),
   }
 }
 
@@ -336,6 +353,8 @@ export function rowToSimSession(r: SimSessionRow): SimSession {
     lineIds: intArray(r.line_ids),
     placements: parseSimPlacements(r.placements),
     locks: parseSimLocks(r.locks),
+    // D101：migration 20260928c 套用前沒有這欄 → 空覆寫（一切照舊）
+    simCapacity: parseSimCapacity(r.sim_capacity),
     undo: parseSimUndo(r.undo),
     version: Number(r.version),
     runningRunId: r.running_run_id == null ? null : Number(r.running_run_id),
@@ -407,6 +426,8 @@ const sessionStateRow = (s: Partial<SimSessionState>) => {
   if (s.lineIds !== undefined) row.line_ids = s.lineIds
   if (s.placements !== undefined) row.placements = s.placements
   if (s.locks !== undefined) row.locks = s.locks
+  // D101：只有呼叫端帶了（＝有變）才寫 sim_capacity。migration 20260928c 套用前，沒改模擬產能的寫入都不會碰到這欄。
+  if (s.simCapacity !== undefined) row.sim_capacity = s.simCapacity
   return row
 }
 
@@ -414,10 +435,12 @@ const sessionStateRow = (s: Partial<SimSessionState>) => {
  * 第一次建立模擬區（version = 1）。owner_email 唯一：同一人另一個分頁剛好也建了 → 回 null（route 回 version_conflict、前端重新載入）。
  */
 export async function insertSimSession(sb: SupabaseAdmin, v: NewSimSession, nowIso: string): Promise<SimSession | null> {
+  // D101：空覆寫不寫（DB 預設值就是空覆寫；migration 套用前也能建立模擬區）
+  const state = isEmptySimCapacity(v.simCapacity) ? { ...v, simCapacity: undefined } : v
   const { data, error } = await sb.from(AI_TBL.sessions).insert({
     owner_email: v.ownerEmail,
     owner_name: v.ownerName,
-    ...sessionStateRow(v),
+    ...sessionStateRow(state),
     undo: v.undo,
     version: 1,
     running_run_id: null,
@@ -592,6 +615,8 @@ function rowToRun(r: AiRunRow): AiRun {
     basePlacements: parseSimPlacements(r.base_placements),
     resultPlacements: Array.isArray(r.result_placements) ? parseSimPlacements(r.result_placements) : null,
     aiOutput: isObj(r.ai_output) ? (r.ai_output as unknown as AiOutput) : null,
+    // D101：null／沒有這欄（migration 前、舊程式建的 run）＝當時沒有模擬產能覆寫
+    simCapacity: isObj(r.sim_capacity) ? parseSimCapacity(r.sim_capacity) : null,
   }
 }
 
@@ -613,6 +638,8 @@ export function toRunStatusInfo(run: Pick<AiRunMeta, 'id' | 'status' | 'phase' |
 /** 建 run 列（status running、phase preparing）；回完整列（取 id 用） */
 export async function insertAiRun(sb: SupabaseAdmin, v: NewAiRun, nowIso: string): Promise<AiRun> {
   const { data, error } = await sb.from(AI_TBL.runs).insert({
+    // D101：只有非空才寫（migration 20260928c 套用前也能建 run；null＝當時沒有覆寫）
+    ...(v.simCapacity && !isEmptySimCapacity(v.simCapacity) ? { sim_capacity: v.simCapacity } : {}),
     session_id: v.sessionId,
     owner_email: v.ownerEmail,
     owner_name: v.ownerName,
@@ -745,11 +772,15 @@ function rowToAdoption(r: AdoptionRow): AiAdoption {
     skipped: parseSkips(r.skipped),
     revertedBy: r.reverted_by ?? null,
     revertReport: isObj(r.revert_report) ? (r.revert_report as unknown as RevertReport) : null,
+    // D101：null／沒有這欄（沒改產能、舊程式採用、migration 前）＝退回只退排程
+    capacityChanges: parseCapacityChangeRecord(r.capacity_changes),
   }
 }
 
 export async function insertAdoption(sb: SupabaseAdmin, v: NewAdoption, nowIso: string): Promise<AiAdoption> {
   const { data, error } = await sb.from(AI_TBL.adoptions).insert({
+    // D101：只有這次採用有改產能才寫（模擬有覆寫＝欄位一定存在，否則根本存不進模擬區）
+    ...(v.capacityChanges ? { capacity_changes: v.capacityChanges } : {}),
     session_id: v.sessionId,
     run_id: v.runId,
     version_id: v.versionId,

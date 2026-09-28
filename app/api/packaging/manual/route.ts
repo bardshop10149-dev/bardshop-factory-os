@@ -4,7 +4,6 @@ import {
   ADJUST_REASON_MAX,
   MAX_ACTIVE_MANUAL,
   MAX_MANUAL_ITEMS_PER_REQUEST,
-  type LockState,
   type ManualErrorCode,
   type ManualInclusion,
   type ManualInclusionMeta,
@@ -27,6 +26,7 @@ import {
   loadActiveInclusionsBySo,
   loadManualLookupData,
   loadSoLinesForSos,
+  restoreInclusionFields,
   updateInclusion,
 } from '@/lib/packaging/manualDb'
 import {
@@ -35,7 +35,6 @@ import {
   linesMigrationMessage,
   loadPlacementsByLines,
   publicDbError,
-  verifyAndTouchLock,
 } from '@/lib/packaging/scheduleDb'
 import { todayTaipei } from '@/lib/packaging/workdays'
 
@@ -47,14 +46,25 @@ export const maxDuration = 60
 // GET  ?so=SO260924020（讀）→ ManualLookupResponse：該 SO 全部品項行＋逐行「不在待排池的原因」
 //      （in_pool／manual_active／non_physical／zero_qty／non_schedule_doc／tower_closed／packaged_done／sheet_stale／waiting_source／unknown），
 //      以及建議途程類型與建議數量（廠商代碼不外露）。so 白名單 ^(SO|SOB|RO)[A-Z0-9-]{4,30}$（轉大寫）。
-// POST ManualAddRequest { lockToken, items[1..50] }（packaging_admin＋編輯鎖）→ ManualMutationResponse
+// POST ManualAddRequest { items[1..50] }（packaging_admin）→ ManualMutationResponse
 //      逐行驗證（伺服器重查 erp_so_lines，不信任前端），不合格的列進 skipped、其餘照常加入。
-// PATCH ManualUpdateRequest { lockToken, soLineKey, qty?, routeType?, reason? } → ManualMutationResponse
+// PATCH ManualUpdateRequest { soLineKey, qty?, routeType?, reason? }（packaging_admin）→ ManualMutationResponse
 //      qty 不可低於該行未完成擺放合計（qty_below_placed；解讀：手動輸入的量直接擋下，比悄悄修剪已排的卡清楚）。
 // 移出：POST /api/packaging/manual/remove（軟刪除）。
 // 三者都寫 op_log（kind 'manual'）、不進 Undo（同產能：是「供給」的事實輸入；誤加可移出、誤移出可再加）。
 // 資料一律用 EIP 鏡像（erp_so_lines、erp_pj_sync、erp_mo_lines、sara_*、daily_order_sheets），不查 ARGO；
-// 只寫 packaging_manual_inclusions／packaging_op_log（＋鎖續命）。
+// 只寫 packaging_manual_inclusions／packaging_op_log。
+//
+// D102（Snow 確認：「一樣可以新增訂單，在工作區按重新整理即可把新的卡片加入」）：寫入不再要求編輯鎖（lockToken）。
+//   為什麼可以拿掉：手動加入改的是「供給」（待排池有哪些卡、量多少），不是「排程」（哪張卡排哪天）。
+//   編輯鎖保護的是排程不被兩個人同時拖亂；供給本來就會被 ERP／塔台同步隨時改變，工作台每次讀取都用
+//   當下供給重新分配（scheduleAllocate），所以多一個人改供給不會讓排程壞掉。真正要守的「數量不超排」仍在伺服器：
+//   PATCH 不可低於未完成擺放（qty_below_placed）、移出前不可有未完成排定卡（manual_has_placements）、
+//   排程寫入（placements）照舊驗供給。仍要求 packaging_admin（guardPackaging('write')）、requireJson（擋 CSRF）、noStore。
+//   沒有鎖就沒有序列化：「先讀已排量、後寫」會被工作台同時寫入的擺放穿過 → 改量／移出都「寫完再讀一次」，撞到就撤回；
+//   工作台那邊也寫後回讀（manualReconcile.ts），兩邊成對才把窗口關掉（D102 驗證修正，見 manualPool.ts 說明）。
+//   舊前端若還送 lockToken：直接忽略（不驗、也不幫鎖續命）。回應不再帶 lock。
+//   op_log 照寫 → 工作台的 revision 會變，下一次輪詢（或按重新整理）就看到新卡。
 
 const SO_RE = /^(SO|SOB|RO)[A-Z0-9-]{4,30}$/
 const LINE_KEY_SPLIT_RE = /^(.+)-(\d{1,4})$/
@@ -62,8 +72,6 @@ const ROUTE_TYPES: readonly ManualRouteType[] = ['自製', '常平', '委外']
 
 type Fail = Extract<ManualMutationResponse, { success: false }>
 const fail = (status: number, body: Omit<Fail, 'success'>) => noStore<Fail>({ success: false, ...body }, status)
-const lockFail = (code: 'lock_required' | 'lock_lost', lock: LockState) =>
-  fail(409, { code, lock, error: code === 'lock_lost' ? `編輯權已由 ${lock.holderName ?? lock.holderEmail ?? '其他人'} 接手` : '沒有編輯權或已逾時釋放，請重新取得編輯權' })
 
 function dbFail(where: string, e: unknown) {
   console.error(`[packaging/manual ${where}]`, describeError(e))
@@ -159,9 +167,6 @@ export async function POST(request: NextRequest) {
   const actor = { email: g.member.email, name: g.member.realName }
   try {
     const sb = getSupabaseAdminClient()
-    const lk = await verifyAndTouchLock(sb, { email: actor.email, token: typeof body.lockToken === 'string' ? body.lockToken : null }, nowMs)
-    if (!lk.ok) return lockFail(lk.code, lk.lock)
-
     const [soLines, active, pool] = await Promise.all([
       loadSoLinesForSos(sb, wanted.map((w) => w.so)),
       loadActiveInclusions(sb),
@@ -170,7 +175,8 @@ export async function POST(request: NextRequest) {
     const normal = normalPoolLineKeys(pool)
     const activeKeys = new Set(active.map((a) => a.soLineKey))
     const slByKey = new Map(soLines.map((sl) => [`${sl.project_id.trim().toUpperCase()}-${soLineNoStr(sl.line_no) ?? ''}`, sl]))
-    // 名額只算「作用中」的紀錄：已全數完成、或 ERP 已查無此行的紀錄不佔位（它們在待排池已不出卡，畫面上無從移出）。
+    // 名額只算「作用中」的紀錄：已全數完成、或 ERP 已查無此行的紀錄不佔位（它們在待排池已不出卡）。
+    // D102 後多人可同時加入，兩個請求同時搶最後幾格時可能多出幾行（上限是防呆、不是硬性容量），不另加鎖。
     // 只有可能超額時才多查一次（平常 active 遠低於上限，省掉 SO 行／擺放查詢）
     let room = MAX_ACTIVE_MANUAL - active.length
     if (room < wanted.length && active.length > 0) {
@@ -192,6 +198,7 @@ export async function POST(request: NextRequest) {
       const blocked = manualBlockedReason(sl)
       if (blocked) { skipped.push({ soLineKey: w.soLineKey, code: 'not_selectable', message: blocked }); continue }
       if (room <= 0) { skipped.push({ soLineKey: w.soLineKey, code: 'too_many', message: `手動加入同時最多 ${MAX_ACTIVE_MANUAL} 行，請先移出不需要的` }); continue }
+      // 同一行兩人同時加入：DB 唯一索引只讓一筆成功，另一筆回 'duplicate' → 列入 skipped（不靠編輯鎖也不會重複）
       const r = await insertInclusion(sb, w, actor, nowIso)
       if (r === 'duplicate') { skipped.push({ soLineKey: w.soLineKey, code: 'already_manual', message: '已手動加入（請改用「改數量」）' }); continue }
       inserted.push(r)
@@ -209,7 +216,7 @@ export async function POST(request: NextRequest) {
       })
       if (opId != null) revision = `m${opId}`
     }
-    return noStore<ManualMutationResponse>({ success: true, inclusions: inserted, skipped, revision, lock: lk.lock })
+    return noStore<ManualMutationResponse>({ success: true, inclusions: inserted, skipped, revision })
   } catch (e) {
     return dbFail('POST', e)
   }
@@ -248,26 +255,40 @@ export async function PATCH(request: NextRequest) {
   const actor = { email: g.member.email, name: g.member.realName }
   try {
     const sb = getSupabaseAdminClient()
-    const lk = await verifyAndTouchLock(sb, { email: actor.email, token: typeof body.lockToken === 'string' ? body.lockToken : null }, nowMs)
-    if (!lk.ok) return lockFail(lk.code, lk.lock)
-
     const cur = await loadActiveInclusionByKey(sb, key)
-    if (!cur) return fail(404, { code: 'not_found', error: '找不到有效的手動加入紀錄（可能已移出）', lock: lk.lock })
+    if (!cur) return fail(404, { code: 'not_found', error: '找不到有效的手動加入紀錄（可能已移出）' })
     if (patch.qty !== undefined && patch.qty < cur.qty) {
       const placed = (await loadPlacementsByLines(sb, [key])).filter((p) => !p.completed).reduce((s, p) => s + p.qty, 0)
       if (patch.qty + 1e-9 < placed) {
-        return fail(422, { code: 'qty_below_placed', error: `已排出 ${Math.round(placed * 1000) / 1000}（未完成），數量不可低於已排量；請先把卡放回待排池`, lock: lk.lock })
+        // D102：改量在待排池頁做、把排定卡拖回待排池要在排程工作台做 → 訊息講清楚去哪裡處理
+        return fail(422, { code: 'qty_below_placed', error: `已排出 ${Math.round(placed * 1000) / 1000}（未完成），數量不可低於已排量；請先到排程工作台把排定卡拖回待排池` })
       }
     }
     const updated = await updateInclusion(sb, cur.inclusionId, patch, actor, nowIso)
-    if (!updated) return fail(404, { code: 'not_found', error: '找不到有效的手動加入紀錄（可能已移出）', lock: lk.lock })
+    if (!updated) return fail(404, { code: 'not_found', error: '找不到有效的手動加入紀錄（可能已移出）' })
     invalidateManualCache()
+    // D102 寫後回讀（同 manual/remove）：改低數量時，工作台（持鎖者）可能正好在「上面讀已排量」與「寫入」之間又排了卡
+    //   （它用舊數量驗證供給 → 通過）。寫完再加總一次未完成擺放：超過新數量 → 把這次的修改改回（CAS：updated_at 仍是這次寫的值，
+    //   免得蓋掉別人剛做的修改），回 422。工作台那邊也會寫後回讀（manualReconcile.ts），兩邊至少一邊看得到另一邊。
+    if (patch.qty !== undefined && patch.qty < cur.qty) {
+      const placedAfter = (await loadPlacementsByLines(sb, [key])).filter((p) => !p.completed).reduce((s, p) => s + p.qty, 0)
+      if (patch.qty + 1e-9 < placedAfter) {
+        const back = await restoreInclusionFields(sb, cur.inclusionId, { updatedAt: updated.updatedAt }, {
+          qty: cur.qty,
+          ...(patch.route_type !== undefined ? { route_type: cur.routeType } : {}),
+          ...(patch.reason !== undefined ? { reason: cur.reason } : {}),
+        }, actor, new Date().toISOString())
+        invalidateManualCache()
+        if (!back) console.error(`[packaging/manual PATCH] ${key} 改回數量時紀錄已被改動（CAS 未命中）`)
+        return fail(422, { code: 'qty_below_placed', error: `排程工作台剛好在排這個品項，已排出 ${Math.round(placedAfter * 1000) / 1000}（未完成），數量不可低於已排量，這次沒有修改；請先到排程工作台把排定卡拖回待排池` })
+      }
+    }
     const opId = await insertOpLog(sb, {
       actorEmail: actor.email, actorName: actor.name, kind: 'manual',
       label: `改手動加入 ${key}${patch.qty !== undefined ? ` 數量 ${cur.qty}→${patch.qty}` : ''}`,
       ops: [{ action: 'update', id: cur.inclusionId, soLineKey: key, before: { qty: cur.qty, routeType: cur.routeType, reason: cur.reason }, after: { qty: updated.qty, routeType: updated.routeType, reason: updated.reason } }],
     })
-    return noStore<ManualMutationResponse>({ success: true, inclusions: [updated], skipped: [], revision: `m${opId ?? nowMs}`, lock: lk.lock })
+    return noStore<ManualMutationResponse>({ success: true, inclusions: [updated], skipped: [], revision: `m${opId ?? nowMs}` })
   } catch (e) {
     return dbFail('PATCH', e)
   }

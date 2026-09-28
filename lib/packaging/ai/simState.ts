@@ -519,8 +519,14 @@ const cutChars = (s: string, max: number): string => {
   return chars.length > max ? chars.slice(0, max).join('') : (s ?? '')
 }
 
-/** 取 session 目前狀態做一格 undo（深拷貝 placements／locks／陣列，之後改 session 不會改到快照） */
+/**
+ * 取 session 目前狀態做一格 undo（深拷貝 placements／locks／陣列，之後改 session 不會改到快照）。
+ * D101：模擬產能（simCapacity）也一起深拷貝——所有推 undo 的路徑（ops、locks、ai_run、reset、load_run、capacity）自動帶上產能快照；
+ *   state 沒有這欄（測試替身、舊格）就不帶這個鍵（退回時保留目前產能）。
+ *   在這裡就地拷貝（不 import simCapacity.ts）：simCapacity.ts 會 import 本檔的 composeSimState，互相 import 會形成循環。
+ */
 export function snapshotForUndo(state: SimSessionState, label: string, kind: SimUndoKind, at: string): SimUndoEntry {
+  const cap = state.simCapacity
   return {
     label: cutChars(label, SIM_LABEL_MAX),
     kind,
@@ -532,6 +538,9 @@ export function snapshotForUndo(state: SimSessionState, label: string, kind: Sim
       lineIds: [...state.lineIds],
       placements: state.placements.map((p) => ({ ...p })),
       locks: copyLocks(state.locks),
+      ...(cap !== undefined
+        ? { simCapacity: { v: 1 as const, cells: cap.cells.map((c) => ({ ...c, base: { ...c.base } })), weekendsOpened: [...cap.weekendsOpened] } }
+        : {}),
     },
   }
 }

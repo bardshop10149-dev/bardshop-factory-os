@@ -8,7 +8,9 @@
 //   useSim：載入／輪詢、操作佇列（樂觀更新＋失敗回滾）、鎖定、退回、AI 執行輪詢
 //   simBoard：鎖定判斷、顯示用標記（🔒／〔AI〕／〔正式〕）、樂觀更新包裝
 //   重用正式工作台的「純顯示」元件：DayLanesView／MultiDayView（卡片、時間尺、負荷條）、PoolSidebar（待排池）、ParkingArea（待排區，唯讀）
-//   ⚠ PoolSidebar 絕不傳 manual（會啟用「＋加入訂單」直接寫正式表）；useBoard／BoardLayout 的「拖曳 → 正式 API」邏輯不重用（規格 §八）。
+//   ⚠ PoolSidebar 不傳任何手動參數（manual／showManualTag／manualManageHref）：模擬區不能加單（D102 起加單入口只在待排池頁，
+//   PoolSidebar 已沒有「＋加入訂單」，但也不放「到待排池頁」連結，免得在模擬區引人去改正式供給）；
+//   useBoard／BoardLayout 的「拖曳 → 正式 API」邏輯不重用（規格 §八）。
 //
 // 模擬區裡的卡分兩種（SimView.simCards）：
 //   模擬列（可動、可鎖）＝範圍內（模擬日期 × 建立時啟用的線）、未完成；
@@ -22,6 +24,10 @@
 //   - 卡片詳情加「上移／下移」（simLaneStep），停用時說明原因（唯讀卡、鎖定、別人的模擬區、起始日已過、鎖定模式…）。
 //   - 工時：卡片上顯示「工時 X.Xh」可點（MinutesChip），詳情工時段在最上面（MinutesEditor variant='sim'）；
 //     產能入口一律「查看產能」（模擬區沿用正式產能），唯讀提示說明要去正式工作台改。
+// D101 模擬區可以調整產線時數（只作用在模擬；採用時一起匯入正式產能表）：
+//   - 產能對話框（線頭 ⚙＝單日、工具列「產線時數」＝表格）重用正式的 CapacityEditor，只換資料來源（source：讀 SimView.capacity、
+//     存 POST session/capacity）；本人、起始日未過、AI 沒在跑、佇列清空時可改，否則唯讀。
+//   - 工作台上方 SimCapacityBanner：列出調整過的格、正式在調整後被改過的格、鎖定線不會匯入的格。
 
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { useRouter } from 'next/navigation'
@@ -43,7 +49,8 @@ import {
   EMPTY_SIM_LOCKS,
   type SimLocks,
 } from '@/lib/packaging/ai/types'
-import { MINUTES_SNAP, type BoardCard, type BoardDay, type PlacementOp, type YMD } from '@/lib/packaging/scheduleTypes'
+import { MINUTES_SNAP, type BoardCard, type BoardDay, type CapacityResponse, type PlacementOp, type YMD } from '@/lib/packaging/scheduleTypes'
+import { isWeekend } from '@/lib/packaging/scheduleCalendar'
 import type { PackagingCard as PackagingCardData } from '@/lib/packaging/types'
 import { lineNameOf } from '@/lib/packaging/scheduleLines'
 import { effectiveMinutes, overrideFromEffective } from '@/lib/packaging/scheduleMinutes'
@@ -67,14 +74,15 @@ import { ownLanePlan, pointerClientY, sameHint, type LaneReorderHint } from '@/c
 import type { LaneOrderProps } from '@/components/packaging/board/LaneOrderControls'
 import SplitDialog from '@/components/packaging/board/SplitDialog'
 import QtyDateDialog from '@/components/packaging/board/QtyDateDialog'
-import CapacityEditor from '@/components/packaging/board/CapacityEditor'
+import CapacityEditor, { type CapacityEditorSource } from '@/components/packaging/board/CapacityEditor'
 import Modal, { Btn } from '@/components/packaging/board/Modal'
 import { useSim } from './useSim'
 import {
   AI_MARK, LIVE_MARK, LOCK_MARK, SIM_LANE_REASON, decorateSimBoard, locksCount, simAutoLane, simCardState, simLaneReorder, simLaneStep, simLaneStepInfo,
   soNumberOfKey, toggleCardLock, toggleLineLock, toggleOrderLock, type SimCardState, type SimOrderCtx,
 } from './simBoard'
-import { MODE_LABEL, UNDO_KIND_LABEL, horizonLabel } from './simText'
+import { MODE_LABEL, UNDO_KIND_LABEL, capHoursText, capMinutesText, horizonLabel } from './simText'
+import SimCapacityBanner, { liveChangedSince, liveLineOf } from './SimCapacityBanner'
 import { SimCreateForm, type SimCreateValue } from './SimCreateDialog'
 import SimCreateDialog from './SimCreateDialog'
 import SimCardDetail from './SimCardDetail'
@@ -119,8 +127,15 @@ type ActiveDrag =
 
 /** D100 量 DOM 時限定在模擬區畫面底下（laneDrag） */
 const SIM_SCOPE = '.sim-board'
-/** D100 產能對話框在模擬區的唯讀說明（就算有正式區編輯權，模擬區也改不了產能） */
-const SIM_CAPACITY_READONLY = '模擬區沿用正式產能，這裡只能查看；要改請到正式排程工作台的「產能表」（需要編輯權）'
+/** D101 產能對話框在模擬區「不能改」時的說明（別人的模擬區、起始日已過、AI 執行中、還有操作儲存中） */
+const SIM_CAPACITY_READONLY = '模擬區的產線時數目前只能查看（別人的模擬區、起始日已過、AI 執行中或還有操作儲存中）；正式產能表請到正式排程工作台改'
+/** D101 模擬產能表上方的說明 */
+const SIM_CAPACITY_INTRO = '這裡改的時數只作用在模擬區（負荷條、AI 排程都用它），按「採用此版排程」時才會一起寫進正式產能表。'
+  + '沒改的格子＝沿用正式產能表；↺＝這格回到正式值。範圍內的週六、週日可以開加班；正式已開的週末在這裡只能改時數、不能關。'
+
+/** 模擬來源的錯誤碼 → 產能表認得的碼（其他一律 bad_request：產能表會顯示伺服器的中文訊息） */
+const CAP_CODES = new Set(['forbidden', 'lock_required', 'lock_lost', 'bad_request', 'date_not_workday', 'weekend_has_cards', 'migration_required', 'line_invalid', 'db_error'])
+type CapFailCode = Extract<CapacityResponse, { success: false }>['code']
 
 type Dialog =
   | { t: 'reset' }
@@ -129,7 +144,8 @@ type Dialog =
   | { t: 'split'; bc: BoardCard }
   | { t: 'move'; bc: BoardCard }
   | { t: 'partial'; card: PackagingCardData }
-  | { t: 'capacity'; date: YMD; lineId?: number }
+  /** D101：date 省略＝表格模式（工具列「產線時數」）；有 date＝單日（線頭 ⚙） */
+  | { t: 'capacity'; date?: YMD; lineId?: number }
 
 type DrawerKind = 'run' | 'history' | 'rules' | 'locks'
 
@@ -198,6 +214,10 @@ export default function SimLayout({ meEmail }: { meEmail: string | null }) {
   const lines = useMemo(() => rawBoard?.lines ?? [], [rawBoard?.lines])
   const editable = isOwner && !!session && !stale && !busy
   const noLockables = !!session && session.mode === 'clear' && session.placementCount === 0 && Object.keys(simCards).length === 0
+  // D101 能不能改模擬產線時數：本人、起始日未過、AI 沒在跑（AI 是在建 run 當下的時數下排的）、佇列清空
+  //   （不含 busy：儲存產能本身就是一個動作，含進來會讓對話框在儲存時閃成唯讀）
+  const capEditable = isOwner && !!session && !stale && !(v?.runningRun && v.runningRun.status === 'running' && !v.runningRun.stale)
+    && sim.pending === 0 && !sim.saving
   // 鎖定模式：沒有東西可鎖、不能寫時視同關閉（資料換了也跟著失效，不必另外同步狀態）
   const lockModeOn = lockMode && editable && !noLockables
   const canDrag = editable && isDesktop && !lockModeOn
@@ -264,6 +284,89 @@ export default function SimLayout({ meEmail }: { meEmail: string | null }) {
     for (const d of rawBoard.days) for (const c of d.cards) if (c.placementId === id) return c
     return rawBoard.holding.find(c => c.placementId === id) ?? null
   }, [rawBoard])
+
+  // ── D101 模擬產線時數：CapacityEditor 的資料來源 ───────────────────────────
+  const { getView, saveCapacity } = sim
+  const lockedLineKey = locks.lineIds.join(',')
+  const capDates = v?.capacity?.sim.effective.map(e => e.date) ?? []
+  const capFrom = capDates[0] ?? null
+  const capTo = capDates[capDates.length - 1] ?? null
+  const simCapacitySource = useMemo<CapacityEditorSource | null>(() => {
+    if (!capFrom || !capTo) return null
+    const lockedIds = lockedLineKey ? lockedLineKey.split(',').map(Number) : []
+    // 一律從 getView() 讀最新畫面（儲存成功後 acceptView 已更新；產能表按儲存後重讀就是新的模擬值，不必再發請求）
+    const cap = () => getView()?.capacity ?? null
+    const inRange = (d: YMD, from: YMD, to: YMD) => d >= from && d <= to
+    return {
+      noLock: true,
+      title: `模擬產線時數（${md(capFrom)}～${md(capTo)}）`,
+      tableRange: { from: capFrom, to: capTo },
+      intro: SIM_CAPACITY_INTRO,
+      hideLinesManager: true,
+      hideNote: true,
+      load: async (from, to) => {
+        const c = cap()
+        if (!c) return { json: null, error: '模擬區尚未建立' }
+        return {
+          json: {
+            success: true,
+            rows: c.sim.rows.filter(r => inRange(r.date, from, to)),
+            effective: c.sim.effective.filter(e => inRange(e.date, from, to)),
+            lines: c.sim.lines,
+            lineRows: c.sim.lineRows.filter(r => inRange(r.date, from, to)),
+          },
+        }
+      },
+      save: async (rows) => {
+        const r = await saveCapacity({ rows })
+        if (r.json && r.json.success) return { json: { success: true, rows: [], effective: [] } }
+        const j = r.json && !r.json.success ? r.json : null
+        const code = (j?.code && CAP_CODES.has(j.code) ? j.code : 'bad_request') as CapFailCode
+        return {
+          json: { success: false, error: r.error ?? j?.error ?? '儲存失敗', code, ...(j?.date ? { date: j.date } : {}), ...(j?.cardCount != null ? { cardCount: j.cardCount } : {}) },
+          error: r.error,
+          missingTable: r.missingTable,
+        }
+      },
+      weekendToggle: (date) => {
+        const c = cap()
+        if (!c) return { enabled: false }
+        if (c.liveOpenWeekends.includes(date)) {
+          // D101 驗證修正：正式在建立模擬區之後才開的週末不在模擬日期裡，也不會因為改時數被悄悄加進來 → 說清楚要重設
+          if (!(getView()?.session?.windowDates ?? []).includes(date)) {
+            return { enabled: false, title: '正式產能表是在建立模擬區之後才開這天加班，這天不在這次模擬的日期裡（不能在這裡調整）；要在模擬區使用這天，請重設模擬區' }
+          }
+          return { enabled: false, title: '正式產能表已開加班：模擬區只能調整各線時數、不能關（要關請到正式工作台的產能表）' }
+        }
+        if (!c.editableDates.includes(date)) return { enabled: false, title: '只能開模擬範圍內（第一天到最後一天之間）、今天以後的週末' }
+        return { enabled: true, title: '在模擬區開這天的加班（只作用在模擬；採用時正式產能表一起開）' }
+      },
+      cellBadge: (date, lineId) => {
+        const c = cap()
+        if (!c) return null
+        const wk = isWeekend(date)
+        const live = liveLineOf(c, date, lineId)
+        const liveText = live ? capMinutesText(live, wk) : '—'
+        const lockNote = lockedIds.includes(lineId) ? '。這條線已鎖定：採用時不會匯入' : '。採用時會寫進正式產能表'
+        const cell = c.cells.find(x => x.date === date && x.lineId === lineId)
+        if (cell) {
+          if (liveChangedSince(cell, live)) {
+            return { text: '正式已改', tone: 'warn', title: `你調整時正式是 ${capHoursText(cell.base, wk)}，現在是 ${liveText}；採用會以模擬值為準${lockNote}` }
+          }
+          return { text: '模擬', tone: 'sim', title: `模擬調整過；正式：${liveText}${lockNote}` }
+        }
+        if (c.diffs.some(d => d.date === date && d.lineId === lineId)) {
+          return { text: '≠正式', tone: 'sim', title: `沿用模擬調整過的前一個平日；正式：${liveText}` }
+        }
+        return null
+      },
+      hasOverride: (date, lineId) => !!cap()?.cells.some(x => x.date === date && x.lineId === lineId),
+      dayHasOverride: (date) => {
+        const c = cap()
+        return !!c && (c.cells.some(x => x.date === date) || c.weekendsOpened.includes(date))
+      },
+    }
+  }, [capFrom, capTo, lockedLineKey, getView, saveCapacity])
 
   // ── 操作（全部經 useSim.submitOps → POST session/ops） ─────────────────────
   const { submitOps, submitLocks } = sim
@@ -708,6 +811,10 @@ export default function SimLayout({ meEmail }: { meEmail: string | null }) {
               })}
             </span>
             <button type="button" onClick={() => setDrawer('locks')} className={TOOL_BTN}>鎖定清單（{locksCount(locks)}）</button>
+            <button type="button" onClick={() => setDialog({ t: 'capacity' })} disabled={!simCapacitySource} className={TOOL_BTN}
+              title={capEditable ? 'D101：調整模擬區的各線正常／加班時數（只作用在模擬；採用時一起寫進正式產能表）' : '查看模擬區的產線時數'}>
+              產線時數{v.capacity && v.capacity.cells.length + v.capacity.weekendsOpened.length > 0 ? `（調整 ${v.capacity.cells.length + v.capacity.weekendsOpened.length}）` : ''}
+            </button>
             <span className="mx-1 h-4 w-px bg-slate-700" />
             <button
               type="button"
@@ -778,6 +885,10 @@ export default function SimLayout({ meEmail }: { meEmail: string | null }) {
             <button type="button" onClick={() => void sim.reload()} className="rounded border border-yellow-600 px-1.5 hover:bg-yellow-900/50">重試</button>
           </div>
         )}
+        {session && (
+          <SimCapacityBanner capacity={v.capacity ?? null} lines={lines} locks={locks} editable={capEditable}
+            onOpen={() => setDialog({ t: 'capacity' })} />
+        )}
         {sim.action && <div className="animate-pulse text-xs text-amber-300">{sim.action}中…</div>}
 
         {/* ─── 檢視切換 ─── */}
@@ -847,7 +958,7 @@ export default function SimLayout({ meEmail }: { meEmail: string | null }) {
         <DndContext sensors={sensors} collisionDetection={pointerWithin} onDragStart={onDragStart} onDragMove={onDragMove} onDragEnd={onDragEnd} onDragCancel={onDragCancel}>
           <main className="flex flex-col gap-4 px-4 pb-4 lg:min-h-0 lg:flex-1 lg:flex-row lg:gap-3">
             <aside className={`eip-scrollbar order-2 min-w-0 lg:order-1 lg:w-[380px] lg:shrink-0 lg:overflow-y-auto lg:pr-1 2xl:w-[420px] ${poolHidden ? 'lg:hidden' : ''}`}>
-              {/* ⚠ 不傳 manual：手動加入會直接寫正式表（規格 §八） */}
+              {/* ⚠ 不傳手動參數：模擬區不能加單、也不放到待排池頁的管理連結（規格 §八；D102 加單只在待排池頁） */}
               <PoolSidebar
                 blocks={board.pool.blocks}
                 cardMeta={board.pool.cardMeta}
@@ -906,7 +1017,7 @@ export default function SimLayout({ meEmail }: { meEmail: string | null }) {
                     onResizing={sim.setDragging}
                     reorderHint={reorderHint}
                     ownLaneKey={ownLaneKey}
-                    capacityReadOnly
+                    capacityReadOnly={!capEditable}
                   />
                 ) : (
                   <div className="flex h-40 items-center justify-center rounded-xl border border-dashed border-slate-800 text-xs text-slate-500">沒有日期</div>
@@ -932,7 +1043,7 @@ export default function SimLayout({ meEmail }: { meEmail: string | null }) {
                     onEditCapacity={(date, lineId) => setDialog({ t: 'capacity', date, lineId })}
                     reorderHint={reorderHint}
                     ownLaneKey={ownLaneKey}
-                    capacityReadOnly
+                    capacityReadOnly={!capEditable}
                   />
                 </div>
               )}
@@ -955,6 +1066,7 @@ export default function SimLayout({ meEmail }: { meEmail: string | null }) {
       {dialog?.t === 'reset' && session && (
         <SimCreateDialog
           initial={{ horizon: session.horizon, mode: session.mode }}
+          capacityCount={(v.capacity?.cells.length ?? 0) + (v.capacity?.weekendsOpened.length ?? 0)}
           busy={busy}
           onClose={() => setDialog(null)}
           onSubmit={val => { void sim.createOrReset(val).then(ok => { if (ok) { setDialog(null); setLockMode(false) } }) }}
@@ -1060,16 +1172,18 @@ export default function SimLayout({ meEmail }: { meEmail: string | null }) {
           />
         )
       })()}
-      {dialog?.t === 'capacity' && (
-        // 模擬區沿用正式產能：只給看（要改請到正式工作台的「產能表」，需要編輯鎖）
+      {dialog?.t === 'capacity' && simCapacitySource && (
+        // D101：模擬區的產線時數（重用正式的產能表元件，只換資料來源；不需要正式編輯鎖）
         <CapacityEditor
-          mode={{ kind: 'day', date: dialog.date, lineId: dialog.lineId }}
+          mode={dialog.date ? { kind: 'day', date: dialog.date, lineId: dialog.lineId } : { kind: 'table' }}
           today={v.today}
-          editable={false}
+          editable={capEditable}
           readonlyHint={SIM_CAPACITY_READONLY}
           getLockToken={() => null}
+          source={simCapacitySource}
           onClose={() => setDialog(null)}
-          onSaved={() => void sim.reload()}
+          // 儲存成功時 useSim.saveCapacity 已用回應更新整個畫面（工作台負荷條＋產能表），不必再重抓
+          onSaved={() => {}}
         />
       )}
 

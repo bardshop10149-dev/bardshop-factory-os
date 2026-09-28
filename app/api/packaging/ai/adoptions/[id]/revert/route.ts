@@ -25,6 +25,9 @@ import {
 } from '@/lib/packaging/ai/db'
 import { isInSimScope } from '@/lib/packaging/ai/simState'
 import { safeErrorTag } from '@/lib/packaging/ai/runner'
+import { executeCapacityPlan } from '@/lib/packaging/capacityWrite'
+import { normalPoolLineKeys } from '@/lib/packaging/manualPool'
+import { reconcileManualAfterPlacementWrite } from '@/lib/packaging/manualReconcile'
 import type {
   AdoptionMeta,
   AdoptionTargetRow,
@@ -39,6 +42,7 @@ import type {
 } from '@/lib/packaging/ai/types'
 import { actorOf, aiFail, aiServerError, logAi, parsePositiveId, type Actor } from '../../../_lib/aiRoute'
 import { openDeltaOf, outsideScopeConflicts, planAndApply, type AdoptionRun } from '../../../_lib/adoptFlow'
+import { logCapacity, planRevertCapacity } from '../../../_lib/capacityFlow'
 
 export const dynamic = 'force-dynamic'
 export const maxDuration = 120
@@ -59,6 +63,18 @@ export const maxDuration = 120
 //   - 範圍外的線在採用後被改過、而且同一品項在範圍內也要還原（跨範圍搬過卡）→ 只倒回範圍內會讓卡片消失或重複（與採用的鎖定線檢查對稱）
 //     → 409 locked_line_diverged＋conflicts；預覽列出來、canRevert false。這種情況請改用「版本歷史」整張還原，或先把卡搬回原線。
 // 完整還原（整張排程）仍可從既有「版本歷史」做——那是最後手段，會連範圍外一起倒回。
+//
+// D101 產線時數一起退回（採用紀錄的 capacity_changes；null＝那次沒改產能或舊程式採用 → 只退排程）：
+//   - 每格三態（capacityAdopt.planCapacityRevert）：目前＝採用後 → 還原；目前＝採用前 → 已還原（略過，重試冪等）；
+//     其他＝組長在採用後改過 → 保留組長的新值（Snow 確認：時數多半是現場事實；預覽逐格列出）。
+//   - 採用時才開的週末：排程退回後那天沒有卡、組長也沒改過 → 關閉；否則保持開著（預覽說明原因）。
+//   - 順序：【先排程】（要先把卡從週末移走才能關週末）→【後產能】。產能寫入失敗 → 不標記已退回（放掉佔位），
+//     回「排程已退回，但產能表還原失敗；再按一次退回會只補做產能」（重試時排程已是目標 → 沒有 op；產能已還原的格歸為「已還原」）。
+//   - 已過的日子（隔天以後才退回）：格不改，但從今天起第一個工作日補一筆「恢復列」＝採用前的值（D101 驗證修正；
+//     否則已過的格會透過 D49 沿用繼續蓋住今天以後，等於沒退）。預覽列在 pastFixes。
+//   - 還原後會通不過產能表規則的日子 → 那天整天保留（預覽列出原因），其他日子照退（D101 驗證修正；原本整份放棄）。
+//     仍然驗證不過（防競態）→ 產能這次不退、寫進報告，不擋排程退回。
+//   - 產能有寫就記 op_log 'capacity'（正式工作台刷新的訊號）。版本歷史的整張還原只還原排程，不還原產能。
 
 type Ctx = { params: Promise<{ id: string }> }
 
@@ -164,6 +180,7 @@ export async function GET(_request: NextRequest, ctx: Ctx) {
     if (adoption.revertedAt != null) {
       return noStore<RevertPreviewResponse>({
         success: true, adoption: metaOf(adoption, false), counts: { ...EMPTY_COUNTS }, changedAfter: [], addedAfter: [], unrestorable: [], outsideConflicts: [], canRevert: false, reason,
+        capacity: null,
       })
     }
     const loaded = await loadRevertBase(sb, adoption)
@@ -174,6 +191,8 @@ export async function GET(_request: NextRequest, ctx: Ctx) {
     const { changedAfter, addedAfter } = afterAdoption(world, loaded.base)
     const outsideConflicts = revertOutsideConflicts(world, loaded.base, run)
     const blocked = canRevert && outsideConflicts.length > 0
+    // D101：產能段（排程退回「之後」的擺放用來判斷週末還有沒有卡；GET 與 POST 同一組計算）
+    const cap = planRevertCapacity({ world, record: adoption.capacityChanges, nextPlacements: run.res.next.values(), actor: me })
     return noStore<RevertPreviewResponse>({
       success: true,
       adoption: metaOf(adoption, canRevert && !blocked),
@@ -184,6 +203,7 @@ export async function GET(_request: NextRequest, ctx: Ctx) {
       outsideConflicts,
       canRevert: canRevert && !blocked,
       reason: blocked ? outsideConflictMessage(outsideConflicts.length) : reason,
+      capacity: cap.rev?.preview ?? null,
     })
   } catch (e) {
     return aiServerError('adoptions/revert GET', e, '退回預覽')
@@ -209,7 +229,9 @@ async function revertClaimed(
   if (run.tooManyOps) return fail('too_many_ops', '範圍內要還原的卡太多，無法一次退回；請改用「版本歷史」還原', { lock })
   const conflicts = revertOutsideConflicts(world, base, run)
   if (conflicts.length > 0) return fail('locked_line_diverged', outsideConflictMessage(conflicts.length), { conflicts, lock })
-  if (run.res.applied.length === 0 && run.plan.ops.length > 0) {
+  // D101：產能段（驗證不過 → 產能這次不退、寫進報告，不擋排程退回）
+  const cap = planRevertCapacity({ world, record: adoption.capacityChanges, nextPlacements: run.res.next.values(), actor: me })
+  if (run.res.applied.length === 0 && run.plan.ops.length > 0 && !cap.put) {
     return fail('nothing_to_adopt', `範圍內的 ${run.skipped.length} 項都無法還原（已完成、已銷貨或已不在待排池），正式排程沒有被修改`, { lock })
   }
   const delta = openDeltaOf(run.res)
@@ -235,11 +257,41 @@ async function revertClaimed(
       }
       return fail(w.code, `${w.message}（正式排程沒有被修改，請重新載入後再試）`, { versionId: backup.id, lock })
     }
+    // D102 寫後回讀：待排池頁同時移出／改低了手動加入的品項 → 以排程為準恢復供給（同 scheduleWrite）
+    await reconcileManualAfterPlacementWrite(sb, {
+      meta: world.manual?.meta ?? {}, normalKeys: normalPoolLineKeys(world.pool), res: run.res, actor: me, via: `退回 AI 採用 #${id}`,
+    })
   }
 
+  // D101【後產能】：排程已退回（卡已從週末移走）才寫產能；失敗 → 不標記已退回，再按一次退回只補做產能
+  if (cap.put) {
+    try {
+      await executeCapacityPlan(sb, cap.put, nowIso)
+    } catch (e) {
+      console.error(`[packaging/ai/adoptions/revert] #${id} 產能還原失敗 ${safeErrorTag(e)}`)
+      await logCapacity(sb, me, `產能表（退回 AI 採用 #${id}，部分失敗）`, [...cap.put.logged, { via: 'ai_revert', adoptionId: id, failed: true }])
+      return fail('db_error', `排程已退回，但產能表還原失敗；再按一次「退回」會只補做產能（排程不會重複修改）`, { versionId: backup.id, lock }, 500)
+    }
+    // 產能有寫就記 'capacity'（正式工作台刷新的訊號）——寫完立刻記，後面標記失敗也不會漏
+    await logCapacity(sb, me, `產能表（退回 AI 採用 #${id}）`, [...cap.put.logged, { via: 'ai_revert', adoptionId: id }])
+  }
+  const capPreview = cap.rev?.preview ?? null
   const report: RevertReport = {
     counts: run.counts, skipped: run.skipped, backupVersionId: backup.id,
     changedAfterCount: changedAfter.length, addedAfterCount: addedAfter.length,
+    ...(capPreview
+      ? {
+        capacity: {
+          // 恢復列（已過的格沿用到今天以後，從今天起補回採用前的值）也算「還原」
+          restored: cap.put ? capPreview.restore.length + capPreview.pastFixes.length : 0,
+          alreadyRestored: capPreview.alreadyRestored.length,
+          keptChangedAfter: capPreview.keptChangedAfter.length,
+          keptOther: capPreview.keptPast.length + capPreview.keptAnchors.length + capPreview.keptWithWeekend.length + capPreview.keptInvalid.length,
+          weekendsClosed: cap.put ? capPreview.weekendsClose : [],
+          error: cap.error,
+        },
+      }
+      : {}),
   }
   try {
     const ok = await markAdoptionReverted(sb, id, { actorEmail: me.email, actorName: me.name, at: nowIso, report })
@@ -251,6 +303,7 @@ async function revertClaimed(
   await deleteExpiredVersions(sb, nowMs)
   await logAi(sb, me, 'ai_revert', `退回 AI 採用 #${id}`, [{
     adoptionId: id, backupVersionId: backup.id, scope: base.scope, counts: run.counts, ops: run.res.applied,
+    ...(report.capacity ? { capacity: report.capacity } : {}),
   }])
   return { res: noStore<RevertResponse>({ success: true, report, lock }), marked: true }
 }

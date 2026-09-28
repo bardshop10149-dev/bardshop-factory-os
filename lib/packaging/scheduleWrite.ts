@@ -7,6 +7,8 @@
 // 分線輪（lines.md §4.2）：多讀線別（D72 驗 lineId）與 D66 手動區塊（併進待排池再算 supplyOf）；
 //   本批有值改變的 setMinutes → 寫入成功後插學習紀錄，失敗回 adjustmentLogFailed（工時已改成功）。
 // D74：reorder 只改 sort_index；sql/20260928 未套用（沒有這欄）時 reorder 回提示，其他操作照常（寫入時略過該欄）。
+// D102：寫入後回讀手動加入紀錄（manualReconcile.ts）——待排池頁同時移出／改低數量時，以排程為準恢復供給
+//   （只在那種交錯發生時才寫 packaging_manual_inclusions＋op_log 'manual'）。
 
 import type { NextRequest, NextResponse } from 'next/server'
 import { describeError, getSupabaseAdminClient } from '@/lib/supabaseAdmin'
@@ -20,6 +22,8 @@ import { applyOps, parseOps, touchedKeys, type ApplyOk } from '@/lib/packaging/s
 import { defaultLineIdOf } from '@/lib/packaging/scheduleLines'
 import { buildAdjustment } from '@/lib/packaging/scheduleMinutes'
 import { getManualMergedPool } from '@/lib/packaging/manualCache'
+import { normalPoolLineKeys } from '@/lib/packaging/manualPool'
+import { reconcileManualAfterPlacementWrite } from '@/lib/packaging/manualReconcile'
 import {
   countOpenPlacements,
   insertOpLog,
@@ -119,7 +123,8 @@ export async function handleApplyRequest(
     ])
     if (!basePool) return failRes({ code: 'pool_unavailable', error: '待排池暫時無法組裝，無法驗證，請稍後再試', lock: lk.lock })
     // D66：手動區塊併進待排池（'mn' 卡是一般供給，place／complete 走同一套驗證）
-    const pool = (await getManualMergedPool(sb, basePool)).pool
+    const merged = await getManualMergedPool(sb, basePool)
+    const pool = merged.pool
     for (const p of byIdRows) lineKeys.add(p.soLineKey)
     const linePlacements = await loadPlacementsByLines(sb, [...lineKeys])
     const byId = new Map(linePlacements.map((p) => [p.id, p]))
@@ -180,6 +185,12 @@ export async function handleApplyRequest(
     }
 
     const opLogId = await insertOpLog(sb, { actorEmail: actor.email, actorName: actor.name, kind: opts.kind, label, ops })
+    // D102 寫後回讀：待排池頁的移出／改量不拿編輯鎖，可能剛好和這批寫入交錯 → 以排程為準恢復手動供給（manualReconcile.ts）。
+    //   只有這批寫過「只靠手動供給」的行才多一個查詢；回應格式不變（D98 存檔佇列照舊），恢復了就記一筆 op_log 'manual'，
+    //   工作台下一次輪詢就看得到。
+    await reconcileManualAfterPlacementWrite(sb, {
+      meta: merged.meta, normalKeys: normalPoolLineKeys(basePool), res, actor, via: '排程工作台',
+    })
     return noStore<ApplyResponse>({
       success: true,
       rows: w.rows,

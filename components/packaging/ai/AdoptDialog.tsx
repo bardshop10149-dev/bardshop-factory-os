@@ -15,17 +15,20 @@
 //   - 鎖定線上的模擬內容與正式區不一致（lockedConflicts）→ 列出來、停用採用（伺服器也會擋 locked_line_diverged）。
 // 伺服器採用前會先佔用模擬區（version + 1）：失敗（鎖的問題以外）時呼叫 onFailed 讓模擬區重新載入，並要求關閉重開——
 //   重開會重新預覽，主管看到的永遠是這次會寫進去的內容（不在同一個視窗裡用新的 version 直接再送一次）。
+// D101：模擬區調整過的產線時數會一起寫進正式產能表 →「產線時數」段逐格列出（正式在你調整後被改過的格橘字、鎖定線不匯入、
+//   範圍後第一個工作日的保值列說明為什麼要寫）；只有時數差異時按鈕改成「匯入產線時數」。
 
 import { useEffect, useState } from 'react'
 import Link from 'next/link'
-import type { AdoptPreviewResponse, AdoptResponse, LockedLineConflict } from '@/lib/packaging/ai/types'
+import type { AdoptPreviewResponse, AdoptResponse, CapacityAdoptPreview, LockedLineConflict } from '@/lib/packaging/ai/types'
 import type { PackagingLine } from '@/lib/packaging/scheduleTypes'
 import { lineNameOf } from '@/lib/packaging/scheduleLines'
+import { isWeekend } from '@/lib/packaging/scheduleCalendar'
 import Modal, { Btn } from '@/components/packaging/board/Modal'
-import { md } from '@/components/packaging/board/boardFormat'
+import { md, mdw } from '@/components/packaging/board/boardFormat'
 import { useEditLock } from '@/components/packaging/board/useEditLock'
 import { fetchAdoptPreview, postAdopt } from './simApi'
-import { adoptPreviewFlags, countsText } from './simText'
+import { adoptPreviewFlags, capHoursText, countsText, countsTotal } from './simText'
 
 type Preview = Extract<AdoptPreviewResponse, { success: true }>
 type Adopted = Extract<AdoptResponse, { success: true }>
@@ -123,6 +126,9 @@ export default function AdoptDialog({ meEmail, lines, getVersion, isIdle, onClos
   // identical＝範圍內一模一樣；allSkipped＝有變更但全部會被自動略過（採用也不會改到正式排程）；blocked＝採用鈕停用
   const { identical, allSkipped, blocked } = adoptPreviewFlags(preview, postConflicts)
   const dates = preview?.scope.windowDates ?? []
+  // D101：只有產線時數要匯入、排程沒有差異 → 按鈕寫「匯入產線時數」
+  const capChanges = (preview?.capacity?.cells.length ?? 0) + (preview?.capacity?.weekendsOpened.length ?? 0)
+  const capacityOnly = !!preview && countsTotal(preview.counts) === 0 && capChanges > 0
 
   return (
     <Modal
@@ -143,7 +149,7 @@ export default function AdoptDialog({ meEmail, lines, getVersion, isIdle, onClos
             </Btn>
           ) : (
             <Btn tone="primary" disabled={busy || !preview || blocked || mustReopen} onClick={() => void doAdopt('acquire')}>
-              {busy ? '處理中…' : '採用此版排程'}
+              {busy ? '處理中…' : capacityOnly ? '匯入產線時數' : '採用此版排程'}
             </Btn>
           )}
         </>
@@ -152,6 +158,14 @@ export default function AdoptDialog({ meEmail, lines, getVersion, isIdle, onClos
       {result ? (
         <div className="space-y-2 text-sm">
           <p>{countsText(result.counts)}。</p>
+          {result.capacity && (
+            <p className="text-xs text-violet-200">
+              產線時數：已寫進正式產能表 <b>{result.capacity.cellsWritten}</b> 格
+              {result.capacity.anchors > 0 && <>（另在範圍後補 {result.capacity.anchors} 格保值列，讓範圍外的時數不變）</>}
+              {result.capacity.weekendsOpened.length > 0 && <>；已開 {result.capacity.weekendsOpened.map(d => mdw(d)).join('、')} 加班</>}。
+              退回這次採用時，時數也會一起退回（組長在採用後改過的格保留組長的值）。
+            </p>
+          )}
           <p className="text-xs text-slate-300">
             採用前已自動存成版本 <b>#{result.versionId}</b>。要退回：到正式排程工作台按「AI 採用紀錄」→ 退回這次採用（只倒回這次的範圍）。
           </p>
@@ -177,6 +191,7 @@ export default function AdoptDialog({ meEmail, lines, getVersion, isIdle, onClos
                 </li>
                 <li>採用前會自動存版本「{preview.versionLabel}」；之後可在正式工作台「AI 採用紀錄」退回這次採用。</li>
               </ul>
+              {preview.capacity && <CapacitySection cap={preview.capacity} lines={lines} />}
               {identical && <div className="rounded border border-slate-700 bg-slate-950/50 px-3 py-2 text-xs text-slate-300">模擬版與正式排程在這個範圍內一模一樣，不需要採用。</div>}
               {allSkipped && (
                 <div className="rounded border border-amber-700/60 bg-amber-950/30 px-3 py-2 text-xs leading-relaxed text-amber-100">
@@ -221,6 +236,55 @@ export default function AdoptDialog({ meEmail, lines, getVersion, isIdle, onClos
         </div>
       )}
     </Modal>
+  )
+}
+
+/** D101 會一起寫進正式產能表的產線時數 */
+function CapacitySection({ cap, lines }: { cap: CapacityAdoptPreview; lines: PackagingLine[] }) {
+  const name = (id: number) => lineNameOf(lines, id)
+  const empty = cap.cells.length === 0 && cap.weekendsOpened.length === 0
+  return (
+    <div className="rounded border border-violet-700/60 bg-violet-950/20 px-3 py-2 text-xs leading-relaxed text-violet-100">
+      <b>產線時數：{empty ? '模擬的時數與正式產能表相同，產能表不用改' : '會一起寫進正式產能表'}</b>
+      {!empty && (
+        <ul className="mt-1 list-disc space-y-0.5 pl-5 text-violet-100/90">
+          {cap.weekendsOpened.map(d => <li key={`w${d}`}>{mdw(d)} 開加班</li>)}
+          {cap.cells.map(c => {
+            const wk = isWeekend(c.date)
+            const before = capHoursText(c.before, wk)
+            const after = capHoursText(c.after, wk)
+            return (
+              <li key={`${c.date}|${c.lineId}`}>
+                {mdw(c.date)} {name(c.lineId)}{' '}
+                {c.kind === 'anchor'
+                  ? <span className="text-violet-200/80">固定為 {after}（原本{c.before.inheritedFrom ? `沿用 ${md(c.before.inheritedFrom)}` : ''} {before}；範圍外的日子才不會跟著變）</span>
+                  : <>{before} → <b>{after}</b></>}
+                {c.liveChangedSinceEdit && c.baseAtEdit && (
+                  <span className="text-orange-300">（正式在你調整後被改過：當時 {capHoursText(c.baseAtEdit, wk)}、現在 {before} → 會改成 {after}）</span>
+                )}
+              </li>
+            )
+          })}
+        </ul>
+      )}
+      {cap.lockedLinesIgnored.length > 0 && (
+        <div className="mt-1 text-[11px] text-slate-400">
+          {cap.lockedLinesIgnored.map(x => `${name(x.lineId)}（${x.cellCount} 格）`).join('、')} 已鎖定：模擬中調整的時數不會匯入。
+        </div>
+      )}
+      {cap.inactiveLinesSkipped.length > 0 && (
+        <div className="mt-1 text-[11px] text-slate-400">
+          {cap.inactiveLinesSkipped.map(x => `${name(x.lineId)}（${x.cellCount} 格）`).join('、')} 已停用：不會匯入。
+        </div>
+      )}
+      {cap.anchorImpossible.length > 0 && (
+        <div className="mt-1 text-[11px] text-amber-200">
+          {cap.anchorImpossible.map(x => `${mdw(x.date)} ${name(x.lineId)}`).join('、')} 原本沒有設定過時數（無法用「保值列」表達未設定）：採用後範圍外沒填的日子會沿用新的時數。
+        </div>
+      )}
+      {cap.error && <div className="mt-1 rounded border border-rose-800 bg-rose-950/40 px-2 py-1 text-rose-200">{cap.error}（不能採用：請先在模擬區調整時數）</div>}
+      {!empty && <div className="mt-1 text-[11px] text-violet-200/70">之後退回這次採用時，時數也會一起退回；組長在採用後改過的格會保留組長的值。</div>}
+    </div>
   )
 }
 

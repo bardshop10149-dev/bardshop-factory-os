@@ -8,6 +8,7 @@ import { todayTaipei } from '@/lib/packaging/workdays'
 import { getSimSession, insertSimSession, loadSimWorld, updateSimSessionCas } from '@/lib/packaging/ai/db'
 import { copyPlacementsFromLive, planSimWindow, pushUndo, simPlacementsTooLarge, snapshotForUndo } from '@/lib/packaging/ai/simState'
 import { stateOf } from '@/lib/packaging/ai/runner'
+import { planResetCapacity, sameSimCapacity } from '@/lib/packaging/ai/simCapacity'
 import {
   AI_HORIZONS,
   SIM_MODES,
@@ -32,6 +33,9 @@ export const maxDuration = 60
 //   - copy：範圍內正式區未完成擺放複製成模擬列（新 id，原 id 記在 livePlacementId）；clear：空的（D78：清空＝全部可動）。
 //   - 鎖定一律清空（copy 的模擬列換了新 id，舊的卡片鎖已對不上；要回到舊狀態按「退回上一步」）。
 //   - 重設前把舊狀態整份推進 undo（可退回）。
+//   - D101 模擬產線時數：建立＝空覆寫（沿用正式產能）；重設預設保留（keepCapacity，舊客戶端沒帶＝true）仍落在新範圍內的覆寫——
+//     重設多半是「換模式重排」，時數設定不該跟著消失。模擬開的週末：先用正式的開加班週末算新範圍 W0，
+//     再把「夾在 W0 第一天與最後一天之間」的模擬週末插回去（插入不改變起訖，所以不會循環）；其餘週末與範圍外的格丟掉。
 // 權限：guardPackagingAi（packaging_ai＋packaging_admin，或 admin）。只寫 packaging_sim_sessions／packaging_op_log（kind ai_sim）。
 // ⚠ 絕不寫 packaging_placements。
 
@@ -73,6 +77,8 @@ export async function POST(request: NextRequest) {
   if (version !== null && !(typeof version === 'number' && Number.isSafeInteger(version) && version >= 1)) {
     return aiFail('bad_request', 'version 格式錯誤')
   }
+  if (body.keepCapacity !== undefined && typeof body.keepCapacity !== 'boolean') return aiFail('bad_request', 'keepCapacity 須為 true / false')
+  const keepCapacity = body.keepCapacity !== false
 
   const me = actorOf(g.member)
   const nowMs = Date.now()
@@ -94,8 +100,12 @@ export async function POST(request: NextRequest) {
     if (active.length === 0) return aiFail('bad_request', '目前沒有啟用中的產線，無法建立模擬區（請先到產線設定啟用）')
     const lineIds = active.map((l) => l.id)
     const openWeekends = openWeekendDaysOf(world.capacityRows, world.lineRows, new Set(lineIds))
-    const windowDates = planSimWindow({ today, start, horizon, openWeekends })
-    if (windowDates.length === 0) return aiFail('bad_request', '算不出模擬日期（行事曆範圍外），請通知管理員')
+    const baseWindow = planSimWindow({ today, start, horizon, openWeekends })
+    if (baseWindow.length === 0) return aiFail('bad_request', '算不出模擬日期（行事曆範圍外），請通知管理員')
+    // D101：重設時保留仍在新範圍內的模擬週末與模擬時數（建立＝空覆寫）
+    const { windowDates, simCapacity } = planResetCapacity({
+      existing: existing?.simCapacity, baseWindow, lineIds, today, keepCapacity: !!existing && keepCapacity,
+    })
     const placements = mode === 'copy'
       ? copyPlacementsFromLive(world.live, { windowDates, lineIds }, () => crypto.randomUUID())
       : []
@@ -110,6 +120,8 @@ export async function POST(request: NextRequest) {
       const undo = pushUndo(existing.undo, snapshotForUndo(stateOf(existing), `重設模擬區（${labelText}）`, 'reset', nowIso))
       session = await updateSimSessionCas(sb, existing.id, existing.version, {
         horizon, mode, windowDates, lineIds, placements, locks, undo, ownerName: me.name,
+        // D101：只有模擬產能有變才寫（migration 20260928c 套用前、沒調過時數的重設都不會碰到新欄）
+        ...(sameSimCapacity(simCapacity, existing.simCapacity) ? {} : { simCapacity }),
       }, nowIso)
     } else {
       session = await insertSimSession(sb, {
@@ -121,6 +133,7 @@ export async function POST(request: NextRequest) {
 
     await logAi(sb, me, 'ai_sim', existing ? `重設模擬區（${labelText}）` : `建立模擬區（${labelText}）`, [{
       action: existing ? 'reset' : 'create', sessionId: session.id, horizon, mode, start, windowDates, lineIds, placementCount: placements.length,
+      ...(existing ? { keepCapacity, capacityCells: simCapacity.cells.length, weekendsOpened: simCapacity.weekendsOpened } : {}),
     }])
     const view = await buildSimView(sb, { me, ownerEmail: me.email, session, world, nowMs, today })
     return noStore<SimViewResponse>({ success: true, ...view })

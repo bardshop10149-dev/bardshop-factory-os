@@ -22,6 +22,7 @@ import type {
   RevertPreviewResponse,
   RevertRequest,
   RevertResponse,
+  SimCapacityRequest,
   SimCreateRequest,
   SimLoadRunRequest,
   SimLocksRequest,
@@ -38,8 +39,17 @@ import type {
 export const AI_MIGRATION_HINT =
   'AI 模擬排程資料表尚未建立：請 Snow 先備份資料庫，再手動套用 migration「sql/20260928b_packaging_ai.sql」。套用前這一頁無法使用（正式排程工作台不受影響）。'
 
+/**
+ * D101 模擬產線時數的欄位還沒套用（只有「改模擬產線時數」會碰到；模擬區其他功能照常可用）。
+ * 要和上面的提示分開：否則 Snow 會以為要重套 20260928b。
+ */
+export const AI_CAPACITY_MIGRATION_HINT =
+  '模擬產線時數的資料表欄位尚未建立：請 Snow 先備份資料庫，再手動套用 migration「sql/20260928c_packaging_sim_capacity.sql」。套用前模擬區其他功能照常可用，只是不能調整產線時數。'
+
 /** PostgREST／Postgres 找不到表或欄位的各種說法（db.ts aiMigrationMessage 的中文也算） */
 const MISSING_TABLE_RE = /PGRST205|PGRST204|42P01|42703|schema cache|找不到資料表|relation .*packaging_ai|20260928b/i
+/** D101：訊息指向 20260928c（db.aiMigrationMessage 依缺的欄位名判斷） */
+const CAPACITY_MIGRATION_RE = /20260928c|sim_capacity|capacity_changes/i
 
 export interface AiApiResult<T> {
   /** HTTP 狀態；網路錯誤 0 */
@@ -94,7 +104,11 @@ async function call<T extends { success: boolean }>(
     }
   }
   if (code === 'migration_required' || (raw != null && MISSING_TABLE_RE.test(raw))) {
-    return { status: res.status, json: parsed, error: AI_MIGRATION_HINT, code: code ?? 'migration_required', missingTable: true, network: false }
+    const capacityOnly = raw != null && CAPACITY_MIGRATION_RE.test(raw)
+    return {
+      status: res.status, json: parsed, error: capacityOnly ? AI_CAPACITY_MIGRATION_HINT : AI_MIGRATION_HINT,
+      code: code ?? 'migration_required', missingTable: true, network: false,
+    }
   }
   return {
     status: res.status,
@@ -140,6 +154,11 @@ export function postSimRun(req: SimRunRequest) {
 
 export function postLoadRun(req: SimLoadRunRequest) {
   return call<SimViewResponse>(`${BASE}/session/load-run`, { method: 'POST', json: req })
+}
+
+/** D101 模擬區調整產線時數（rows 與正式產能表 PUT 同形；或 clearAll 全部回到正式值） */
+export function postSimCapacity(req: SimCapacityRequest) {
+  return call<SimViewResponse>(`${BASE}/session/capacity`, { method: 'POST', json: req })
 }
 
 // ── 採用（§6.1） ────────────────────────────────────────────────────────

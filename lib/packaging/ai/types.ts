@@ -41,7 +41,9 @@
 
 import type {
   BoardResponse,
+  CapacityInput,
   DailyCapacity,
+  EffectiveCapacity,
   LineCapacity,
   LineSupply,
   LockState,
@@ -135,6 +137,14 @@ export const AI_REVERT_CLAIM_TTL_MS = 3 * 60_000
 /** 空鎖定（D88）；建立／清空模擬區時用。唯讀：使用時請複製 */
 export const EMPTY_SIM_LOCKS: Readonly<SimLocks> = Object.freeze({ placementIds: [], soNumbers: [], lineIds: [] })
 
+/**
+ * D101 空的模擬產能覆寫（＝模擬區完全沿用正式產能表）。唯讀：使用時請用 simCapacity.emptySimCapacity() 取新物件。
+ * 與 DB 預設值 '{"v":1,"cells":[],"weekendsOpened":[]}' 同形（sql/20260928c）。
+ */
+export const EMPTY_SIM_CAPACITY: Readonly<SimCapacity> = Object.freeze({ v: 1 as const, cells: [], weekendsOpened: [] })
+/** D101 模擬區產能一次最多改幾天（POST session/capacity 的 rows 上限；模擬範圍最多約 10 個日期） */
+export const SIM_CAPACITY_MAX_ROWS = 20
+
 // ─────────────────────────────────────────────────────────────────────
 // 模擬區狀態（規格 §三）
 // ─────────────────────────────────────────────────────────────────────
@@ -179,8 +189,171 @@ export interface SimLocks {
 /** simState.lockReasonsOf 的輸出：這張卡為什麼被鎖（可多個） */
 export type SimLockReason = 'card' | 'order' | 'line'
 
-/** undo 一步是什麼動作造成的（畫面標籤用） */
-export type SimUndoKind = 'ops' | 'ai_run' | 'reset' | 'load_run' | 'locks'
+/** undo 一步是什麼動作造成的（畫面標籤用）。D101 加 'capacity'（改模擬產線時數；舊程式讀到不認得的 kind 會當 'ops'，只影響小圖示） */
+export type SimUndoKind = 'ops' | 'ai_run' | 'reset' | 'load_run' | 'locks' | 'capacity'
+
+// ── D101 模擬產能（模擬區可調整產線時數，採用時一起匯入正式產能表）──
+
+/**
+ * 模擬產能的一格＝正式產能表「已設定列」的草稿（一天 × 一條線）。
+ * 語意（D101 設計 §2.2）：覆寫列「疊在」正式各線列上，再跑同一個 resolveLineCapacity——D49 各線沿用照樣作用
+ *   （改 9/30，後面沒填的模擬日跟著變），所以模擬區看到的＝採用後正式產能表在範圍內會長的樣子。
+ */
+export interface SimCapacityCell {
+  date: YMD
+  lineId: number
+  /** 小時（同 packaging_line_capacity，最多 2 位小數；週末恆 0） */
+  regularHours: number
+  overtimeHoursMax: number
+  /**
+   * 改這格「當下」正式的有效值（小時；平日從沒設定過＝regularHours null）。
+   * 採用預覽用它標出「正式在你模擬之後被改過」（D86 仍以模擬版為準，只是提醒）。
+   */
+  base: { regularHours: number | null; overtimeHoursMax: number }
+  /** ISO，最後修改時間 */
+  at: string
+}
+
+/** packaging_sim_sessions.sim_capacity（camelCase jsonb；sql/20260928c） */
+export interface SimCapacity {
+  v: 1
+  cells: SimCapacityCell[]
+  /** 模擬才開的週末（正式的週末旗標沒開）；一定也在 window_dates 內 */
+  weekendsOpened: YMD[]
+}
+
+/** 採用寫進正式產能表的一格（packaging_ai_adoptions.capacity_changes；退回產能唯一的依據） */
+export interface CapacityCellChange {
+  date: YMD
+  lineId: number
+  /** sim＝模擬改的格；anchor＝窗後第一個工作日的「保值列」（讓範圍外沒填的日子沿用值不變，D87） */
+  kind: 'sim' | 'anchor'
+  /** 採用前這格的「列」；null＝沒有列（沿用／未設定／週末 0） */
+  before: { regularHours: number; overtimeHoursMax: number; note: string | null } | null
+  /** 採用寫進去的值 */
+  after: { regularHours: number; overtimeHoursMax: number }
+}
+
+/** 採用時週末開加班旗標的變化（D101：模擬開的週末採用時在正式一起開、退回時一起關） */
+export interface CapacityWeekendChange {
+  date: YMD
+  beforeOpen: boolean
+  afterOpen: boolean
+}
+
+export interface CapacityChangeRecord {
+  v: 1
+  cells: CapacityCellChange[]
+  weekends: CapacityWeekendChange[]
+}
+
+/** 預覽用的一格有效值（小時；regularHours null＝未設定；inheritedFrom＝沿用哪天） */
+export interface CapacityHoursView {
+  regularHours: number | null
+  overtimeHoursMax: number
+  inheritedFrom: YMD | null
+}
+
+/** 採用預覽的一格 */
+export interface CapacityAdoptCell {
+  date: YMD
+  lineId: number
+  kind: 'sim' | 'anchor'
+  /** 採用前正式的有效值 */
+  before: CapacityHoursView
+  /** 採用後（＝寫進去的列） */
+  after: { regularHours: number; overtimeHoursMax: number }
+  /** 正式在你調整這格之後被改過（cell.base ≠ 目前正式值）；採用仍以模擬值為準（D86） */
+  liveChangedSinceEdit: boolean
+  /** liveChangedSinceEdit 時：你調整時的正式值 */
+  baseAtEdit: { regularHours: number | null; overtimeHoursMax: number } | null
+}
+
+/** GET session/adopt 的產能段（D101） */
+export interface CapacityAdoptPreview {
+  cells: CapacityAdoptCell[]
+  /** 採用時會在正式產能表打開的週末加班 */
+  weekendsOpened: YMD[]
+  /** 鎖定的線（D88）上的模擬格：不匯入 */
+  lockedLinesIgnored: { lineId: number; cellCount: number }[]
+  /** 已停用的線上的模擬格：不匯入 */
+  inactiveLinesSkipped: { lineId: number; cellCount: number }[]
+  /** 範圍後第一個工作日原本「未設定」，列無法表達未設定 → 採用後範圍外會沿用新值（只提示） */
+  anchorImpossible: { date: YMD; lineId: number }[]
+  /** 產能這段通不過正式產能表的驗證（採用會被擋下）；null＝可以 */
+  error: string | null
+}
+
+/** 退回預覽的一格（D101 §7.1） */
+export interface CapacityRevertCell {
+  date: YMD
+  lineId: number
+  kind: 'sim' | 'anchor'
+  before: { regularHours: number; overtimeHoursMax: number } | null
+  after: { regularHours: number; overtimeHoursMax: number }
+  /** keptChangedAfter：目前正式的列（null＝已被清除） */
+  now?: { regularHours: number; overtimeHoursMax: number } | null
+}
+
+/** GET adoptions/[id]/revert 的產能段（D101） */
+export interface CapacityRevertPreview {
+  /** 目前＝採用後的值 → 還原（before 為 null＝刪列、回到沿用） */
+  restore: CapacityRevertCell[]
+  /** 目前＝採用前 → 略過（重試時的冪等） */
+  alreadyRestored: CapacityRevertCell[]
+  /** 採用後被組長改過 → 保留組長的新值（Snow 確認） */
+  keptChangedAfter: CapacityRevertCell[]
+  /** 日期 < 今天 → 不還原（過去的產能是歷史） */
+  keptPast: CapacityRevertCell[]
+  /** 同線較早的格沒還原 → 保值列保留（刪了會讓範圍外改沿用那個沒還原的值） */
+  keptAnchors: CapacityRevertCell[]
+  /** 週末保持開著時，它的各格也不動（不能留下「開著但加總 0」） */
+  keptWithWeekend: CapacityRevertCell[]
+  /** D101 驗證修正：還原後那天會通不過產能表規則（invalidDays）→ 那天的格全部保留 */
+  keptInvalid: CapacityRevertCell[]
+  /**
+   * D101 驗證修正：已過的格不能改，但它的值會沿用到今天以後（D49）→ 在今天起第一個工作日補一筆「恢復列」＝採用前的值
+   * （pastDates＝造成這筆的已過日子）
+   */
+  pastFixes: { date: YMD; lineId: number; hours: { regularHours: number; overtimeHoursMax: number }; pastDates: YMD[] }[]
+  /** 同上但補不回來（採用前沒有設定時數、線已停用、或那天整天保留）→ 今天起到保值列之前仍是採用後的值，請到產能表確認 */
+  pastUnfixable: { date: YMD; lineId: number; pastDates: YMD[] }[]
+  /** D101 驗證修正：還原後會通不過產能表規則的日子（例：週末開著但各線加班合計 0）→ 那天整天保留，其他日子照退 */
+  invalidDays: { date: YMD; message: string }[]
+  /** 會關閉的週末加班 */
+  weekendsClose: YMD[]
+  weekendsKeptOpen: { date: YMD; reason: 'has_cards' | 'changed_after' | 'already_closed' | 'past' | 'invalid' }[]
+  /** 產能這段通不過正式產能表的驗證（排程照樣退回，產能這次不退）；null＝可以 */
+  error: string | null
+}
+
+/** SimView.capacity（D101）：模擬區產能表與橫幅用 */
+export interface SimCapacityView {
+  /**
+   * 模擬值，CapacityResponse 成功形（CapacityEditor 直接吃）：rows＝疊後 daily、effective＝模擬範圍內每個日期＋其間所有週末、
+   * lines＝線（不在這次模擬範圍的線標成停用，產能表就不會出現那一欄）、lineRows＝疊後各線列（模擬範圍內）
+   */
+  sim: { rows: DailyCapacity[]; effective: EffectiveCapacity[]; lines: PackagingLine[]; lineRows: LineCapacity[] }
+  /** 正式值（同一組日期），畫面灰字「正式 8h」 */
+  live: { effective: EffectiveCapacity[] }
+  cells: SimCapacityCell[]
+  weekendsOpened: YMD[]
+  /** 可以在模擬區調整的日期（模擬範圍內 ≥ 今天＋夾在第一天與最後一天之間、非國定假日的週末） */
+  editableDates: YMD[]
+  /** 正式已開的週末（模擬區不能關） */
+  liveOpenWeekends: YMD[]
+  /** 模擬有效值 ≠ 正式有效值的格（橫幅、產能表徽章） */
+  diffs: {
+    date: YMD
+    lineId: number
+    live: { regularMinutes: number | null; overtimeMinutes: number }
+    sim: { regularMinutes: number | null; overtimeMinutes: number }
+    /** 這格有模擬覆寫、且正式現值 ≠ 覆寫當時記下的 base */
+    liveChangedSinceEdit: boolean
+    /** 這條線在模擬區被整條鎖定（D88）：採用時不匯入 */
+    lockedLine: boolean
+  }[]
+}
 
 /**
  * 模擬區可被 undo 還原的狀態（整份快照＝最簡單可靠，§三「退回上一步」）。
@@ -193,6 +366,11 @@ export interface SimSessionState {
   lineIds: number[]
   placements: SimPlacement[]
   locks: SimLocks
+  /**
+   * D101 模擬產能覆寫。選填：穩定站舊程式推的 undo 格沒有這欄＝「不知道」→ 退回時保留目前產能
+   * （舊程式不會改產能，這是最接近的推斷）。SimSession 讀出時一定有（缺欄＝空覆寫）。
+   */
+  simCapacity?: SimCapacity
 }
 
 /** undo 堆疊的一格：「做這個動作之前」的整份狀態＋標籤 */
@@ -219,6 +397,8 @@ export interface SimSessionRow {
   running_run_id: number | null
   created_at: string
   updated_at: string
+  /** D101（sql/20260928c）；migration 套用前沒有這欄 → undefined＝空覆寫 */
+  sim_capacity?: unknown
 }
 
 /** 模擬區（伺服器端完整版，含 undo 堆疊；db.ts 讀出後已驗證 jsonb 形狀） */
@@ -226,6 +406,8 @@ export interface SimSession extends SimSessionState {
   id: number
   ownerEmail: string
   ownerName: string | null
+  /** D101：讀出時一定有（缺欄或壞掉＝空覆寫） */
+  simCapacity: SimCapacity
   undo: SimUndoEntry[]
   version: number
   runningRunId: number | null
@@ -783,6 +965,8 @@ export interface AiRunRow {
   duration_ms: number | null
   started_at: string
   finished_at: string | null
+  /** D101（sql/20260928c）：這次 AI 執行當下的模擬產能覆寫；null／沒有這欄＝沒有覆寫（或舊程式建立） */
+  sim_capacity?: unknown
 }
 
 /** 列表用（不含 payload／擺放／AI 原文，GET runs 回這個） */
@@ -822,10 +1006,18 @@ export interface AiRun extends AiRunMeta {
   resultPlacements: SimPlacement[] | null
   aiOutput: AiOutput | null
   validation: ValidationReport | null
+  /**
+   * D101：建 run 當下的模擬產能覆寫（AI 就是在這組時數下排的；載入歷史時一併載回）。
+   * null＝當時沒有覆寫（只有非空才寫入），或 run 由舊程式建立（舊 runner 本來就只用正式產能）。
+   */
+  simCapacity: SimCapacity | null
 }
 
-/** 輪詢／詳情用（不含 payload、擺放本體、AI 原文；db.getAiRunSummary） */
-export type AiRunSummary = Omit<AiRun, 'payload' | 'basePlacements' | 'resultPlacements' | 'aiOutput'>
+/**
+ * 輪詢／詳情用（不含 payload、擺放本體、AI 原文；db.getAiRunSummary）。
+ * D101 simCapacity 也不含：摘要查詢用明列欄位，migration 20260928c 套用前選 sim_capacity 會整個查詢失敗。
+ */
+export type AiRunSummary = Omit<AiRun, 'payload' | 'basePlacements' | 'resultPlacements' | 'aiOutput' | 'simCapacity'>
 
 /** 新建 run（POST session/run） */
 export interface NewAiRun {
@@ -838,6 +1030,8 @@ export interface NewAiRun {
   locks: SimLocks
   baseVersion: number
   basePlacements: SimPlacement[]
+  /** D101：只有非空才寫入 sim_capacity 欄（migration 套用前也能建 run） */
+  simCapacity?: SimCapacity | null
 }
 
 /** runner 分階段更新 run 列（只寫有帶的欄位） */
@@ -886,6 +1080,8 @@ export interface AdoptionRow {
   /** 退回處理中的佔位（CAS；AI_REVERT_CLAIM_TTL_MS 後失效）。舊版 migration 沒有這兩欄 → undefined */
   revert_claimed_at?: string | null
   revert_claimed_by?: string | null
+  /** D101（sql/20260928c）：這次採用寫進正式產能表的每一格；null／沒有這欄＝沒有改產能（或舊程式採用） */
+  capacity_changes?: unknown
 }
 
 /** 採用後每張被寫的卡（之後 version 變了＝採用後又被改過） */
@@ -920,6 +1116,8 @@ export interface AiAdoption extends Omit<AdoptionMeta, 'canRevert' | 'skippedCou
   skipped: AdoptionSkip[]
   revertedBy: string | null
   revertReport: RevertReport | null
+  /** D101：採用寫進正式產能表的每一格（退回產能的依據）；null＝沒有改產能 */
+  capacityChanges: CapacityChangeRecord | null
 }
 
 export interface NewAdoption {
@@ -934,6 +1132,8 @@ export interface NewAdoption {
   skipped: AdoptionSkip[]
   actorEmail: string
   actorName: string | null
+  /** D101：只有非 null 才寫入 capacity_changes 欄 */
+  capacityChanges?: CapacityChangeRecord | null
 }
 
 /** 退回預覽／結果中列出的一張卡 */
@@ -955,6 +1155,16 @@ export interface RevertReport {
   changedAfterCount: number
   /** 採用後才新增在範圍內、這次移回待排池的張數 */
   addedAfterCount: number
+  /** D101：產能退回摘要（這次採用沒有改產能＝省略） */
+  capacity?: {
+    restored: number
+    alreadyRestored: number
+    keptChangedAfter: number
+    keptOther: number
+    weekendsClosed: YMD[]
+    /** 產能這段沒有退回的原因（驗證不過等）；null＝有退回 */
+    error: string | null
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -1041,7 +1251,11 @@ export type AiApiErrorCode =
   | 'nothing_to_adopt'     // 範圍內沒有差異
   | 'locked_line_diverged' // 鎖定的線（退回：採用範圍外的線）上的內容與正式排程不一致，採用／退回會造成卡片消失或重複 → 不寫入
   | 'revert_in_progress'   // 這筆採用正在被另一個請求退回（佔位中）
-  | 'migration_required'   // sql/20260928b_packaging_ai.sql 尚未套用
+  | 'migration_required'   // sql/20260928b_packaging_ai.sql（或 D101 的 20260928c）尚未套用
+  // ── D101 模擬產能（POST session/capacity；後兩個與正式產能表同一套驗證碼、同狀態碼 409／422）──
+  | 'sim_weekend_live_open' // 正式產能表已開的週末加班不能在模擬區關閉
+  | 'weekend_has_cards'     // 關閉週末加班前，那天還有卡
+  | 'date_not_workday'      // 國定假日不能填／不能開加班
 
 export interface AiFail {
   success: false
@@ -1049,6 +1263,10 @@ export interface AiFail {
   code: AiApiErrorCode
   /** 第幾個 op 失敗（模擬區操作） */
   opIndex?: number
+  /** D101 模擬產能：哪一天沒通過驗證（weekend_has_cards 等，同正式產能表的回應） */
+  date?: YMD
+  /** D101 weekend_has_cards：那天還有幾張未完成的卡 */
+  cardCount?: number
   /** 採用／退回：正式區編輯鎖狀態 */
   lock?: LockState
   /** 採用／退回：多列寫入中途失敗、前面已寫入（無交易）；前端提示「從版本 #versionId 還原」 */
@@ -1137,9 +1355,15 @@ export interface SimView {
   latestRun: AiRunMeta | null
   /** 有模擬區的被授權人（含自己），供切換唯讀檢視 */
   owners: SimOwnerSummary[]
+  /** D101 模擬產線時數（產能表、橫幅用）；沒有模擬區時 null */
+  capacity: SimCapacityView | null
 }
 
-export type SimViewResponse = ({ success: true } & SimView) | AiFail
+/**
+ * notice（選填）：寫入成功但有一件事要讓主管知道（toast 警告取代成功訊息）。
+ * 目前只有 session/undo：那一步是舊版程式（3711）記錄的、沒有產能快照，模擬產線時數無法還原（D101 驗證修正）。
+ */
+export type SimViewResponse = ({ success: true; notice?: string } & SimView) | AiFail
 
 /** POST /api/packaging/ai/session：建立或重設（重設會先把舊狀態推進 undo） */
 export interface SimCreateRequest {
@@ -1148,6 +1372,22 @@ export interface SimCreateRequest {
   start: SimStartOption
   /** 已有模擬區時必帶（重設＝CAS）；第一次建立省略或 null */
   version?: number | null
+  /**
+   * D101 重設時保留仍落在新範圍內的模擬產線時數（預設 true：重設多半是「換模式重排」，時數設定不該跟著消失；
+   * 舊客戶端沒帶＝true）。模擬才開的週末只保留夾在新範圍第一天與最後一天之間的。
+   */
+  keepCapacity?: boolean
+}
+
+/**
+ * D101 POST /api/packaging/ai/session/capacity：改模擬區的產線時數（只作用在模擬；不需要正式編輯鎖）→ SimViewResponse。
+ * rows 與正式 PUT /api/packaging/capacity 同形（capacityForm.formRowToInput 的輸出），1～SIM_CAPACITY_MAX_ROWS 筆；與 clearAll 二擇一。
+ */
+export interface SimCapacityRequest {
+  version: number
+  rows?: CapacityInput[]
+  /** 「全部回到正式值」：清空覆寫與模擬開的週末（模擬開的週末上還有模擬卡 → 擋下） */
+  clearAll?: true
 }
 
 /** POST /api/packaging/ai/session/ops：模擬區手動操作（D77） */
@@ -1196,6 +1436,8 @@ export type AdoptPreviewResponse =
       versionLabel: string
       /** 鎖定線上與正式排程不一致、會讓採用結果和模擬區不同的項目；非空時 POST 會回 locked_line_diverged（畫面停用採用鈕） */
       lockedConflicts: LockedLineConflict[]
+      /** D101 會一起匯入正式產能表的產線時數；模擬區沒有調整時數＝null */
+      capacity: CapacityAdoptPreview | null
     }
   | AiFail
 
@@ -1214,6 +1456,8 @@ export type AdoptResponse =
       /** 採用前自動存的版本（auto_before_ai） */
       versionId: number
       lock: LockState
+      /** D101 匯入正式產能表的格數；沒有改產能＝null */
+      capacity: { cellsWritten: number; anchors: number; weekendsOpened: YMD[] } | null
     }
   | AiFail
 
@@ -1231,7 +1475,7 @@ export interface AiRunDetail extends AiRunMeta {
   locks: SimLocks
   thresholds: BulkThreshold[]
   validation: ValidationReport | null
-  /** 能否載入目前模擬區（done 且 horizon／windowDates 與目前模擬區相同） */
+  /** 能否載入目前模擬區（done 且 horizon 與「工作日」和目前模擬區相同；D101：模擬開的週末不算，載入時連同當時的週末與時數一起載回） */
   canLoad: boolean
 }
 
@@ -1262,6 +1506,8 @@ export type RevertPreviewResponse =
       canRevert: boolean
       /** 不能退回的原因（canRevert false 時） */
       reason: string | null
+      /** D101 產線時數會怎麼退回；這次採用沒有改產能（或舊程式採用）＝null */
+      capacity: CapacityRevertPreview | null
     }
   | AiFail
 

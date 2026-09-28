@@ -10,8 +10,11 @@ import type { RawSoLine, WorkEstimator } from './classify'
 import { isNonPhysicalLine, nameSaysSample, normDate } from './classify'
 import { allocateSoldToLines, applySoldToCards, type SoSalesRow } from './salesAlloc'
 import { workdaysBetween } from './workdays'
+import { r3, unreflectedCompletedQty } from './scheduleAllocate'
 
 type PoolOk = Extract<PoolResponse, { success: true }>
+
+const EPS = 1e-9
 
 /** D9／D11：交期 5 個工作天內算緊張、打樣類 3 天（同 classify.ts） */
 const URGENT_WORKDAYS = 5
@@ -162,8 +165,16 @@ export function buildManualBlock(input: {
     const inc = incByKey.get(c.soLineKey)
     if (inc) meta[c.soLineKey] = manualMetaOf(inc)
   }
+  return { block: manualBlockOf(cards, input.today), meta, backInPoolKeys, skipped }
+}
+
+/**
+ * 'mn' 區塊的彙總（張數、工時、工時未知、逾期、打樣）。從 buildManualBlock 抽出來，
+ * D102 待排池頁把「已全數完成」的卡拆出去後要用同一套規則重算，兩處共用才不會算法分岔。
+ */
+export function manualBlockOf(cards: PackagingCard[], today: YMD): PoolBlock {
   const m = POOL_BLOCK_META[MANUAL_BLOCK_ID]
-  const block: PoolBlock = {
+  return {
     id: MANUAL_BLOCK_ID,
     title: m.title,
     hint: m.hint,
@@ -171,10 +182,103 @@ export function buildManualBlock(input: {
     cardCount: cards.length,
     totalMinutes: round1(cards.reduce((s, c) => s + (c.work.minutes ?? 0), 0)),
     unknownMinutesCards: cards.filter((c) => c.work.minutes == null).length,
-    overdueCount: cards.filter((c) => !!c.dueDate && c.dueDate < input.today).length,
+    overdueCount: cards.filter((c) => !!c.dueDate && c.dueDate < today).length,
     sampleCount: cards.filter((c) => c.sample.isSample).length,
   }
-  return { block, meta, backInPoolKeys, skipped }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// D102：待排池頁是可排卡片的唯一控制台（手動加入的改數量／移出都在那一頁）
+// ─────────────────────────────────────────────────────────────────────
+// 型別放這裡而不是 scheduleTypes.ts：只有待排池頁與它的 API 用；scheduleTypes 是多人共用的大檔，
+// 放這裡改動面最小。本檔本來就同時 import types 與 scheduleTypes，不會形成型別循環。
+
+/** D102 待排池頁：一筆「有出卡」的手動加入的管理資訊 */
+export interface PoolManualLine {
+  meta: ManualInclusionMeta
+  /**
+   * 未完成擺放合計。伺服器 PATCH 檢查 qty_below_placed 用的就是這個數字（原始擺放量、不修剪），
+   * 所以直接傳給 ManualEditDialog 的 placedQty，畫面預警與伺服器判斷才一致。
+   */
+  placedQty: number
+  /** 已勾完成的擺放合計（顯示用） */
+  completedQty: number
+  /**
+   * 還可排＝max(0, 卡片量 − U − 未完成擺放)，U＝scheduleAllocate.unreflectedCompletedQty（已完成但待排池還沒扣掉的量）。
+   * 為什麼不直接用「卡片量 − 已完成量」：D73 部分銷貨時卡片量已扣掉出貨量，而出貨的多半就是已包完的那批；
+   * 用 U 才和工作台 cardMeta.remainingQty（assembleBoard → allocateLine）一模一樣，兩頁數字不會對不起來。
+   */
+  remainingQty: number
+}
+
+export interface PoolManualEnded {
+  card: PackagingCard
+  line: PoolManualLine
+}
+
+export interface PoolManualSection {
+  /** false＝手動加入表不存在（migration 未套用）或讀取失敗；待排池其他區塊照常顯示 */
+  available: boolean
+  error: string | null
+  /** key＝soLineKey；只含 'mn' 區塊（仍可排）的卡 */
+  lines: Record<string, PoolManualLine>
+  /** 已全數完成：不在 'mn' 區塊、不計入張數與工時，可移出清理（紀錄的終點，lines.md §6.3） */
+  ended: PoolManualEnded[]
+  skipped: { soGone: number; backInPool: number; soldOut: number }
+}
+
+/** GET /api/packaging/pool 的回應（D102：多了 manual；PoolResponse 本身不改，其他使用者不受影響） */
+export type PoolPageResponse =
+  | (PoolOk & { manual: PoolManualSection })
+  | { success: false; error: string; code?: string }
+
+/** 手動層讀不到時的 section（路由降級、前端遇到舊回應都用它） */
+export function unavailableManualSection(error: string): PoolManualSection {
+  return { available: false, error, lines: {}, ended: [], skipped: { soGone: 0, backInPool: 0, soldOut: 0 } }
+}
+
+/**
+ * D102 待排池頁：'mn' 區塊依擺放拆成「仍可排」與「已全數完成」，並算出每一行的已排／已完成／可排量。
+ * - 已全數完成＝沒有未完成擺放、至少一筆已完成、而且可排量 ≤ 0（同工作台「剩 0 就不出卡」）→ 拆到 ended，
+ *   不算進張數與工時；否則「可立即開包」會一直把早就包完的手動卡算進去。
+ * - 已完成量 ≥ 卡片量但還有未完成擺放 → 留在區塊（那些排定卡還沒做，不能當完成）。
+ * - block 來自 getManualMergedPool（多個請求共用的快取物件）→ 一律產生新物件，絕不修改輸入。
+ * 名額判定（manualRecordEnded，用 inc.qty）不改：那是「佔不佔 300 格」的規則，和這裡的顯示分開。
+ */
+export function splitManualForPoolPage(input: {
+  block: PoolBlock
+  meta: Readonly<Record<string, ManualInclusionMeta>>
+  placements: readonly Placement[]
+  today: YMD
+}): { block: PoolBlock; lines: Record<string, PoolManualLine>; ended: PoolManualEnded[] } {
+  const byLine = new Map<string, Placement[]>()
+  for (const p of input.placements) {
+    const arr = byLine.get(p.soLineKey)
+    if (arr) arr.push(p)
+    else byLine.set(p.soLineKey, [p])
+  }
+  const keep: PackagingCard[] = []
+  const lines: Record<string, PoolManualLine> = {}
+  const ended: PoolManualEnded[] = []
+  for (const card of input.block.cards) {
+    const ps = byLine.get(card.soLineKey) ?? []
+    const open = ps.filter((p) => !p.completed)
+    const done = ps.filter((p) => !!p.completed)
+    const placedQty = r3(open.reduce((s, p) => s + p.qty, 0))
+    const completedQty = r3(done.reduce((s, p) => s + p.qty, 0))
+    const u = unreflectedCompletedQty(done, card.qtyCard)
+    const remainingQty = r3(Math.max(0, card.qtyCard - u - placedQty))
+    const meta = input.meta[card.soLineKey]
+    // meta 只含有出卡的行，理論上一定有；萬一沒有就照常顯示卡、不給管理按鈕（不能憑空組 inclusionId）
+    if (!meta) { keep.push(card); continue }
+    const line: PoolManualLine = { meta, placedQty, completedQty, remainingQty }
+    if (open.length === 0 && done.length > 0 && remainingQty <= EPS) ended.push({ card, line })
+    else {
+      keep.push(card)
+      lines[card.soLineKey] = line
+    }
+  }
+  return { block: manualBlockOf(keep, input.today), lines, ended }
 }
 
 /** 正常區塊（不含 'mn'）已有卡的 SO 行 */
@@ -216,4 +320,75 @@ export function manualRecordEnded(
     doneQty += p.qty
   }
   return doneQty + 1e-9 >= inc.qty ? 'done' : null
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// D102 寫後回讀（write-then-read-back）：待排池頁的移出／改量不再拿編輯鎖，與工作台（持鎖者）寫擺放可能交錯
+// ─────────────────────────────────────────────────────────────────────
+// 兩邊原本都是「先讀、後寫」：移出讀到「沒有未完成排定卡」、工作台讀到「手動紀錄還在」，兩個寫入各自成功 →
+//   排定卡沒了供給，讀取時被當成「行已不在待排池」略過（卡從畫面消失）。改量同理：已排量超過新數量，剛排的卡被靜默修剪。
+// 關法（不需要 migration、也不恢復編輯鎖，照 Snow 的決定）：兩邊都改成「先寫、再讀對方的表」。
+//   PostgREST 每個請求各自 commit；read committed 下，兩個「寫→讀」至少有一邊的「讀」看得到另一邊已 commit 的寫入：
+//   - 移出／改量那邊看到了 → 撤回自己（manual/remove、manual PATCH 回 409／422）；
+//   - 工作台那邊看到了 → 以排程為準，把供給恢復（紀錄恢復有效、數量恢復成排程驗證時的值），記 op_log 說明。
+//   兩邊都看到就兩邊都撤回，最後一定是「有未完成排定卡的手動行，一定有有效紀錄、數量不低於已排量」。
+
+/** 排程寫入後要回讀的手動行：這批寫入過（inserts／updates）、只靠手動加入供給（不在正常區塊）、寫入後仍有未完成擺放 */
+export interface ManualReconcileCandidate {
+  soLineKey: string
+  /** 排程驗證時讀到的有效紀錄 */
+  inclusionId: number
+  validatedQty: number
+  /** 寫入後這一行未完成擺放合計（原始 qty，與 PATCH 的 qty_below_placed 同一個算法） */
+  openQty: number
+}
+
+export function manualReconcileCandidates(input: {
+  /** getManualMergedPool 的 meta（排程驗證時的手動供給） */
+  meta: Readonly<Record<string, ManualInclusionMeta>>
+  /** 正常區塊（不含 'mn'）有卡的行：這些行有正常供給，手動紀錄在不在都不會讓卡消失 */
+  normalKeys: ReadonlySet<string>
+  written: Iterable<Pick<Placement, 'soLineKey'>>
+  /** 寫入後的整行狀態（applyOps 的 next：已讀進觸及行的全部擺放＋這批的修改） */
+  next: Iterable<Pick<Placement, 'soLineKey' | 'qty' | 'completed'>>
+}): ManualReconcileCandidate[] {
+  const keys = new Set<string>()
+  for (const p of input.written) if (input.meta[p.soLineKey] && !input.normalKeys.has(p.soLineKey)) keys.add(p.soLineKey)
+  if (keys.size === 0) return []
+  const open = new Map<string, number>()
+  for (const p of input.next) if (keys.has(p.soLineKey) && !p.completed) open.set(p.soLineKey, (open.get(p.soLineKey) ?? 0) + p.qty)
+  const out: ManualReconcileCandidate[] = []
+  for (const k of [...keys].sort()) {
+    const q = open.get(k) ?? 0
+    if (q <= EPS) continue
+    const m = input.meta[k]
+    out.push({ soLineKey: k, inclusionId: m.inclusionId, validatedQty: m.qty, openQty: r3(q) })
+  }
+  return out
+}
+
+/**
+ * 回讀到的有效紀錄 → 要恢復什麼：
+ * - restore：這行已沒有有效紀錄（排程驗證之後被移出）→ 恢復排程驗證時那筆紀錄
+ * - requantify：數量在排程驗證之後被改低、低於寫入後的已排量 → 恢復成排程驗證時的數量（CAS：數量仍是回讀到的值）
+ * 有效紀錄換了一筆（被移出又重新加入）→ 新紀錄已提供供給，不動（新紀錄的數量是別人剛輸入的事實，不覆寫）。
+ */
+export function planManualReconcile(
+  candidates: readonly ManualReconcileCandidate[],
+  active: readonly Pick<ManualInclusion, 'soLineKey' | 'inclusionId' | 'qty'>[],
+): {
+  restore: { soLineKey: string; inclusionId: number }[]
+  requantify: { soLineKey: string; inclusionId: number; from: number; to: number }[]
+} {
+  const byKey = new Map(active.map((a) => [a.soLineKey, a]))
+  const restore: { soLineKey: string; inclusionId: number }[] = []
+  const requantify: { soLineKey: string; inclusionId: number; from: number; to: number }[] = []
+  for (const c of candidates) {
+    const a = byKey.get(c.soLineKey)
+    if (!a) { restore.push({ soLineKey: c.soLineKey, inclusionId: c.inclusionId }); continue }
+    if (a.inclusionId === c.inclusionId && a.qty + EPS < c.openQty && a.qty + EPS < c.validatedQty) {
+      requantify.push({ soLineKey: c.soLineKey, inclusionId: a.inclusionId, from: a.qty, to: c.validatedQty })
+    }
+  }
+  return { restore, requantify }
 }

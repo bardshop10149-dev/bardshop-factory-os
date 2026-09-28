@@ -90,6 +90,8 @@ export async function POST(request: NextRequest) {
       locks: session.locks,
       baseVersion: session.version,
       basePlacements: session.placements,
+      // D101：AI 用建 run 當下的模擬產線時數排（只有非空才寫入 run 列；載入歷史時一併載回）
+      simCapacity: session.simCapacity,
     }, nowIso)
     const claimed = await claimRunSlot(sb, session.id, session.version, run.id, staleRunId)
     if (!claimed) {

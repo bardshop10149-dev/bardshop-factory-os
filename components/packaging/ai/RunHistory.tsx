@@ -3,6 +3,7 @@
 // AI 執行歷史（規格 §三「歷史切換」、預設第 1 點：保留最近 10 次可切換比較；D91 AI 執行也要留 LOG）。
 // 每一列：誰、何時、範圍、模式、結果張數、是否已放進模擬區；可「看結果」，或把結果／AI 前狀態載入模擬區。
 // 只能載入範圍（horizon＋日期）與目前模擬區相同的那幾次（伺服器另回 window_mismatch 把關）。
+// D101：比「工作日」即可（模擬開的週末加班會改變日期清單；有存模擬產線時數的那次，載入時連週末與時數一起載回）。
 
 import { useEffect, useState } from 'react'
 import type { AiRunMeta } from '@/lib/packaging/ai/types'
@@ -11,7 +12,11 @@ import { Btn } from '@/components/packaging/board/Modal'
 import { clock, md } from '@/components/packaging/board/boardFormat'
 import Drawer from './Drawer'
 import { fetchRuns } from './simApi'
+import { isWeekend } from '@/lib/packaging/scheduleCalendar'
 import { sameDates } from './simBoard'
+
+/** D101：兩組模擬日期的工作日是否相同（同伺服器 simCapacity.sameWorkdays；這裡不 import 伺服器端的大檔） */
+const sameWorkdays = (a: readonly YMD[], b: readonly YMD[]) => sameDates(a.filter(d => !isWeekend(d)), b.filter(d => !isWeekend(d)))
 import { MODE_LABEL, RUN_ERROR_LABEL, RUN_STATUS_LABEL, durationText, horizonLabel } from './simText'
 
 export default function RunHistory({ owner, isOwner, currentWindow, busy, nowMs, onClose, onShow, onLoad }: {
@@ -55,11 +60,11 @@ export default function RunHistory({ owner, isOwner, currentWindow, busy, nowMs,
       ) : (
         <ul className="space-y-2">
           {runs.map(r => {
-            const loadable = isOwner && r.status === 'done' && currentWindow != null && sameDates(r.windowDates, currentWindow)
+            const loadable = isOwner && r.status === 'done' && currentWindow != null && sameWorkdays(r.windowDates, currentWindow)
             const why = !isOwner ? '別人的模擬區只能檢視'
               : r.status !== 'done' ? '這次沒有完成，沒有結果可載入'
                 : currentWindow == null ? '目前沒有模擬區'
-                  : !sameDates(r.windowDates, currentWindow) ? '範圍與目前模擬區不同，不能載入' : undefined
+                  : !sameWorkdays(r.windowDates, currentWindow) ? '範圍與目前模擬區不同，不能載入' : undefined
             return (
               <li key={r.id} className="rounded-lg border border-slate-800 bg-slate-950/50 px-3 py-2 text-xs">
                 <div className="flex items-center gap-2">

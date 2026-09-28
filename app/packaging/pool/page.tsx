@@ -11,11 +11,15 @@ import {
   type PoolBlockId,
   type PoolExcluded,
   type PoolFreshness,
-  type PoolResponse,
   type StaleUnsynced,
 } from '@/lib/packaging/types'
+import { MANUAL_BLOCK_ID } from '@/lib/packaging/scheduleTypes'
+// 只 import 型別：manualPool.ts 會連帶 classify.ts 等伺服器端純函式，值 import 會把它們整包拉進瀏覽器
+import type { PoolManualSection, PoolPageResponse } from '@/lib/packaging/manualPool'
 import PoolBlock from '@/components/packaging/PoolBlock'
 import PackagingOrderModal from '@/components/packaging/PackagingOrderModal'
+import ManualPoolSection from '@/components/packaging/pool/ManualPoolSection'
+import { usePoolManual } from '@/components/packaging/pool/usePoolManual'
 import {
   BLOCK_SHORT,
   BLOCK_TONE,
@@ -27,12 +31,19 @@ import {
   fmtShortDate,
 } from '@/components/packaging/poolStyles'
 
-// 包裝專區 P0：唯讀待排池（D42）。
+// 包裝專區待排池頁（P0 起，D42）。
 // 資料全部來自 GET /api/packaging/pool（伺服器端彙整 ERP／塔台／採購追蹤／出單表並算好區塊、工時、旗標），
-// 這一頁只負責「顯示＋前端篩選排序」，不存任何資料。
-// 瀏覽器端的 Supabase 是 anon，受保護表查不到，所以不在這裡直接查表。
+// 這一頁負責「顯示＋前端篩選排序」；瀏覽器端的 Supabase 是 anon，受保護表查不到，所以不在這裡直接查表。
+//
+// D102「待排池頁是可排卡片的唯一控制台」（Snow：「所有可排的卡片都在那張卡裡面控制」）：
+//   - 最上面多「手動加入」區塊（'mn'，ManualPoolSection）：主管按標題列「＋加入訂單」把不在待排池的訂單品項加進來，
+//     手動卡的「改數量…／移出待排池」也在這一頁（排程工作台側欄已拿掉這些入口，手動卡在工作台照樣顯示、照樣能拖）。
+//   - 權限：主管（admin 或 packaging_admin）可加入／改量／移出；唯讀者（packaging）按「查詢訂單」只能查、不能加。
+//   - 不需要編輯鎖（Snow 確認：工作台有人在編輯也照樣能加；工作台按重新整理就看得到新卡）。
+//     寫入只經 /api/packaging/manual*（伺服器仍驗 packaging_admin 與數量），這頁本身不寫任何資料。
+//   - 手動卡算進摘要的「共 N 張卡／估計工時／可立即開包」（它們也是可排的卡）；已全數完成的在伺服器就拆出去，不灌水。
 
-type PoolOk = Extract<PoolResponse, { success: true }>
+type PoolOk = Extract<PoolPageResponse, { success: true }>
 type SortMode = 'default' | 'due_asc' | 'due_desc'
 type Focus = 'all' | 'ready' | 'danger' | 'overdue' | 'sample' | 'maybe_unshipped'
 
@@ -271,6 +282,8 @@ function StaleUnsyncedPanel({ stale, today, onOpenOrder }: { stale: StaleUnsynce
 export default function PackagingPoolPage() {
   const router = useRouter()
   const [auth, setAuth] = useState<'checking' | 'allowed' | 'denied'>('checking')
+  /** D102：主管（is_admin 或 packaging_admin，同伺服器 guardPackaging('write')）才顯示加入／改量／移出；只影響按鈕，守門在伺服器 */
+  const [canEdit, setCanEdit] = useState(false)
   const [data, setData] = useState<PoolOk | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -288,6 +301,8 @@ export default function PackagingPoolPage() {
   const [orderSo, setOrderSo] = useState<string | null>(null)
 
   const inflight = useRef(false)
+  /** 載入中又有人要求重抓（D102 手動加入寫入成功）：載完再抓一次，不能像輪詢那樣直接丟掉 */
+  const reloadQueued = useRef(false)
   const lastLoadAt = useRef(0)
 
   // 「隱藏舊單」勾選已移除（D43），清掉舊偏好
@@ -304,6 +319,7 @@ export default function PackagingPoolPage() {
         if (!res.ok) { setAuth('denied'); return }
         const me = await res.json() as { is_admin?: boolean; permissions?: string[] }
         const perms = Array.isArray(me.permissions) ? me.permissions : []
+        setCanEdit(Boolean(me.is_admin) || perms.includes('packaging_admin'))
         setAuth(Boolean(me.is_admin) || perms.includes('packaging') || perms.includes('packaging_admin') ? 'allowed' : 'denied')
       } catch { setAuth('denied') }
     }
@@ -318,10 +334,14 @@ export default function PackagingPoolPage() {
       const res = await fetch(`/api/packaging/pool${fresh ? '?fresh=1' : ''}`, { cache: 'no-store' })
       if (res.status === 401) { router.replace('/login'); return }
       if (res.status === 403) { setAuth('denied'); return }
-      const json = await res.json().catch(() => null) as PoolResponse | null
+      const json = await res.json().catch(() => null) as PoolPageResponse | null
       if (!json) throw new Error(`伺服器回應無法解析（HTTP ${res.status}）`)
       if (!json.success) throw new Error(json.error || `HTTP ${res.status}`)
-      setData(json)
+      // 部署交接時可能拿到舊版回應（沒有 manual）：手動區顯示暫不可用，其他照常（形狀同 manualPool.unavailableManualSection）
+      const oldServer: PoolManualSection = {
+        available: false, error: '伺服器版本較舊，請稍後重新整理', lines: {}, ended: [], skipped: { soGone: 0, backInPool: 0, soldOut: 0 },
+      }
+      setData(json.manual ? json : { ...json, manual: oldServer })
       setError(null)
       lastLoadAt.current = Date.now()
     } catch (e) {
@@ -330,8 +350,24 @@ export default function PackagingPoolPage() {
       inflight.current = false
       setLoading(false)
       setNow(Date.now())
+      if (reloadQueued.current) {
+        reloadQueued.current = false
+        void load(false)
+      }
     }
   }, [router])
+
+  /**
+   * D102 手動加入寫入後的重抓（排隊版）。既有 load() 遇到進行中直接 return（輪詢撞到就算了，5 分鐘後還會再抓）；
+   * 但寫入後那次不能漏——剛好撞上輪詢時，等它載完再抓一次。
+   * 不用 fresh=1：手動寫入不改底層待排池（ERP／塔台彙整），伺服器手動層有自己的失效機制，一般讀取 0.3～1 秒就是新的。
+   */
+  const requestReload = useCallback(() => {
+    if (inflight.current) { reloadQueued.current = true; return }
+    void load(false)
+  }, [load])
+
+  const manualCtl = usePoolManual({ canEdit, onChanged: requestReload })
 
   useEffect(() => { if (auth === 'allowed') void load(false) }, [auth, load])
 
@@ -427,7 +463,8 @@ export default function PackagingPoolPage() {
   }, [])
 
   const setAllCollapsed = (collapse: boolean) => {
-    const next = collapse ? new Set<PoolBlockId>(POOL_BLOCK_ORDER) : new Set<PoolBlockId>()
+    // D102：'mn' 不在 POOL_BLOCK_ORDER（摘要晶片不放它），「全部收合」要另外補上
+    const next = collapse ? new Set<PoolBlockId>([...POOL_BLOCK_ORDER, MANUAL_BLOCK_ID]) : new Set<PoolBlockId>()
     writeCollapsed(next)
     setCollapsed(next)
   }
@@ -482,7 +519,10 @@ export default function PackagingPoolPage() {
               className="mb-2 inline-block text-xs font-mono text-slate-400 hover:text-white transition-colors">← 包裝專區</Link>
             <h1 className="text-2xl font-bold">
               待排池
-              <span className="ml-2 align-middle rounded border border-amber-600/50 bg-amber-950/40 px-1.5 py-0.5 text-[11px] font-semibold text-amber-300">唯讀 P0</span>
+              {/* D102：這頁不再是唯讀總覽——主管可在這裡手動加入、改數量、移出；徽章依權限顯示（字樣同包裝專區首頁） */}
+              <span className={`ml-2 align-middle rounded border px-1.5 py-0.5 text-[11px] font-semibold ${canEdit
+                ? 'border-violet-500/40 bg-violet-500/10 text-violet-300'
+                : 'border-slate-600 bg-slate-800/60 text-slate-400'}`}>{canEdit ? '主管編輯權限' : '唯讀'}</span>
             </h1>
             <p className="mt-1 text-sm text-slate-400">
               依來源分組的待包裝品項（一張卡＝一個 ARGO 品項行）
@@ -490,8 +530,21 @@ export default function PackagingPoolPage() {
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
+            {/* D102：手動加入的入口（主管＝加入；唯讀＝只能查詢某張單為什麼不在待排池） */}
+            <button
+              type="button"
+              onClick={manualCtl.openAdd}
+              disabled={!data || !data.manual.available}
+              title={data && !data.manual.available
+                ? `手動加入暫時無法使用：${data.manual.error ?? ''}`
+                : canEdit ? '手動把不在待排池的訂單品項加進來排程（D66／D102）' : '查詢某張單的品項為什麼不在待排池（加入需要包裝主管權限）'}
+              className={canEdit
+                ? 'rounded-lg border border-amber-500 bg-amber-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-amber-500 disabled:opacity-50'
+                : 'rounded-lg border border-slate-600 bg-slate-800 px-3 py-1.5 text-xs font-semibold text-slate-200 hover:bg-slate-700 disabled:opacity-50'}
+            >{canEdit ? '＋加入訂單' : '查詢訂單'}</button>
+            {/* D102 起與排程工作台共用同一份待排池快取（D98：2 分鐘內直接用；較舊時先顯示舊的、背景更新，最多 10 分鐘） */}
             {genAt && (
-              <span className="text-[11px] text-slate-500" title={`伺服器彙整時間 ${data?.generatedAt}${data?.cached ? '（伺服器快取，2 分鐘內共用）' : ''}`}>
+              <span className="text-[11px] text-slate-500" title={`伺服器彙整時間 ${data?.generatedAt}${data?.cached ? '（伺服器快取：與排程工作台共用，2 分鐘內直接用；較舊時先顯示、背景更新）' : ''}`}>
                 彙整於 {genAt.clock}（{genAt.ago}）{data?.cached ? '・快取' : ''}
               </span>
             )}
@@ -499,7 +552,7 @@ export default function PackagingPoolPage() {
               type="button"
               onClick={() => void load(true)}
               disabled={loading}
-              title="略過伺服器快取，重新彙整（約 3~6 秒）"
+              title="略過伺服器快取，重新彙整（約 3~6 秒；30 秒內重按視同一般讀取）"
               className="rounded-lg border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs font-semibold text-slate-200 hover:bg-slate-700 disabled:opacity-50"
             >{loading ? '更新中…' : '重新整理'}</button>
           </div>
@@ -548,6 +601,14 @@ export default function PackagingPoolPage() {
                 <span className="text-lime-300" title="狀態為「可包」或「前站已完工」的卡片工時合計">
                   可立即開包 <b className="text-lg">{fmtHours(summary.readyMinutes)}</b> 小時
                 </span>
+                {/* D102：手動卡已算進上面的張數與工時；另給一個跳到手動區的入口（不放進 10 格晶片列，會變 11 格換行） */}
+                {data.manual.available && (
+                  <button type="button" onClick={() => jumpTo(MANUAL_BLOCK_ID)}
+                    title="主管手動加入的品項（已算進共 N 張卡與工時）；點一下跳到「手動加入」區"
+                    className="text-amber-300 underline decoration-dotted underline-offset-2 hover:text-amber-200">
+                    其中手動加入 {blockMap.get(MANUAL_BLOCK_ID)?.cardCount ?? 0} 張
+                  </button>
+                )}
                 {summary.unknown > 0 && <span className="text-orange-300">工時未知 {summary.unknown} 張</span>}
                 {summary.overdue > 0 && <span className="font-semibold text-red-300">已逾期 {summary.overdue} 張</span>}
                 {data.staleUnsynced.count > 0 && (
@@ -638,6 +699,25 @@ export default function PackagingPoolPage() {
                 className="rounded border border-slate-700 bg-slate-900 px-2 py-1 text-[11px] text-slate-400 hover:text-white">全部展開</button>
               <button type="button" onClick={() => setAllCollapsed(true)}
                 className="rounded border border-slate-700 bg-slate-900 px-2 py-1 text-[11px] text-slate-400 hover:text-white">全部收合</button>
+            </div>
+
+            {/* ─── D102 手動加入（'mn'）：所有區塊最上面；篩選、排序、全部收合與其他區塊同一套 ─── */}
+            <div className="mt-4">
+              <ManualPoolSection
+                block={blockMap.get(MANUAL_BLOCK_ID)}
+                cards={viewCards.get(MANUAL_BLOCK_ID) ?? []}
+                filtered={filtered}
+                collapsed={collapsed.has(MANUAL_BLOCK_ID)}
+                onToggle={() => toggleBlock(MANUAL_BLOCK_ID)}
+                manual={data.manual}
+                today={data.today}
+                canEdit={canEdit}
+                changpingSyncLabel={cpSyncLabel}
+                onOpenOrder={setOrderSo}
+                onAdd={manualCtl.openAdd}
+                onEdit={manualCtl.openEdit}
+                onRemove={manualCtl.openRemove}
+              />
             </div>
 
             {/* ─── 跨來源的整列區塊（ns：已發單・未上塔台，D44）─── */}
@@ -748,6 +828,7 @@ export default function PackagingPoolPage() {
       </div>
 
       {orderSo && <PackagingOrderModal so={orderSo} open onClose={() => setOrderSo(null)} />}
+      {manualCtl.dialogs}
     </div>
   )
 }

@@ -17,15 +17,16 @@ export const POOL_BLOCK_META: Record<PoolBlockId, { title: string; group: 'chang
   '5c': { title: '委外 — 出貨待確認', group: 'outsource', hint: '採購交期前 2 個工作天仍未點出貨' },
   // D44：出單表 30 天內已發單、比對不到任何塔台批、又沒有採購／製令來源的 SO 行（例：壓克力集單）
   'ns': { title: '已發單・未上塔台', group: 'shared', hint: '出單表 30 天內已發單、塔台尚未建立，請確認是否已轉塔台' },
-  // D66：主管在工作台「＋加入訂單」手動加入的 SO 品項行（只出現在工作台待排池，P0 唯讀待排池頁不列）
+  // D66：主管「＋加入訂單」手動加入的 SO 品項行（D102 起入口在待排池頁；工作台與待排池頁都會顯示，各自決定放哪裡）
   'mn': { title: '手動加入', group: 'shared', hint: '主管手動加入的品項（不在自動判定的待排池內），可正常排程' },
 }
 
 export const POOL_BLOCK_ORDER = ['3', 'ns', '1', '1b', '2', '4', '4x', '5c', '5a', '5b'] as const satisfies readonly PoolBlockId[]
 /**
- * 只出現在 P1 工作台待排池、不由 classifyPool 產生的區塊（D66 手動加入 'mn'）。
- * 刻意不放進 POOL_BLOCK_ORDER：P0 唯讀待排池頁（app/packaging/pool，本輪不改）以 ORDER 畫摘要晶片與空區塊殼，
- * 放進去會在 P0 頁多出一個永遠是 0 的「手動加入」晶片。工作台的區塊順序由 lib/packaging/manualPool.ts 決定（'mn' 在最前）。
+ * 不由 classifyPool 產生、各頁自行決定位置的區塊（D66 手動加入 'mn'）。
+ * 刻意不放進 POOL_BLOCK_ORDER：待排池頁（app/packaging/pool）以 ORDER 畫 10 格摘要晶片與空區塊殼，放進去會變 11 格換行；
+ * D102 起待排池頁由 ManualPoolSection 把它畫在最上面，工作台側欄也排在最前（lib/packaging/manualPool.ts 決定）。
+ * 常數名沿用 BOARD_ONLY（改名會牽動編譯期防呆，收益小）。
  */
 export const BOARD_ONLY_BLOCKS = ['mn'] as const satisfies readonly PoolBlockId[]
 /** 編譯期防呆：新增 PoolBlockId 卻沒放進 POOL_BLOCK_ORDER（或 BOARD_ONLY_BLOCKS）時，這裡會編譯失敗（blocks 由 ORDER 產生，漏放的區塊整塊卡片會悄悄消失） */

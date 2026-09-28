@@ -1,6 +1,6 @@
 // 包裝專區 — 待排池共用快取（規格 §7.1；D98 ② 先給舊資料、背景更新）
 //
-// /api/packaging/board 與所有 P1 寫入 API 共用同一份（同一個 Vercel 實例內的模組層記憶體）：
+// /api/packaging/board、/api/packaging/pool（D102 起）與所有 P1 寫入 API 共用同一份（同一個 Vercel 實例內的模組層記憶體）：
 // - 讀（board）用 maxAgeMs = 120 秒：塔台 30 分、ERP 5 分～1 小時才同步，2 分鐘內重算沒有意義。
 // - 寫（placements／complete…）用 10 分鐘：驗證只需要「這一行大概有多少可排量、預估可包日」，
 //   換來拖曳不會碰到 3～6 秒的冷啟動重算。讀取時會再依最新資料修剪／標示（規格 §9.1 第 8 條）。
@@ -24,7 +24,7 @@
 // 快取本體（可注入 build／時鐘，單元測試用）在 poolCacheCore.ts；本檔只負責接上正式的 build 與 after()。
 //
 // 只「讀」buildPackagingPool 的輸出，不修改 pool 邏輯。回傳的物件是多個請求共用的，呼叫端不可修改它。
-// （/api/packaging/pool 目前仍用自己的模組快取；改為共用本檔屬該 route 的修改，不在本次範圍。）
+// （D102：/api/packaging/pool 已改用本檔，待排池頁與工作台看的是同一份。）
 
 import { after } from 'next/server'
 import { describeError, getSupabaseAdminClient } from '@/lib/supabaseAdmin'

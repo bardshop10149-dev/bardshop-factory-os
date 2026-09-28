@@ -8,7 +8,11 @@
 // - 途程類型預設用查詢給的建議值（有常平採購＝常平、其他廠商採購＝委外、否則自製），用來估工時。
 // - 已在待排池、已手動加入、費用行、訂單量 0 的行不能勾（伺服器加入時還會再驗一次，不信任前端）。
 // 同檔另有：ManualEditDialog（改手動加入數量／途程／原因，PATCH）、ManualRemoveDialog（移出待排池，POST /manual/remove）。
-// 手動加入／移出是「供給」的事實輸入，不進 Undo；誤加可移出、誤移出可再加入。寫入要 packaging_admin＋編輯鎖。
+// 手動加入／移出是「供給」的事實輸入，不進 Undo；誤加可移出、誤移出可再加入。
+// D102：入口搬到待排池頁（components/packaging/pool/usePoolManual），工作台側欄不再開這三個對話框。
+//   寫入只要 packaging_admin，不再需要編輯鎖（Snow 確認；伺服器理由見 app/api/packaging/manual/route.ts 檔頭），
+//   所以對話框不再向父層要 lockToken（getLockToken 保留成選填、不使用，只為舊呼叫端能編譯）。
+//   唯讀者（沒有 packaging_admin）按「查詢訂單」開的是 editable=false：可查某張單為什麼不在待排池，不能加入。
 
 import { useState } from 'react'
 import {
@@ -67,10 +71,11 @@ export function parseSoInput(raw: string): { so: string; lineNo: string | null }
   return m ? { so: m[1], lineNo: String(Number(m[2])) } : { so: t, lineNo: null }
 }
 
-/** 寫入失敗 → 中文說明（伺服器 error 已是中文；鎖相關統一說法） */
+/** 寫入失敗 → 中文說明（伺服器 error 已是中文） */
 export function manualError(r: ApiResult<ManualMutationResponse>): string {
   const j = r.json && !r.json.success ? r.json : null
-  if (j?.code === 'lock_required' || j?.code === 'lock_lost') return '編輯權已失效，請重新取得編輯權後再操作'
+  // D102 起伺服器不再回鎖相關錯誤；部署交接那幾分鐘若打到舊版伺服器才可能出現
+  if (j?.code === 'lock_required' || j?.code === 'lock_lost') return '伺服器仍要求編輯權（可能正在更新版本），請稍後重新整理再試'
   if (r.missingTable) return r.error ?? '資料庫尚未更新'
   return j?.error || r.error || '儲存失敗'
 }
@@ -106,7 +111,7 @@ function stateBadge(l: ManualLookupLine, action?: React.ReactNode) {
     return (
       <div className="text-[10px] text-violet-300">
         手動・{l.manual.addedByName ?? l.manual.addedBy}・{clock(l.manual.addedAt)}（{fmtQty(l.manual.qty)}，
-        {l.manualDone ? '已全數完成，待排池已無此卡；不再需要可移出' : '改數量請在待排池卡片按右鍵'}）
+        {l.manualDone ? '已全數完成，待排池已無此卡；不再需要可移出' : '改數量／移出請用待排池頁「手動加入」區該卡的按鈕'}）
         {action}
       </div>
     )
@@ -114,13 +119,19 @@ function stateBadge(l: ManualLookupLine, action?: React.ReactNode) {
   return null
 }
 
-export default function ManualAddDialog({ editable, getLockToken, onClose, onChanged }: {
-  /** 持有編輯鎖（沒有時只能查詢） */
+/** D102：唯讀時 footer 的預設說明（加入不再需要編輯鎖，只看權限） */
+const DEFAULT_READONLY_NOTE = '唯讀：可以查詢這張單為什麼不在待排池；加入需要包裝主管（packaging_admin）權限'
+
+export default function ManualAddDialog({ editable, onClose, onChanged, readOnlyNote }: {
+  /** 可以加入／移出（D102：＝有 packaging_admin；false＝只能查詢） */
   editable: boolean
-  getLockToken: () => string | null
+  /** @deprecated D102 起不需要編輯鎖，這個參數不再使用（保留只為舊呼叫端能編譯） */
+  getLockToken?: () => string | null
   onClose: () => void
-  /** 加入成功（父層重新載入工作台） */
+  /** 加入／移出成功（父層重新載入待排池） */
   onChanged: () => void
+  /** 唯讀（editable=false）時 footer 顯示的說明；省略用 DEFAULT_READONLY_NOTE */
+  readOnlyNote?: string
 }) {
   const [soText, setSoText] = useState('')
   const [data, setData] = useState<LookupOk | null>(null)
@@ -166,8 +177,6 @@ export default function ManualAddDialog({ editable, getLockToken, onClose, onCha
 
   const submit = async () => {
     if (!canSubmit) return
-    const token = getLockToken()
-    if (!token) { setError('需要先取得編輯權（開始編輯）'); return }
     setSaving(true)
     setError(null)
     try {
@@ -177,7 +186,7 @@ export default function ManualAddDialog({ editable, getLockToken, onClose, onCha
         routeType: forms[l.soLineKey].route,
         reason: reasonTrim || null,
       }))
-      const r = await addManual(token, items)
+      const r = await addManual(items)
       if (!r.json?.success) { setError(manualError(r)); return }
       const added = r.json.inclusions.length
       setResult({ added, skipped: r.json.skipped })
@@ -195,12 +204,10 @@ export default function ManualAddDialog({ editable, getLockToken, onClose, onCha
   // 移出手動加入紀錄（軟刪除）。主要給「已全數完成、待排池已無此卡」的紀錄用；
   // 還有未完成排定卡時伺服器回 manual_has_placements，照樣顯示錯誤訊息。
   const removeLine = async (soLineKey: string) => {
-    const token = getLockToken()
-    if (!token) { setError('需要先取得編輯權（開始編輯）'); return }
     setSaving(true)
     setError(null)
     try {
-      const r = await removeManual({ lockToken: token, soLineKey, reason: null })
+      const r = await removeManual({ soLineKey, reason: null })
       if (!r.json?.success) { setError(manualError(r)); return }
       setConfirmRemove(null)
       onChanged()
@@ -233,12 +240,12 @@ export default function ManualAddDialog({ editable, getLockToken, onClose, onCha
 
   return (
     <Modal
-      title="手動加入訂單品項（D66）"
+      title={editable ? '手動加入訂單品項（D66）' : '查詢訂單品項為什麼不在待排池'}
       onClose={onClose}
       wide
       footer={<>
         {error && <span className="mr-auto text-xs text-rose-300">{error}</span>}
-        {!error && !editable && <span className="mr-auto text-xs text-slate-400">唯讀：可以查詢，取得編輯權後才能加入</span>}
+        {!error && !editable && <span className="mr-auto text-xs text-slate-400">{readOnlyNote ?? DEFAULT_READONLY_NOTE}</span>}
         {!error && editable && tooMany && <span className="mr-auto text-xs text-orange-300">一次最多加入 {MAX_MANUAL_ITEMS_PER_REQUEST} 行</span>}
         {!error && editable && !tooMany && qtyErr && <span className="mr-auto text-xs text-orange-300">第 {qtyErr.lineNo} 項數量須大於 0、最多 3 位小數</span>}
         <Btn onClick={onClose}>{result ? '完成' : '取消'}</Btn>
@@ -379,8 +386,9 @@ export default function ManualAddDialog({ editable, getLockToken, onClose, onCha
               </label>
             )}
             <p className="text-[11px] leading-relaxed text-slate-500">
-              加入後出現在待排池最上面的「手動加入」區塊，一律視為可包（實線），可以正常排程、拆卡、勾完成。
-              之後若這一行自己回到待排池（例：塔台補上報工），手動卡會自動讓位，不會重複計算。要取消請在待排池卡片按右鍵「移出待排池」。
+              加入後出現在待排池最上面的「手動加入」區塊，一律視為可包（實線），可以到排程工作台正常排程、拆卡、勾完成
+              （工作台已開著的話按「重新整理」就看得到）。
+              之後若這一行自己回到待排池（例：塔台補上報工），手動卡會自動讓位，不會重複計算。要取消請在「手動加入」區按該卡的「移出待排池」。
             </p>
           </>
         )}
@@ -393,12 +401,13 @@ export default function ManualAddDialog({ editable, getLockToken, onClose, onCha
 // 改手動加入數量／途程類型／原因（PATCH /api/packaging/manual）
 // ─────────────────────────────────────────────────────────────────────
 
-export function ManualEditDialog({ card, meta, placedQty, getLockToken, onClose, onChanged }: {
+export function ManualEditDialog({ card, meta, placedQty, onClose, onChanged }: {
   card: PackagingCard
   meta: ManualInclusionMeta
   /** 目前已排出去的量（參考；伺服器以「未完成擺放合計」檢查，低於它回 qty_below_placed） */
   placedQty: number
-  getLockToken: () => string | null
+  /** @deprecated D102 起不需要編輯鎖，不再使用 */
+  getLockToken?: () => string | null
   onClose: () => void
   onChanged: () => void
 }) {
@@ -418,13 +427,10 @@ export function ManualEditDialog({ card, meta, placedQty, getLockToken, onClose,
 
   const save = async () => {
     if (!canSave) return
-    const token = getLockToken()
-    if (!token) { setError('需要先取得編輯權（開始編輯）'); return }
     setSaving(true)
     setError(null)
     try {
       const r = await updateManual({
-        lockToken: token,
         soLineKey: card.soLineKey,
         ...(changedQty ? { qty: Number(qty.trim()) } : {}),
         ...(changedRoute ? { routeType: route } : {}),
@@ -459,7 +465,7 @@ export function ManualEditDialog({ card, meta, placedQty, getLockToken, onClose,
           <input autoFocus value={qty} inputMode="decimal" onChange={e => setQty(e.target.value)}
             className={`w-28 rounded border bg-slate-950 px-1.5 py-0.5 text-right tabular-nums text-slate-100 ${qtyOk ? 'border-slate-600' : 'border-rose-500'}`} />
           {!qtyOk && <span className="text-[11px] text-rose-300">須大於 0、最多 3 位小數</span>}
-          {belowPlaced && <span className="text-[11px] text-orange-300">低於已排量，可能會被擋下（請先把卡放回待排池）</span>}
+          {belowPlaced && <span className="text-[11px] text-orange-300">低於已排量，會被擋下（請先到排程工作台把排定卡拖回待排池）</span>}
         </label>
         <label className="flex items-center gap-2">
           <span className="w-16 text-slate-400">途程類型</span>
@@ -485,10 +491,11 @@ export function ManualEditDialog({ card, meta, placedQty, getLockToken, onClose,
 // 移出待排池（POST /api/packaging/manual/remove；軟刪除，紀錄保留）
 // ─────────────────────────────────────────────────────────────────────
 
-export function ManualRemoveDialog({ card, meta, getLockToken, onClose, onChanged }: {
+export function ManualRemoveDialog({ card, meta, onClose, onChanged }: {
   card: PackagingCard
   meta: ManualInclusionMeta
-  getLockToken: () => string | null
+  /** @deprecated D102 起不需要編輯鎖，不再使用 */
+  getLockToken?: () => string | null
   onClose: () => void
   onChanged: () => void
 }) {
@@ -497,12 +504,10 @@ export function ManualRemoveDialog({ card, meta, getLockToken, onClose, onChange
   const [error, setError] = useState<string | null>(null)
 
   const remove = async () => {
-    const token = getLockToken()
-    if (!token) { setError('需要先取得編輯權（開始編輯）'); return }
     setSaving(true)
     setError(null)
     try {
-      const r = await removeManual({ lockToken: token, soLineKey: card.soLineKey, reason: reason.trim() || null })
+      const r = await removeManual({ soLineKey: card.soLineKey, reason: reason.trim() || null })
       if (!r.json?.success) { setError(manualError(r)); return }
       onChanged()
       onClose()
@@ -525,7 +530,7 @@ export function ManualRemoveDialog({ card, meta, getLockToken, onClose, onChange
         <div className="break-words text-slate-200">{card.itemName ?? '（無品名）'}・{fmtQty(meta.qty)}</div>
         <ul className="list-disc space-y-0.5 pl-4 text-[11px] text-slate-400">
           <li>這一行會從「手動加入」區塊消失；紀錄保留，之後可以再加入。</li>
-          <li>還有未完成的排定卡時不能移出，請先把卡放回待排池。已勾完成的卡不受影響。</li>
+          <li>還有未完成的排定卡時不能移出，請先到排程工作台把排定卡拖回待排池。已勾完成的卡不受影響。</li>
           <li>不進復原（Undo）。</li>
         </ul>
         <input value={reason} maxLength={ADJUST_REASON_MAX} onChange={e => setReason(e.target.value)}

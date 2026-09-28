@@ -4,20 +4,16 @@ import type {
   CapacityInput,
   CapacityResponse,
   DailyCapacity,
-  DailyCapacityRow,
-  LineCapacity,
-  LineCapacityRow,
   LockState,
   YMD,
 } from '@/lib/packaging/scheduleTypes'
 import { guardPackaging, noStore, readJson, requireJson } from '@/lib/packaging/guard'
 import { addDays, isValidYmd, isWeekend } from '@/lib/packaging/scheduleCalendar'
-import { resolveDayCapacity, validateCapacityDayInput } from '@/lib/packaging/scheduleCapacity'
+import { resolveDayCapacity } from '@/lib/packaging/scheduleCapacity'
+import { planCapacityPut } from '@/lib/packaging/capacityPlan'
+import { executeCapacityPlan } from '@/lib/packaging/capacityWrite'
 import {
   countOpenByDates,
-  deleteCapacity,
-  deleteLineCapacity,
-  deleteLineCapacityDates,
   insertOpLog,
   isMissingSchema,
   linesMigrationMessage,
@@ -25,8 +21,6 @@ import {
   loadLineCapacityRows,
   loadLines,
   publicDbError,
-  upsertCapacity,
-  upsertLineCapacity,
   verifyAndTouchLock,
   type SupabaseAdmin,
 } from '@/lib/packaging/scheduleDb'
@@ -53,15 +47,12 @@ export const dynamic = 'force-dynamic'
 const DEFAULT_SPAN_DAYS = 60
 const MAX_SPAN_DAYS = 180
 const MAX_PUT_ROWS = 60
-/** packaging_daily_capacity 的 regular_hours／overtime_hours_max check 上限（sql/20260927_packaging_schedule.sql） */
-const DAILY_TOTAL_HOURS_MAX = 5000
 /** 算「沿用最近一次填的平日值」要往前看的天數 */
 const LOOKBACK_DAYS = 400
 
 type Fail = Extract<CapacityResponse, { success: false }>
 const fail = (status: number, body: Omit<Fail, 'success'>) => noStore<Fail>({ success: false, ...body }, status)
 const byDate = <T extends { date: YMD }>(a: T, b: T) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0)
-const toHours = (min: number | null): number => (min == null ? 0 : Math.round((min / 60) * 100) / 100)
 
 function daySpan(from: YMD, to: YMD): number {
   return Math.round((Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / 86_400_000)
@@ -109,9 +100,6 @@ export async function GET(request: NextRequest) {
   }
 }
 
-type LineUpsert = Omit<LineCapacityRow, 'updated_at'>
-type DailyUpsert = Omit<DailyCapacityRow, 'updated_at'>
-
 export async function PUT(request: NextRequest) {
   const g = await guardPackaging('write')
   if (!g.ok) return g.res
@@ -147,101 +135,18 @@ export async function PUT(request: NextRequest) {
       loadLineCapacityRows(sb, lookFrom, lookTo),
       countOpenByDates(sb, weekendDates),
     ])
-    const lineRowsOn = (d: YMD) => lineAll.filter((r) => r.date === d)
-
-    // 1. 逐日驗證（任何一天不過 → 整批不寫）
-    for (const r of rows) {
-      const v = validateCapacityDayInput(r, { today, lines, openCardCountOn: (d) => counts.get(d) ?? 0, existingLineRows: lineRowsOn })
-      if (!v.ok) {
-        const status = v.code === 'weekend_has_cards' ? 409 : 422
-        return fail(status, { code: v.code, error: v.message, date: r.date, ...(v.cardCount != null ? { cardCount: v.cardCount } : {}) })
-      }
+    // D101：第 1～3 步（逐日驗證 → 記憶體算寫入後的列與總時數 → 寫入順序）抽到 lib/packaging/capacityPlan.ts，
+    //   AI 採用／退回採用寫產能也走同一個函式（不長出第二套產能規則）；抽出前後輸出逐欄相同（回歸比對測試）。
+    const planned = planCapacityPut(rows, {
+      today, nowIso, actor, lines, dailyAll, lineAll, openCardCountOn: (d) => counts.get(d) ?? 0,
+    })
+    if (!planned.ok) {
+      return fail(planned.status, { code: planned.code, error: planned.message, date: planned.date, ...(planned.cardCount != null ? { cardCount: planned.cardCount } : {}) })
     }
+    const { plan } = planned
+    await executeCapacityPlan(sb, plan, nowIso)
+    const logged = plan.logged
 
-    // 2. 以「寫入後」的資料在記憶體算好每天的總時數（D71：啟用線有效值加總，含沿用值），再決定寫入順序
-    const lineUpserts: LineUpsert[] = []
-    const lineDeletes: { date: YMD; lineId: number }[] = []
-    const clearDates: YMD[] = []
-    const after = new Map<string, LineCapacity>()
-    for (const r of lineAll) after.set(`${r.date}|${r.lineId}`, r)
-    const dailyAfter = new Map<YMD, DailyCapacity>(dailyAll.map((d) => [d.date, d]))
-    for (const r of rows) {
-      if ('clear' in r) {
-        clearDates.push(r.date)
-        for (const k of [...after.keys()]) if (k.startsWith(`${r.date}|`)) after.delete(k)
-        dailyAfter.delete(r.date)
-        continue
-      }
-      for (const x of r.lines ?? []) {
-        if ('clear' in x) {
-          lineDeletes.push({ date: r.date, lineId: x.lineId })
-          after.delete(`${r.date}|${x.lineId}`)
-          continue
-        }
-        const note = typeof x.note === 'string' ? x.note.trim() || null : null
-        lineUpserts.push({
-          date: r.date, line_id: x.lineId, regular_hours: x.regularHours, overtime_hours_max: x.overtimeHoursMax,
-          note, updated_by: actor.email, updated_by_name: actor.name,
-        })
-        after.set(`${r.date}|${x.lineId}`, {
-          date: r.date, lineId: x.lineId, regularHours: x.regularHours, overtimeHoursMax: x.overtimeHoursMax,
-          note, updatedBy: actor.email, updatedByName: actor.name, updatedAt: nowIso,
-        })
-      }
-      // 週末旗標與備註先放進 daily（總時數下面再填）
-      dailyAfter.set(r.date, {
-        date: r.date, headcount: null, regularHours: 0, overtimeHoursMax: 0, isSaturdayOpen: isWeekend(r.date) && r.isSaturdayOpen,
-        note: r.note?.trim() || null, updatedBy: actor.email, updatedByName: actor.name, updatedAt: nowIso,
-      })
-    }
-    const lineRowsAfter = [...after.values()]
-    const dailySorted = [...dailyAfter.values()].sort(byDate)
-    const dailyUpserts: DailyUpsert[] = []
-    for (const r of rows) {
-      if ('clear' in r) continue
-      const eff = resolveDayCapacity(r.date, { daily: dailySorted, lineRows: lineRowsAfter, lines })
-      // 各線各自 ≤ 5000 已在第 1 步驗過，但加總（含沿用值）寫回 daily 相容欄時也受 daily 表的 ≤ 5000 check 約束；
-      // 在任何寫入之前擋下，避免「各線已寫、daily 失敗」的半套狀態（本 API 沒有交易）
-      if (toHours(eff.regularMinutes) > DAILY_TOTAL_HOURS_MAX || toHours(eff.overtimeMinutes) > DAILY_TOTAL_HOURS_MAX) {
-        return fail(422, { code: 'bad_request', error: `${r.date} 各線合計不可超過 ${DAILY_TOTAL_HOURS_MAX} 小時（正常、加班分開計）`, date: r.date })
-      }
-      const d = dailyAfter.get(r.date)!
-      dailyUpserts.push({
-        date: r.date,
-        headcount: null, // D65：不再使用（欄位保留）
-        regular_hours: isWeekend(r.date) ? 0 : toHours(eff.regularMinutes),
-        overtime_hours_max: toHours(eff.overtimeMinutes),
-        is_saturday_open: d.isSaturdayOpen,
-        note: d.note,
-        updated_by: actor.email,
-        updated_by_name: actor.name,
-      })
-    }
-
-    // 3. 寫入順序（無交易，偏向「週末沒開」）：
-    //   a. 關閉週末的 daily（旗標 false）與整天清除的 daily 先寫／先刪
-    //   b. 各線列（upsert、delete）
-    //   c. 其餘 daily（含開週末：線列已在，最後才打開旗標）
-    const closesFirst = dailyUpserts.filter((u) => isWeekend(u.date) && !u.is_saturday_open)
-    const rest = dailyUpserts.filter((u) => !(isWeekend(u.date) && !u.is_saturday_open))
-    await upsertCapacity(sb, closesFirst, nowIso)
-    await deleteCapacity(sb, clearDates)
-    await upsertLineCapacity(sb, lineUpserts, nowIso)
-    await deleteLineCapacity(sb, lineDeletes)
-    await deleteLineCapacityDates(sb, clearDates)
-    await upsertCapacity(sb, rest, nowIso)
-
-    // op_log 只記正規化後的欄位（不寫原始 body：客戶端夾帶的多餘鍵或大字串會永久留在正式站）
-    const logged = [
-      ...dailyUpserts.map((u) => ({
-        date: u.date, regularHours: u.regular_hours, overtimeHoursMax: u.overtime_hours_max, isSaturdayOpen: u.is_saturday_open, note: u.note,
-        lines: [
-          ...lineUpserts.filter((l) => l.date === u.date).map((l) => ({ lineId: l.line_id, regularHours: l.regular_hours, overtimeHoursMax: l.overtime_hours_max })),
-          ...lineDeletes.filter((l) => l.date === u.date).map((l) => ({ lineId: l.lineId, clear: true as const })),
-        ],
-      })),
-      ...clearDates.map((d) => ({ date: d, clear: true as const })),
-    ]
     await insertOpLog(sb, { actorEmail: actor.email, actorName: actor.name, kind: 'capacity', label: '產能表', ops: logged })
 
     return noStore(await buildRange(sb, sorted[0], sorted[sorted.length - 1], lk.lock))

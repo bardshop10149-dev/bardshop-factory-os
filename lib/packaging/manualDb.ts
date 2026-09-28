@@ -109,6 +109,66 @@ export async function updateInclusion(
   return r ? rowToManualInclusion(r) : null
 }
 
+/** 多個 SO 行的有效紀錄（D102 寫後回讀用；每 100 行一次查詢） */
+export async function loadActiveInclusionsByKeys(sb: SupabaseAdmin, keys: readonly string[]): Promise<ManualInclusion[]> {
+  const out: ManualInclusion[] = []
+  for (const part of chunks([...new Set(keys)], IN_CHUNK)) {
+    const { data, error } = await sb.from(TBL.manual).select('*').in('so_line_key', part).is('removed_at', null)
+    if (error) throw new ScheduleDbError('讀取手動加入', error)
+    out.push(...((data ?? []) as ManualInclusionRow[]).map(rowToManualInclusion))
+  }
+  return out
+}
+
+/**
+ * D102 寫後回讀：把一筆已移出的紀錄恢復成有效（排程工作台同一時間在這一行排了卡 → 那些卡需要這份供給）。
+ * expect.removedAt 有給＝只撤回「這次」的移出（CAS：removed_at 仍是這次寫的值）；沒給＝只要還是已移出就恢復。
+ * 23505（同一行剛被重新加入，部分唯一索引只允許一筆有效紀錄）→ 'duplicate'：新紀錄已提供供給，不必恢復。
+ * 回 null＝CAS 沒對上（已被別人恢復或改動），不動。
+ */
+export async function unremoveInclusion(
+  sb: SupabaseAdmin,
+  id: number,
+  expect: { removedAt?: string | null },
+  actor: { email: string; name: string | null },
+  nowIso: string,
+): Promise<ManualInclusion | 'duplicate' | null> {
+  const base = sb.from(TBL.manual)
+    .update({ removed_at: null, removed_by: null, removed_by_name: null, removed_reason: null, updated_by: actor.email, updated_by_name: actor.name, updated_at: nowIso })
+    .eq('id', id)
+  const q = expect.removedAt ? base.eq('removed_at', expect.removedAt) : base.not('removed_at', 'is', null)
+  const { data, error } = await q.select('*')
+  if (error) {
+    if ((error as { code?: string }).code === '23505') return 'duplicate'
+    throw new ScheduleDbError('恢復手動加入', error)
+  }
+  const r = ((data ?? []) as ManualInclusionRow[])[0]
+  return r ? rowToManualInclusion(r) : null
+}
+
+/**
+ * D102 寫後回讀：把有效紀錄的欄位改回（CAS：只在 expect 的欄位值都還對得上時才改，免得蓋掉別人剛做的修改）。
+ * 用途：PATCH 改量後回讀發現已排量超過新數量 → 改回這次之前的值；排程寫入後回讀發現數量剛被改低 → 恢復成排程驗證時的數量。
+ */
+export async function restoreInclusionFields(
+  sb: SupabaseAdmin,
+  id: number,
+  expect: { updatedAt?: string; qty?: number },
+  set: { qty?: number; route_type?: ManualRouteType; reason?: string | null },
+  actor: { email: string; name: string | null },
+  nowIso: string,
+): Promise<ManualInclusion | null> {
+  let q = sb.from(TBL.manual)
+    .update({ ...set, updated_by: actor.email, updated_by_name: actor.name, updated_at: nowIso })
+    .eq('id', id).is('removed_at', null)
+  if (expect.updatedAt !== undefined) q = q.eq('updated_at', expect.updatedAt)
+  if (expect.qty !== undefined) q = q.eq('qty', expect.qty)
+  const { data, error } = await q.select('*')
+  if (error) throw new ScheduleDbError('更新手動加入', error)
+  const r = ((data ?? []) as ManualInclusionRow[])[0]
+  return r ? rowToManualInclusion(r) : null
+}
+
 /** 移出待排池＝軟刪除（紀錄保留；移出後可再加入新列） */
 export async function removeInclusion(
   sb: SupabaseAdmin,

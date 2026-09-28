@@ -19,6 +19,7 @@
 //   D100：連按上移／下移時，還在排隊（尚未送出）的「只調整順序」那一批與新的一批併成一個請求（simBoard.mergeQueuedReorderOps）——
 //     每個請求推一格「退回上一步」（上限 30 格），連按十幾次會把「AI 排程前」那格擠掉。
 //   建立／重設、退回上一步、載入歷史、AI 排程：佇列清空才能做（要帶最新 version），做完以回應為準。
+//   D101 產線時數（saveCapacity）也一樣：佇列要空、帶最新 version；但結果完整回給產能表（CapacityEditor 自己顯示錯誤、失敗不關視窗）。
 //
 // 「過時回應」防護（同 useBoard）：GET 發出時記下 genRef，回來時若已有新寫入＝寫入前的快照 → 丟掉再抓。
 // AI 執行（§4.1）：POST run 只回 runId，實際在伺服器背景跑；這裡每 AI_POLL_MS（3 秒）GET runs/[id]，
@@ -34,7 +35,7 @@ import {
   type SimView,
   type SimViewResponse,
 } from '@/lib/packaging/ai/types'
-import type { PlacementOp } from '@/lib/packaging/scheduleTypes'
+import type { CapacityInput, PlacementOp } from '@/lib/packaging/scheduleTypes'
 import type { LocalAction } from '@/components/packaging/board/boardLocal'
 import {
   createSim,
@@ -42,6 +43,7 @@ import {
   fetchSim,
   postLoadRun,
   postSimLocks,
+  postSimCapacity,
   postSimOps,
   postSimRun,
   postSimUndo,
@@ -425,9 +427,12 @@ export function useSim(opts: {
       if (r.status === 401) { cbRef.current.onUnauthorized(); return false }
       if (r.json && r.json.success) {
         genRef.current++
-        acceptView(r.json)
+        const { notice, ...view } = r.json
+        acceptView(view)
         setLastSavedAt(Date.now())
-        if (opt.successMsg) showToast('info', opt.successMsg)
+        // 伺服器附了提醒（例：退回的那一步是舊版程式記錄的，時數無法還原）→ 以警告取代成功訊息，不能被「已退回」蓋掉
+        if (notice) showToast('warn', notice)
+        else if (opt.successMsg) showToast('info', opt.successMsg)
         return true
       }
       if (r.code === 'version_conflict') {
@@ -461,6 +466,41 @@ export function useSim(opts: {
       successMsg: label ? `已退回：${label}` : '已退回上一步',
     })
   }, [runAction])
+
+  /**
+   * D101 模擬區調整產線時數（產能表的「儲存」）。規則同 runAction（本人、佇列清空、帶最新 version、一次一個動作），
+   * 但錯誤不 toast、原樣回傳——產能表對話框自己顯示在底部，而且失敗時使用者的輸入要留著（不能關視窗）。
+   * 成功時以回應為準（acceptView：工作台負荷條與產能表一起更新）；version_conflict → 重新載入。
+   */
+  const saveCapacity = useCallback(async (req: { rows: CapacityInput[] } | { clearAll: true }): Promise<AiApiResult<SimViewResponse>> => {
+    const local = (error: string): AiApiResult<SimViewResponse> => ({ status: 0, json: null, error, code: 'client', missingTable: false, network: false })
+    const v = viewRef.current
+    if (!v || !v.isOwner) return local('這是別人的模擬區，只能檢視')
+    if (!v.session) return local('請先建立模擬區')
+    if (queueRef.current.length > 0 || busyRef.current) return local('還有操作儲存中，請稍候再按儲存')
+    if (actionRef.current) return local('請等目前的動作完成再儲存')
+    actionRef.current = true
+    setAction('儲存模擬產線時數')
+    try {
+      const r = await postSimCapacity({ version: versionRef.current ?? 0, ...req })
+      if (r.status === 401) { cbRef.current.onUnauthorized(); return r }
+      if (r.json && r.json.success) {
+        genRef.current++
+        acceptView(r.json)
+        setLastSavedAt(Date.now())
+        return r
+      }
+      if (r.code === 'version_conflict') {
+        void load()
+        return { ...r, error: '模擬區剛被其他操作更新過（AI 剛寫回，或你在另一個分頁操作），已重新載入；請關閉後重新開啟產能表再改' }
+      }
+      return r
+    } finally {
+      actionRef.current = false
+      setAction(null)
+      if (dirtyRef.current) { dirtyRef.current = false; void load() }
+    }
+  }, [acceptView, load])
 
   /** 把某次 AI 的結果（result）或 AI 前狀態（base）載入模擬區（先推 undo） */
   const loadRun = useCallback((runId: number, which: 'result' | 'base') => {
@@ -613,6 +653,9 @@ export function useSim(opts: {
     polling: pollRunId != null,
     /** 最新確認過的模擬區 version（採用要帶） */
     getVersion: useCallback(() => versionRef.current, []),
+    /** D101 最新的畫面（產能表從這裡讀模擬值：儲存成功後 acceptView 已更新，不必再發請求） */
+    getView: useCallback(() => viewRef.current, []),
+    saveCapacity,
     /** 佇列是否清空（採用前要確認） */
     isIdle: useCallback(() => queueRef.current.length === 0 && !busyRef.current && !actionRef.current, []),
     setDragging,

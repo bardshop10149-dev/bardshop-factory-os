@@ -8,17 +8,21 @@
 // 需要正式區編輯鎖（D53）：用工作台自己的鎖（getLockToken），沒持有時請主管先按「開始編輯」——
 //   這裡不另外 acquire：工作台已經有一套鎖的狀態與橫幅，兩套並存會互相打架（同一分頁同一把 token）。
 // 完整還原（整張排程）仍在「版本」面板，那是最後手段：會連範圍外一起倒回。
+// D101：採用時一起寫進正式產能表的產線時數，退回時也一起退回——預覽「產線時數」段：會還原 N 格／已還原／
+//   採用後被組長改過、保留組長的值（逐格列「採用寫 6h → 現在 7h」，Snow 確認）／週末關閉或保持開著的原因。
+//   版本歷史的整張還原只還原排程，不還原產能（要改產能請到產能表）。
 
 import { useCallback, useEffect, useState } from 'react'
-import type { AdoptionMeta, LockedLineConflict, RevertPreviewResponse } from '@/lib/packaging/ai/types'
+import type { AdoptionMeta, CapacityRevertCell, CapacityRevertPreview, LockedLineConflict, RevertPreviewResponse } from '@/lib/packaging/ai/types'
 import type { PackagingLine } from '@/lib/packaging/scheduleTypes'
 import { lineNameOf } from '@/lib/packaging/scheduleLines'
+import { isWeekend } from '@/lib/packaging/scheduleCalendar'
 import { fmtQty } from '@/components/packaging/poolStyles'
 import Modal, { Btn } from '@/components/packaging/board/Modal'
-import { clock, md } from '@/components/packaging/board/boardFormat'
+import { clock, md, mdw } from '@/components/packaging/board/boardFormat'
 import Drawer from './Drawer'
 import { fetchAdoptions, fetchRevertPreview, postRevert } from './simApi'
-import { countsText } from './simText'
+import { WEEKEND_KEPT_LABEL, capHoursText, countsText } from './simText'
 
 type RevertPreview = Extract<RevertPreviewResponse, { success: true }>
 
@@ -76,7 +80,11 @@ export default function AdoptionsDialog({ editable, getLockToken, nowMs, lines, 
       const r = await postRevert(id, { lockToken: token })
       if (r.json && r.json.success) {
         const rep = r.json.report
-        const m = `已退回 AI 採用 #${id}：${countsText(rep.counts)}；退回前的排程已存成版本 #${rep.backupVersionId}`
+        const cap = rep.capacity
+        const capText = !cap ? ''
+          : cap.error ? `；${cap.error}`
+            : `；產線時數還原 ${cap.restored} 格${cap.keptChangedAfter > 0 ? `（${cap.keptChangedAfter} 格組長改過、保留）` : ''}${cap.weekendsClosed.length > 0 ? `、關閉 ${cap.weekendsClosed.map(d => mdw(d)).join('、')} 加班` : ''}`
+        const m = `已退回 AI 採用 #${id}：${countsText(rep.counts)}${capText}；退回前的排程已存成版本 #${rep.backupVersionId}`
         setPreview(null)
         setMsg(m)
         onReverted(m)
@@ -183,6 +191,7 @@ export default function AdoptionsDialog({ editable, getLockToken, nowMs, lines, 
               <li>會做的變更：<b className="text-violet-200">{countsText(preview.counts)}</b></li>
               <li>退回前會再自動存一版「還原前備份」，萬一退錯還能再還原回來。</li>
             </ul>
+            {preview.capacity && <CapacityRevertSection cap={preview.capacity} lines={lines} />}
             {preview.changedAfter.length > 0 && (
               <CardList title={`採用後又被改過的卡（${preview.changedAfter.length}）：這些調整也會一起被倒回`} tone="warn" items={preview.changedAfter} lines={lines} />
             )}
@@ -219,6 +228,87 @@ export default function AdoptionsDialog({ editable, getLockToken, nowMs, lines, 
         </Modal>
       )}
     </>
+  )
+}
+
+/** D101 產線時數會怎麼退回 */
+function CapacityRevertSection({ cap, lines }: { cap: CapacityRevertPreview; lines: PackagingLine[] }) {
+  const name = (id: number) => lineNameOf(lines, id)
+  const cellText = (c: CapacityRevertCell) => {
+    const wk = isWeekend(c.date)
+    return `${mdw(c.date)} ${name(c.lineId)}${c.kind === 'anchor' ? '（保值列）' : ''}`
+      + `：採用寫 ${capHoursText(c.after, wk)} → 回到 ${capHoursText(c.before, wk)}`
+  }
+  // D101 驗證修正的新欄位：舊伺服器的回應沒有 → 當空的（換版的那幾分鐘不會整段壞掉）
+  const pastFixes = cap.pastFixes ?? []
+  const pastUnfixable = cap.pastUnfixable ?? []
+  const invalidDays = cap.invalidDays ?? []
+  const keptInvalid = cap.keptInvalid ?? []
+  const kept = [...cap.keptPast, ...cap.keptAnchors, ...cap.keptWithWeekend, ...keptInvalid]
+  const nothing = cap.restore.length === 0 && cap.weekendsClose.length === 0 && pastFixes.length === 0
+  const hoursText = (h: { regularHours: number; overtimeHoursMax: number }) => capHoursText(h, false)
+  return (
+    <div className="rounded border border-violet-700/60 bg-violet-950/20 px-3 py-2 text-xs leading-relaxed text-violet-100">
+      <b>產線時數（這次採用一起寫進正式產能表的）：{nothing ? '沒有要還原的' : `會還原 ${cap.restore.length + pastFixes.length} 格`}</b>
+      {cap.restore.length > 0 && (
+        <ul className="mt-1 list-disc space-y-0.5 pl-5 text-violet-100/90">
+          {cap.restore.map(c => <li key={`r${c.date}|${c.lineId}`}>{cellText(c)}</li>)}
+        </ul>
+      )}
+      {pastFixes.length > 0 && (
+        <div className="mt-1">
+          已過的日子不能改，但它的時數會沿用到今天以後；所以從今天起補一筆，回到採用前的值：
+          <ul className="list-disc pl-5 text-violet-100/90">
+            {pastFixes.map(f => (
+              <li key={`f${f.date}|${f.lineId}`}>
+                {name(f.lineId)}：{f.pastDates.map(d => mdw(d)).join('、')} 已過 → 從 {mdw(f.date)} 起回到 {hoursText(f.hours)}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {pastUnfixable.length > 0 && (
+        <div className="mt-1 text-amber-200">
+          {pastUnfixable.map(u => `${name(u.lineId)}：${u.pastDates.map(d => mdw(d)).join('、')} 已過，無法從 ${mdw(u.date)} 起補回採用前的值（採用前沒有設定時數、線已停用，或那天保持不變），請到產能表確認`).join('；')}
+        </div>
+      )}
+      {invalidDays.length > 0 && (
+        <div className="mt-1 text-amber-200">
+          {invalidDays.map(x => `${mdw(x.date)} 整天保持不變：還原後會通不過產能表規則（${x.message}）`).join('；')}
+        </div>
+      )}
+      {cap.weekendsClose.length > 0 && <div className="mt-1">會關閉 {cap.weekendsClose.map(d => mdw(d)).join('、')} 的加班（採用時才開的）。</div>}
+      {cap.weekendsKeptOpen.length > 0 && (
+        <div className="mt-1 text-amber-200">
+          {cap.weekendsKeptOpen.map(w => `${mdw(w.date)}：${WEEKEND_KEPT_LABEL[w.reason]}`).join('；')}
+        </div>
+      )}
+      {cap.keptChangedAfter.length > 0 && (
+        <div className="mt-1 text-amber-200">
+          採用後被改過、保留目前的值（{cap.keptChangedAfter.length} 格）：
+          <ul className="list-disc pl-5">
+            {cap.keptChangedAfter.map(c => (
+              <li key={`k${c.date}|${c.lineId}`}>
+                {mdw(c.date)} {name(c.lineId)}：採用寫 {capHoursText(c.after, isWeekend(c.date))} → 現在 {capHoursText(c.now ?? null, isWeekend(c.date))}（組長改過）
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {cap.alreadyRestored.length > 0 && <div className="mt-1 text-[11px] text-slate-400">已經是採用前的值（略過）：{cap.alreadyRestored.length} 格</div>}
+      {kept.length > 0 && (
+        <div className="mt-1 text-[11px] text-slate-400">
+          不變動 {kept.length} 格（{[
+            cap.keptPast.length > 0 ? `日期已過 ${cap.keptPast.length}` : '',
+            cap.keptAnchors.length > 0 ? `同線有格保留、保值列跟著保留 ${cap.keptAnchors.length}` : '',
+            cap.keptWithWeekend.length > 0 ? `週末保持開著 ${cap.keptWithWeekend.length}` : '',
+            keptInvalid.length > 0 ? `那天整天保持不變 ${keptInvalid.length}` : '',
+          ].filter(Boolean).join('、')}）
+        </div>
+      )}
+      {cap.error && <div className="mt-1 rounded border border-rose-800 bg-rose-950/40 px-2 py-1 text-rose-200">{cap.error}</div>}
+      <div className="mt-1 text-[11px] text-violet-200/70">註：「版本」面板的整張還原只還原排程，不還原產線時數。</div>
+    </div>
   )
 }
 

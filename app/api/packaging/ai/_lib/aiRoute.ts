@@ -25,6 +25,7 @@ import {
   toSimSessionInfo,
 } from '@/lib/packaging/ai/db'
 import { assembleSimBoard, simCardMetaOf } from '@/lib/packaging/ai/simState'
+import { simCapacityViewOf, withSimCapacity } from '@/lib/packaging/ai/simCapacity'
 import { safeErrorTag } from '@/lib/packaging/ai/runner'
 import type { AiApiErrorCode, AiFail, AiOpLogKind, SimSession, SimView, SimWorld } from '@/lib/packaging/ai/types'
 
@@ -53,6 +54,10 @@ const AI_ONLY_STATUS: Partial<Record<AiApiErrorCode, number>> = {
   nothing_to_adopt: 422,
   // 鎖定線（退回：採用範圍外的線）與正式排程不一致 → 衝突（主管要先解除鎖定／重設或把卡搬回原線）
   locked_line_diverged: 409,
+  // D101 模擬產能：與正式產能表同一套狀態碼（關週末有卡 409、其餘驗證 422）
+  sim_weekend_live_open: 422,
+  weekend_has_cards: 409,
+  date_not_workday: 422,
   revert_in_progress: 409,
   migration_required: 409,
   locked: 422,
@@ -125,6 +130,8 @@ export async function loadOwnSession(
  * GET session 與所有模擬區寫入共用的回應本體（SimView）：組合工作台（assembleSimBoard；BoardResponse 同形）＋模擬列附加資訊
  * ＋執行中 AI（輪詢用）＋最近一次 AI＋有模擬區的人（切換唯讀檢視）。
  * world 已讀過（寫入 route）就傳進來重用；沒有且有 session 時在這裡讀（與其他查詢並行）。
+ * D101：world 一律傳「正式」的；模擬產線時數在這裡疊（withSimCapacity）→ 負荷條、lanes capacity 都是模擬值；
+ *   另組 capacity（模擬產能表、正式值、覆寫格、差異）給產能表與橫幅用。
  */
 export async function buildSimView(
   sb: SupabaseAdmin,
@@ -153,13 +160,14 @@ export async function buildSimView(
     },
     isOwner,
     session: p.session ? toSimSessionInfo(p.session, p.today) : null,
-    board: p.session && world ? assembleSimBoard(world, p.session) : null,
+    board: p.session && world ? assembleSimBoard(withSimCapacity(world, p.session), p.session) : null,
     simCards: p.session ? simCardMetaOf(p.session) : {},
     // running_run_id 指到已結束的 run（runner 釋放執行位失敗）→ 不算執行中；
     // 仍是 running 但超過 6 分鐘 → 照回但 stale: true（畫面不再封鎖 AI／採用／重設，提示可重新執行；GET 不寫入）
     runningRun: running && running.status === 'running' ? toRunStatusInfo(running, p.nowMs) : null,
     latestRun: runs[0] ?? null,
     owners,
+    capacity: p.session && world ? simCapacityViewOf(world, p.session) : null,
   }
 }
 

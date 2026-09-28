@@ -803,13 +803,9 @@ export default function BoardLayout() {
               dragKind={activeDrag?.kind ?? null}
               onOpenOrder={openOrder}
               onPoolAction={onPoolAction}
-              manual={{
-                editable,
-                busy: board.pending > 0 || board.saving,
-                getLockToken: lk.getToken,
-                today: data.today,
-                onChanged: () => void board.reload(),
-              }}
+              // D102：手動加入的加入／改數量／移出搬到待排池頁；這裡只顯示「手動」標記＋到待排池頁的連結
+              showManualTag
+              manualManageHref="/packaging/pool"
             >
               <ParkingArea
                 cards={holdingCards}

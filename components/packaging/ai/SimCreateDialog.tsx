@@ -3,6 +3,7 @@
 // 建立／重設模擬區（規格 §三「建立/重設」；D78① 複製或清空、D83 範圍 2／4／6 天、預設第 8 點起始日今天／下一個工作日）。
 // 同一份表單兩種用法：還沒有模擬區時直接放在頁面上（SimCreateForm）；已有模擬區時從工具列開對話框重設（SimCreateDialog）。
 // 重設不會刪東西：伺服器先把目前整份狀態推進「退回上一步」，按一下就能回來。
+// D101：重設時可選「保留模擬產線時數」（預設保留：重設多半是換模式重排，時數設定不該跟著消失；只留仍落在新範圍內的）。
 
 import { useState } from 'react'
 import { AI_DEFAULT_HORIZON, AI_HORIZONS, SIM_MODES, type AiHorizon, type SimMode, type SimStartOption } from '@/lib/packaging/ai/types'
@@ -13,6 +14,8 @@ export interface SimCreateValue {
   horizon: AiHorizon
   mode: SimMode
   start: SimStartOption
+  /** D101 重設時保留仍在新範圍內的模擬產線時數（省略＝保留） */
+  keepCapacity?: boolean
 }
 
 const START_LABEL: Record<SimStartOption, { label: string; hint: string }> = {
@@ -102,16 +105,19 @@ export function SimCreateForm({ disabled, value, onChange }: {
   )
 }
 
-export default function SimCreateDialog({ initial, busy, onClose, onSubmit }: {
+export default function SimCreateDialog({ initial, busy, onClose, onSubmit, capacityCount = 0 }: {
   initial?: Partial<SimCreateValue>
   busy: boolean
   onClose: () => void
   onSubmit: (v: SimCreateValue) => void
+  /** D101 目前模擬區調整過的產線時數（格＋模擬開的週末）；0 不顯示「保留」選項 */
+  capacityCount?: number
 }) {
   const [value, setValue] = useState<SimCreateValue>({
     horizon: initial?.horizon ?? AI_DEFAULT_HORIZON,
     mode: initial?.mode ?? 'copy',
     start: initial?.start ?? 'today',
+    keepCapacity: true,
   })
   return (
     <Modal
@@ -126,6 +132,16 @@ export default function SimCreateDialog({ initial, busy, onClose, onSubmit }: {
         重設會用新的範圍與方式重新開始模擬區（鎖定也會依新範圍重來）。目前的模擬內容會先存進「退回上一步」，按一下就能回來。
       </div>
       <SimCreateForm value={value} onChange={setValue} disabled={busy} />
+      {capacityCount > 0 && (
+        <label className="mt-3 flex items-start gap-2 rounded-lg border border-violet-700/60 bg-violet-950/30 px-3 py-2 text-xs text-violet-100">
+          <input type="checkbox" checked={value.keepCapacity !== false} disabled={busy}
+            onChange={e => setValue(v => ({ ...v, keepCapacity: e.target.checked }))} className="mt-0.5 accent-violet-500" />
+          <span>
+            保留模擬產線時數（目前調整了 {capacityCount} 項）
+            <span className="mt-0.5 block text-[11px] text-violet-200/70">只保留仍落在新範圍內的日子；範圍外的、以及不在新範圍中間的模擬週末加班會拿掉。不勾＝全部回到正式產能表的值。</span>
+          </span>
+        </label>
+      )}
     </Modal>
   )
 }

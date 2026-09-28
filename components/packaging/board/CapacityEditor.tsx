@@ -12,9 +12,14 @@
 // - 「線別管理」→ LinesManager（新增、改名、停用、排序）；有未儲存的修改時先停用，避免欄位變動洗掉輸入。
 // 產能與線別是事實輸入／設定，不進 Undo（D33）。資料一律經 /api/packaging/capacity、/lines；寫入要持有編輯鎖（D53）。
 // 表單的換算、檢查、批次填寫規則在 lib/packaging/capacityForm.ts（純函式，有單元測試）。
+// D101（AI 模擬區調整產線時數）：選填 prop `source` 把「讀／存」換成模擬區的來源（不發 /api/packaging/capacity、不需要編輯鎖），
+//   其餘（表格、D64 批次填寫、沿用灰字、驗證訊息）全部沿用——模擬區與正式產能表是同一張表、同一套規則。
+//   沒傳 source＝原本的正式行為，BoardLayout 的呼叫一字不改。source 只多了幾個模擬區才需要的小差異：
+//   標題、隱藏線別管理與備註（線別與備註只屬正式產能表）、週末開關能不能動（正式已開的週末在模擬區不能關）、
+//   每格的「模擬」徽章、↺／清除整天只在有模擬覆寫時出現（文案改成「回到正式值」）。
 
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
-import type { EffectiveCapacity, PackagingLine, YMD } from '@/lib/packaging/scheduleTypes'
+import type { CapacityInput, CapacityResponse, EffectiveCapacity, PackagingLine, YMD } from '@/lib/packaging/scheduleTypes'
 import {
   applyBulkFill,
   bulkFillRowsError,
@@ -63,7 +68,44 @@ function CellPair({ a, b }: { a: ReactNode; b: ReactNode }) {
   return <>{a}{b}</>
 }
 
-export default function CapacityEditor({ mode, today, editable, getLockToken, onClose, onSaved, readonlyHint }: {
+/** D101：load／save 的回傳（boardApi 的 ApiResult 是它的超集合，正式來源可直接傳） */
+export interface CapacitySourceResult {
+  json: CapacityResponse | null
+  error?: string | null
+  missingTable?: boolean
+}
+
+/**
+ * D101 選填：產能表的資料來源換成別處（AI 模擬區）。沒給＝正式產能表（/api/packaging/capacity＋編輯鎖）。
+ */
+export interface CapacityEditorSource {
+  /** 取代 fetchCapacity：回 CapacityResponse 成功形（模擬：模擬值，只含模擬範圍的日期） */
+  load: (from: YMD, to: YMD) => Promise<CapacitySourceResult>
+  /** 取代 putCapacity：失敗回 CapacityResponse 失敗形（code／error／date／cardCount）或 error 字串 */
+  save: (rows: CapacityInput[]) => Promise<CapacitySourceResult>
+  /** 不需要正式編輯鎖（模擬區只寫自己的模擬區）：儲存時不檢查 getLockToken */
+  noLock: true
+  /** 表格模式的標題（例「模擬產線時數（9/29～10/2）」） */
+  title?: string
+  /** 表格模式讀取的日期範圍（省略＝今天起約 6 週、取前 20 個工作日） */
+  tableRange?: { from: YMD; to: YMD }
+  /** 表格上方的說明（一段文字） */
+  intro?: string
+  /** 隱藏「線別管理」（線別只屬正式產能表） */
+  hideLinesManager?: boolean
+  /** 隱藏備註欄（備註只屬正式產能表） */
+  hideNote?: boolean
+  /** 週末開加班開關能不能動（模擬：正式已開的週末不能關） */
+  weekendToggle?: (date: YMD) => { enabled: boolean; title?: string }
+  /** 每格旁的小徽章（模擬：覆寫格「模擬」、正式在調整後被改過「正式已改」） */
+  cellBadge?: (date: YMD, lineId: number) => { text: string; title: string; tone: 'sim' | 'warn' } | null
+  /** 這格有沒有模擬覆寫（有才顯示 ↺「回到正式值」）；省略＝照原本規則（這格有填過就顯示） */
+  hasOverride?: (date: YMD, lineId: number) => boolean
+  /** 這天有沒有任何模擬覆寫（有才顯示「清除整天」）；省略＝照原本規則 */
+  dayHasOverride?: (date: YMD) => boolean
+}
+
+export default function CapacityEditor({ mode, today, editable, getLockToken, onClose, onSaved, readonlyHint, source }: {
   /** day 模式可指定 lineId：從日檢視某條線的線頭 ⚙ 打開時，該線欄位自動聚焦 */
   mode: { kind: 'day'; date: YMD; lineId?: number } | { kind: 'table' }
   today: YMD
@@ -75,6 +117,8 @@ export default function CapacityEditor({ mode, today, editable, getLockToken, on
   onSaved: () => void
   /** D100 唯讀時底部的說明（省略＝「取得編輯權後才能修改」；AI 模擬區就算有編輯權也改不了，要說清楚去哪改） */
   readonlyHint?: string
+  /** D101 選填：資料來源（AI 模擬區）；省略＝正式產能表 */
+  source?: CapacityEditorSource
 }) {
   const [rows, setRows] = useState<CapacityFormRow[] | null>(null)
   const [allLines, setAllLines] = useState<PackagingLine[]>([])
@@ -93,17 +137,24 @@ export default function CapacityEditor({ mode, today, editable, getLockToken, on
   const modeKind = mode.kind
   const modeDate = mode.kind === 'day' ? mode.date : null
   const focusLineId = mode.kind === 'day' ? (mode.lineId ?? null) : null
+  const tableFrom = source?.tableRange?.from ?? null
+  const tableTo = source?.tableRange?.to ?? null
   const range = useMemo(() => (modeDate
     ? { from: modeDate, to: modeDate }
+    // D101：模擬區給自己的範圍（模擬的日期）
+    : tableFrom && tableTo ? { from: tableFrom, to: tableTo }
     // 20 個工作日約 4 週，遇連假多抓一些，畫面再取前 20 個工作日
-    : { from: today, to: addDays(today, 41) }), [modeDate, today])
+    : { from: today, to: addDays(today, 41) }), [modeDate, today, tableFrom, tableTo])
 
   const activeLines = useMemo(() => activeLinesOf(allLines), [allLines])
   const lineIds = useMemo(() => activeLines.map(l => l.id), [activeLines])
 
+  // D101：load 函式由父層每次重繪重建也不要重抓（會洗掉正在編輯的內容）→ 只在掛載／日期範圍改變時讀
+  const sourceLoad = source?.load
+  const [loader] = useState(() => sourceLoad)
   const load = useCallback(async () => {
     setLoadErr(null)
-    const r = await fetchCapacity(range.from, range.to)
+    const r = loader ? await loader(range.from, range.to) : await fetchCapacity(range.from, range.to)
     if (!r.json || !r.json.success) {
       setLoadErr(r.error ?? '讀取產能失敗')
       return
@@ -128,7 +179,7 @@ export default function CapacityEditor({ mode, today, editable, getLockToken, on
     setRows(list.map(e => toFormRow(e, byDate.get(e.date), lineRows, ids)))
     // 線別變了（停用了原本選的線）：批次對象回到全部
     setBulkTarget(t => (t === 'all' || ids.includes(t) ? t : 'all'))
-  }, [range, modeKind])
+  }, [range, modeKind, loader])
 
   useEffect(() => { void load() }, [load])
 
@@ -145,8 +196,9 @@ export default function CapacityEditor({ mode, today, editable, getLockToken, on
    * 回傳是否成功（沒有要送的列也算成功）；批次確認失敗時要靠它把表格還原。
    */
   const saveRows = async (list: readonly CapacityFormRow[]): Promise<boolean> => {
-    const token = getLockToken()
-    if (!token) { setError('需要先取得編輯權（開始編輯）'); return false }
+    // D101：模擬區只寫自己的模擬區，不需要正式編輯鎖
+    const token = source?.noLock ? null : getLockToken()
+    if (!source?.noLock && !token) { setError('需要先取得編輯權（開始編輯）'); return false }
     const toSend = list.filter(r => r.dirty)
     if (toSend.length === 0) return true
     const err = toSend.map(r => formRowError(r, activeLines)).find(Boolean)
@@ -154,7 +206,8 @@ export default function CapacityEditor({ mode, today, editable, getLockToken, on
     setSaving(true)
     setError(null)
     try {
-      const r = await putCapacity(token, toSend.map(row => formRowToInput(row, lineIds)))
+      const inputs = toSend.map(row => formRowToInput(row, lineIds))
+      const r = source ? await source.save(inputs) : await putCapacity(token ?? '', inputs)
       if (r.json?.success) {
         onSaved()
         setPreview(null)
@@ -217,7 +270,9 @@ export default function CapacityEditor({ mode, today, editable, getLockToken, on
   const otherDirty = dirty.filter(r => !pvDates.has(r.date)).length
   const bulkTargetName = bulkTarget === 'all' ? '全部線' : (activeLines.find(l => l.id === bulkTarget)?.name ?? '')
 
-  const title = mode.kind === 'day' ? `產能設定：${mdw(mode.date)}` : `每日產能表（今天起 ${TABLE_WORKDAYS} 個工作日）`
+  const title = mode.kind === 'day'
+    ? `${source ? '模擬產線時數' : '產能設定'}：${mdw(mode.date)}`
+    : (source?.title ?? `每日產能表（今天起 ${TABLE_WORKDAYS} 個工作日）`)
   const locked = !editable || !!preview || saving
 
   // ── 一格（某天某線）的兩個輸入框 ──
@@ -231,6 +286,7 @@ export default function CapacityEditor({ mode, today, editable, getLockToken, on
     const ring = (on: boolean | undefined) => (on ? 'border-amber-400 ring-1 ring-amber-400' : 'border-slate-700')
     const lineName = activeLines.find(l => l.id === lineId)?.name ?? ''
     const hint = cellHint(c, isWk) || undefined
+    const badge = source?.cellBadge?.(r.date, lineId) ?? null
     return {
       regular: isWk ? <span className="text-slate-600">—</span> : (
         <div className="flex items-center gap-0.5">
@@ -253,12 +309,18 @@ export default function CapacityEditor({ mode, today, editable, getLockToken, on
             onChange={e => updateRow(r.date, row => patchCell(row, lineId, { ot: e.target.value }))}
             className={`${INPUT_CLS} ${ring(p?.ot)} ${dim}`} />
           {p?.ot && <span className="text-[10px] font-semibold text-amber-300">→{bulk.ot.trim()}</span>}
-          {/* 只清這條線這天（平日：回到該線沿用；週末：加班回到 0） */}
-          {editable && !preview && !r.clear && c.explicit && !c.clear && (!isWk || r.weekendOpen) && (
+          {/* 只清這條線這天（平日：回到該線沿用；週末：加班回到 0）。D101 模擬區：只在有模擬覆寫時出現＝回到正式值 */}
+          {editable && !preview && !r.clear && !c.clear && (!isWk || r.weekendOpen)
+            && (source?.hasOverride ? source.hasOverride(r.date, lineId) : c.explicit) && (
             <button type="button" onClick={() => updateRow(r.date, row => patchCell(row, lineId, { clear: true }))}
-              aria-label={`清除 ${mdw(r.date)} ${lineName}的設定`}
-              title={isWk ? `清除${lineName}這天的加班（回到 0）` : `清除${lineName}這天的設定，回到沿用該線前一個平日`}
+              aria-label={source ? `${mdw(r.date)} ${lineName}回到正式值` : `清除 ${mdw(r.date)} ${lineName}的設定`}
+              title={source ? `${lineName}這天回到正式產能表的值（拿掉模擬調整）`
+                : isWk ? `清除${lineName}這天的加班（回到 0）` : `清除${lineName}這天的設定，回到沿用該線前一個平日`}
               className="px-0.5 text-[11px] text-slate-500 hover:text-white">↺</button>
+          )}
+          {badge && (
+            <span title={badge.title}
+              className={`rounded px-1 text-[9px] font-semibold ${badge.tone === 'warn' ? 'bg-orange-900/70 text-orange-200' : 'bg-violet-900/70 text-violet-200'}`}>{badge.text}</span>
           )}
         </div>
       ),
@@ -277,19 +339,24 @@ export default function CapacityEditor({ mode, today, editable, getLockToken, on
     return unset > 0 && r.source !== 'unset' ? `${base}・${unset} 線未設定` : base
   }
 
-  const weekendToggle = (r: CapacityFormRow) => (
-    <label className={`flex items-center gap-1 whitespace-nowrap text-[11px] ${r.holidayWeekend ? 'text-slate-500' : 'text-amber-200'}`}
-      title={r.holidayWeekend ? '國定假日不能開加班（D48 未定義假日加班）' : `${weekendName(r.date)}只有加班（D63）；開啟後出現在工作台`}>
-      <input type="checkbox" disabled={locked || r.clear || (r.holidayWeekend && !r.weekendOpen)} checked={r.weekendOpen}
-        onChange={e => updateRow(r.date, row => patchRow(row, { weekendOpen: e.target.checked }))} className="accent-amber-500" />
-      {r.holidayWeekend ? '不能開加班' : `開${weekendName(r.date)}加班`}
-    </label>
-  )
+  const weekendToggle = (r: CapacityFormRow) => {
+    // D101：模擬區可以限制開關（正式已開的週末只能改時數、不能關；範圍外的週末不能開）
+    const gate = source?.weekendToggle?.(r.date) ?? null
+    return (
+      <label className={`flex items-center gap-1 whitespace-nowrap text-[11px] ${r.holidayWeekend ? 'text-slate-500' : 'text-amber-200'}`}
+        title={gate?.title ?? (r.holidayWeekend ? '國定假日不能開加班（D48 未定義假日加班）' : `${weekendName(r.date)}只有加班（D63）；開啟後出現在工作台`)}>
+        <input type="checkbox" disabled={locked || r.clear || (r.holidayWeekend && !r.weekendOpen) || (gate != null && !gate.enabled)} checked={r.weekendOpen}
+          onChange={e => updateRow(r.date, row => patchRow(row, { weekendOpen: e.target.checked }))} className="accent-amber-500" />
+        {r.holidayWeekend ? '不能開加班' : `開${weekendName(r.date)}加班`}
+      </label>
+    )
+  }
 
-  const clearDayBtn = (r: CapacityFormRow) => (editable && !preview && r.explicit && !r.clear ? (
+  const clearDayBtn = (r: CapacityFormRow) => (editable && !preview && !r.clear
+    && (source?.dayHasOverride ? source.dayHasOverride(r.date) : r.explicit) ? (
     <button type="button" onClick={() => updateRow(r.date, row => patchRow(row, { clear: true }))}
-      title="刪除這天全部線的設定，回到各線沿用前一個平日（週六、週日＝不開加班）"
-      className="rounded border border-slate-700 px-1.5 py-0.5 text-[11px] text-slate-400 hover:text-white">清除整天</button>
+      title={source ? '這天全部線回到正式產能表的值（模擬才開的週末＝關閉）' : '刪除這天全部線的設定，回到各線沿用前一個平日（週六、週日＝不開加班）'}
+      className="rounded border border-slate-700 px-1.5 py-0.5 text-[11px] text-slate-400 hover:text-white">{source ? '整天回到正式值' : '清除整天'}</button>
   ) : null)
 
   // ── 表格模式：一個日期一列 ──
@@ -303,7 +370,7 @@ export default function CapacityEditor({ mode, today, editable, getLockToken, on
               <th key={l.id} colSpan={2} className="border-l border-slate-800 px-1.5 py-1 text-center font-semibold text-slate-200">{l.name}</th>
             ))}
             <th colSpan={2} className="border-l-2 border-slate-600 px-1.5 py-1 text-center font-semibold text-sky-200" title="D71：各線加總（唯讀）">合計</th>
-            <th rowSpan={2} className="py-1 pl-2 align-bottom font-normal">備註</th>
+            {!source?.hideNote && <th rowSpan={2} className="py-1 pl-2 align-bottom font-normal">備註</th>}
             <th rowSpan={2} className="py-1 font-normal" />
           </tr>
           <tr className="border-b border-slate-800">
@@ -342,12 +409,14 @@ export default function CapacityEditor({ mode, today, editable, getLockToken, on
                   {isWk ? <span className="text-slate-600">—</span> : <>{totalText(t.regular)}{t.pending ? '*' : ''}</>}
                 </td>
                 <td className="px-1.5 py-1.5 text-right tabular-nums text-sky-100">{t.ot}{t.pending ? '*' : ''}</td>
-                <td className="py-1.5 pl-2">
-                  <input disabled={locked || r.clear} value={r.note} maxLength={200}
-                    onChange={e => updateRow(r.date, row => patchRow(row, { note: e.target.value }))}
-                    placeholder="請假、支援品檢…"
-                    className="w-full min-w-[7rem] rounded border border-slate-700 bg-slate-950 px-1.5 py-0.5 text-slate-200" />
-                </td>
+                {!source?.hideNote && (
+                  <td className="py-1.5 pl-2">
+                    <input disabled={locked || r.clear} value={r.note} maxLength={200}
+                      onChange={e => updateRow(r.date, row => patchRow(row, { note: e.target.value }))}
+                      placeholder="請假、支援品檢…"
+                      className="w-full min-w-[7rem] rounded border border-slate-700 bg-slate-950 px-1.5 py-0.5 text-slate-200" />
+                  </td>
+                )}
                 <td className="py-1.5 pl-1 text-right whitespace-nowrap">
                   {clearDayBtn(r)}
                   {err && <div className="max-w-[12rem] whitespace-normal text-[10px] text-rose-300">{err}</div>}
@@ -404,10 +473,12 @@ export default function CapacityEditor({ mode, today, editable, getLockToken, on
             </tr>
           </tbody>
         </table>
-        <input disabled={locked || r.clear} value={r.note} maxLength={200}
-          onChange={e => updateRow(r.date, row => patchRow(row, { note: e.target.value }))}
-          placeholder="備註：請假、支援品檢…"
-          className="w-full rounded border border-slate-700 bg-slate-950 px-1.5 py-1 text-xs text-slate-200" />
+        {!source?.hideNote && (
+          <input disabled={locked || r.clear} value={r.note} maxLength={200}
+            onChange={e => updateRow(r.date, row => patchRow(row, { note: e.target.value }))}
+            placeholder="備註：請假、支援品檢…"
+            className="w-full rounded border border-slate-700 bg-slate-950 px-1.5 py-1 text-xs text-slate-200" />
+        )}
         {err && <div className="text-[11px] text-rose-300">{err}</div>}
       </div>
     )
@@ -423,8 +494,10 @@ export default function CapacityEditor({ mode, today, editable, getLockToken, on
           {error && <span className="mr-auto text-xs text-rose-300">{error}</span>}
           {!error && firstErr && <span className="mr-auto text-xs text-orange-300">{firstErr}</span>}
           {!error && !firstErr && !editable && <span className="mr-auto text-xs text-slate-400">{readonlyHint ?? '唯讀：取得編輯權後才能修改'}</span>}
-          <Btn onClick={() => setLinesOpen(true)} disabled={dirty.length > 0 || saving || (!rows && !loadErr)}
-            title={dirty.length > 0 ? '有未儲存的修改：請先儲存或取消，再調整線別' : '新增、改名、停用產線，調整順序'}>線別管理</Btn>
+          {!source?.hideLinesManager && (
+            <Btn onClick={() => setLinesOpen(true)} disabled={dirty.length > 0 || saving || (!rows && !loadErr)}
+              title={dirty.length > 0 ? '有未儲存的修改：請先儲存或取消，再調整線別' : '新增、改名、停用產線，調整順序'}>線別管理</Btn>
+          )}
           <Btn onClick={onClose}>{editable ? '取消' : '關閉'}</Btn>
           {editable && <Btn tone="primary" disabled={saving || !!preview || dirty.length === 0 || !!firstErr} onClick={() => void saveRows(rows ?? [])}>{saving ? '儲存中…' : `儲存${dirty.length > 1 ? `（${dirty.length} 天）` : ''}`}</Btn>}
         </>}
@@ -442,6 +515,9 @@ export default function CapacityEditor({ mode, today, editable, getLockToken, on
           <p className="py-6 text-center text-xs text-slate-400">這段期間沒有可設定的日期（國定假日）</p>
         ) : (
           <div className="space-y-2">
+            {source?.intro && (
+              <p className="rounded border border-violet-700/60 bg-violet-950/30 px-2 py-1.5 text-[11px] leading-relaxed text-violet-100">{source.intro}</p>
+            )}
             <p className="text-[11px] text-slate-400">
               由組長填寫<b className="text-slate-200">每條線當天的總時數</b>（小時；已扣請假、支援品檢）。正常＝做到 19:00 為止的合計，加班＝19:00 之後可加班的上限。
               <b className="text-sky-200">合計＝各線加總</b>（唯讀，就是工作台上整天的總時數）。

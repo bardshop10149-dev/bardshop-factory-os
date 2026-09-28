@@ -29,6 +29,7 @@ import {
   updateSimSessionCas,
 } from '@/lib/packaging/ai/db'
 import { assembleSimBoard, isRowLocked, pushUndo, snapshotForUndo } from '@/lib/packaging/ai/simState'
+import { emptySimCapacity, withSimCapacity } from '@/lib/packaging/ai/simCapacity'
 import { buildAiPayload, decodeAiText, scanPayloadLeaks } from '@/lib/packaging/ai/payload'
 import { validateAiResult } from '@/lib/packaging/ai/validate'
 import { AiError, callClaude, isAiConfigured } from '@/lib/packaging/ai/claude'
@@ -125,12 +126,19 @@ function emptyReport(meta: AiPayloadMeta, base: SimSessionState, isLocked: Runne
  * 萬一被一起拷進快照，每推一格就把整個堆疊再包一層，大小會指數成長（DB 8MB 上限很快爆掉）。
  */
 export function stateOf(s: SimSessionState): SimSessionState {
-  return { horizon: s.horizon, mode: s.mode, windowDates: s.windowDates, lineIds: s.lineIds, placements: s.placements, locks: s.locks }
+  return {
+    horizon: s.horizon, mode: s.mode, windowDates: s.windowDates, lineIds: s.lineIds, placements: s.placements, locks: s.locks,
+    // D101：模擬產能一起進 undo 快照（沒有這欄的狀態不帶這個鍵）
+    ...(s.simCapacity !== undefined ? { simCapacity: s.simCapacity } : {}),
+  }
 }
 
 /**
  * 建 run 當下的模擬區狀態（AI 要排的「基底」）：擺放與鎖定取 run 列（建 run 時存下的），範圍與模式也取 run 列；
  * 線別 run 列沒存 → 用目前 session 的（線只有「重設」會換；重設後版本一定變，結果本來就寫不回、只留在 run 裡）。
+ * D101 模擬產能：取 run 列（建 run 當下的覆寫，與 base_placements 同一時點）。run.simCapacity 為 null＝建 run 時沒有覆寫
+ *   （只有非空才寫入），或舊程式建的 run（舊 runner 本來就只用正式產能）→ 一律當空覆寫。
+ *   為什麼不退回用目前 session 的：AI 執行中不能改模擬產能，但「退回上一步」可以把舊的覆寫換回來；用 run 列才與建 run 時一致。
  */
 function baseStateOf(run: AiRun, session: SimSession): SimSessionState {
   return {
@@ -140,6 +148,7 @@ function baseStateOf(run: AiRun, session: SimSession): SimSessionState {
     lineIds: session.lineIds,
     placements: run.basePlacements,
     locks: run.locks,
+    simCapacity: run.simCapacity ?? emptySimCapacity(),
   }
 }
 
@@ -181,13 +190,16 @@ export async function executeRun(runId: number, deps: Partial<RunnerDeps> = {}):
     const nowMs = d.nowMs()
     const today = todayTaipei(new Date(nowMs))
     const nowIso = new Date(nowMs).toISOString()
-    const [world, rules, thresholds] = await Promise.all([
+    const [liveWorld, rules, thresholds] = await Promise.all([
       d.loadSimWorld(sb, { today, nowIso, actor: { email: run.ownerEmail, name: run.ownerName } }),
       d.getLatestRules(sb),
       d.listThresholds(sb),
     ])
     const base = baseStateOf(run, session)
     const baseSession = { ...base, ownerEmail: session.ownerEmail, ownerName: session.ownerName, updatedAt: session.updatedAt }
+    // D101：AI 在「建 run 當下的模擬產能」下排——疊一次，之後組工作台（各線 used／remaining）、payload（各線各日分鐘）、
+    //   驗算（產能削減、模擬開的週末＝可排日）全部從這個 world 讀，validate／payload 不必知道哪些是模擬值
+    const world = withSimCapacity(liveWorld, baseSession)
     const board = d.assembleSimBoard(world, baseSession)
     const built = d.buildAiPayload({
       today,

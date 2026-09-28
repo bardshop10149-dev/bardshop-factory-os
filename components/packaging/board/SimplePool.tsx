@@ -148,7 +148,7 @@ export default function SimplePool({ blocks, viewCards, cardMeta, filtered, coll
   /** 拖曳中不顯示滑過提示 */
   dragging: boolean
   onOpenOrder: (so: string) => void
-  /** D66：手動卡顯示「手動・誰・何時」標記（PoolSidebar 有啟用手動加入時） */
+  /** D66：手動卡顯示「手動・誰・何時」標記（D102 起由 PoolSidebar 的 showManualTag 決定：工作台傳 true、AI 模擬區不傳） */
   showManualTag?: boolean
 }) {
   const [hover, setHover] = useState<{ card: PackagingCard; rect: DOMRect } | null>(null)

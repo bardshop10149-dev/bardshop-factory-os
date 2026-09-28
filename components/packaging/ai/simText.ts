@@ -46,6 +46,7 @@ export const UNDO_KIND_LABEL: Record<SimUndoKind, string> = {
   reset: '建立／重設',
   load_run: '載入歷史結果',
   locks: '鎖定變更',
+  capacity: '產線時數',
 }
 
 export const RUN_STATUS_LABEL: Record<RunStatus, string> = {
@@ -161,17 +162,61 @@ export function countsTotal(c: AdoptionCounts | null | undefined): number {
  * - allSkipped：有變更，但全部會被自動略過（卡片已完成／已銷貨／不在待排池）→「這些變更都無法套用，正式排程不會被修改」
  * - conflicts：鎖定線上與正式排程不一致（伺服器會擋 locked_line_diverged）
  * blocked：以上任一成立 → 採用鈕停用（POST 也只會回 nothing_to_adopt／locked_line_diverged）。
+ * D101：有產線時數要匯入（capacity.cells／weekendsOpened 非空）也算「有變更」——只改時數也能採用（「只匯入產線時數」）；
+ *   產能段驗證不過（capacity.error）→ 擋下。沒有 capacity 的預覽（舊伺服器、模擬區沒調時數）行為與 D101 前完全相同。
  */
 export function adoptPreviewFlags(
-  p: { counts: AdoptionCounts; skipped: readonly unknown[]; lockedConflicts?: readonly unknown[] } | null | undefined,
+  p: {
+    counts: AdoptionCounts
+    skipped: readonly unknown[]
+    lockedConflicts?: readonly unknown[]
+    capacity?: { cells: readonly unknown[]; weekendsOpened: readonly unknown[]; error?: string | null } | null
+  } | null | undefined,
   conflictsOverride?: readonly unknown[] | null,
 ): { identical: boolean; allSkipped: boolean; conflicts: number; blocked: boolean } {
   if (!p) return { identical: false, allSkipped: false, conflicts: 0, blocked: true }
-  const noChanges = countsTotal(p.counts) === 0
+  const capChanges = (p.capacity?.cells.length ?? 0) + (p.capacity?.weekendsOpened.length ?? 0)
+  const noScheduleChanges = countsTotal(p.counts) === 0
+  const noChanges = noScheduleChanges && capChanges === 0
   const identical = noChanges && p.skipped.length === 0
   const allSkipped = noChanges && p.skipped.length > 0
   const conflicts = (conflictsOverride ?? p.lockedConflicts ?? []).length
-  return { identical, allSkipped, conflicts, blocked: noChanges || conflicts > 0 }
+  return { identical, allSkipped, conflicts, blocked: noChanges || conflicts > 0 || !!p.capacity?.error }
+}
+
+// ── D101 產線時數的說法（採用預覽、退回預覽、模擬區橫幅共用） ──
+
+/** 小時：最多 2 位小數、去掉多餘的 0 */
+export function hoursNum(h: number): string {
+  return String(Math.round(h * 100) / 100)
+}
+
+/**
+ * 一格產線時數的一句話：平日「8h＋加班 2h」／「8h」／「未設定」；週末「加班 4h」／「沒開加班」。
+ * regularHours null＝平日從沒設定過。
+ */
+export function capHoursText(h: { regularHours: number | null; overtimeHoursMax: number } | null, weekend: boolean): string {
+  if (!h) return weekend ? '沒開加班' : '沒有設定（沿用前一個平日）'
+  if (weekend) return h.overtimeHoursMax > 0 ? `加班 ${hoursNum(h.overtimeHoursMax)}h` : '加班 0h'
+  if (h.regularHours == null) return '未設定'
+  return `${hoursNum(h.regularHours)}h${h.overtimeHoursMax > 0 ? `＋加班 ${hoursNum(h.overtimeHoursMax)}h` : ''}`
+}
+
+/** 分鐘版（SimView.capacity.diffs 用） */
+export function capMinutesText(m: { regularMinutes: number | null; overtimeMinutes: number }, weekend: boolean): string {
+  return capHoursText({
+    regularHours: m.regularMinutes == null ? null : m.regularMinutes / 60,
+    overtimeHoursMax: m.overtimeMinutes / 60,
+  }, weekend)
+}
+
+/** 退回時「週末保持開著」的原因 */
+export const WEEKEND_KEPT_LABEL: Record<'has_cards' | 'changed_after' | 'already_closed' | 'past' | 'invalid', string> = {
+  has_cards: '那天退回後還有卡，保持開著',
+  changed_after: '組長在採用後改過那天的時數，保持開著',
+  already_closed: '已經關閉了',
+  past: '日期已過，不變動',
+  invalid: '還原後那天會通不過產能表規則，整天保持不變',
 }
 
 /** 小時（1 位小數） */

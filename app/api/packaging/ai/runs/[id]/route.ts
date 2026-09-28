@@ -4,7 +4,7 @@ import { guardPackagingAi, noStore } from '@/lib/packaging/guard'
 import { getAiRunSummary, listSimOwners, toRunStatusInfo } from '@/lib/packaging/ai/db'
 import type { AiRunDetail, AiRunDetailResponse } from '@/lib/packaging/ai/types'
 import { actorOf, aiFail, aiServerError, parsePositiveId, sameEmail } from '../../_lib/aiRoute'
-import { sameDates } from '../../_lib/adoptFlow'
+import { sameWorkdays } from '@/lib/packaging/ai/simCapacity'
 
 export const dynamic = 'force-dynamic'
 
@@ -13,6 +13,8 @@ export const dynamic = 'force-dynamic'
 // GET → AiRunDetailResponse：{ status, phase, elapsedMs（伺服器算）, 摘要, 驗算報告, 用量… }；前端每 3 秒（AI_POLL_MS）輪詢到 done／failed。
 //   不讀 payload、擺放本體與 AI 原文（db.getAiRunSummary 只選需要的欄位），輪詢很便宜。
 //   canLoad：done 且是自己的 run、且與自己目前模擬區的 horizon／window 相同（可從歷史載入）。只在 run 結束後才查模擬區摘要。
+//   D101：window 改比「工作日」（模擬開的週末會讓 window 不同；載入時一律連 window 與那次的模擬產能一起載回，
+//   沒存模擬產能的 run＝空覆寫，與 load-run 的 planLoadRunCapacity 同一個判斷 → canLoad 與實際能不能載一致）。
 //   執行中但超過 6 分鐘（AI_RUN_STALE_MS）：GET 不寫入，照回 running＋elapsedMs＋stale: true（db.toRunStatusInfo），
 //   畫面據以停止輪詢、解除封鎖並提示「可能已中斷，可重新執行」（下一次按 AI 時 POST session/run 會把它標成 ai_stale）。
 
@@ -34,7 +36,7 @@ export async function GET(_request: NextRequest, ctx: Ctx) {
     if (run.status === 'done' && sameEmail(run.ownerEmail, me.email)) {
       // 只要 horizon／window：用摘要列表（不讀 placements／undo 大欄位）
       const mine = (await listSimOwners(sb)).find((o) => sameEmail(o.email, me.email))
-      canLoad = !!mine && mine.horizon === run.horizon && sameDates(mine.windowDates, run.windowDates)
+      canLoad = !!mine && mine.horizon === run.horizon && sameWorkdays(mine.windowDates, run.windowDates)
     }
     const { baseVersion: _bv, ...rest } = run
     void _bv
