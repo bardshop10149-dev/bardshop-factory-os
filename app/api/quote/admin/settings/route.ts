@@ -59,6 +59,8 @@ export async function PUT(request: NextRequest) {
     const now = new Date().toISOString()
 
     const upserts: { key: string; value: unknown }[] = []
+    // 「匯率未設定」＝刪掉那一列（quote_settings.value 是 NOT NULL，不能存 null；loadSettings 讀不到就當未設定）
+    let clearFx = false
 
     if (body.acrylic_settings !== undefined) {
       if (!isPlainObject(body.acrylic_settings)) return badRequest('acrylic_settings 必須是物件')
@@ -83,7 +85,7 @@ export async function PUT(request: NextRequest) {
     }
     if (body.fx_rmb_twd !== undefined) {
       if (body.fx_rmb_twd === null) {
-        upserts.push({ key: 'fx_rmb_twd', value: null })
+        clearFx = true
       } else {
         const fx = body.fx_rmb_twd
         const rate = Number(fx?.rate)
@@ -108,12 +110,18 @@ export async function PUT(request: NextRequest) {
       if (!v || v.length > 20) return badRequest('rate_version 必填，最多 20 字')
       upserts.push({ key: 'rate_version', value: v })
     }
-    if (upserts.length === 0) return badRequest('沒有可更新的欄位')
+    if (upserts.length === 0 && !clearFx) return badRequest('沒有可更新的欄位')
 
-    const { error } = await sb
-      .from('quote_settings')
-      .upsert(upserts.map((u) => ({ key: u.key, value: u.value, updated_by: updatedBy, updated_at: now })), { onConflict: 'key' })
-    if (error) throw new Error(describeError(error))
+    if (clearFx) {
+      const { error } = await sb.from('quote_settings').delete().eq('key', 'fx_rmb_twd')
+      if (error) throw new Error(describeError(error))
+    }
+    if (upserts.length > 0) {
+      const { error } = await sb
+        .from('quote_settings')
+        .upsert(upserts.map((u) => ({ key: u.key, value: u.value, updated_by: updatedBy, updated_at: now })), { onConflict: 'key' })
+      if (error) throw new Error(describeError(error))
+    }
 
     const settings = await loadSettings(ctx)
     return NextResponse.json({ success: true, settings, updatedKeys: upserts.map((u) => u.key) })
