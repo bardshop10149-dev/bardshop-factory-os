@@ -17,7 +17,9 @@ import { SalesSyncError, runSalesSync } from '@/lib/packaging/salesSync'
 //   (b) 已登入且具 packaging_admin（手動觸發；不需編輯鎖——只更新 ARGO 鏡像，不動排程）。
 //       手動觸發同一實例 60 秒內只接受一次；同一實例同時只跑一個同步（兩次全量同時跑只會加倍打 ARGO）。
 // 為什麼 GET 會寫入：Vercel Cron 只會發 GET；寫入的是「ARGO 的鏡像」，重跑結果相同（冪等），被跨站觸發也只是多同步一次。
-// 排程（vercel.json）由 P3 session 統一設定，本檔不動 vercel.json。
+// 排程（vercel.json，時間為 UTC）：
+//   增量 `5,35 0-14 * * *`＝台北每天 08:05～22:35 每 30 分鐘（刻意錯開整點／半點的 ERP 與塔台同步，避免同時打 ARGO）
+//   全量 `40 18 * * *`＝台北每天 02:40（補增量漏掉的：作廢銷貨、超過 3 天才補登的銷貨；避開 ARGO 半夜 00:05～00:39 曾不回應的時段）
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
