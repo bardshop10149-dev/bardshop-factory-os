@@ -183,7 +183,9 @@ export interface ClosureCloseRequest {
   action: 'close'
   soLineKey: string
   /** 備註（選填；空字串不送） */
-  note?: string
+  note?: string | null
+  /** D110：卡片所在區塊與整行在待排池的數量（伺服器當提示用、逐欄驗證；讓它不必為了快照重組待排池） */
+  hint?: { block?: string | null; qty?: number | null } | null
 }
 
 export type ClosureCloseResponse =
@@ -194,8 +196,10 @@ export type ClosureCloseResponse =
     unplaced?: unknown
     /** 從各人模擬區移除的模擬列數（形狀由對方定義） */
     simRemoved?: unknown
+    /** D110：自己的模擬區被移除模擬卡之後的新 version（沒被動到＝null；舊版伺服器沒有這一欄） */
+    simVersion?: number | null
   }
-  | { success: false; error: string; code?: string }
+  | { success: false; error: string; code?: string; /** D110：true＝結案已成立，只是附帶清理沒做完 */ closed?: boolean }
 
 /** D107 對一張卡（SO-項次）結案：永久不再拉回待排池；伺服器會一併從正式區與所有模擬區移除該行的卡 */
 export async function postClosure(req: ClosureCloseRequest): Promise<AiApiResult<ClosureCloseResponse>> {

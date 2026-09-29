@@ -56,6 +56,7 @@ import {
   MINUTES_SNAP,
   type BoardCard,
   type BoardDay,
+  type Closure,
   type PlacementOp,
   type YMD,
 } from '@/lib/packaging/scheduleTypes'
@@ -104,6 +105,10 @@ import QtyDateDialog, { type LineChoice } from './QtyDateDialog'
 import CapacityEditor from './CapacityEditor'
 import VersionsPanel from './VersionsPanel'
 import ClosureDialog, { type CloseTarget } from './ClosureDialog'
+// D110 結案：樂觀更新（本地記號）、背景佇列、結案池面板
+import ClosurePoolPanel, { type RestoreResult } from './ClosurePoolPanel'
+import { hideClosedLines, linePoolQty } from './closureLocal'
+import { restoreClosureCall, useClosedMarks, useClosureList, useClosureQueue } from './useClosures'
 import PaneResizer, { MIN_POOL_WIDTH } from './PaneResizer'
 // P3 AI 模擬排程（規格 §八）：正式工作台只新增「AI 採用紀錄」按鈕與對話框（退回採用），不動既有拖曳／儲存／鎖邏輯
 import AdoptionsDialog from '@/components/packaging/ai/AdoptionsDialog'
@@ -142,6 +147,8 @@ type Dialog =
   | { t: 'versions' }
   /** D104 結案確認（待排池卡或排定卡的右鍵） */
   | { t: 'close'; target: CloseTarget }
+  /** D110 結案池（近 30 天已結案清單、復原） */
+  | { t: 'closures' }
 
 /** 桌機（≥ 1024px）才提供拖曳（D54 現場裝置先不處理） */
 function useIsDesktop(): boolean {
@@ -241,7 +248,15 @@ export default function BoardLayout() {
   })
   useEffect(() => { boardRef.current = board })
 
-  const data = board.data
+  // D110 結案的樂觀更新：畫面用的 data＝伺服器資料濾掉「有結案記號的 SO 行」（closureLocal.hideClosedLines）。
+  // 記號套在「每一份」資料上——輪詢、較早發出的回應晚到、樂觀更新後的資料都一樣，所以已結案的卡不會被帶回畫面；
+  // 直到伺服器回來的資料本身已不含該行，記號才拿掉（下面的 effect）。useBoard 裡的資料不動：結案失敗時拿掉記號，卡片就回原位。
+  const closedMarks = useClosedMarks()
+  const closureList = useClosureList(!denied)
+  const rawData = board.data
+  const data = useMemo(() => (rawData ? hideClosedLines(rawData, closedMarks.marks) : null), [rawData, closedMarks.marks])
+  const pruneClosedMarks = closedMarks.prune
+  useEffect(() => { if (rawData) pruneClosedMarks(rawData) }, [rawData, pruneClosedMarks])
   const me = data?.me
 
   const openWeekendsFetched = useOpenWeekends(!denied && !!data, data?.today ?? null, capRefresh)
@@ -401,6 +416,57 @@ export default function BoardLayout() {
     if (!data) return 0
     return [...data.holding, ...data.days.flatMap(d => d.cards)].filter(c => c.card.soLineKey === soLineKey && !c.completed).length
   }, [data])
+  const { noteExternalWrite, reload: reloadBoard } = board
+  const { upsert: upsertClosureRow, refresh: refreshClosureList } = closureList
+  const clearClosedMark = closedMarks.clear
+  const closureQueue = useClosureQueue(closedMarks, {
+    onClosed: (intent, out) => {
+      // 伺服器已刪掉該行未完成的排定卡：Undo 堆疊裡對這些卡的反向操作已對不上 → 清空（同版本還原）。
+      // 409／附帶清理未完成時伺服器沒回張數 → 以按下結案當時畫面上的張數判斷
+      if (out.unplaced > 0 || ((out.already || out.warning != null) && (intent.openPlacements ?? 0) > 0)) undo.clear()
+      const c = out.closure as Closure | null
+      if (c && typeof c === 'object' && typeof c.id === 'number') upsertClosureRow(c)
+      else void refreshClosureList()
+      if (out.warning) showToast('warn', `${intent.label}：${out.warning}`)
+      else if (out.already) showToast('info', `${intent.label} 本來就已經結案（可能是別人剛結的），已從畫面移除`)
+      else showToast('info', `已結案 ${intent.label}${out.unplaced > 0 ? `，放回 ${out.unplaced} 張排定卡` : ''}${out.simRemoved > 0 ? `，清掉模擬區 ${out.simRemoved} 張` : ''}（可在「結案池」復原）`)
+      noteExternalWrite()
+    },
+    onFailed: (intent, message) => showToast('error', `結案失敗：${intent.label} 的卡片已放回原位（${message}）`),
+    onUnauthorized: () => router.replace('/login'),
+  })
+  const enqueueClosure = closureQueue.close
+  /** 主管在對話框按「確定結案」：關對話框、卡片立刻消失、背景送出（可以接著結下一張） */
+  const confirmClose = useCallback((target: CloseTarget, note: string | null) => {
+    setDialog(null)
+    const label = `${target.so}${target.soLine ? `-${target.soLine}` : ''}`
+    // 數量帶「整行在待排池的量」（qty_at_close 一直以來的定義）；待排池資料裡找不到這一行才退回對話框上那張卡的量
+    const qty = (rawData ? linePoolQty(rawData, target.soLineKey) : null) ?? target.qty
+    const queued = enqueueClosure({
+      soLineKey: target.soLineKey, label, note, block: target.block, qty, openPlacements: target.openPlacements ?? 0,
+    })
+    if (!queued) showToast('info', `${label} 已在結案中`)
+  }, [enqueueClosure, rawData, showToast])
+  /** 結案池的「復原」：等伺服器說好才動畫面（拿掉記號、重新載入 → 該行回到待排池） */
+  const restoreClosure = useCallback(async (c: Closure): Promise<RestoreResult> => {
+    const r = await restoreClosureCall(c)
+    if (r.ok) {
+      clearClosedMark(c.soLineKey)
+      upsertClosureRow(r.closure)
+      showToast('info', `已復原 ${c.so}-${c.soLine}：這一行回到待排池`)
+      void reloadBoard()
+      return { ok: true }
+    }
+    if (r.unauthorized) { router.replace('/login'); return { ok: false, message: '登入已逾時' } }
+    if (r.gone) {
+      // 別人剛復原過：結果相同（該行已回待排池）→ 畫面照樣更新
+      clearClosedMark(c.soLineKey)
+      void refreshClosureList()
+      void reloadBoard()
+    }
+    return { ok: false, message: r.message }
+  }, [clearClosedMark, upsertClosureRow, refreshClosureList, reloadBoard, showToast, router])
+
   const openCloseDialog = useCallback((card: PackagingCardData, qty: number) => {
     setDialog({
       t: 'close',
@@ -729,6 +795,11 @@ export default function BoardLayout() {
             className="rounded border border-slate-700 bg-slate-900 px-2.5 py-1 text-slate-200 hover:bg-slate-800">產能表</button>
           <button type="button" onClick={() => setDialog({ t: 'versions' })}
             className="rounded border border-slate-700 bg-slate-900 px-2.5 py-1 text-slate-200 hover:bg-slate-800">版本</button>
+          <button type="button" onClick={() => setDialog({ t: 'closures' })}
+            title="今天／近期結案的 SO-項次（誰、何時、備註），結錯了可以復原"
+            className="rounded border border-rose-800/70 bg-rose-950/30 px-2.5 py-1 text-rose-200 hover:bg-rose-900/40">
+            結案池（{closureList.todayCount}）{closureQueue.pending > 0 ? <span className="ml-1 text-[10px] text-amber-300">送出中 {closureQueue.pending}</span> : null}
+          </button>
           {aiAccess.canUseAi && (
             <button type="button" onClick={() => setAiAdoptionsOpen(true)}
               title="AI 模擬區每次「採用此版排程」的紀錄；可退回最近一次採用（只倒回那次的範圍）"
@@ -1023,13 +1094,19 @@ export default function BoardLayout() {
           target={dialog.target}
           busyHint={board.pending > 0 || board.saving ? '工作台還有操作在儲存中，請等自動儲存完成再結案' : null}
           onClose={() => setDialog(null)}
-          onDone={r => {
-            setDialog(null)
-            // 伺服器已刪掉該行未完成的排定卡：Undo 堆疊裡對這些卡的反向操作已對不上 → 清空（同版本還原）
-            if (r.unplaced > 0) undo.clear()
-            board.showToast('info', r.message)
-            void board.reload()
-          }}
+          onConfirm={note => confirmClose(dialog.target, note)}
+        />
+      )}
+      {dialog?.t === 'closures' && (
+        <ClosurePoolPanel
+          list={closureList}
+          canRestore={canClose}
+          pendingCount={closureQueue.pending}
+          nowMs={nowMs}
+          onRestore={restoreClosure}
+          // 訂單詳情（全站共用 z-50）比抽屜低：先關抽屜再開
+          onOpenOrder={so => { setDialog(null); openOrder(so) }}
+          onClose={() => setDialog(null)}
         />
       )}
 

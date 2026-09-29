@@ -8,7 +8,7 @@
 
 import { describeError } from '@/lib/supabaseAdmin'
 import type { Closure, ClosureRow, PlacementSnapshotRow, YMD } from '@/lib/packaging/scheduleTypes'
-import { rowToClosure, stripSimPlacementsForLine, taipeiDayRange } from '@/lib/packaging/closures'
+import { rowToClosure, stripSimPlacementsForLine, taipeiDayRange, type ClosureSnapshot } from '@/lib/packaging/closures'
 import { ScheduleDbError, TBL, chunks, fetchAll, isMissingSchema, type SupabaseAdmin } from '@/lib/packaging/scheduleDb'
 import type { Placement } from '@/lib/packaging/scheduleTypes'
 
@@ -57,19 +57,8 @@ export async function loadActiveClosuresBySo(sb: SupabaseAdmin, so: string): Pro
   return ((data ?? []) as ClosureRow[]).map(rowToClosure)
 }
 
-export interface ClosureInsert {
-  soLineKey: string
-  so: string
-  soLine: string
-  itemCode: string | null
-  itemName: string | null
-  customer: string | null
-  qtyAtClose: number
-  dueDate: YMD | null
-  blockAtClose: string | null
-  soldQtyAtClose: number | null
-  note: string | null
-}
+/** 結案快照（D110：由 closures.buildClosureSnapshot 組；型別定義在純函式檔） */
+export type ClosureInsert = ClosureSnapshot
 
 /** 新增結案；部分唯一索引撞到（同一行已有未復原的結案）→ 'duplicate' */
 export async function insertClosure(
@@ -157,46 +146,81 @@ export async function unplaceOpenPlacements(sb: SupabaseAdmin, open: readonly Pl
 // 結案時：從各人模擬區移除該行的模擬卡（packaging_sim_sessions.placements jsonb）
 // ─────────────────────────────────────────────────────────────────────
 
-type SimSessionSlice = { id: number | string; version: number | string; placements: unknown; locks: unknown }
+export type SimSessionSlice = { id: number | string; owner_email?: string | null; version: number | string; placements: unknown; locks: unknown }
+
+const SIM_SLICE_COLS = 'id, owner_email, version, placements, locks'
+
+/**
+ * D110：讀全部模擬區（每位主管一列）的精簡欄位。拆成獨立函式＝路由可以把它跟「查重、ERP 鏡像、排定卡」並行讀，
+ * 少一趟來回；也用來判斷「排程系統認不認得這一行」（closures.buildClosureSnapshot 的退路 ③）。
+ * AI 表未建（migration 20260928b 未套用）→ 空陣列（不丟錯）。
+ */
+export async function loadSimSessionSlices(sb: SupabaseAdmin): Promise<SimSessionSlice[]> {
+  const { data, error } = await sb.from(SIM_SESSIONS_TABLE).select(SIM_SLICE_COLS)
+  if (error) {
+    if (isMissingSchema(error)) return []
+    throw new ScheduleDbError('讀取模擬區', error)
+  }
+  return (data ?? []) as SimSessionSlice[]
+}
+
+const slicePlacements = (s: SimSessionSlice): PlacementSnapshotRow[] => (Array.isArray(s.placements) ? (s.placements as PlacementSnapshotRow[]) : [])
+
+/** 這些模擬區裡有沒有這一行的模擬卡（純判斷，不寫入） */
+export function simSlicesHaveLine(slices: readonly SimSessionSlice[], soLineKey: string): boolean {
+  const key = soLineKey.trim().toUpperCase()
+  return slices.some((s) => slicePlacements(s).some((p) => typeof p.soLineKey === 'string' && p.soLineKey.trim().toUpperCase() === key))
+}
+
+export interface SimRemoval {
+  /** 移除的模擬卡張數（全部模擬區合計） */
+  removed: number
+  /** 有被改到的模擬區：owner（小寫 email）與改完後的 version（結案的人自己的那一份，前端要用它接著送下一個操作） */
+  sessions: { ownerEmail: string; version: number; removed: number }[]
+}
 
 /**
  * 每位主管一份模擬區（一列）；逐列：解析 placements（陣列）→ 拿掉 soLineKey＝該行的列、locks.placementIds 同步清掉
  * → update … where id = ? and version = 舊值（同 lib/packaging/ai/db.ts updateSimSessionCas：version + 1、updated_at）。
  * 0 列＝那份模擬區剛被主管或 AI 寫回改過 → 重讀一次再試，最多兩輪。undo 堆疊不動（退回上一步可能把該卡帶回模擬區，
  * 但採用時走正式寫入驗證：該行已不在待排池 → 擋下，不會寫進正式區）。
- * AI 表未建（migration 20260928b 未套用）→ 0（不丟錯）。回傳移除的模擬卡張數。
+ * AI 表未建（migration 20260928b 未套用）→ 0（不丟錯）。
+ * D110：preloaded＝路由已經讀好的那一份（省一趟來回）；各份模擬區互不相干 → 並行處理。
  */
-export async function removeLineFromSimSessions(sb: SupabaseAdmin, soLineKey: string, nowIso: string): Promise<number> {
-  const { data, error } = await sb.from(SIM_SESSIONS_TABLE).select('id, version, placements, locks')
-  if (error) {
-    if (isMissingSchema(error)) return 0
-    throw new ScheduleDbError('讀取模擬區', error)
-  }
-  let removed = 0
-  for (const row of (data ?? []) as SimSessionSlice[]) {
+export async function removeLineFromSimSessions(
+  sb: SupabaseAdmin,
+  soLineKey: string,
+  nowIso: string,
+  preloaded?: readonly SimSessionSlice[],
+): Promise<SimRemoval> {
+  const rows = preloaded ?? await loadSimSessionSlices(sb)
+  const results = await Promise.all(rows.map(async (row): Promise<SimRemoval['sessions'][number] | null> => {
     let cur: SimSessionSlice | null = row
     for (let round = 0; round < 2 && cur; round++) {
-      const placements = Array.isArray(cur.placements) ? (cur.placements as PlacementSnapshotRow[]) : []
       const locks = cur.locks && typeof cur.locks === 'object' && !Array.isArray(cur.locks)
         ? (cur.locks as { placementIds?: unknown })
         : { placementIds: [], soNumbers: [], lineIds: [] }
-      const stripped = stripSimPlacementsForLine(placements, locks, soLineKey)
-      if (stripped.removed === 0) break
+      const stripped = stripSimPlacementsForLine(slicePlacements(cur), locks, soLineKey)
+      if (stripped.removed === 0) return null
       const expect = Number(cur.version)
       const { data: upd, error: uerr } = await sb.from(SIM_SESSIONS_TABLE)
         .update({ placements: stripped.placements, locks: stripped.locks, version: expect + 1, updated_at: nowIso })
         .eq('id', cur.id).eq('version', expect).select('id')
       if (uerr) throw new ScheduleDbError('模擬區移除結案行', uerr)
-      if ((upd ?? []).length > 0) { removed += stripped.removed; break }
+      if ((upd ?? []).length > 0) {
+        return { ownerEmail: String(row.owner_email ?? '').trim().toLowerCase(), version: expect + 1, removed: stripped.removed }
+      }
       // CAS 未命中：重讀這一份再試
       const reread: { data: unknown; error: { message: string } | null } = await sb.from(SIM_SESSIONS_TABLE)
-        .select('id, version, placements, locks').eq('id', cur.id).maybeSingle()
+        .select(SIM_SLICE_COLS).eq('id', cur.id).maybeSingle()
       if (reread.error) throw new ScheduleDbError('重讀模擬區', reread.error)
       cur = (reread.data as SimSessionSlice | null) ?? null
       if (round === 1) console.warn(`[packaging/closures] 模擬區 #${row.id} 兩輪 CAS 都沒命中，${soLineKey} 的模擬卡未移除（採用時會被正式驗證擋下）`)
     }
-  }
-  return removed
+    return null
+  }))
+  const sessions = results.filter((x): x is SimRemoval['sessions'][number] => x != null)
+  return { removed: sessions.reduce((a, x) => a + x.removed, 0), sessions }
 }
 
 /** 供路由 log 用（統一格式） */

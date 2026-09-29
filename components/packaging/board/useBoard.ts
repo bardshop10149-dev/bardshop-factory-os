@@ -326,6 +326,19 @@ export function useBoard(opts: {
   }, [load])
   useEffect(() => { settleRef.current = scheduleSettledReload }, [scheduleSettledReload])
 
+  /**
+   * D110：工作台操作佇列「以外」的寫入剛完成（結案：伺服器刪了該行未完成的排定卡、該行離開待排池）。
+   * ① 寫入世代 +1：在它之前發出的 GET 是寫入前的快照，回來時照既有規則丟掉（否則那份舊資料會被當成最新、
+   *    還順手把等著的重抓取消掉，畫面要等到下一次 60 秒輪詢才校正）
+   * ② 標記待重抓：佇列是空的就排「停手 3 秒重抓」（連續結案多張只抓一次）；佇列還有東西＝清空時 pump 會排
+   * 畫面不靠這次重抓把卡拿掉（那是本地記號的事，closureLocal.ts）；重抓只是校正伺服器才算得出的產能與分配。
+   */
+  const noteExternalWrite = useCallback(() => {
+    mutationGenRef.current++
+    dirtyRef.current = true
+    if (queueRef.current.length === 0 && !busyRef.current) scheduleSettledReload(true)
+  }, [scheduleSettledReload])
+
   const clearSettle = useCallback(() => {
     if (settleTimerRef.current != null) {
       window.clearTimeout(settleTimerRef.current)
@@ -774,6 +787,7 @@ export function useBoard(opts: {
     windowReq,
     setWindow,
     reload,
+    noteExternalWrite,
     submit,
     setMinutes,
     undoStep,

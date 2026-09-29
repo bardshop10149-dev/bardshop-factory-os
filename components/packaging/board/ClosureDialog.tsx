@@ -1,15 +1,16 @@
 'use client'
 
-// D104 結案確認對話框：顯示單號-項次、品名、數量、交期、原區塊，備註輸入（≤ CLOSURE_NOTE_MAX 字）→ 送 POST /api/packaging/closures。
-// 不需編輯鎖（結案是單據事實，不是排程動作）；不進 Undo（誤結請到「已結案清單」復原——面板延後，先由 GET API 提供）。
-// 送出後由呼叫端重新載入工作台：伺服器已把該行未完成的排定卡放回（刪除）、模擬區的卡移除。
+// D104 結案確認對話框：顯示單號-項次、品名、數量、交期、原區塊，備註輸入（≤ CLOSURE_NOTE_MAX 字）。
+// 不需編輯鎖（結案是單據事實，不是排程動作）；不進 Undo（誤結請到「結案池」復原）。
+// D110：這個對話框**不打 API、不等伺服器**——按「確定結案」就把內容交給呼叫端（onConfirm）並關閉；
+//   呼叫端立刻把該行的卡從畫面拿掉、背景送出（useClosures.useClosureQueue），失敗才把卡放回原位並提示。
+//   （以前是在這裡等伺服器回來才關，等的那幾秒卡片還在畫面上，主管會以為沒結到、再按一次就看到「這一行已經結案」。）
 
 import { useState } from 'react'
 import { CLOSURE_NOTE_MAX } from '@/lib/packaging/scheduleTypes'
 import { POOL_BLOCK_META, type PoolBlockId } from '@/lib/packaging/types'
 import Modal, { Btn } from './Modal'
 import { md } from './boardFormat'
-import { postClosure } from './boardApi'
 
 /** 對話框要顯示的那一行（來源可能是待排池卡或排定卡；伺服器自己重算快照，這裡只是給主管確認） */
 export interface CloseTarget {
@@ -30,37 +31,20 @@ export interface CloseTarget {
 
 const fmtQty = (n: number) => (Number.isInteger(n) ? String(n) : String(Math.round(n * 1000) / 1000))
 
-export default function ClosureDialog({ target, busyHint, onClose, onDone }: {
+export default function ClosureDialog({ target, busyHint, onClose, onConfirm }: {
   target: CloseTarget
   /** 工作台還有未儲存的操作時給提示、先擋送出（避免與自動儲存交錯） */
   busyHint?: string | null
   onClose: () => void
-  /** 結案成功：訊息＋伺服器放回的排定卡張數＋清掉的模擬卡張數（呼叫端清 Undo、重新載入） */
-  onDone: (r: { message: string; unplaced: number; simRemoved: number }) => void
+  /** 主管按下「確定結案」（備註已去頭尾空白，空的＝null）；呼叫端負責關對話框、樂觀更新與送出 */
+  onConfirm: (note: string | null) => void
 }) {
   const [note, setNote] = useState('')
-  const [busy, setBusy] = useState(false)
-  const [err, setErr] = useState<string | null>(null)
   const label = `${target.so}${target.soLine ? `-${target.soLine}` : ''}`
 
-  const submit = async () => {
-    if (busy || busyHint) return
-    setBusy(true)
-    setErr(null)
-    try {
-      const r = await postClosure({ action: 'close', soLineKey: target.soLineKey, note: note.trim() || null })
-      if (r.json?.success) {
-        const { unplaced, simRemoved } = r.json
-        onDone({
-          message: `已結案 ${label}${unplaced > 0 ? `，放回 ${unplaced} 張排定卡` : ''}${simRemoved > 0 ? `，清掉模擬區 ${simRemoved} 張` : ''}`,
-          unplaced, simRemoved,
-        })
-      } else {
-        setErr(r.error ?? '結案失敗')
-      }
-    } finally {
-      setBusy(false)
-    }
+  const submit = () => {
+    if (busyHint) return
+    onConfirm(note.trim() || null)
   }
 
   return (
@@ -69,10 +53,8 @@ export default function ClosureDialog({ target, busyHint, onClose, onDone }: {
       onClose={onClose}
       footer={(
         <>
-          <Btn onClick={onClose} disabled={busy}>取消</Btn>
-          <Btn tone="danger" onClick={() => void submit()} disabled={busy || !!busyHint} title={busyHint ?? undefined}>
-            {busy ? '結案中…' : '確定結案'}
-          </Btn>
+          <Btn onClick={onClose}>取消</Btn>
+          <Btn tone="danger" onClick={submit} disabled={!!busyHint} title={busyHint ?? undefined}>確定結案</Btn>
         </>
       )}
     >
@@ -92,7 +74,7 @@ export default function ClosureDialog({ target, busyHint, onClose, onDone }: {
             ? <>目前 <b>{target.openPlacements}</b> 張未完成的排定卡會一併放回（刪除），</>
             : <>同行未完成的排定卡會一併放回（刪除），</>}
           各人模擬區裡這一行的卡也會移除。已勾完成的不受影響。
-          <span className="block text-rose-300/80">不進「復原」（Ctrl+Z）；要拉回請由主管在已結案清單復原。</span>
+          <span className="block text-rose-300/80">不進「復原」（Ctrl+Z）；要拉回請到工具列的「結案池」按復原。</span>
         </div>
         <label className="block text-xs text-slate-300">
           備註（選填，例：已出貨未開銷貨單、交期改到下月）
@@ -107,7 +89,6 @@ export default function ClosureDialog({ target, busyHint, onClose, onDone }: {
           <span className="text-[10px] text-slate-500">{note.length}／{CLOSURE_NOTE_MAX}</span>
         </label>
         {busyHint && <p className="text-xs text-amber-300">{busyHint}</p>}
-        {err && <p className="text-xs text-rose-300">{err}</p>}
       </div>
     </Modal>
   )

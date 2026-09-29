@@ -49,7 +49,7 @@ import {
   EMPTY_SIM_LOCKS,
   type SimLocks,
 } from '@/lib/packaging/ai/types'
-import { MINUTES_SNAP, type BoardCard, type BoardDay, type CapacityResponse, type PlacementOp, type YMD } from '@/lib/packaging/scheduleTypes'
+import { MINUTES_SNAP, type BoardCard, type BoardDay, type CapacityResponse, type Closure, type PlacementOp, type YMD } from '@/lib/packaging/scheduleTypes'
 import { isWeekend } from '@/lib/packaging/scheduleCalendar'
 import type { PackagingCard as PackagingCardData } from '@/lib/packaging/types'
 import { lineNameOf } from '@/lib/packaging/scheduleLines'
@@ -76,8 +76,12 @@ import SplitDialog from '@/components/packaging/board/SplitDialog'
 import QtyDateDialog from '@/components/packaging/board/QtyDateDialog'
 import CapacityEditor, { type CapacityEditorSource } from '@/components/packaging/board/CapacityEditor'
 import Modal, { Btn } from '@/components/packaging/board/Modal'
-import SimCloseDialog, { type ClosureDone } from './SimCloseDialog'
-import { useSim } from './useSim'
+import SimCloseDialog from './SimCloseDialog'
+import { useSim, type SimClosureEvent } from './useSim'
+// D110 結案池（清單、復原）：與正式工作台共用
+import ClosurePoolPanel, { type RestoreResult } from '@/components/packaging/board/ClosurePoolPanel'
+import { restoreClosureCall, useClosureList } from '@/components/packaging/board/useClosures'
+import { linePoolQty } from '@/components/packaging/board/closureLocal'
 import {
   AI_MARK, LIVE_MARK, LOCK_MARK, SIM_LANE_REASON, decorateSimBoard, locksCount, simAutoLane, simCardState, simLaneReorder, simLaneStep, simLaneStepInfo,
   soNumberOfKey, toggleCardLock, toggleLineLock, toggleOrderLock, type SimCardState, type SimOrderCtx,
@@ -152,7 +156,7 @@ type Dialog =
   /** D107：對這張卡的 SO-項次結案（確認對話框） */
   | { t: 'closeCase'; bc: BoardCard }
 
-type DrawerKind = 'run' | 'history' | 'rules' | 'locks'
+type DrawerKind = 'run' | 'history' | 'rules' | 'locks' | 'closures'
 
 /** 桌機（≥ 1024px）才提供拖曳（同正式工作台 D54） */
 function useIsDesktop(): boolean {
@@ -194,12 +198,23 @@ export default function SimLayout({ meEmail }: { meEmail: string | null }) {
 
   /** AI 執行結束（成功或失敗）：自動打開結果面板 */
   const onRunFinished = useCallback(() => setDrawer('run'), [])
+  // D110 結案池：近 30 天已結案清單＋今天筆數（工具列「結案池（N）」）
+  const closureList = useClosureList(!denied)
+  const { upsert: upsertClosureRow, refresh: refreshClosureList } = closureList
+  /** 結案送完：成功的那一筆直接併進清單；伺服器沒回那一筆（409 本來就結案了…）就重抓清單。提示由 useSim 負責 */
+  const onClosureSettled = useCallback((ev: SimClosureEvent) => {
+    if (!ev.ok) return
+    const c = ev.outcome.closure as Closure | null
+    if (c && typeof c === 'object' && typeof c.id === 'number') upsertClosureRow(c)
+    else void refreshClosureList()
+  }, [upsertClosureRow, refreshClosureList])
   const sim = useSim({
     enabled: !denied,
     owner,
     onUnauthorized: () => router.replace('/login'),
     onForbidden: () => setDenied(true),
     onRunFinished,
+    onClosureSettled,
   })
 
   const v = sim.view
@@ -552,14 +567,36 @@ export default function SimLayout({ meEmail }: { meEmail: string | null }) {
   }, [lockModeOn, toggleCard])
   const openOrder = useCallback((so: string) => { setDetailId(null); setOrderSo(so) }, [])
 
-  const { reload: reloadSim } = sim
-  /** D107 結案成功：伺服器已把這一行的卡從正式區與模擬區移除 → 關對話框、重抓模擬區、回饋 */
-  const onClosureDone = useCallback((r: ClosureDone) => {
+  const { reload: reloadSim, submitClosure, unhideLine } = sim
+  /**
+   * D107／D110 主管按「確定結案」：關對話框、這一行的卡立刻從畫面消失、排進佇列背景送出（可以接著結下一張）。
+   * 區塊與數量當提示一起送，伺服器就不必為了快照重組待排池。數量帶「整行在待排池的量」
+   *（qty_at_close 一直以來的定義）；待排池資料裡找不到這一行才退回這張卡的量。
+   */
+  const confirmCloseCase = useCallback((bc: BoardCard, note: string | null) => {
     setDialog(null)
-    const n = typeof r.response.simRemoved === 'number' ? r.response.simRemoved : Array.isArray(r.response.simRemoved) ? r.response.simRemoved.length : null
-    showToast('info', `已結案 ${r.soLineKey}：這一行不再拉回待排池${n != null ? `，已從模擬區移除 ${n} 張卡` : ''}；正在重新載入模擬區`)
-    void reloadSim()
-  }, [showToast, reloadSim])
+    const qty = (rawBoard ? linePoolQty(rawBoard, bc.soLineKey) : null) ?? bc.effectiveQty
+    submitClosure({ soLineKey: bc.soLineKey, label: lineLabel(bc.card), note, block: bc.card.block, qty })
+  }, [rawBoard, submitClosure])
+  /** 結案池的「復原」：等伺服器說好才動畫面（拿掉記號、重新載入 → 該行回到待排池）。復原不動模擬區，不必排進佇列 */
+  const restoreClosure = useCallback(async (c: Closure): Promise<RestoreResult> => {
+    const r = await restoreClosureCall(c)
+    if (r.ok) {
+      unhideLine(c.soLineKey)
+      upsertClosureRow(r.closure)
+      showToast('info', `已復原 ${c.so}-${c.soLine}：這一行回到待排池`)
+      void reloadSim()
+      return { ok: true }
+    }
+    if (r.unauthorized) { router.replace('/login'); return { ok: false, message: '登入已逾時' } }
+    if (r.gone) {
+      // 別人剛復原過：結果相同（該行已回待排池）→ 畫面照樣更新
+      unhideLine(c.soLineKey)
+      void refreshClosureList()
+      void reloadSim()
+    }
+    return { ok: false, message: r.message }
+  }, [unhideLine, upsertClosureRow, refreshClosureList, reloadSim, showToast, router])
 
   const onPoolAction = useCallback((card: PackagingCardData, action: PoolAction) => {
     if (action === 'partial') { setDialog({ t: 'partial', card }); return }
@@ -864,6 +901,9 @@ export default function SimLayout({ meEmail }: { meEmail: string | null }) {
               className={TOOL_BTN}
             >↶ 退回上一步{session.undo.length > 0 ? ` ${session.undo.length}` : ''}</button>
             <button type="button" onClick={() => setDrawer('history')} className={TOOL_BTN}>歷史</button>
+            <button type="button" onClick={() => setDrawer('closures')}
+              title="今天／近期結案的 SO-項次（誰、何時、備註），結錯了可以復原"
+              className="rounded border border-rose-800/70 bg-rose-950/30 px-2.5 py-1 text-rose-200 hover:bg-rose-900/40">結案池（{closureList.todayCount}）</button>
             {(v.latestRun || running || sim.run) && (
               <button type="button" onClick={() => openRunPanel()} className={TOOL_BTN}>AI 結果</button>
             )}
@@ -1125,7 +1165,7 @@ export default function SimLayout({ meEmail }: { meEmail: string | null }) {
         <SimCloseDialog
           bc={dialog.bc}
           onClose={() => setDialog(null)}
-          onDone={onClosureDone}
+          onConfirm={note => confirmCloseCase(dialog.bc, note)}
         />
       )}
       {dialog?.t === 'reset' && session && (
@@ -1295,12 +1335,12 @@ export default function SimLayout({ meEmail }: { meEmail: string | null }) {
             changeLocks(toggleOrderLock(locks, detailRaw.soLineKey), `${on ? '解除鎖定' : '鎖定'}訂單 ${so}`)
           }}
           onSubmitMinutes={(m, reason) => setMinutes(detailRaw, m, reason, 'dialog')}
-          // D107：結案是正式區的事實（只需 packaging_admin，不看模擬區的鎖）；但要等模擬區沒有東西在儲存，
-          //   否則佇列裡的操作會撞到伺服器順手移除模擬卡後的新 version
+          // D107：結案是正式區的事實（只需 packaging_admin，不看模擬區的鎖）。
+          // D110：不必等模擬區存完——結案排進同一條操作佇列依序送出（伺服器順手移除模擬卡後的新 version 由回應接上），
+          //   所以可以連續結好幾張；只有「佇列以外的動作」（AI 排程送出、退回、清空…）進行中才擋
           onCloseCase={() => { setDetailId(null); setDialog({ t: 'closeCase', bc: detailRaw }) }}
           closeCaseHint={!isOwner ? '請回到自己的模擬區再結案（結案會動到正式區與所有人的模擬區）'
-            : sim.pending > 0 || sim.saving ? '還有操作儲存中，請稍候'
-              : busy ? '請等目前的動作完成' : null}
+            : busy ? '請等目前的動作完成' : null}
         />
         )
       })()}
@@ -1343,6 +1383,19 @@ export default function SimLayout({ meEmail }: { meEmail: string | null }) {
           lines={lines}
           editable={editable}
           onChange={changeLocks}
+          onClose={() => setDrawer(null)}
+        />
+      )}
+      {drawer === 'closures' && (
+        <ClosurePoolPanel
+          list={closureList}
+          // 進得了 AI 模擬區的人都有 packaging_admin（guardPackagingAi）；伺服器仍會再驗一次
+          canRestore
+          pendingCount={0}
+          nowMs={nowMs}
+          onRestore={restoreClosure}
+          // 訂單詳情（全站共用 z-50）比抽屜低：先關抽屜再開
+          onOpenOrder={so => { setDrawer(null); openOrder(so) }}
           onClose={() => setDrawer(null)}
         />
       )}
