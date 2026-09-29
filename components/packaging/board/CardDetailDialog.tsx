@@ -15,16 +15,19 @@
 //     有工時段時「排程」一段不再重複列唯讀的「工時」。focusMinutes＝直接聚焦輸入框（點卡片上的「工時」小標／右鍵「調整工時…」）。
 //   - 「排程」段的「線」下面加「順序」列（LaneOrderRow：第 n／m 張＋上移／下移），laneOrder 不傳就不顯示（待排池卡、待排區卡）。
 //   - MinutesEditor 的 key 不再用 version：上移／下移寫入後 version +1，會重掛元件、清掉還沒送出的工時輸入。
+// D111：CardInfo 多一段「入庫」（ReceiptInfo）——列出全部入庫批次（日期、數量）、合計 vs 採購量、已放天數。
+//   CardInfo 是卡片詳情、AI 模擬區卡片詳情（SimCardDetail）、待排池滑過提示三處共用，所以三處都會出現。
 
 import type { ReactNode } from 'react'
 import type { BoardCard, ManualInclusionMeta, PackagingLine, PlacementFlag, PoolCardMeta } from '@/lib/packaging/scheduleTypes'
 import type { DangerFlag, PackagingCard } from '@/lib/packaging/types'
 import { SOURCE_STYLES, fmtQty } from '@/components/packaging/poolStyles'
 import { hoursText, noteText, placementState } from '@/lib/packaging/boardView'
+import { RECEIPT_AGE_DANGER_DAYS, RECEIPT_AGE_WARN_DAYS, receiptDetail } from '@/lib/packaging/receipts'
 import { lineNameOf } from '@/lib/packaging/scheduleLines'
 import { clock, md, mdw } from './boardFormat'
 import Modal, { Btn } from './Modal'
-import { lineLabel } from './CardFace'
+import { RECEIPT_TONE_CLASS, lineLabel } from './CardFace'
 import MinutesEditor from './MinutesEditor'
 import MinutesHistory from './MinutesHistory'
 import LaneOrderRow, { type LaneOrderProps } from './LaneOrderControls'
@@ -52,10 +55,43 @@ function ManualInfo({ m }: { m: ManualInclusionMeta }) {
 }
 
 /**
+ * D111 入庫批次（全部列出）：日期、數量、合計 vs 採購量、已放天數（自最早一批起算）。
+ * 沒有任何批次（製令、手動加入、還沒到貨、入庫同步未啟用）→ 不顯示。
+ */
+export function ReceiptInfo({ card, today }: { card: PackagingCard; today?: string }) {
+  const d = receiptDetail(card, today)
+  if (!d) return null
+  return (
+    <div className="break-words">
+      <span className="text-slate-400">入庫　　</span>
+      <span className="tabular-nums">
+        {d.batches.map((b, i) => (
+          <span key={b.date}>{i > 0 ? '、' : ''}{b.label} 入 {b.qtyText}</span>
+        ))}
+      </span>
+      <span className="ml-1 tabular-nums text-slate-400">（共 {d.batches.length} 批・{d.totalText}）</span>
+      {d.days != null && (
+        <span
+          className={`ml-1 tabular-nums ${RECEIPT_TONE_CLASS[d.tone]}`}
+          title={`自最早一批 ${d.batches[0].label} 起算的日曆天數；滿 ${RECEIPT_AGE_WARN_DAYS} 天橘色、滿 ${RECEIPT_AGE_DANGER_DAYS} 天紅色`}
+        >已放 {d.days} 天</span>
+      )}
+      {d.pendingCard && <span className="ml-1 text-slate-400">（本卡是同一採購行尚未入庫的數量）</span>}
+    </div>
+  )
+}
+
+/**
  * 卡片上沒放的資訊：狀態、工時與來源、品項編碼、備註、完整 PACKING、可包量、已排量、全部旗標（info 灰色）。
  * placed：排定卡——拆卡序與可包量交給「排程」一段（PlacementInfo 的「拆卡」「預排…（可包 x/y）」）顯示，這裡不重複列
  */
-export function CardInfo({ card, meta, placed = false }: { card: PackagingCard; meta: PoolCardMeta | undefined; placed?: boolean }) {
+export function CardInfo({ card, meta, placed = false, today }: {
+  card: PackagingCard
+  meta: PoolCardMeta | undefined
+  placed?: boolean
+  /** D111：算「已放 N 天」用；不傳＝用待排池算好的 daysSinceReceipt */
+  today?: string
+}) {
   const note = noteText(card)
   const hrs = hoursText(card.work.minutes)
   const sources = card.sources.map(s => s.docNo).filter(Boolean)
@@ -76,6 +112,7 @@ export function CardInfo({ card, meta, placed = false }: { card: PackagingCard; 
         <span className="text-slate-400">來源　　</span>{SOURCE_STYLES[card.sourceKind].label}
         {sources.length > 0 && <span className="ml-1 font-mono text-slate-300">{sources.join('、')}</span>}
       </div>
+      <ReceiptInfo card={card} today={today} />
       <div><span className="text-slate-400">品項編碼　</span><span className="font-mono">{card.itemCode ?? '—'}</span></div>
       <div className="break-words"><span className="text-slate-400">備註　　</span>{note ?? '—'}</div>
       <div className="whitespace-pre-line break-words"><span className="text-slate-400">PACKING　</span>{card.packing?.trim() || '—'}</div>
@@ -234,7 +271,7 @@ export default function CardDetailDialog({ card, meta, placement, today, onClose
           </>
         )}
         <div className="my-1 border-t border-slate-800" />
-        <CardInfo card={card} meta={meta} placed={!!placement} />
+        <CardInfo card={card} meta={meta} placed={!!placement} today={today} />
       </div>
     </Modal>
   )

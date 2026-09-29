@@ -14,11 +14,18 @@
 // 不另佔一行（D60），客戶名稱被擠時先截斷客戶名稱（它是 7 項裡最不影響排程判斷的）。
 // D100：選填的 tail 放在第 5 行（PACKING）右側——排定卡（PlacementCard）用來放「工時」小標與角標；
 //   不傳（待排池 SimplePoolCard、拖曳中的浮動卡、日檢視 LaneCard）時外觀與原本完全相同，7 項的排版不動。
+// D111：已入庫的卡（常平／委外）多一行入庫資訊（ReceiptLine）——單批「入庫 9/09・已放 21 天」、
+//   分批逐批列出「9/09 入 500、9/15 入 300」（最多 3 批，超過接「…共 N 批」）；已放滿 14 天橘、滿 30 天紅。
+//   沒有入庫批次的卡（製令、手動加入、還沒到貨、入庫同步未啟用）不多佔一行，外觀與原本完全相同。
+//   位置 receiptAt：'top'（預設）＝交期那一行的正下方、靠右對齊（和交期上下對齊）；
+//     'bottom'＝放在最後（日檢視 LaneCard 用：卡片高度＝工時、超出會被截掉，新資訊放最後才不會把原本的 7 項擠出去）；
+//     'none'＝不顯示。兩週迷你卡不用這個元件（放不下），入庫資訊在滑過提示（cardParts cardTitle）。
 
 import type { ReactNode } from 'react'
 import type { PackagingCard } from '@/lib/packaging/types'
 import { fmtQty } from '@/components/packaging/poolStyles'
 import { moText, packingMain, type CardMark } from '@/lib/packaging/boardView'
+import { receiptFace, type ReceiptTone } from '@/lib/packaging/receipts'
 import { md } from './boardFormat'
 
 export type BarTone = 'done' | 'danger' | 'normal'
@@ -56,6 +63,43 @@ export function CardMarks({ marks, small = false }: { marks: CardMark[]; small?:
   )
 }
 
+/** D111「已放 N 天」的顏色（門檻在 lib/packaging/receipts.ts：RECEIPT_AGE_WARN_DAYS／RECEIPT_AGE_DANGER_DAYS） */
+export const RECEIPT_TONE_CLASS: Record<ReceiptTone, string> = {
+  normal: 'text-slate-400',
+  warn: 'font-semibold text-orange-300',
+  danger: 'font-bold text-red-300',
+}
+
+/**
+ * D111 入庫資訊一行（CardFace md／sm 共用；沒有入庫批次回 null、不佔位置）。
+ * 分批時文字可能比卡片寬 → 允許換行（flex-wrap），「已放 N 天」整塊不拆開。
+ */
+export function ReceiptLine({ card, today, small = false, muted = false }: {
+  card: PackagingCard
+  today: string
+  small?: boolean
+  muted?: boolean
+}) {
+  const f = receiptFace(card, today)
+  if (!f) return null
+  return (
+    <div
+      className={`flex min-w-0 flex-wrap items-baseline justify-end gap-x-1 ${small ? 'text-[10px] leading-[13px]' : 'text-[11px] leading-4'} ${muted ? 'opacity-55' : ''}`}
+      title={f.title}
+      data-receipt-tone={f.tone}
+    >
+      <span className="min-w-0 break-words text-right tabular-nums text-slate-300">
+        {f.batches}{f.more ? <span className="text-slate-400">{f.more}</span> : null}
+        {/* 分隔點跟著批次文字：換行時「已放 N 天」整塊落到下一行，不會以「・」開頭 */}
+        {f.aged ? <span className="text-slate-500">・</span> : null}
+      </span>
+      {f.aged && (
+        <span className={`shrink-0 whitespace-nowrap tabular-nums ${muted ? 'text-slate-400' : RECEIPT_TONE_CLASS[f.tone]}`}>{f.aged}</span>
+      )}
+    </div>
+  )
+}
+
 export function lineLabel(c: { so: string; soLine: string | null }): string {
   return `${c.so}${c.soLine ? `-${c.soLine}` : ''}`
 }
@@ -81,7 +125,7 @@ export function OrderNo({ card, onOpenOrder, className = '' }: {
   )
 }
 
-export default function CardFace({ card, today, size = 'md', onOpenOrder, bar, marks, check, muted = false, tail }: {
+export default function CardFace({ card, today, size = 'md', onOpenOrder, bar, marks, check, muted = false, tail, receiptAt = 'top' }: {
   card: PackagingCard
   today: string
   size?: 'md' | 'sm'
@@ -96,6 +140,8 @@ export default function CardFace({ card, today, size = 'md', onOpenOrder, bar, m
   muted?: boolean
   /** D100：第 5 行（PACKING）右側的附加內容（排定卡的工時小標、角標）；已完成時跟著變淡 */
   tail?: ReactNode
+  /** D111：入庫資訊放哪裡（見檔頭）；預設交期那一行的正下方 */
+  receiptAt?: 'top' | 'bottom' | 'none'
 }) {
   const overdue = card.dueDate != null && card.dueDate < today && !muted
   const mo = moText(card)
@@ -117,6 +163,8 @@ export default function CardFace({ card, today, size = 'md', onOpenOrder, bar, m
           </span>
           {check}
         </div>
+        {/* D111：入庫資訊（交期正下方；沒有入庫批次時不佔行） */}
+        {receiptAt === 'top' && <ReceiptLine card={card} today={today} small={sm} muted={muted} />}
         {/* 第 2 行：製令＋數量 */}
         <div className={`flex items-baseline ${sm ? 'gap-1' : 'gap-2'} ${fade}`}>
           {label('製令')}
@@ -143,6 +191,7 @@ export default function CardFace({ card, today, size = 'md', onOpenOrder, bar, m
           <span className={`min-w-0 truncate text-amber-100/80 ${sm ? 'text-[10px]' : 'text-xs'}`} title={sm && packing ? `PACKING ${packing}` : undefined}>{packing ?? '—'}</span>
           {tail && <span className="ml-auto flex shrink-0 items-center gap-0.5 self-center">{tail}</span>}
         </div>
+        {receiptAt === 'bottom' && <ReceiptLine card={card} today={today} small={sm} muted={muted} />}
       </div>
     </div>
   )

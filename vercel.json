@@ -76,6 +76,14 @@
     {
       "path": "/api/packaging/sales-sync?mode=full",
       "schedule": "40 18 * * *"
+    },
+    {
+      "path": "/api/packaging/receipts-sync?mode=incremental&days=3",
+      "schedule": "10,40 0-14 * * *"
+    },
+    {
+      "path": "/api/packaging/receipts-sync?mode=full",
+      "schedule": "50 18 * * *"
     }
   ]
 }

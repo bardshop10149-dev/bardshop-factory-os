@@ -3,6 +3,9 @@
 // 只讀 Supabase 既有鏡像（service role），不寫任何資料、不呼叫 ARGO／塔台（D4、D42 P0 唯讀）。
 // D73 已銷貨：只讀 ARGO 銷貨的 EIP 鏡像 erp_so_sales（由 /api/packaging/sales-sync 定時同步），待排池本身不即時打 ARGO；
 //   鏡像表不存在（sql/20260928 未套用）或讀取失敗時照舊出池、不排除已銷貨，並在 notes 最前面說明。
+// D111 入庫日期：只讀 ARGO 採購入庫的 EIP 鏡像 erp_po_receipts（由 /api/packaging/receipts-sync 定時同步）；
+//   鏡像表不存在（sql/20260930 未套用）或讀取失敗時卡片的 receipts 一律空陣列、notes 說明「入庫日期同步尚未啟用」，
+//   待排池照常出卡（loadReceiptMirror 不會往外丟錯）。
 // 判定邏輯全部在 lib/packaging/classify.ts（純函式）；工時在 lib/packaging/stdTime.ts。
 // 規格：docs/design/2026-09-27-packaging-schedule.md §7.1。
 //
@@ -36,6 +39,7 @@ import {
 } from '@/lib/packaging/classify'
 import { computeStdTime, loadStdTimeTables } from '@/lib/packaging/stdTime'
 import { loadSalesMirror, SALES_MIGRATION_FILE } from '@/lib/packaging/salesSync'
+import { loadReceiptMirror, RECEIPTS_MIGRATION_FILE } from '@/lib/packaging/receiptSync'
 import type { PoolFreshness, PoolResponse } from '@/lib/packaging/types'
 import { CALENDAR_COVERAGE, todayTaipei } from '@/lib/packaging/workdays'
 
@@ -67,6 +71,7 @@ export const POOL_NOTES: string[] = [
   '委外（MPO）在塔台只有 QC 工序，P0 沒有包裝完成訊號；已入庫的委外卡留到塔台批結案（D43）或 SO 結案。',
   '自製製令以塔台包裝工序完工代替 ARGO 繳庫（EIP 尚未同步繳庫量）。',
   '已銷貨（D73）：以 ARGO 銷貨明細（IV_INVENTORYIODETAIL，出庫／銷貨）判斷。EIP 定時把銷貨依「SO＋品號」同步成鏡像（erp_so_sales，作廢的銷貨單在下一次同步後自動回補），待排池只讀鏡像、不即時查 ARGO。同一張 SO 同品號多行時，已銷貨量依項次由小到大分配；全數銷貨的品項行不列入（頁尾「已全數銷貨」），部分銷貨的卡片只留未出貨量並標「部分已出貨」（卡片數量大於訂單量、單位可能不同時依比例扣）。銷貨退回目前不回補。',
+  '入庫日期（D111）：卡片上的「入庫 M/DD・已放 N 天」來自 ARGO 採購入庫明細（IV_INVENTORYIODETAIL，入庫／採購），EIP 定時依「採購單號＋行號＋入庫日」同步成鏡像（erp_po_receipts，作廢的入庫單在下一次同步後自動消失），待排池只讀鏡像。分批入庫逐批列出（卡片最多 3 批，其餘看卡片詳情）；「已放 N 天」從最早一批起算、算日曆天，滿 14 天橘色、滿 30 天紅色。只有來源是採購單的卡（常平、委外）有入庫日期；製令與手動加入的卡沒有。同一採購行尚未入庫的那一部分另成一張卡，該卡只列已入庫的批次、不算已放天數。',
   '常平出貨燈可能誤亮：同單同品號多行時黃底同步會把所有行都亮燈；數量配不到的行標「出貨燈可能誤亮」。',
   '常平黃底同步目前每晚 23:30 一次；分批寄出時只記第一次寄出。出貨日無法解析者（如「出HK」）不估可包日。',
   '預估可包日＝寄出日＋預設運輸工作天（順豐 3、空運 5、海特快 7、一般海運 13），尚未以實績校正。',
@@ -324,7 +329,7 @@ async function lastErpSync(supabase: SupabaseAdmin, action: 'sync_so' | 'sync_po
   return typeof v === 'string' ? v : fallback()
 }
 
-async function loadFreshness(supabase: SupabaseAdmin): Promise<Omit<PoolFreshness, 'orderSheet' | 'soSales'>> {
+async function loadFreshness(supabase: SupabaseAdmin): Promise<Omit<PoolFreshness, 'orderSheet' | 'soSales' | 'poReceipts'>> {
   const [erpSo, erpPo, saraSchedule, saraRecords, changping] = await Promise.all([
     lastErpSync(supabase, 'sync_so', () => latestOf(supabase, 'erp_so_lines', 'synced_at')),
     lastErpSync(supabase, 'sync_po', () => latestOf(supabase, 'erp_pj_sync', 'synced_at', ['doc_type', '採購單號'])),
@@ -350,10 +355,21 @@ function salesNoteOf(m: Awaited<ReturnType<typeof loadSalesMirror>>): string | n
   return null
 }
 
+/** D111 入庫鏡像不可用或尚未成功同步時，放在頁尾註腳前面的說明（null＝正常） */
+function receiptNoteOf(m: Awaited<ReturnType<typeof loadReceiptMirror>>): string | null {
+  if (!m.available) {
+    return m.reason === 'missing'
+      ? `入庫日期同步尚未啟用（${RECEIPTS_MIGRATION_FILE} 尚未套用）：卡片暫不顯示入庫日期與已放天數。`
+      : '入庫資料這次讀取失敗：卡片暫不顯示入庫日期與已放天數（重新整理後再試）。'
+  }
+  if (!m.status?.lastOkAt) return '入庫日期同步尚未完整成功跑過一次：卡片上的入庫日期可能不完整（請手動觸發一次全量同步）。'
+  return null
+}
+
 /** 讀完所有原始列（供 classifyPool 與驗證腳本共用） */
 export async function loadPoolRawData(supabase: SupabaseAdmin, today: string) {
   // ① 彼此獨立的讀取
-  const [poLines, tracking, shipMarks, lots, schedule, sheets, tables, fresh, decodableRecords, sales] = await Promise.all([
+  const [poLines, tracking, shipMarks, lots, schedule, sheets, tables, fresh, decodableRecords, sales, receipts] = await Promise.all([
     fetchPoLines(supabase, today),
     fetchTracking(supabase),
     fetchShipMarks(supabase),
@@ -364,6 +380,7 @@ export async function loadPoolRawData(supabase: SupabaseAdmin, today: string) {
     loadFreshness(supabase),
     fetchDecodableRecords(supabase),
     loadSalesMirror(supabase),
+    loadReceiptMirror(supabase),
   ])
 
   // ② SO 集合：採購行來源單（SO/SOB/RO 直接查；RO 另抓前單號＝RO 的 SO 當橋接候選，
@@ -460,15 +477,22 @@ export async function loadPoolRawData(supabase: SupabaseAdmin, today: string) {
     saraDecodedMos,
     // D73：鏡像不可用 → null（不排除已銷貨）；可用但還沒成功同步過 → 照樣用讀到的列（每張 SO 都是整張重算過的，數字可信）
     soSales: sales.available ? sales.rows : null,
+    // D111：鏡像不可用 → null（卡片 receipts 一律空陣列）；可用但還沒成功同步過 → 照樣用讀到的列（每張採購單都是整張重算過的）
+    poReceipts: receipts.available ? receipts.rows : null,
   }
-  const freshness: PoolFreshness = { ...fresh, orderSheet: sheets.latest, soSales: sales.available ? sales.status?.lastOkAt ?? null : null }
-  return { raw, tables, freshness, salesNote: salesNoteOf(sales) }
+  const freshness: PoolFreshness = {
+    ...fresh,
+    orderSheet: sheets.latest,
+    soSales: sales.available ? sales.status?.lastOkAt ?? null : null,
+    poReceipts: receipts.available ? receipts.status?.lastOkAt ?? null : null,
+  }
+  return { raw, tables, freshness, salesNote: salesNoteOf(sales), receiptNote: receiptNoteOf(receipts) }
 }
 
 /** 組出 GET /api/packaging/pool 的成功回應（快取由 route 處理） */
 export async function buildPackagingPool(supabase: SupabaseAdmin, now: Date = new Date()): Promise<PoolOk> {
   const today = todayTaipei(now)
-  const { raw, tables, freshness, salesNote } = await loadPoolRawData(supabase, today)
+  const { raw, tables, freshness, salesNote, receiptNote } = await loadPoolRawData(supabase, today)
   // 工時：stdTime 回傳完整拆解（WorkEstimate），直接放進卡片
   const estimate: WorkEstimator = (input) => computeStdTime(input, tables).work
   const result = classifyPool(raw, estimate)
@@ -485,7 +509,7 @@ export async function buildPackagingPool(supabase: SupabaseAdmin, now: Date = ne
       source: result.calendarFallback ? 'fallback' : 'static',
       coveredYears: Array.from({ length: toYear - fromYear + 1 }, (_, i) => fromYear + i),
     },
-    notes: salesNote ? [salesNote, ...POOL_NOTES] : POOL_NOTES,
+    notes: salesNote || receiptNote ? [...(salesNote ? [salesNote] : []), ...(receiptNote ? [receiptNote] : []), ...POOL_NOTES] : POOL_NOTES,
     cached: false,
     staleUnsynced: result.staleUnsynced,
   }

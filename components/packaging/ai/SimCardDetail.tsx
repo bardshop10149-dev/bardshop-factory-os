@@ -159,7 +159,7 @@ export default function SimCardDetail({
         )}
 
         <div className="my-1 border-t border-slate-800" />
-        <CardInfo card={card} meta={undefined} placed />
+        <CardInfo card={card} meta={undefined} placed today={today} />
       </div>
     </Modal>
   )

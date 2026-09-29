@@ -3,6 +3,7 @@
 import { useState, type ReactNode } from 'react'
 import type { CardStatus, DangerFlag, PackagingCard as PackagingCardData, WorkEstimate } from '@/lib/packaging/types'
 import { packingMethodText } from '@/lib/packaging/stdTime'
+import { RECEIPT_AGE_DANGER_DAYS, RECEIPT_AGE_WARN_DAYS, receiptDetail, type ReceiptTone } from '@/lib/packaging/receipts'
 import {
   FLAG_LEVEL_RANK,
   FLAG_STYLES,
@@ -19,6 +20,13 @@ import {
 // 待排池卡片（一張卡＝一個 ARGO 品項行，D6）。
 // 預設精簡：長文字（品名、備註）截兩行；按「詳細」才展開工時拆解、來源明細、其他製令。
 // 外框：可包量為 0（在途／品檢中／未寄）用虛線，對應 D22「未到貨的卡以虛線框顯示」；已逾期加紅框。
+
+/** D111「已放 N 天」的顏色：滿 14 天橘、滿 30 天紅（門檻在 lib/packaging/receipts.ts） */
+const RECEIPT_TONE_TEXT: Record<ReceiptTone, string> = {
+  normal: 'text-slate-400',
+  warn: 'font-semibold text-orange-300',
+  danger: 'font-bold text-red-300',
+}
 
 /** 交期提醒已經由右上角的交期晶片表達，旗標列不重複顯示這兩個 */
 const DUE_FLAG_CODES = new Set(['overdue', 'due_soon'])
@@ -150,6 +158,8 @@ export default function PackagingCard({ card, today, onOpenOrder, changpingSyncL
   const pre = card.preStation
   const etaPassed = card.flags.some(f => f.code === 'eta_passed')
   const qtyLabel = QTY_CARD_LABEL[card.status]
+  // D111：入庫批次（沒有批次＝不多一列，版面與原本相同）
+  const receipt = receiptDetail(card, today)
 
   return (
     <article
@@ -259,6 +269,28 @@ export default function PackagingCard({ card, today, onOpenOrder, changpingSyncL
             )}
           </div>
         </Row>
+
+        {/* D111 入庫批次：逐批列出「幾號入多少」＋已放天數（自最早一批起算）；精簡模式最多列 3 批 */}
+        {receipt && (
+          <Row label="入庫">
+            <div className="flex flex-wrap items-baseline gap-x-2 leading-5" title={receipt.lines.join('\n')}>
+              <span className="tabular-nums text-slate-300">
+                {(expanded ? receipt.batches : receipt.batches.slice(0, 3)).map((b, i) => (
+                  <span key={b.date}>{i > 0 ? '、' : ''}{b.label} 入 {b.qtyText}</span>
+                ))}
+                {!expanded && receipt.batches.length > 3 && <span className="text-slate-400">…共 {receipt.batches.length} 批</span>}
+              </span>
+              {receipt.days != null && (
+                <span
+                  className={`whitespace-nowrap tabular-nums ${RECEIPT_TONE_TEXT[receipt.tone]}`}
+                  title={`自最早一批起算的日曆天數；滿 ${RECEIPT_AGE_WARN_DAYS} 天橘色、滿 ${RECEIPT_AGE_DANGER_DAYS} 天紅色`}
+                >已放 {receipt.days} 天</span>
+              )}
+              {expanded && <span className="text-slate-400">{receipt.totalText}</span>}
+              {receipt.pendingCard && <span className="text-[10px] text-slate-400">本卡為尚未入庫的數量</span>}
+            </div>
+          </Row>
+        )}
 
         {/* 寄出／預估可包日 */}
         {(card.ship || card.estReadyDate) && (

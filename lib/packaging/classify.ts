@@ -39,6 +39,7 @@ import {
 import { decodedTowerKeys, isNonScheduleDocType, soLineDigitsKey } from '@/lib/packaging/saraKeys'
 import { CHANGPING_PACK_HINT_RE, CHANGPING_UNPACKED_RE } from '@/lib/packaging/stdTime'
 import { allocateSoldToLines, applySoldToCards, type SoSalesRow } from '@/lib/packaging/salesAlloc'
+import { applyReceiptsToCards, indexReceipts, receiptLineKey, type PoReceiptRow } from '@/lib/packaging/receipts'
 import { addWorkdays, isCovered, workdaysBetween } from '@/lib/packaging/workdays'
 import { CP_SHIP_NOTE_TAG } from '@/lib/purchasing/types'
 
@@ -199,6 +200,11 @@ export interface PoolRawData {
    * （pool.ts 另在 notes 說明）；空陣列＝已啟用但沒有任何銷貨。
    */
   soSales?: SoSalesRow[] | null
+  /**
+   * D111：ARGO 採購入庫鏡像（erp_po_receipts，依採購單號＋行號＋入庫日彙總）。null／省略＝入庫日期同步尚未啟用或讀取失敗
+   * → 卡片的 receipts 一律空陣列（pool.ts 另在 notes 說明）；空陣列＝已啟用但沒有任何入庫。
+   */
+  poReceipts?: Pick<PoReceiptRow, 'poDocNo' | 'poLineNo' | 'receiptDate' | 'qty'>[] | null
 }
 
 /** 與 lib/packaging/stdTime.ts computeStdTime 的 input 同形 */
@@ -1836,6 +1842,20 @@ export function classifyPool(raw: PoolRawData, estimate: WorkEstimator): Classif
     bump('sold_partial_lines', sold.partialLines)
     bump('sold_capped_lines', sold.cappedLines)
     bump('sold_unmatched_rows', unmatched.length)
+  }
+
+  // ── D111：入庫批次（erp_po_receipts 鏡像）──
+  // 放在 D73 之後：applySoldToCards 會複製卡片，先套入庫再套銷貨也可以，但放最後語意最單純——只替「會出現在池裡的卡」補欄位。
+  // 鏡像不可用（raw.poReceipts 為 null／省略）→ 每張卡 receipts＝[]，待排池照常出卡。
+  {
+    const poQtyByLine = new Map<string, number>()
+    for (const po of raw.poLines) {
+      const k = receiptLineKey(po.doc_no, po.sub_no)
+      if (k) poQtyByLine.set(k, num(po.qty))
+    }
+    pooled = applyReceiptsToCards(pooled, raw.poReceipts ? indexReceipts(raw.poReceipts) : null, today, poQtyByLine)
+    bump('receipt_cards', pooled.filter((c) => (c.receipts?.length ?? 0) > 0).length)
+    bump('receipt_multi_batch_cards', pooled.filter((c) => (c.receipts?.length ?? 0) > 1).length)
   }
 
   // ── 拆卡標示（D7：同 SO 行落在不同區塊）──

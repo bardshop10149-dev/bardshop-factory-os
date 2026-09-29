@@ -8,12 +8,15 @@
 //   - 點卡片本身（或聚焦後按 Enter）→ 卡片詳情 CardDetailDialog（D61；與右側排定卡共用；觸控裝置也拿得到）
 //   - 點單號 → 訂單詳情（全部品項＋示意圖，BoardLayout 的 PackagingOrderModal）
 // D66：「手動加入」區塊（'mn'）的卡在卡片上方加「手動・誰・何時」標記（showManualTag；資料來自 cardMeta[*].manual）。
+// D111：「已入庫」區塊（2 常平已入庫、5b 委外已入庫）展開後多一列排序切換「預設／依入庫日（舊→新）」；
+//   選擇由 PoolSidebar 管（存 localStorage、排序也在那裡做），這裡只畫按鈕。滑過提示多一行入庫批次（CardInfo）。
 
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import type { PoolCardMeta } from '@/lib/packaging/scheduleTypes'
 import type { PackagingCard, PoolBlock as PoolBlockData, PoolBlockId } from '@/lib/packaging/types'
 import { BLOCK_TONE, TONE_STYLES, fmtHours } from '@/components/packaging/poolStyles'
+import { RECEIVED_BLOCKS } from '@/lib/packaging/receipts'
 import { isPlaceableBlock } from './boardLocal'
 import SimplePoolCard from './SimplePoolCard'
 import CardDetailDialog, { CardInfo } from './CardDetailDialog'
@@ -21,8 +24,11 @@ import CardDetailDialog, { CardInfo } from './CardDetailDialog'
 /** 一段先畫這麼多張，其餘按「顯示更多」 */
 const PAGE = 60
 
-function Section({ block, cards, cardMeta, showManualTag, filtered, collapsed, onToggle, today, canDrag, descId, onOpenOrder, onOpenDetail, onHover }: {
+function Section({ block, cards, cardMeta, showManualTag, filtered, collapsed, onToggle, today, canDrag, descId, onOpenOrder, onOpenDetail, onHover, receiptSorted, onReceiptSort }: {
   block: PoolBlockData
+  /** D111：這一區目前是否「依入庫日（舊→新）」排序；onReceiptSort 沒傳＝不顯示排序切換 */
+  receiptSorted: boolean
+  onReceiptSort?: (on: boolean) => void
   cardMeta: Record<string, PoolCardMeta>
   showManualTag: boolean
   cards: PackagingCard[]
@@ -71,6 +77,23 @@ function Section({ block, cards, cardMeta, showManualTag, filtered, collapsed, o
               這一區不能排到日期（{block.id === '3' ? 'D22：未寄出不預排，僅提醒' : '出貨與否不明，比照未寄出'}）
             </div>
           )}
+          {onReceiptSort && cards.length > 1 && (
+            <div className="mb-1.5 flex flex-wrap items-center gap-1 text-[11px] text-slate-400" role="group" aria-label={`${block.title} 排序`}>
+              <span>排序</span>
+              {([[false, '預設', '逾期 → 打樣 → 剩餘工作天'], [true, '依入庫日（舊→新）', '最早一批入庫日越早的排越前面（放最久的先包）；沒有入庫日的排最後']] as const).map(([on, text, tip]) => (
+                <button
+                  key={text}
+                  type="button"
+                  aria-pressed={receiptSorted === on}
+                  title={tip}
+                  onClick={() => onReceiptSort(on)}
+                  className={`rounded border px-1.5 py-0.5 ${receiptSorted === on
+                    ? 'border-sky-600 bg-sky-950/60 text-sky-200'
+                    : 'border-slate-700 text-slate-400 hover:text-white'}`}
+                >{text}</button>
+              ))}
+            </div>
+          )}
           {cards.length === 0 ? (
             <p className="py-1.5 text-center text-[11px] text-slate-500">{filtered ? '沒有符合的卡' : '沒有卡片'}</p>
           ) : (
@@ -105,7 +128,7 @@ function Section({ block, cards, cardMeta, showManualTag, filtered, collapsed, o
 }
 
 /** 滑過（或鍵盤聚焦）卡片的提示 */
-function PoolHoverTip({ card, meta, rect }: { card: PackagingCard; meta: PoolCardMeta | undefined; rect: DOMRect }) {
+function PoolHoverTip({ card, meta, rect, today }: { card: PackagingCard; meta: PoolCardMeta | undefined; rect: DOMRect; today: string }) {
   const ref = useRef<HTMLDivElement>(null)
   const w = 320
   // 預設放在卡片右邊；右邊放不下（左欄被拉很寬）就放左邊
@@ -130,14 +153,18 @@ function PoolHoverTip({ card, meta, rect }: { card: PackagingCard; meta: PoolCar
         <span className="flex-1" />
         <span className="font-sans text-[10px] text-slate-400">點卡片看詳情</span>
       </div>
-      <CardInfo card={card} meta={meta} />
+      <CardInfo card={card} meta={meta} today={today} />
     </div>,
     document.body,
   )
 }
 
-export default function SimplePool({ blocks, viewCards, cardMeta, filtered, collapsed, onToggle, today, canDrag, dragging, onOpenOrder, showManualTag = false }: {
+export default function SimplePool({ blocks, viewCards, cardMeta, filtered, collapsed, onToggle, today, canDrag, dragging, onOpenOrder, showManualTag = false, receiptSorted, onReceiptSort }: {
   blocks: PoolBlockData[]
+  /** D111：哪些「已入庫」區塊目前依入庫日排序（排序本身由 PoolSidebar 做好放在 viewCards） */
+  receiptSorted?: ReadonlySet<PoolBlockId>
+  /** D111：切換某一區的排序；不傳＝不顯示排序切換 */
+  onReceiptSort?: (id: PoolBlockId, on: boolean) => void
   viewCards: Map<PoolBlockId, PackagingCard[]>
   cardMeta: Record<string, PoolCardMeta>
   filtered: boolean
@@ -208,9 +235,11 @@ export default function SimplePool({ blocks, viewCards, cardMeta, filtered, coll
           onOpenOrder={onOpenOrder}
           onOpenDetail={onOpenDetail}
           onHover={onHover}
+          receiptSorted={receiptSorted?.has(b.id) ?? false}
+          onReceiptSort={onReceiptSort && RECEIVED_BLOCKS.includes(b.id) ? (on => onReceiptSort(b.id, on)) : undefined}
         />
       ))}
-      {hover && !dragging && !detail && <PoolHoverTip card={hover.card} meta={cardMeta[hover.card.cardId]} rect={hover.rect} />}
+      {hover && !dragging && !detail && <PoolHoverTip card={hover.card} meta={cardMeta[hover.card.cardId]} rect={hover.rect} today={today} />}
       {detail && (
         <CardDetailDialog
           card={detail}

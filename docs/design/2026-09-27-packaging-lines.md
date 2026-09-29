@@ -891,6 +891,97 @@ I/O（新 `lib/packaging/manualDb.ts` `loadManualLookupData(sb, so)`，全部唯
   - **畫面（正式工作台＋AI 模擬區）**：樂觀更新——按「確定結案」對話框立刻關、該行的卡（待排池卡、排定卡、模擬列）立刻消失，背景依序送出，可連續結案；失敗（非 409）卡片回原位＋錯誤提示；409 `already_closed` 視為成功；網路／5xx 重試 1s、3s、9s。做法是「結案記號」（`components/packaging/board/closureLocal.ts`：pending／confirmed）套在**每一份**伺服器回應上，直到回應本身已不含該行才拿掉 → 輪詢或舊回應晚到不會把卡帶回來。模擬區的結案排進模擬區自己的操作佇列（`useSim.submitClosure`），成功後以 `simVersion` 接續，不再要求「先等模擬區存完」。
   - **結案池**：兩邊工具列「結案池（N）」（N＝今天結案、未復原的筆數）→ 抽屜 `ClosurePoolPanel`：今天／近 7 天／近 30 天，列單號-項次、客戶、品名、數量、交期、原區塊、誰、何時、備註、結案當下 ARGO 已銷量；每列「復原」（兩段式確認，需 packaging_admin）→ 該行回待排池、畫面重新載入。
 
+---
+
+## 十五、D111 入庫日期（2026-09-30）
+
+依據 `需求決策紀錄.md` **D111**（做法比照 D73 銷貨鏡像；D17 入庫＝品檢完成＝可以開始包；D41 常平＝廠商 C01510；D58／D60／D61 簡化卡片與卡片詳情）。Migration：`sql/20260930_packaging_po_receipts.sql`（冪等、單一交易、**不修改任何既有表**；套用前先備份）。
+
+**要解決的事**：回廠的貨（委外、常平）入庫後到底放了幾天，卡片上看不出來；分批回廠時也看不出「幾號入多少」。
+
+### 15.1 資料源與欄位
+
+ARGO `IV_INVENTORYIODETAIL`，條件 `IO_TYPE='I'`、`IO_ACTION='BUY'`（採購入庫），唯讀（S_QUERY）。
+
+| ARGO 欄位 | 意義 | 鏡像欄位 |
+| --- | --- | --- |
+| `PDL_PJT_PROJECT_ID` | 採購單號 | `po_doc_no`（一律大寫） |
+| `PJD_LINE_NO` | **採購行號**（＝`erp_pj_sync.sub_no`） | `po_line_no`（文字；`3.0`→`3`） |
+| `ISM_MBP_PART` | 品號 | `item_code`（可空） |
+| `ISM_MBP_LOT_NO` | 來源 SO／RO | `source_so`（可空；備查，卡片比對不靠它） |
+| `QTY` | 入庫量 | `qty`（同一採購行同一天加總） |
+| `IO_DATE` | 入庫日（`'YYYY/MM/DD HH:MM:SS'` 文字） | `receipt_date`（只取日期） |
+| `SLIP_NO` | 入庫單號 | `slip_count`（同一天不重複張數） |
+
+- `erp_po_receipts`：主鍵 `(po_doc_no, po_line_no, receipt_date)`；索引 `po_doc_no`、`receipt_date`；RLS 只給 service_role、revoke anon／authenticated。
+- `erp_po_receipts_sync`：單列狀態（`id = 1`，欄位同 `erp_so_sales_sync`）。
+
+### 15.2 已踩過的坑（改程式前必讀）
+
+1. **CUSTOMCOLUMN 寫了不存在的欄位，ARGO 不報錯、靜默回 0 筆**。採購行號是 `PJD_LINE_NO`，不是 `PDL_LINE_NO`（寫錯就整批回空）。「回 0 筆」在整張重算覆蓋的同步裡等於「入庫全部作廢」，會把鏡像清掉 → `receiptSync.ts` 有三道防線：
+   - 一批回 0 筆、但鏡像裡這批有 ≥ 3 張採購單有資料 → 視為異常，這批不寫不刪、記錯誤；
+   - 有回明細但彙總後 0 列（行號／日期欄全空）→ 視為異常；
+   - 全量跑了 ≥ 60 張採購單卻一筆明細都沒有 → 不算成功（不更新 `last_ok_at`、不清範圍外的列）。
+   改欄位清單（`RECEIPT_COLUMNS`）後務必先用 `dry=1` 對真實 ARGO 跑一次，確認 `argoRows > 0`。
+2. **日期是文字** `'YYYY/MM/DD HH:MM:SS'`：用 `salesAlloc.argoDate` 取日期部分；查詢條件用 `>=TO_DATE('YYYYMMDD','YYYYMMDD')`。
+3. **IN 清單每批 ≤ 60 個**（Oracle 動態 WHERE 是 VARCHAR2(4000)）；單號先過白名單（英數與連字號）再拼字串。
+4. **作廢的入庫單在 ARGO 會整筆消失** → 不能增量累加，一律「整張採購單重算覆蓋」（upsert 新值、刪掉 ARGO 已不存在的（行, 日））。近期作廢的單在 ARGO 已查不到，增量模式靠「鏡像裡近 N 天有入庫的採購單」把它找回來重算。
+5. ARGO 冷的時候很慢：2026-09-30 同一份全量（1,005 張採購單、17 批）第一次跑 128 秒、第二次 4.9 秒。時間預算 250 秒；真的跑不完可分片（`&shards=2&shard=0`／`&shard=1`）。
+
+### 15.3 同步（`lib/packaging/receiptSync.ts`＋`GET /api/packaging/receipts-sync`）
+
+- 參數：`mode=incremental|full`（預設 incremental）、`days=1～31`（預設 3）、`shard`／`shards`、`dry=1`。驗證與行為**完全比照** `/api/packaging/sales-sync`：Bearer `CRON_SECRET`／`WEBHOOK_SECRET`（`timingSafeEqual`）或已登入 `packaging_admin`；同實例同時只跑一個（busy 409）、手動 60 秒一次（429）；`maxDuration 300`、時間預算 250 秒；部分失敗回 200＋`partial`／`errors`。
+- **範圍（scope）**＝待排池來源用到的採購單：`erp_pj_sync` 採購行（近 180 天開單、未作廢、數量 > 0、有來源 SO／RO；條件同 `pool.ts fetchPoLines`）中，來源單在 `erp_so_lines` 還查得到（＝SO 未結案）的採購單；來源是 RO 的一律算。
+  - `full`：範圍內全部採購單重算；完整跑完（無錯誤、未分片）再清掉「已不在範圍內」的採購單。
+  - `incremental`：（近 N 天 `IO_DATE` 有入庫的採購單 ∪ 鏡像裡近 N 天有入庫的採購單）∩ 範圍。
+- `dry=1`：只查 ARGO、不寫 Supabase，而且**完全不碰新表**（新表沒建也能跑；只讀 `erp_pj_sync`、`erp_so_lines`）。回彙總統計與前 50 列預覽。
+- 回應（成功）：`{ success, partial, errors[], mode, days, shard, shards, scopeDocs, poCount, batches, batchesDone, argoRows, mirrorRows, upserted, deleted, clearedDocs, outOfScopePurged, skippedBatches, elapsedMs, preview? }`；錯誤碼 `unauthorized`（401）、`forbidden`（403）、`bad_request`（400）、`busy`（409／429）、`migration_required`（409）、`argo_unconfigured`（503）、`argo_error`（502）、`db_error`（500）。
+- 排程（`vercel.json`，UTC）：增量 `10,40 0-14 * * *`（台北 08:10～22:40 每 30 分）、全量 `50 18 * * *`（台北 02:50；與銷貨全量 02:40 錯開）。
+
+### 15.4 待排池（`lib/packaging/receipts.ts` 純函式＋`classify.ts`／`pool.ts`）
+
+- `PackagingCard` 新增（皆選填，舊快取的卡沒有＝當空）：`receipts: { date, qty }[]`（由舊到新）、`firstReceiptDate`、`daysSinceReceipt`（自**最早一批**至今的日曆天數，今天入庫＝0）、`receiptPoQty`（來源採購行的採購量合計，詳情「合計 vs 採購量」用）。
+- 對應方式：卡片 `sources` 裡是採購行的來源（`POC`／`PO`／`MPO` 且有行號）→ 以（採購單號, 行號）讀鏡像；一張卡多個來源採購行 → 合併所有批次、**同一天加總**。製令（MOT／MOS）與 D66 手動加入的卡（`sources` 為空）沒有入庫批次。
+- `classifyPool` 在 D73 之後、拆卡標示之前套 `applyReceiptsToCards`（`raw.poReceipts` 為 null＝鏡像不可用 → 每張卡 `receipts = []`）。
+- **鏡像不可用／未套用 migration**：`loadReceiptMirror` 不往外丟錯；卡片欄位為空、`freshness.poReceipts = null`、頁尾註腳最前面加「入庫日期同步尚未啟用（…尚未套用）」。**待排池不會因此失敗**。
+- `PoolFreshness.poReceipts`＝`erp_po_receipts_sync.last_ok_at`；待排池頁「資料更新」列多「ARGO 入庫」、工作台標題列多「入庫資料更新於 …」。
+
+### 15.5 畫面
+
+- **簡化卡片**（`CardFace` md／sm；正式工作台、待排池側欄、AI 模擬區共用）：交期那一行的正下方、靠右對齊多一行（沒有批次的卡不多佔一行）。
+  - 單批：「入庫 9/09・已放 21 天」
+  - 分批：逐批列出「9/09 入 500、9/15 入 300・已放 21 天」，最多 3 批，超過接「…共 N 批」
+  - 已放滿 14 天橘色、滿 30 天紅色（`RECEIPT_AGE_WARN_DAYS`／`RECEIPT_AGE_DANGER_DAYS`／`RECEIPT_FACE_MAX_BATCHES`，都在 `lib/packaging/receipts.ts` 檔頭，可調）。
+  - 日檢視時間尺上的卡（`LaneCard`）高度＝工時、超出會被截掉 → 入庫那一行放在最後（`receiptAt="bottom"`），不把原本的 7 項擠出去。
+  - 兩週迷你卡不顯示（放不下），滑過提示（`cardTitle`）有。
+  - 同一採購行「尚未入庫的那一部分」另成一張卡（運送中／品檢中…，可包量 0）：只列已入庫的批次、**不顯示也不上色「已放 N 天」**（那張卡的貨還沒到）。
+- **卡片詳情**（`CardDetailDialog`、AI 模擬區 `SimCardDetail`、待排池滑過提示，共用 `CardInfo`）：多一列「入庫」，列出全部批次（日期、數量）、「共 N 批・合計 X／採購 Y」、已放天數。
+- **排序**：「已入庫」區塊（2 常平已入庫、5b 委外已入庫）展開後多一列「排序：預設／依入庫日（舊→新）」，每一區各自記住（localStorage `packaging.schedule.poolReceiptSort.v1`，讀寫包 try/catch）。待排池頁的排序下拉多「已入庫區塊：依入庫日 舊→新」，選擇記在 `packaging.pool.sort.v1`。
+- **待排池頁的完整卡片**（`PackagingCard.tsx`）：有批次時多一列「入庫」（精簡模式最多 3 批，按「詳細」列全部與合計）；`PoolBlock.tsx` 未改。
+
+### 15.6 套用順序
+
+1. Snow 在 Supabase 後台**備份**。
+2. **套用 migration** `sql/20260930_packaging_po_receipts.sql`（SQL Editor 貼上執行一次；可重跑）。
+3. **部署**新程式（含 `vercel.json` 的兩條 cron）。
+4. **手動觸發一次全量同步**：以 packaging_admin 登入後開 `/api/packaging/receipts-sync?mode=full`（或帶 `Authorization: Bearer <CRON_SECRET>` 呼叫）；回應 `partial: false` 才算完成。之後交給排程。
+
+順序顛倒也不會壞：先部署、還沒套 migration 時，待排池照常（卡片沒有入庫日期、註腳寫「尚未啟用」），cron 打到同步 API 只會回 409 `migration_required`。
+
+### 15.7 驗證（2026-09-30，全部唯讀）
+
+- 純函式測試 32／32 通過（同日加總、分批排序、作廢後覆蓋、卡片多來源合併、已放天數、顯示字串：單批／分批／超過 3 批）。
+- dry-run 對真實 ARGO：範圍 1,005 張採購單、17 批、明細 2,894 筆 → 鏡像 2,879 列（2,774 個採購行、778 張採購單；分批的採購行 90 個、最多 4 批；同日多張入庫單 13 列）；增量（3 天）24 張採購單、150 筆、2.8 秒。
+- 把 dry-run 結果當鏡像餵進 `classifyPool`：池內 328 張卡，有入庫批次 122 張（區塊 2：79／79、5b：40／40、另有部分入庫的 1：2 張、5a：1 張）；已入庫區塊 119 張的「批次合計」與 ERP 已入庫量（`RECEIVED_QTY`）**全部相符**；抽 5 張直接查 ARGO 核對 5／5 一致（已知基準 SO260811010-1 ← PO260824013-2 於 2026-09-09 入庫 5）。
+- 新表未建時 `buildPackagingPool` 正常（每張卡 `receipts = []`、註腳有「入庫日期同步尚未啟用」）。
+
+### 15.8 已知限制／待 Snow 確認
+
+- D66 手動加入的卡、製令卡沒有入庫日期（沒有採購行來源）。手動加入的行若其實有採購入庫，可改用鏡像的 `source_so`＋品號對應（未做）。
+- 「已放 N 天」算日曆天（含假日），以待排池的「今天」（台北）計；門檻 14／30 天為暫定值。
+- 增量排程涵蓋台北 08:10～22:40、每天（含週日）；若只要週一～六可把 cron 改成 `10,40 0-14 * * 1-6`。
+- 採購退回（IO_ACTION 不是 BUY）不扣入庫量；同一天入庫又全數沖銷（合計 ≤ 0）的那一天不存。
+
 ## 附：本輪（規格輪）產出
 
 - `docs/design/2026-09-27-packaging-lines.md`（本文件）

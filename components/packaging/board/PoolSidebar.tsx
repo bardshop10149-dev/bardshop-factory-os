@@ -15,6 +15,8 @@
 //   - manualManageHref：傳了就在說明列與手動卡右鍵放「到待排池頁」連結（新分頁開：工作台的編輯權、
 //     尚未存完的操作與 Undo 紀錄都留在原分頁；改完回來按「重新整理」即可）
 //   - manual（舊 prop）：@deprecated，只剩「傳了＝顯示手動標記」的作用，讓舊呼叫端能編譯、行為不出錯
+// D111：「已入庫」區塊（2、5b）可切換「依入庫日（舊→新）」排序；每一區各自記住選擇（localStorage，讀寫都包 try/catch）。
+//   排序在這裡做（viewCards），右鍵找卡、搜尋都沿用同一份清單；正式工作台與 AI 模擬區共用這個元件，所以兩邊都有。
 
 import { useCallback, useDeferredValue, useMemo, useState, type MouseEvent, type ReactNode } from 'react'
 import Link from 'next/link'
@@ -25,6 +27,7 @@ import SimplePool from './SimplePool'
 import { fmtQty } from '@/components/packaging/poolStyles'
 import { isPlaceableBlock, ruleForPoolCard } from './boardLocal'
 import { md } from './boardFormat'
+import { RECEIVED_BLOCKS, sortByReceiptDate } from '@/lib/packaging/receipts'
 
 /**
  * 側欄區塊順序：D66「手動加入」最上面（主管特地加進來的，最常要找）；
@@ -42,6 +45,20 @@ function readCollapsed(): Set<PoolBlockId> {
 }
 function writeCollapsed(s: Set<PoolBlockId>) {
   try { window.localStorage.setItem(COLLAPSE_KEY, JSON.stringify([...s])) } catch { /* 存不進去就算了 */ }
+}
+
+const RECEIPT_SORT_KEY = 'packaging.schedule.poolReceiptSort.v1'
+
+/** D111：哪些「已入庫」區塊要依入庫日排序（讀不到、格式不對 → 都用預設排序） */
+function readReceiptSort(): Set<PoolBlockId> {
+  try {
+    const raw = window.localStorage.getItem(RECEIPT_SORT_KEY)
+    const arr = raw ? (JSON.parse(raw) as unknown) : []
+    return new Set(Array.isArray(arr) ? arr.filter((x): x is PoolBlockId => typeof x === 'string' && (RECEIVED_BLOCKS as readonly string[]).includes(x)) : [])
+  } catch { return new Set() }
+}
+function writeReceiptSort(s: Set<PoolBlockId>) {
+  try { window.localStorage.setItem(RECEIPT_SORT_KEY, JSON.stringify([...s])) } catch { /* 存不進去就算了（無痕模式等） */ }
 }
 
 function haystack(c: PackagingCard): string {
@@ -92,6 +109,7 @@ export default function PoolSidebar({
   const [keyword, setKeyword] = useState('')
   const deferred = useDeferredValue(keyword)
   const [collapsed, setCollapsed] = useState<Set<PoolBlockId>>(() => (typeof window === 'undefined' ? new Set() : readCollapsed()))
+  const [receiptSorted, setReceiptSorted] = useState<Set<PoolBlockId>>(() => (typeof window === 'undefined' ? new Set() : readReceiptSort()))
   const [menu, setMenu] = useState<{ x: number; y: number; card: PackagingCard } | null>(null)
   const manualTagOn = showManualTag ?? !!manual
 
@@ -101,9 +119,22 @@ export default function PoolSidebar({
   const q = deferred.trim().toLowerCase()
   const viewCards = useMemo(() => {
     const m = new Map<PoolBlockId, PackagingCard[]>()
-    for (const b of ordered) m.set(b.id, q ? b.cards.filter(c => haystack(c).includes(q)) : b.cards)
+    for (const b of ordered) {
+      const list = q ? b.cards.filter(c => haystack(c).includes(q)) : b.cards
+      // D111：已入庫區塊可依入庫日（舊→新）排序；穩定排序，同一天入庫的維持預設順序
+      m.set(b.id, receiptSorted.has(b.id) ? sortByReceiptDate(list) : list)
+    }
     return m
-  }, [ordered, q])
+  }, [ordered, q, receiptSorted])
+
+  const onReceiptSort = useCallback((id: PoolBlockId, on: boolean) => setReceiptSorted(prev => {
+    if (prev.has(id) === on) return prev
+    const next = new Set(prev)
+    if (on) next.add(id)
+    else next.delete(id)
+    writeReceiptSort(next)
+    return next
+  }), [])
 
   const toggle = (id: PoolBlockId) => setCollapsed(prev => {
     const next = new Set(prev)
@@ -193,6 +224,8 @@ export default function PoolSidebar({
           collapsed={collapsed}
           onToggle={toggle}
           showManualTag={manualTagOn}
+          receiptSorted={receiptSorted}
+          onReceiptSort={onReceiptSort}
           today={today}
           canDrag={canDrag}
           dragging={dragKind != null}
