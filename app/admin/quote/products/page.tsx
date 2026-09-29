@@ -381,7 +381,8 @@ function ProductEditor({ product, goldens, prices, post, setError, setOkMsg, set
     const res = await post({ action: 'setStatus', id: draft.id, status })
     setBusyStatus(false)
     if (!res) return
-    setOkMsg(`已${label}「${draft.name}」。`)
+    const warning = typeof (res as { warning?: unknown }).warning === 'string' ? (res as { warning: string }).warning : ''
+    setOkMsg(`已${label}「${draft.name}」。${warning ? `※ ${warning}` : ''}`)
     await reload()
   }
 
@@ -394,8 +395,10 @@ function ProductEditor({ product, goldens, prices, post, setError, setOkMsg, set
   }
 
   const approvedCount = goldens?.filter((g) => g.status === 'approved').length ?? 0
-  const canPublish = !dirty && draft.status !== 'published' && verify?.gate === 'pass' && verify.productId === draft.id
-  const publishHint = dirty ? '先儲存變更' : draft.status === 'published' ? '已是發布狀態' : !verify ? '先跑驗證' : verify.gate === 'no-approved-cases' ? '沒有已核可的 golden，先核可' : verify.gate === 'fail' ? '驗證未全過' : ''
+  // 發布鈕不再要求「這一頁剛跑過驗證」（Snow 2026-09-29：跑過驗證換頁就鎖住太麻煩）。
+  // 真正的閘門在伺服器：發布時會再跑一次已核可的 golden，有一筆不過就擋；沒有核可案例只警告不擋。
+  const canPublish = !dirty && draft.status !== 'published'
+  const publishHint = dirty ? '先儲存變更' : draft.status === 'published' ? '已是發布狀態' : ''
 
   return (
     <>
