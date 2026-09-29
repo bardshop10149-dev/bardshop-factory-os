@@ -179,6 +179,18 @@ export interface PackagingCard {
    * 其他區塊的卡沒有這個鍵（形狀與 D103 前相同）。
    */
   manualTotalQty?: number
+  /**
+   * D111 入庫批次（ARGO 採購入庫鏡像 erp_po_receipts）：依卡片 sources 的採購行（採購單號＋行號）合併所有批次，
+   * 同一天加總、由舊到新。來源不是採購行（製令、手動加入）、還沒入庫、或入庫同步尚未啟用 → 空陣列。
+   * 這四個鍵刻意是選填：舊伺服器／舊快取回的卡沒有它們，畫面一律用 lib/packaging/receipts.ts 的 receiptsOf() 讀（缺＝空）。
+   */
+  receipts?: { date: string; qty: number }[]
+  /** D111：最早一批的入庫日 YYYY-MM-DD；沒有批次為 null */
+  firstReceiptDate?: string | null
+  /** D111：自最早一批至今的日曆天數（今天入庫＝0；以待排池的 today 計）；沒有批次為 null */
+  daysSinceReceipt?: number | null
+  /** D111：來源採購行的採購量合計（卡片詳情「合計 vs 採購量」用）；沒有採購行來源為 null */
+  receiptPoQty?: number | null
 }
 
 export interface PoolBlock {
@@ -209,6 +221,11 @@ export interface PoolFreshness {
    * null＝銷貨同步尚未啟用（新表未建）或還沒成功跑過——這時待排池不排除已銷貨品項（notes 另有說明）。
    */
   soSales: string | null
+  /**
+   * D111：ARGO 採購入庫鏡像（erp_po_receipts）最後一次「成功」同步的時間（erp_po_receipts_sync.last_ok_at）。
+   * null＝入庫日期同步尚未啟用（新表未建）或還沒成功跑過——這時卡片不顯示入庫日期（notes 另有說明）。
+   */
+  poReceipts: string | null
 }
 
 /** 未進池的計數（畫面頁尾顯示） */

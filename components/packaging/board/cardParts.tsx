@@ -10,6 +10,7 @@ import { useDraggable } from '@dnd-kit/core'
 import type { BoardCard } from '@/lib/packaging/scheduleTypes'
 import { fmtQty } from '@/components/packaging/poolStyles'
 import { hoursText, moText, placementState, type CardSize } from '@/lib/packaging/boardView'
+import { receiptFace } from '@/lib/packaging/receipts'
 import { clock, md } from './boardFormat'
 import { lineLabel } from './CardFace'
 import { MenuPopup, cardMenuItems, type CardMenuHandlers } from './cardMenu'
@@ -28,6 +29,9 @@ export function cardTitle(bc: BoardCard, mini = false): string {
   ]
   const mo = moText(c)
   if (mo) lines.push(`${mo.isMo ? '製令' : '來源單'} ${mo.text}`)
+  // D111：入庫批次與已放天數（兩週迷你卡放不下，只在這裡看得到；用排定卡自己的可包量判斷要不要算「已放」）
+  const rc = receiptFace(c)
+  if (rc) lines.push(rc.text)
   if (s.delayed && bc.delayWorkdays > 0) lines.push(`延誤 ${bc.delayWorkdays} 天`)
   if (s.pre && !s.done) lines.push(bc.readiness === 'pre' && bc.preReadyDate ? `預排：預估 ${md(bc.preReadyDate)} 可包` : '預排：可包日未知')
   if (bc.split) lines.push(`拆卡 ${bc.split.index}/${bc.split.total}`)

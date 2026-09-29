@@ -17,6 +17,7 @@ import { MANUAL_BLOCK_ID } from '@/lib/packaging/scheduleTypes'
 // 只 import 型別：manualPool.ts 會連帶 classify.ts 等伺服器端純函式，值 import 會把它們整包拉進瀏覽器
 import type { PoolManualSection, PoolPageResponse } from '@/lib/packaging/manualPool'
 import PoolBlock from '@/components/packaging/PoolBlock'
+import { RECEIVED_BLOCKS, sortByReceiptDate } from '@/lib/packaging/receipts'
 import PackagingOrderModal from '@/components/packaging/PackagingOrderModal'
 import ManualPoolSection from '@/components/packaging/pool/ManualPoolSection'
 import { usePoolManual } from '@/components/packaging/pool/usePoolManual'
@@ -44,7 +45,9 @@ import {
 //   - 手動卡算進摘要的「共 N 張卡／估計工時／可立即開包」（它們也是可排的卡）；已全數完成的在伺服器就拆出去，不灌水。
 
 type PoolOk = Extract<PoolPageResponse, { success: true }>
-type SortMode = 'default' | 'due_asc' | 'due_desc'
+/** receipt_asc（D111）：只重排「已入庫」區塊（2、5b），依最早一批入庫日由舊到新；其他區塊維持預設順序 */
+type SortMode = 'default' | 'due_asc' | 'due_desc' | 'receipt_asc'
+const SORT_MODES: readonly SortMode[] = ['default', 'due_asc', 'due_desc', 'receipt_asc']
 type Focus = 'all' | 'ready' | 'danger' | 'overdue' | 'sample' | 'maybe_unshipped'
 
 /** 自動重抓間隔：與伺服器快取（120 秒）搭配，5 分鐘足夠；手動「重新整理」才略過快取 */
@@ -52,6 +55,8 @@ const POLL_MS = 5 * 60 * 1000
 // 回應大小注意：Vercel 函式回應上限 4.5MB。D43 改以塔台未結案批界定範圍後，卡數從約 2,000 張降到約 300 張，
 // 舊的「隱藏逾期舊單」勾選（?hideStale）已移除。
 const COLLAPSE_KEY = 'packaging.pool.collapsed.v1'
+/** D111：記住區塊內排序的選擇（每位使用者自己的瀏覽器） */
+const SORT_KEY = 'packaging.pool.sort.v1'
 /** 已移除的「隱藏舊單」偏好鍵：載入時順手清掉，避免瀏覽器留著用不到的設定 */
 const LEGACY_HIDE_STALE_KEY = 'packaging.pool.hideStale.v1'
 
@@ -68,6 +73,8 @@ const FRESHNESS_ITEMS: { key: keyof PoolFreshness; label: string; staleMins: num
   { key: 'orderSheet', label: '出單表', staleMins: null, tip: 'daily_order_sheets 最後更新時間' },
   // D73：ARGO 銷貨鏡像（erp_so_sales）最後一次成功同步；排程由 P3 設定（建議上班時間每 30 分增量、每晚全量）
   { key: 'soSales', label: 'ARGO 銷貨', staleMins: 180, tip: '銷貨同步（erp_so_sales）最後一次成功的時間；取不到＝銷貨同步尚未啟用，待排池暫不排除已銷貨' },
+  // D111：ARGO 採購入庫鏡像（erp_po_receipts）最後一次成功同步；排程＝每 30 分增量、每晚全量
+  { key: 'poReceipts', label: 'ARGO 入庫', staleMins: 180, tip: '入庫同步（erp_po_receipts）最後一次成功的時間；取不到＝入庫日期同步尚未啟用，卡片暫不顯示入庫日期與已放天數' },
 ]
 
 /**
@@ -188,6 +195,16 @@ function readCollapsed(): Set<PoolBlockId> {
   }
 }
 
+function readSortMode(): SortMode {
+  try {
+    const raw = window.localStorage.getItem(SORT_KEY)
+    return (SORT_MODES as readonly string[]).includes(raw ?? '') ? (raw as SortMode) : 'default'
+  } catch { return 'default' }
+}
+function writeSortMode(m: SortMode) {
+  try { window.localStorage.setItem(SORT_KEY, m) } catch { /* 無痕模式等情況寫不進去就算了 */ }
+}
+
 function writeCollapsed(s: Set<PoolBlockId>) {
   try { window.localStorage.setItem(COLLAPSE_KEY, JSON.stringify([...s])) } catch { /* 無痕模式等情況寫不進去就算了 */ }
 }
@@ -295,7 +312,8 @@ export default function PackagingPoolPage() {
 
   const [keyword, setKeyword] = useState('')
   const deferredKeyword = useDeferredValue(keyword)
-  const [sortMode, setSortMode] = useState<SortMode>('default')
+  // D111：排序選擇記在瀏覽器（同下面的折疊狀態：伺服器端只畫「驗證權限中」，直接讀 localStorage 不會造成 hydration 不一致）
+  const [sortMode, setSortMode] = useState<SortMode>(() => (typeof window === 'undefined' ? 'default' : readSortMode()))
   const [focus, setFocus] = useState<Focus>('all')
   // 折疊狀態是「每位使用者自己的習慣」，存在瀏覽器即可（讀不到就全部展開）。
   // 伺服器端渲染時只會畫「驗證權限中」，區塊還沒出現，所以這裡直接讀 localStorage 不會造成 hydration 不一致
@@ -425,7 +443,10 @@ export default function PackagingPoolPage() {
       // 與區塊 3 提示的計數用同一個條件，點「只看這些」後的張數才對得上
       else if (focus === 'maybe_unshipped') cards = cards.filter(c => c.flags.some(f => f.code === 'maybe_unshipped_urgent'))
       if (terms.length > 0) cards = cards.filter(c => { const h = haystack(c); return terms.every(t => h.includes(t)) })
-      if (sortMode !== 'default') {
+      if (sortMode === 'receipt_asc') {
+        // D111：只重排已入庫區塊；最早一批越早（放越久）排越前面，沒有入庫日的排最後
+        if (RECEIVED_BLOCKS.includes(id)) cards = sortByReceiptDate(cards)
+      } else if (sortMode !== 'default') {
         // 預設順序由伺服器排好（逾期→打樣→剩餘工作天→預估可包日→SO）；交期排序時沒交期的排最後。sort 是穩定排序，同交期維持原順序
         const dir = sortMode === 'due_asc' ? 1 : -1
         cards = [...cards].sort((a, b) => {
@@ -674,7 +695,7 @@ export default function PackagingPoolPage() {
               />
               <select
                 value={sortMode}
-                onChange={e => setSortMode(e.target.value as SortMode)}
+                onChange={e => { const m = e.target.value as SortMode; setSortMode(m); writeSortMode(m) }}
                 className="rounded border border-slate-700 bg-slate-900 px-2 py-1.5 text-xs text-slate-200 focus:border-amber-500 focus:outline-none"
                 title="區塊內卡片排序"
                 aria-label="區塊內排序"
@@ -682,6 +703,7 @@ export default function PackagingPoolPage() {
                 <option value="default">預設：逾期→打樣→剩餘工作天</option>
                 <option value="due_asc">交期 近→遠</option>
                 <option value="due_desc">交期 遠→近</option>
+                <option value="receipt_asc">已入庫區塊：依入庫日 舊→新</option>
               </select>
               <div className="flex flex-wrap gap-1">
                 {FOCUS_OPTIONS.map(o => (

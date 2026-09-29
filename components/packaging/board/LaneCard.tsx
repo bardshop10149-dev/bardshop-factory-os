@@ -222,6 +222,8 @@ const LaneCard = memo(function LaneCard({ bc, layout, scale, today, editable, ca
               marks={cardMarks(bc, face, md)}
               muted={muted}
               check={<DoneCheck bc={bc} editable={editable} handlers={handlers} />}
+              // D111：時間尺上的卡高度＝工時、超出會被截掉 → 入庫資訊放最後，不把原本的 7 項擠出去（滑過提示 cardTitle 一定看得到）
+              receiptAt="bottom"
             />
           </>
         )}

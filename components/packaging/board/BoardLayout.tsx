@@ -706,6 +706,7 @@ export default function BoardLayout() {
               {board.lastLoadedAt ? `・畫面更新 ${clock(board.lastLoadedAt, nowMs)}` : ''}
             </span>
             <SalesFreshness iso={data.freshness.soSales ?? null} nowMs={nowMs + lk.offsetMs} />
+            <ReceiptFreshness iso={data.freshness.poReceipts ?? null} nowMs={nowMs + lk.offsetMs} />
           </p>
           <div className="flex-1" />
           <button type="button" onClick={() => void board.reload(true)} disabled={board.loading || board.pending > 0}
@@ -1125,6 +1126,20 @@ function SalesFreshness({ iso, nowMs }: { iso: string | null; nowMs: number }) {
   return (
     <span className={stale ? 'text-amber-400' : 'text-slate-500'} title="ARGO 銷貨鏡像（erp_so_sales）最後一次成功同步；全數銷貨的品項行不列入待排池（D73）">
       ・銷貨資料更新於 {clock(iso, nowMs)}{stale ? ' ⚠' : ''}
+    </span>
+  )
+}
+
+/** D111：ARGO 採購入庫鏡像最後成功同步時間（卡片上的入庫日期與已放天數來自它） */
+function ReceiptFreshness({ iso, nowMs }: { iso: string | null; nowMs: number }) {
+  if (!iso) {
+    return <span className="text-slate-500" title="ARGO 入庫日期同步尚未啟用或尚未成功跑過：卡片暫不顯示入庫日期與已放天數">・入庫同步未啟用</span>
+  }
+  const t = Date.parse(iso)
+  const stale = Number.isFinite(t) && nowMs - t > 3 * 3600_000
+  return (
+    <span className={stale ? 'text-amber-400' : 'text-slate-500'} title="ARGO 採購入庫鏡像（erp_po_receipts）最後一次成功同步；卡片上的「入庫 M/DD・已放 N 天」來自它（D111）">
+      ・入庫資料更新於 {clock(iso, nowMs)}{stale ? ' ⚠' : ''}
     </span>
   )
 }
