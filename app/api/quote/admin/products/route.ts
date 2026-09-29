@@ -135,15 +135,11 @@ export async function POST(request: NextRequest) {
         if (!existing) return badRequest('找不到此品項')
 
         const update: Record<string, unknown> = { status: body.status, updated_by: updatedBy, updated_at: now }
+        let publishWarning: string | undefined
         if (body.status === 'published') {
           // 發布閘門：該品項所有 approved golden 都要在容差內
+          // 發布前重跑已核可的 golden：有一筆不過就擋。沒有核可案例暫時放行（Snow 2026-09-29），回應帶警告
           const verify = await verifyProduct(ctx, existing.id, { includeProposed: false, persist: true })
-          if (verify.gate === 'no-approved-cases') {
-            return NextResponse.json(
-              { success: false, error: '此品項沒有任何已核可的驗證案例，無法發布。請先核可（approve）至少一筆 golden case。', code: 'NO_APPROVED_CASES', verify },
-              { status: 400 },
-            )
-          }
           if (verify.gate === 'fail') {
             const failed = verify.results.filter((r) => r.status === 'approved' && !r.pass).map((r) => r.name)
             return NextResponse.json(
@@ -151,11 +147,12 @@ export async function POST(request: NextRequest) {
               { status: 400 },
             )
           }
+          if (verify.gate === 'no-approved-cases') publishWarning = '此品項沒有任何已核可的驗證案例，已直接發布；建議之後補核可，讓發布閘門有東西可驗。'
           update.published_at = now
         }
         const { error } = await sb.from('quote_products').update(update).eq('id', existing.id)
         if (error) throw new Error(describeError(error))
-        return NextResponse.json({ success: true, status: body.status })
+        return NextResponse.json({ success: true, status: body.status, ...(publishWarning ? { warning: publishWarning } : {}) })
       }
 
       case 'setGoldenStatus': {
