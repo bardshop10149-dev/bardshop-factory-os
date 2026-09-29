@@ -207,7 +207,13 @@ export function deriveProductFromInput(
   if (missing.length) notes.push(`價格表缺 ${missing.length} 個品名（${missing.map((r) => r.name).join('、')}），套用時會一併新增`)
   notes.push('板材選項只帶了這份表用的那一張；其他厚度到「品項維護」再加')
 
-  const suggestedName = (hint.productName || hint.fileName?.replace(/\.xlsx?$/i, '').replace(/_?(报价模板|柯氏报价模板)_v[\d.]+$/i, '').replace(/^BA\d+\s*/i, '') || '新品項').trim()
+  // 給名稱欄的「例：」提示：去掉訂單號、模板字尾與前後底線（「BA26091001 关关 摇摆物_报价模板_v1.5.6」→「关关 摇摆物」）
+  const suggestedName = (hint.productName || hint.fileName || '')
+    .replace(/\.xlsx?$/i, '')
+    .replace(/_?(柯氏)?报价模板_v[\d.]+$/i, '')
+    .replace(/^BA\d+\s*/i, '')
+    .replace(/^_+|_+$/g, '')
+    .trim() || '新品項'
 
   return { config, referencedPrices: [...refs.values()], notes, suggestedName }
 }

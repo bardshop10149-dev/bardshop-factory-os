@@ -53,7 +53,6 @@ export default function QuoteImportPage() {
   const [filter, setFilter] = useState<'changed' | 'all'>('changed')
   const [expandedGolden, setExpandedGolden] = useState<Set<number>>(new Set())
   /** 「用這份 Excel 建立新品項」 */
-  const [createProduct, setCreateProduct] = useState(false)
   const [newProductId, setNewProductId] = useState('')
   const [newProductName, setNewProductName] = useState('')
   const [newProductCategory, setNewProductCategory] = useState('壓克力')
@@ -103,8 +102,7 @@ export default function QuoteImportPage() {
       setGoldenChecked(new Set(json.goldenProposals.map((_, i) => i)))
       setGoldenProduct(Object.fromEntries(json.goldenProposals.map((_, i) => [i, defaultProductId])))
       setExpandedGolden(new Set())
-      setCreateProduct(false)
-      setNewProductName(json.productProposal?.suggestedName ?? '')
+      setNewProductName('')
       setNewProductId(suggestProductId())
       setNewProductCategory('壓克力')
       setSettingChecked(new Set())
@@ -169,8 +167,11 @@ export default function QuoteImportPage() {
   const selectedPriceCount = priceChecked.size
   const selectedGoldenCount = goldenChecked.size
   const proposal = preview?.productProposal ?? null
+  /** Snow 2026-09-29：從 Excel 匯入＝新增一個品項（解析得出品項設定時一律建立，驗證案例都掛在它底下） */
+  const createProduct = !!proposal
   const missingPrices = useMemo(() => (proposal?.referencedPrices ?? []).filter((r) => !r.exists), [proposal])
   const newIdOk = /^[a-z0-9][a-z0-9-]{1,39}$/.test(newProductId) && !products.some((p) => p.id === newProductId)
+  const applyDisabled = applying || (createProduct ? !newProductName.trim() || !newIdOk : selectedPriceCount === 0 && selectedGoldenCount === 0 && settingChecked.size === 0)
   const goldenTarget = (i: number) => (createProduct && newIdOk ? newProductId : (goldenProduct[i] ?? defaultProductId))
 
   const handleApply = async () => {
@@ -184,7 +185,7 @@ export default function QuoteImportPage() {
       .map(({ g, i }) => ({ ...g, productId: goldenTarget(i).trim() }))
     if (createProduct) {
       if (!newIdOk) { setError('新品項代碼格式不對或已存在（小寫英數與連字號，2～40 字）'); return }
-      if (!newProductName.trim()) { setError('請填新品項名稱'); return }
+      if (!newProductName.trim()) { setError('請先填「品項名稱」再套用'); return }
       // 這個品項會查到但價格表沒有的品名：一併新增（用 Excel 上的價），否則前台一算就「價格表找不到」
       const have = new Set(priceUpdates.map((p) => p.name))
       for (const r of missingPrices) if (!have.has(r.name)) priceUpdates.push({ name: r.name, group: r.group, price: r.price, unit: r.unit, attrs: r.attrs })
@@ -282,57 +283,29 @@ export default function QuoteImportPage() {
 
       {preview && (
         <>
-          {/* 版本與 notes */}
-          <div className="bg-slate-900/50 rounded-xl border border-slate-700 p-6 mb-6">
-            <h2 className="text-sm font-bold text-orange-500 uppercase tracking-wider border-b border-slate-700 pb-2 mb-4">2. 檔案資訊</h2>
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-sm">
-              <div>
-                <div className="text-xs text-slate-500 mb-1">檔名</div>
-                <div className="text-white font-mono text-xs break-all">{preview.fileName}</div>
-              </div>
-              <div>
-                <div className="text-xs text-slate-500 mb-1">模板版本</div>
-                <div className="text-white font-bold">{preview.templateVersion}</div>
-              </div>
-              <div>
-                <div className="text-xs text-slate-500 mb-1">解析結果</div>
-                <div className="text-white">價格 {preview.priceDiff.length} 項 · 成本分頁 {preview.goldenProposals.length} 頁</div>
-              </div>
-            </div>
-            {preview.notes.length > 0 && (
-              <ul className="mt-4 space-y-1 text-xs text-yellow-300/90 list-disc list-inside">
-                {preview.notes.map((n, i) => (
-                  <li key={i}>{n}</li>
-                ))}
-              </ul>
-            )}
-          </div>
-
-          {/* 建立新品項 */}
+          {/* 新增品項：匯入一份報價表＝新增一個品項 */}
           {proposal && (
-            <div className={`rounded-xl border p-6 mb-6 ${createProduct ? 'bg-amber-950/20 border-amber-700' : 'bg-slate-900/50 border-slate-700'}`}>
-              <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 border-b border-slate-700 pb-2 mb-4">
-                <h2 className="text-sm font-bold text-orange-500 uppercase tracking-wider">2b. 用這份 Excel 建立新品項</h2>
-                <label className="flex items-center gap-2 text-sm text-slate-200 cursor-pointer">
-                  <input type="checkbox" checked={createProduct} onChange={(e) => setCreateProduct(e.target.checked)} className="accent-orange-500" />
-                  建立新品項（設定從「{proposal.fromSheet}」分頁反推；建好是草稿，驗證案例會掛在它底下）
+            <div className="rounded-xl border p-6 mb-6 bg-amber-950/20 border-amber-700">
+              <div className="border-b border-slate-700 pb-2 mb-4">
+                <h2 className="text-sm font-bold text-orange-500 uppercase tracking-wider">2. 新增品項</h2>
+                <p className="text-xs text-slate-400 mt-1">設定從「{proposal.fromSheet}」分頁反推；建好是草稿，這份表的驗證案例都掛在它底下。</p>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-[2fr_1fr] gap-4 mb-4">
+                <label className="text-xs text-slate-300 font-bold">品項名稱（台灣叫法）*
+                  <input
+                    autoFocus
+                    value={newProductName}
+                    onChange={(e) => setNewProductName(e.target.value)}
+                    placeholder={proposal.suggestedName ? `例：${proposal.suggestedName}` : '例：搖搖樂'}
+                    className={`${inputClass} w-full mt-1 text-base ${newProductName.trim() ? '' : 'border-amber-500'}`}
+                  />
+                  <span className="block mt-1 font-normal text-slate-500">品項代碼自動產生：<span className="font-mono">{newProductId}</span></span>
+                </label>
+                <label className="text-xs text-slate-400">分類
+                  <input value={newProductCategory} onChange={(e) => setNewProductCategory(e.target.value)} className={`${inputClass} w-full mt-1`} />
                 </label>
               </div>
-
-              {createProduct && (
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
-                  <label className="text-xs text-slate-400">品項名稱（台灣叫法）*
-                    <input value={newProductName} onChange={(e) => setNewProductName(e.target.value)} placeholder="例 搖搖樂" className={`${inputClass} w-full mt-1`} />
-                  </label>
-                  <label className="text-xs text-slate-400">品項代碼（網址／log 用，建立後不可改）*
-                    <input value={newProductId} onChange={(e) => setNewProductId(e.target.value.trim().toLowerCase())} className={`${inputClass} w-full mt-1 font-mono ${newIdOk ? '' : 'border-red-500'}`} />
-                    {!newIdOk && <span className="text-red-300">小寫英數與連字號，2～40 字，且不能跟既有品項重複</span>}
-                  </label>
-                  <label className="text-xs text-slate-400">分類
-                    <input value={newProductCategory} onChange={(e) => setNewProductCategory(e.target.value)} className={`${inputClass} w-full mt-1`} />
-                  </label>
-                </div>
-              )}
 
               {/* 反推出來的設定摘要 */}
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 text-sm">
@@ -383,11 +356,37 @@ export default function QuoteImportPage() {
             </div>
           )}
 
+          {/* 版本與 notes */}
+          <div className="bg-slate-900/50 rounded-xl border border-slate-700 p-6 mb-6">
+            <h2 className="text-sm font-bold text-orange-500 uppercase tracking-wider border-b border-slate-700 pb-2 mb-4">3. 檔案資訊</h2>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-sm">
+              <div>
+                <div className="text-xs text-slate-500 mb-1">檔名</div>
+                <div className="text-white font-mono text-xs break-all">{preview.fileName}</div>
+              </div>
+              <div>
+                <div className="text-xs text-slate-500 mb-1">模板版本</div>
+                <div className="text-white font-bold">{preview.templateVersion}</div>
+              </div>
+              <div>
+                <div className="text-xs text-slate-500 mb-1">解析結果</div>
+                <div className="text-white">價格 {preview.priceDiff.length} 項 · 成本分頁 {preview.goldenProposals.length} 頁</div>
+              </div>
+            </div>
+            {preview.notes.length > 0 && (
+              <ul className="mt-4 space-y-1 text-xs text-yellow-300/90 list-disc list-inside">
+                {preview.notes.map((n, i) => (
+                  <li key={i}>{n}</li>
+                ))}
+              </ul>
+            )}
+          </div>
+
           {/* 全域參數差異 */}
           {preview.settingsDiff.length > 0 && (
             <div className="bg-slate-900/50 rounded-xl border border-slate-700 p-6 mb-6">
               <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 border-b border-slate-700 pb-2 mb-4">
-                <h2 className="text-sm font-bold text-orange-500 uppercase tracking-wider">2c. 全域參數差異（已勾 {settingChecked.size} / {preview.settingsDiff.length}）</h2>
+                <h2 className="text-sm font-bold text-orange-500 uppercase tracking-wider">4. 全域參數差異（已勾 {settingChecked.size} / {preview.settingsDiff.length}）</h2>
                 <span className="text-xs text-yellow-300/90">人工／折舊／刀費是全品項共用，預設不勾；勾了才會改後台「全域參數」，沒勾的維持現值（這份表自己的 golden 仍用它的常數驗證）</span>
               </div>
               <table className="w-full text-sm">
@@ -416,7 +415,7 @@ export default function QuoteImportPage() {
           {/* 價格差異 */}
           <div className="bg-slate-900/50 rounded-xl border border-slate-700 p-6 mb-6">
             <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 border-b border-slate-700 pb-2 mb-4">
-              <h2 className="text-sm font-bold text-orange-500 uppercase tracking-wider">3. 價格差異（已勾 {selectedPriceCount} 筆）</h2>
+              <h2 className="text-sm font-bold text-orange-500 uppercase tracking-wider">5. 價格差異（已勾 {selectedPriceCount} 筆）</h2>
               <div className="flex flex-wrap items-center gap-2 text-xs">
                 {(['new', 'up', 'down', 'same', 'invalid'] as const).map((s) => (
                   <span key={s} className={`px-2 py-0.5 rounded border ${STATUS_CLASS[s]}`}>
@@ -479,7 +478,7 @@ export default function QuoteImportPage() {
           {/* golden 提案 */}
           <div className="bg-slate-900/50 rounded-xl border border-slate-700 p-6 mb-6">
             <h2 className="text-sm font-bold text-orange-500 uppercase tracking-wider border-b border-slate-700 pb-2 mb-4">
-              4. 驗證案例提案（已勾 {selectedGoldenCount} / {preview.goldenProposals.length} 筆，寫入後狀態 proposed）
+              6. 驗證案例提案（已勾 {selectedGoldenCount} / {preview.goldenProposals.length} 筆，寫入後狀態 proposed）
             </h2>
             {preview.goldenProposals.length === 0 ? (
               <p className="text-sm text-slate-500 py-6 text-center">這份檔案沒有可解析的成本分頁</p>
@@ -492,7 +491,8 @@ export default function QuoteImportPage() {
                     checked={goldenChecked.has(i)}
                     onToggle={() => toggleGolden(i)}
                     productId={goldenTarget(i)}
-                    onProductChange={(v) => { if (!createProduct) setGoldenProduct((prev) => ({ ...prev, [i]: v })) }}
+                    lockedLabel={createProduct ? `新品項「${newProductName.trim() || '（未命名）'}」` : undefined}
+                    onProductChange={(v) => setGoldenProduct((prev) => ({ ...prev, [i]: v }))}
                     products={products}
                     expanded={expandedGolden.has(i)}
                     onToggleExpanded={() => toggleExpanded(i)}
@@ -508,8 +508,8 @@ export default function QuoteImportPage() {
             <span className="text-xs text-slate-500">價格 {selectedPriceCount} 筆 · 驗證案例 {selectedGoldenCount} 筆</span>
             <button
               onClick={handleApply}
-              disabled={applying || (selectedPriceCount === 0 && selectedGoldenCount === 0 && !createProduct && settingChecked.size === 0)}
-              className={`px-6 py-2 rounded font-bold text-sm transition-all ${applying || (selectedPriceCount === 0 && selectedGoldenCount === 0 && !createProduct && settingChecked.size === 0) ? 'bg-slate-800 border border-slate-700 text-slate-500 cursor-not-allowed' : 'bg-orange-600 hover:bg-orange-500 text-white shadow-lg shadow-orange-900/50'}`}
+              disabled={applyDisabled}
+              className={`px-6 py-2 rounded font-bold text-sm transition-all ${applyDisabled ? 'bg-slate-800 border border-slate-700 text-slate-500 cursor-not-allowed' : 'bg-orange-600 hover:bg-orange-500 text-white shadow-lg shadow-orange-900/50'}`}
             >
               {applying ? '套用中...' : createProduct ? '建立品項並套用' : '套用勾選項目'}
             </button>
@@ -525,13 +525,15 @@ function GoldenCard(props: {
   checked: boolean
   onToggle: () => void
   productId: string
+  /** 有值＝案例固定掛到新品項，不給選 */
+  lockedLabel?: string
   onProductChange: (v: string) => void
   products: ProductOption[]
   expanded: boolean
   onToggleExpanded: () => void
   inputClass: string
 }) {
-  const { proposal: g, checked, onToggle, productId, onProductChange, products, expanded, onToggleExpanded, inputClass } = props
+  const { proposal: g, checked, onToggle, productId, lockedLabel, onProductChange, products, expanded, onToggleExpanded, inputClass } = props
   const margin = g.expected_price > 0 ? (1 - g.expected_cost / g.expected_price) * 100 : 0
   return (
     <div className={`rounded-lg border p-4 ${checked ? 'border-slate-600 bg-slate-900/60' : 'border-slate-800 bg-slate-900/20 opacity-70'}`}>
@@ -561,7 +563,9 @@ function GoldenCard(props: {
         </div>
         <div className="flex items-center gap-2">
           <span className="text-xs text-slate-500">品項</span>
-          {products.length > 0 ? (
+          {lockedLabel ? (
+            <span className="text-sm text-amber-300">{lockedLabel}</span>
+          ) : products.length > 0 ? (
             <select value={productId} onChange={(e) => onProductChange(e.target.value)} className={inputClass}>
               {!products.some((p) => p.id === productId) && <option value={productId}>{productId || '（請選擇）'}</option>}
               {products.map((p) => (
