@@ -295,6 +295,9 @@ export default function HomePage() {
   const canInfoBoard = hasFeaturePermission('info_board')
   const canPurchasing = hasFeaturePermission('purchasing')
   const canEngineering = hasFeaturePermission('engineering')
+  // 包裝專區(D30/D36):packaging(唯讀)或 packaging_admin(編輯)任一即可進入;管理員自動通過。
+  // 與 /packaging 頁、/api/packaging/* 的判斷一致;不能用只收單一鍵的 guardFeatureAccess
+  const canPackaging = hasFeaturePermission('packaging') || hasFeaturePermission('packaging_admin')
   // 常平訂單資料區：只看有沒有被勾 changping_ship（不用 hasFeaturePermission——那會讓管理員自動通過；
   // 這區連其他管理員都不該看到）。API 端 guardChangpingShipOwner 為準。
   const canChangpingShip = memberPermissions.includes('changping_ship')
@@ -995,6 +998,39 @@ export default function HomePage() {
               設備維護/維修登記與追蹤。<br/>(Engineering)
             </p>
             <span className="hidden md:inline-block px-4 py-2 rounded border border-slate-600 text-slate-300 text-xs font-mono group-hover:bg-orange-600 group-hover:border-orange-600 group-hover:text-white transition-all">
+              OPEN &rarr;
+            </span>
+          </Link>
+
+          {/* 包裝專區 (Violet) — 包裝站排程工作台(待排池/AI 排程/版本歷史/每日產能)。
+              比照工程專區：無權限者卡片變灰、點擊跳提示；舊 /admin/production/packaging 看板從專區頁連過去 */}
+          <Link href="/packaging"
+            onClick={canPackaging ? undefined : (event) => {
+              event.preventDefault();
+              alert('你目前沒有「包裝專區」權限，請聯絡核心管理員。');
+            }}
+            onMouseEnter={() => setIsHovered('none')}
+            onMouseLeave={() => setIsHovered('none')}
+            className={`
+              group relative order-17 h-40 md:h-60 lg:h-64 rounded-2xl border border-slate-700 bg-slate-900/40 backdrop-blur-sm
+              flex flex-col items-center justify-center text-center p-3 md:p-6 transition-all duration-500 cursor-pointer
+              hover:border-violet-500 hover:bg-slate-800/60 hover:shadow-[0_0_30px_rgba(139,92,246,0.15)]
+              ${canPackaging ? '' : 'opacity-50 grayscale'}
+            `}
+          >
+            <div className="absolute top-4 right-4 flex items-center gap-1.5 px-2 py-1 bg-violet-500/10 rounded border border-violet-500/20">
+              <span className="text-[10px] text-violet-400 font-bold uppercase tracking-wider">Packaging</span>
+            </div>
+            <div className="mb-3 md:mb-6 p-3 md:p-4 rounded-full bg-slate-800 group-hover:bg-violet-900/50 text-slate-400 group-hover:text-violet-400 transition-colors">
+              <svg className="w-7 h-7 md:w-10 md:h-10" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4" />
+              </svg>
+            </div>
+            <h2 className="text-base md:text-xl font-bold text-white mb-1 md:mb-2 group-hover:text-violet-400 transition-colors">包裝專區</h2>
+            <p className="text-slate-500 text-[10px] md:text-xs mb-3 md:mb-6 group-hover:text-slate-300 px-1 md:px-2 hidden md:block">
+              包裝站排程工作台與每日產能。<br/>(Packaging)
+            </p>
+            <span className="hidden md:inline-block px-4 py-2 rounded border border-slate-600 text-slate-300 text-xs font-mono group-hover:bg-violet-600 group-hover:border-violet-600 group-hover:text-white transition-all">
               OPEN &rarr;
             </span>
           </Link>

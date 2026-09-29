@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { supabase } from '../lib/supabaseClient'
 
 interface SoLine {
@@ -32,23 +32,51 @@ interface Props {
   liveRefresh?: boolean
   /** 附加在明細下方的自訂內容（如採購專區塞示意圖縮圖牆）；不影響既有頁面 */
   extraContent?: React.ReactNode
+  /** 每個品項行 Row 1 右側的自訂內容（如包裝專區的「示意圖」按鈕）；不傳時畫面完全不變。
+   *  line_no 同步表是文字（"1"）、ARGO 即時可能是數字，呼叫端自行正規化 */
+  renderLineExtra?: (line: { line_no: number | string | null; mbp_part: string | null; description: string | null }) => React.ReactNode
+  /** true：「商品備註」與「備註2」內容相同時只顯示一次（兩欄同步自 ARGO REMARK2，恆重複）。
+   *  預設 false 維持既有頁面原樣 */
+  dedupeRemarks?: boolean
+  /** true：不顯示 hold_status（同步的是表頭狀態 OPEN/UNSIGNED，每行都有值，看起來全是警示）。
+   *  預設 false 維持既有頁面原樣（目前只有包裝專區開啟） */
+  hideHoldStatus?: boolean
+  /** true：項次依數字排序（line_no 是文字欄，資料庫排序會變成 1、10、11、2…）。預設 false 維持原樣 */
+  numericLineSort?: boolean
 }
 
-export default function SoOrderModal({ projectId, onClose, liveRefresh = false, extraContent }: Props) {
+/** 項次轉數字排序鍵；非數字排最後 */
+const lineSortKey = (v: number | string | null) => {
+  const n = Number(v)
+  return v == null || String(v).trim() === '' || !Number.isFinite(n) ? Number.POSITIVE_INFINITY : n
+}
+
+export default function SoOrderModal({
+  projectId, onClose, liveRefresh = false, extraContent, renderLineExtra, dedupeRemarks = false,
+  hideHoldStatus = false, numericLineSort = false,
+}: Props) {
   const [meta, setMeta] = useState<SoOrderMeta | null>(null)
   const [lines, setLines] = useState<SoLine[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [source, setSource] = useState<'live' | 'synced' | null>(null)
+  const dialogRef = useRef<HTMLDivElement>(null)
 
-  useEffect(() => {
-    if (!projectId) return
-    let cancelled = false
-    setLoading(true)
+  // 換單時在 render 階段就重設狀態（React 建議的「依 prop 調整 state」寫法），
+  // 不在 effect 裡同步 setState，避免多一次重繪（react-hooks/set-state-in-effect）
+  const [shownFor, setShownFor] = useState<string | null>(null)
+  if (projectId !== shownFor) {
+    setShownFor(projectId)
+    setLoading(Boolean(projectId))
     setError(null)
     setMeta(null)
     setLines([])
     setSource(null)
+  }
+
+  useEffect(() => {
+    if (!projectId) return
+    let cancelled = false
 
     // 同步表（erp_so_lines）：即時查不到或未啟用即時時的來源
     const loadFromSynced = async (): Promise<boolean> => {
@@ -127,7 +155,20 @@ export default function SoOrderModal({ projectId, onClose, liveRefresh = false, 
     return () => window.removeEventListener('keydown', onKey)
   }, [onClose])
 
+  // 開啟時把焦點移進彈窗（鍵盤／讀螢幕軟體才知道進了對話框），關閉時還給原本的按鈕
+  const open = Boolean(projectId)
+  useEffect(() => {
+    if (!open) return
+    const prev = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    dialogRef.current?.focus({ preventScroll: true })
+    return () => { prev?.focus({ preventScroll: true }) }
+  }, [open])
+
   if (!projectId) return null
+
+  const shownLines = numericLineSort
+    ? [...lines].sort((a, b) => lineSortKey(a.line_no) - lineSortKey(b.line_no))
+    : lines
 
   return (
     <div
@@ -135,13 +176,18 @@ export default function SoOrderModal({ projectId, onClose, liveRefresh = false, 
       onClick={onClose}
     >
       <div
-        className="bg-slate-900 border border-slate-700 rounded-xl shadow-2xl w-full max-w-[96vw] max-h-[90vh] flex flex-col"
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label={`訂單明細 ${projectId}`}
+        tabIndex={-1}
+        className="bg-slate-900 border border-slate-700 rounded-xl shadow-2xl w-full max-w-[96vw] max-h-[90vh] flex flex-col outline-none"
         onClick={e => e.stopPropagation()}
       >
-        {/* Header */}
-        <div className="flex items-start justify-between px-6 py-5 border-b border-slate-800 bg-slate-900/80 rounded-t-xl flex-shrink-0">
-          <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5">
-            <span className="text-xl font-bold font-mono text-cyan-300 tracking-wide">{projectId}</span>
+        {/* Header（min-w-0＋break-all：手機上長單號如 SOA260924-095321-313 才不會把關閉鈕擠出去） */}
+        <div className="flex items-start justify-between px-4 sm:px-6 py-4 sm:py-5 border-b border-slate-800 bg-slate-900/80 rounded-t-xl flex-shrink-0">
+          <div className="flex min-w-0 flex-wrap items-center gap-x-4 gap-y-1.5">
+            <span className="min-w-0 break-all text-base sm:text-xl font-bold font-mono text-cyan-300 tracking-wide">{projectId}</span>
             {meta?.partner_name && (
               <span className="text-slate-200 text-sm font-medium">{meta.partner_name}</span>
             )}
@@ -167,7 +213,7 @@ export default function SoOrderModal({ projectId, onClose, liveRefresh = false, 
           </div>
           <button
             onClick={onClose}
-            className="text-slate-500 hover:text-white transition-colors text-2xl leading-none ml-6 flex-shrink-0 mt-0.5"
+            className="text-slate-400 hover:text-white transition-colors text-2xl leading-none ml-3 sm:ml-6 flex-shrink-0 mt-0.5"
             aria-label="關閉"
           >
             ✕
@@ -192,11 +238,17 @@ export default function SoOrderModal({ projectId, onClose, liveRefresh = false, 
           )}
           {!loading && !error && lines.length > 0 && (
             <div className="flex flex-col gap-3">
-              {lines.map((line, i) => (
+              {shownLines.map((line, i) => {
+                const lineExtra = renderLineExtra?.(line)
+                // 備註2 與商品備註同源（REMARK2）：開啟去重時，相同內容只留「商品備註」那一欄
+                const remark2 = dedupeRemarks && line.remark2 && line.remark2.trim() === (line.remark ?? '').trim()
+                  ? null
+                  : line.remark2
+                return (
                 <div
                   key={i}
                   className={`rounded-lg border px-5 py-4 ${
-                    line.hold_status
+                    line.hold_status && !hideHoldStatus
                       ? 'border-red-700/50 bg-red-950/20'
                       : i % 2 === 0
                       ? 'border-slate-700/60 bg-slate-800/40'
@@ -216,15 +268,18 @@ export default function SoOrderModal({ projectId, onClose, liveRefresh = false, 
                         {line.mbp_part}
                       </span>
                     )}
-                    {line.hold_status && (
+                    {line.hold_status && !hideHoldStatus && (
                       <span className="px-2 py-0.5 rounded text-xs bg-red-900/60 text-red-300 border border-red-700/50 flex-shrink-0">
                         ⛔ {line.hold_status}
                       </span>
                     )}
+                    {lineExtra != null && lineExtra !== false && (
+                      <div className="flex-shrink-0">{lineExtra}</div>
+                    )}
                   </div>
 
                   {/* Row 2: 商品備註 + 備註2 + 包裝方式 */}
-                  {(line.remark || line.remark2 || line.packing) && (
+                  {(line.remark || remark2 || line.packing) && (
                     <div className="grid grid-cols-1 md:grid-cols-3 gap-x-6 gap-y-2 mb-3 pl-11">
                       {line.remark && (
                         <div>
@@ -232,10 +287,10 @@ export default function SoOrderModal({ projectId, onClose, liveRefresh = false, 
                           <div className="text-amber-200/90 text-sm leading-relaxed whitespace-pre-wrap">{line.remark}</div>
                         </div>
                       )}
-                      {line.remark2 && (
+                      {remark2 && (
                         <div>
                           <div className="text-xs text-slate-500 mb-0.5">備註2</div>
-                          <div className="text-slate-300 text-sm leading-relaxed whitespace-pre-wrap">{line.remark2}</div>
+                          <div className="text-slate-300 text-sm leading-relaxed whitespace-pre-wrap">{remark2}</div>
                         </div>
                       )}
                       {line.packing && (
@@ -268,7 +323,8 @@ export default function SoOrderModal({ projectId, onClose, liveRefresh = false, 
                     )}
                   </div>
                 </div>
-              ))}
+                )
+              })}
             </div>
           )}
 

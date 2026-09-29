@@ -1,0 +1,386 @@
+-- ============================================================================
+-- 2026-09-27(b)  包裝專區 P1 擴充：週末加班（D63）＋分線（D67／D71／D72）＋工時覆寫與學習紀錄（D69）＋手動加入（D66）
+--
+-- ⚠ 套用前請先在 Supabase 後台手動備份（Dashboard → Database → Backups，或匯出 packaging_* 各表）。
+--   本專案 Supabase 是正式站、沒有自動備份。本檔由 Snow 備份後在 SQL Editor 手動貼上執行一次。
+-- ⚠ 前提：sql/20260927_packaging_schedule.sql 已套用（本檔修改那 5 張表，並新增 4 張表）。
+--
+-- 本檔取代原本的 sql/20260927b_packaging_capacity_weekend.sql（那份從未套用、已刪除；內容併入下面第 1 段）。
+-- 設計理由與規則：docs/design/2026-09-27-packaging-lines.md（§一 資料模型、§九 相容與套用順序）。
+--
+-- 內容（全部包在一個交易裡：任何一段失敗整份不生效）
+--   1. packaging_daily_capacity：週末（六／日）規則（原 20260927b）＋欄位註解（總時數改為各線加總的相容欄）
+--   2. packaging_lines           新表：產線（種子 A／B／C＝id 1／2／3）
+--   3. packaging_line_capacity   新表：一天 × 一條線的產能；既有每日產能回填到 A 線
+--   4. packaging_placements      加欄：line_id（既有排進日期的列回填 A 線後加約束）、est_minutes_override 等
+--   5. packaging_time_adjustments 新表：D69 主管改工時的學習紀錄（只增不改）
+--   6. packaging_manual_inclusions 新表：D66 手動加入待排池的 SO 品項行（移出＝軟刪除）
+--   7. packaging_op_log.kind 放寬：加 'lines'、'manual'
+--   8. RLS：4 張新表只給 service_role（revoke anon / authenticated）
+--
+-- 不做：不改任何既有（非 packaging_*）表；不建函式、觸發器；不刪任何資料。
+--
+-- 相容性（Snow 的穩定測試站 wt-packaging-stable 仍是舊程式、連同一個正式站資料庫）
+--   - placements.line_id 預設 1（A 線），且本檔把既有所有 line_id 為 null 的列（含待排區）都補成 1；新程式寫入待排區的卡
+--     也填 1（不寫 null）。所以每一列都有 line_id：舊程式插入不帶 line_id、或把待排區的卡 UPDATE 進日期／勾完成
+--     （只改 plan_date、不帶 line_id）都符合新約束。新程式讀取時「plan_date 為 null 就忽略 line_id」。
+--     舊程式排進日期的卡一律落在 A 線（它不知道分線），要換線請用新版。
+--   - 新程式儲存產能時仍把各線加總寫回 packaging_daily_capacity 的總時數欄 → 舊程式看到的總時數正確；
+--     但舊程式儲存的產能只會改 daily 表、不會改各線表 → 套用後請只用新版編輯產能（見規格 §九）。
+--
+-- 冪等：create ... if not exists、add column if not exists、drop constraint/policy if exists 後再建、
+--       種子 on conflict do nothing、產能回填只補「還沒有任何線列」的日期，重跑不會壞也不會重複回填。
+--       注意：若主管已用新版把某天「逐線清空」（該日期沒有任何線列、但 daily 列還在），重跑本檔會把 daily 的總時數
+--       再回填到 A 線；套用成功後請勿重跑（第 3 段註解）。
+--
+-- 還原（若要整份退回）：先確認新程式已下線，再依序
+--   drop table packaging_manual_inclusions, packaging_time_adjustments, packaging_line_capacity;
+--   alter table packaging_placements drop constraint packaging_placements_line_required,
+--     drop column line_id, drop column est_minutes_override, drop column minutes_override_by,
+--     drop column minutes_override_by_name, drop column minutes_override_at;
+--   drop table packaging_lines;
+--   op_log 與 daily_capacity 的 constraint 可保留（是舊規則的放寬版，對舊程式無害）。
+-- ============================================================================
+
+begin;
+
+
+-- ----------------------------------------------------------------------------
+-- 1. packaging_daily_capacity：週末加班（D63，原 20260927b_packaging_capacity_weekend.sql）
+-- ----------------------------------------------------------------------------
+-- 原本（20260927）：no_sunday 禁止週日列、saturday_overtime_only 週六 regular_hours＝0、open_only_saturday 開加班只能在週六。
+-- D63「週日比照週六」→ 改成「週末（isodow 6＝週六、7＝週日）」。新規則是舊規則的放寬版，既有資料必過。
+
+alter table public.packaging_daily_capacity
+  drop constraint if exists packaging_daily_capacity_no_sunday;
+alter table public.packaging_daily_capacity
+  drop constraint if exists packaging_daily_capacity_saturday_overtime_only;
+alter table public.packaging_daily_capacity
+  drop constraint if exists packaging_daily_capacity_open_only_saturday;
+alter table public.packaging_daily_capacity
+  drop constraint if exists packaging_daily_capacity_weekend_overtime_only;
+alter table public.packaging_daily_capacity
+  drop constraint if exists packaging_daily_capacity_open_only_weekend;
+
+-- 週末只有加班欄：regular_hours 必須 0（D49／D63）
+alter table public.packaging_daily_capacity
+  add constraint packaging_daily_capacity_weekend_overtime_only
+  check (extract(isodow from "date") not in (6, 7) or regular_hours = 0);
+
+-- 「開加班」旗標只能用在週末（平日沒有這個開關）
+alter table public.packaging_daily_capacity
+  add constraint packaging_daily_capacity_open_only_weekend
+  check (is_saturday_open = false or extract(isodow from "date") in (6, 7));
+
+comment on column public.packaging_daily_capacity.is_saturday_open is
+  '週末開加班（D63）：週六或週日為 true 時該日出現在包裝工作台；平日恆為 false。欄名沿用舊稱 is_saturday_open。';
+comment on column public.packaging_daily_capacity.regular_hours is
+  'D71 起為相容欄：＝當天各啟用線正常時數加總，由 PUT /api/packaging/capacity 同步寫入；權威值在 packaging_line_capacity。';
+comment on column public.packaging_daily_capacity.overtime_hours_max is
+  'D71 起為相容欄：＝當天各啟用線加班時數加總，由 PUT /api/packaging/capacity 同步寫入；權威值在 packaging_line_capacity。';
+comment on column public.packaging_daily_capacity.headcount is
+  'D65 起不再使用（畫面不填不顯示，新寫入一律 null）；欄位保留。';
+
+
+-- ----------------------------------------------------------------------------
+-- 2. packaging_lines：產線（D67／D71）
+-- ----------------------------------------------------------------------------
+-- 預設 A／B／C（Snow 確認只有 ABC），主管可再加一條（臨時線／D 線）、可停用。線不能刪（歷史擺放與產能要留著），只能停用。
+-- id 用 smallint identity：種子固定 1／2／3（程式與文件以「A＝1」為預設線），之後新增由序列接續。
+-- code：畫面與匯出顯示用的短代碼，唯一、建立後不改；name：可改名（例「A 線」「臨時線」）。
+
+create table if not exists public.packaging_lines (
+  id smallint generated by default as identity primary key,
+  code text not null
+    check (code ~ '^[A-Z0-9]{1,4}$'),
+  name text not null
+    check (char_length(btrim(name)) between 1 and 20),
+  sort_order smallint not null default 0
+    check (sort_order between 0 and 999),
+  active boolean not null default true,
+  created_by text not null,
+  created_by_name text,
+  created_at timestamptz not null default now(),
+  updated_by text not null,
+  updated_by_name text,
+  updated_at timestamptz not null default now(),
+  constraint packaging_lines_code_key unique (code)
+);
+
+-- （identity 是 by default，可直接寫明確 id）
+insert into public.packaging_lines (id, code, name, sort_order, active, created_by, created_by_name, updated_by, updated_by_name)
+values
+  (1, 'A', 'A 線', 10, true, 'system', 'migration 20260927b', 'system', 'migration 20260927b'),
+  (2, 'B', 'B 線', 20, true, 'system', 'migration 20260927b', 'system', 'migration 20260927b'),
+  (3, 'C', 'C 線', 30, true, 'system', 'migration 20260927b', 'system', 'migration 20260927b')
+on conflict (id) do nothing;
+
+-- 種子用了明確 id，序列要跳過它們，否則下一次新增會撞 1
+select setval(
+  pg_get_serial_sequence('public.packaging_lines', 'id'),
+  greatest((select coalesce(max(id), 0) from public.packaging_lines), 3)
+);
+
+
+-- ----------------------------------------------------------------------------
+-- 3. packaging_line_capacity：一天 × 一條線的產能（D67／D71）
+-- ----------------------------------------------------------------------------
+-- 主管在產能表每個日期填各線「正常總時數」「加班總時數」，總時數＝各線加總（D71，由程式算，不存在這張表）。
+-- 沒填的日子不存列：平日「各線各自」沿用該線最近一次（較早日期）填的平日值（D49 改為分線）；週末預設 0。
+-- 週末開不開加班仍看 packaging_daily_capacity.is_saturday_open（一天一個旗標，不分線）。
+-- 時數上限 5000 同 daily 表（一條線也可能是多人合計，例 6 人 × 8 小時 = 48）。
+
+create table if not exists public.packaging_line_capacity (
+  "date" date not null,
+  line_id smallint not null
+    references public.packaging_lines (id) on delete restrict,
+  regular_hours numeric(6,2) not null default 0
+    check (regular_hours >= 0 and regular_hours <= 5000),
+  overtime_hours_max numeric(6,2) not null default 0
+    check (overtime_hours_max >= 0 and overtime_hours_max <= 5000),
+  note text
+    check (note is null or char_length(note) <= 200),
+  updated_by text not null,
+  updated_by_name text,
+  updated_at timestamptz not null default now(),
+  primary key ("date", line_id),
+  -- 週末只有加班（同 daily 表的 D63 規則）
+  constraint packaging_line_capacity_weekend_overtime_only
+    check (extract(isodow from "date") not in (6, 7) or regular_hours = 0)
+);
+
+-- 「某線在某日之前最近一次填的平日值」：依 (line_id, date desc) 找
+create index if not exists packaging_line_capacity_line_date_idx
+  on public.packaging_line_capacity (line_id, "date" desc);
+
+-- 回填：既有的每日產能（分線前填的總時數）全部算到 A 線（id 1）。
+-- 只補「該日期還沒有任何線列」的日期 → 重跑不會覆蓋主管已填的各線值。
+-- 例外：主管用新版把某天各線逐一清空（線列全刪、daily 列保留）後重跑，該日會再被回填成 A 線＝daily 總時數；
+-- 本檔設計為套用一次，成功後不需重跑。
+insert into public.packaging_line_capacity ("date", line_id, regular_hours, overtime_hours_max, note, updated_by, updated_by_name, updated_at)
+select d."date", 1, d.regular_hours, d.overtime_hours_max, d.note, d.updated_by, d.updated_by_name, d.updated_at
+  from public.packaging_daily_capacity d
+ where not exists (
+         select 1 from public.packaging_line_capacity lc where lc."date" = d."date"
+       )
+on conflict ("date", line_id) do nothing;
+
+
+-- ----------------------------------------------------------------------------
+-- 4. packaging_placements：所屬線（D72）＋主管覆寫工時（D69）
+-- ----------------------------------------------------------------------------
+-- line_id：排進日期（plan_date 非 null）的卡一定屬於某條線；待排區（plan_date null）的卡不屬於任何線
+--   （讀取時 plan_date 為 null 就忽略 line_id；寫入時新程式仍填 1，不寫 null）。預設 1＝A 線，理由見檔頭「相容性」。
+-- est_minutes_override：主管改過的工時（分鐘，以本列 qty 為準；拆卡依數量比例分配，規格 §三.6）；null＝用標準估計。
+
+alter table public.packaging_placements
+  add column if not exists line_id smallint
+    references public.packaging_lines (id) on delete restrict;
+alter table public.packaging_placements
+  alter column line_id set default 1;
+
+alter table public.packaging_placements
+  add column if not exists est_minutes_override numeric(8,1);
+alter table public.packaging_placements
+  add column if not exists minutes_override_by text;
+alter table public.packaging_placements
+  add column if not exists minutes_override_by_name text;
+alter table public.packaging_placements
+  add column if not exists minutes_override_at timestamptz;
+
+-- 回填：既有所有列（排進日期的含已完成、以及待排區的列）line_id 全部補成 A 線，再加約束（先回填才加得上去）。
+-- 待排區的列也補：add column 時沒有預設值，既有列是 null；舊程式之後把它 UPDATE 進日期不會帶 line_id → 會違反約束。
+update public.packaging_placements
+   set line_id = 1
+ where line_id is null;
+
+alter table public.packaging_placements
+  drop constraint if exists packaging_placements_line_required;
+alter table public.packaging_placements
+  add constraint packaging_placements_line_required
+  check (plan_date is null or line_id is not null);
+
+alter table public.packaging_placements
+  drop constraint if exists packaging_placements_minutes_override_range;
+alter table public.packaging_placements
+  add constraint packaging_placements_minutes_override_range
+  check (est_minutes_override is null or (est_minutes_override > 0 and est_minutes_override <= 6000));
+
+-- 覆寫值與「誰（by）何時（at）改的」一起有、一起清（by_name 可為 null：成員可能沒有中文名）
+alter table public.packaging_placements
+  drop constraint if exists packaging_placements_minutes_override_meta;
+alter table public.packaging_placements
+  add constraint packaging_placements_minutes_override_meta
+  check ((est_minutes_override is null) = (minutes_override_at is null)
+     and (est_minutes_override is null) = (minutes_override_by is null));
+
+-- 停用線前要數「這條線還有幾張未完成、排進日期的卡」（lines.md §三.3）
+create index if not exists packaging_placements_open_line_idx
+  on public.packaging_placements (line_id, plan_date)
+  where completed_at is null and plan_date is not null;
+
+
+-- ----------------------------------------------------------------------------
+-- 5. packaging_time_adjustments：D69 主管改工時的學習紀錄（只增不改）
+-- ----------------------------------------------------------------------------
+-- 每次主管改一張卡的工時（拉卡片下緣、詳情輸入、或 Undo／Redo）記一列，供日後 AI 校正工時：
+--   品號、數量、PACKING、途程／工時來源、標準估計值 vs 主管改後值、換算每件分鐘數、誰、何時、原因。
+-- placement_id 不設 FK：擺放之後可能被合併／放回待排池／快照還原刪掉，學習紀錄要留著。
+-- 品名只存前 80 字；不存客戶名稱（學習用不到，減少個資）。
+
+create table if not exists public.packaging_time_adjustments (
+  id bigserial primary key,
+  created_at timestamptz not null default now(),
+  placement_id uuid not null,
+  so_line_key text not null
+    check (char_length(so_line_key) between 3 and 80),
+  item_code text,
+  item_name text
+    check (item_name is null or char_length(item_name) <= 80),
+  -- 修改當下的有效數量
+  qty numeric(14,3) not null
+    check (qty > 0),
+  packing text
+    check (packing is null or char_length(packing) <= 200),
+  -- 途程類型（自製／常平／委外）
+  route_type text,
+  -- WorkEstimate.source（route、changping_rebox…）與一行說明
+  work_source text,
+  work_explain text
+    check (work_explain is null or char_length(work_explain) <= 300),
+  per_unit_std numeric(10,4),
+  std_minutes numeric(8,1),
+  before_minutes numeric(8,1),
+  after_minutes numeric(8,1),
+  per_unit_after numeric(10,4),
+  -- 本次是「清除覆寫、回到標準值」
+  cleared boolean not null default false,
+  reason text
+    check (reason is null or char_length(reason) <= 200),
+  via text not null
+    check (via in ('drag', 'dialog', 'undo')),
+  plan_date date,
+  line_id smallint,
+  actor_email text not null,
+  actor_name text
+);
+
+create index if not exists packaging_time_adjustments_placement_idx
+  on public.packaging_time_adjustments (placement_id, created_at desc);
+create index if not exists packaging_time_adjustments_item_idx
+  on public.packaging_time_adjustments (item_code, created_at desc);
+create index if not exists packaging_time_adjustments_created_idx
+  on public.packaging_time_adjustments (created_at desc);
+
+
+-- ----------------------------------------------------------------------------
+-- 6. packaging_manual_inclusions：D66 手動加入待排池（顆粒度＝SO 品項行）
+-- ----------------------------------------------------------------------------
+-- 主管輸入單號 → 勾選品項行 → 加入「手動加入」區塊（可正常排程）。資料一律取自 EIP 鏡像（erp_so_lines 等），不查 ARGO。
+-- 移出＝軟刪除（removed_at 有值），紀錄保留；同一個 SO 行同時只能有一筆有效（未移出）的紀錄。
+-- 卡片消失條件（勾完成、ERP 結案、手動移出）由讀取時判斷（規格 §六），不靠刪列。
+
+create table if not exists public.packaging_manual_inclusions (
+  id bigserial primary key,
+  so_line_key text not null
+    check (char_length(so_line_key) between 3 and 80),
+  so text not null
+    check (char_length(so) between 2 and 40),
+  line_no text not null
+    check (char_length(line_no) between 1 and 20),
+  -- 加入數量（預設 ERP 訂單量，可改）
+  qty numeric(14,3) not null
+    check (qty > 0),
+  -- 估工時用的途程類型（查詢時依採購來源推測，主管可改）
+  route_type text not null default '自製'
+    check (route_type in ('自製', '常平', '委外')),
+  reason text
+    check (reason is null or char_length(reason) <= 200),
+  added_by text not null,
+  added_by_name text,
+  added_at timestamptz not null default now(),
+  removed_at timestamptz,
+  removed_by text,
+  removed_by_name text,
+  removed_reason text
+    check (removed_reason is null or char_length(removed_reason) <= 200),
+  updated_by text,
+  updated_by_name text,
+  updated_at timestamptz not null default now(),
+  constraint packaging_manual_inclusions_removed_by
+    check ((removed_at is null) = (removed_by is null))
+);
+
+-- 同一個 SO 行同時只能有一筆有效紀錄（移出後可再加入）
+create unique index if not exists packaging_manual_inclusions_active_key
+  on public.packaging_manual_inclusions (so_line_key)
+  where removed_at is null;
+create index if not exists packaging_manual_inclusions_updated_idx
+  on public.packaging_manual_inclusions (updated_at desc);
+
+
+-- ----------------------------------------------------------------------------
+-- 7. packaging_op_log.kind：加 'lines'（線別新增／改名／停用）、'manual'（手動加入／改量／移出）
+-- ----------------------------------------------------------------------------
+-- 20260927 建表時是欄位上的匿名 check，Postgres 自動命名為 packaging_op_log_kind_check。
+
+alter table public.packaging_op_log
+  drop constraint if exists packaging_op_log_kind_check;
+alter table public.packaging_op_log
+  add constraint packaging_op_log_kind_check
+  check (kind in ('placements', 'complete', 'capacity', 'version_create', 'version_restore', 'lock', 'lines', 'manual'));
+
+
+-- ----------------------------------------------------------------------------
+-- 8. RLS：service_role only（比照 20260927_packaging_schedule.sql）
+--    anon / authenticated 沒有任何 policy → 全部拒絕；另外收回表權限與序列權限，雙重保險。
+-- ----------------------------------------------------------------------------
+
+alter table public.packaging_lines enable row level security;
+drop policy if exists "service_role full access" on public.packaging_lines;
+create policy "service_role full access" on public.packaging_lines
+  for all to service_role using (true) with check (true);
+revoke all on table public.packaging_lines from anon, authenticated;
+
+alter table public.packaging_line_capacity enable row level security;
+drop policy if exists "service_role full access" on public.packaging_line_capacity;
+create policy "service_role full access" on public.packaging_line_capacity
+  for all to service_role using (true) with check (true);
+revoke all on table public.packaging_line_capacity from anon, authenticated;
+
+alter table public.packaging_time_adjustments enable row level security;
+drop policy if exists "service_role full access" on public.packaging_time_adjustments;
+create policy "service_role full access" on public.packaging_time_adjustments
+  for all to service_role using (true) with check (true);
+revoke all on table public.packaging_time_adjustments from anon, authenticated;
+
+alter table public.packaging_manual_inclusions enable row level security;
+drop policy if exists "service_role full access" on public.packaging_manual_inclusions;
+create policy "service_role full access" on public.packaging_manual_inclusions
+  for all to service_role using (true) with check (true);
+revoke all on table public.packaging_manual_inclusions from anon, authenticated;
+
+-- identity／bigserial 的序列也收回（Supabase 預設會給 anon/authenticated 序列權限）
+revoke all on sequence public.packaging_lines_id_seq from anon, authenticated;
+revoke all on sequence public.packaging_time_adjustments_id_seq from anon, authenticated;
+revoke all on sequence public.packaging_manual_inclusions_id_seq from anon, authenticated;
+
+commit;
+
+
+-- ----------------------------------------------------------------------------
+-- 9. 套用後自我檢查（唯讀，可單獨執行）
+-- ----------------------------------------------------------------------------
+-- (a) 9 張 packaging_* 表都開了 RLS：
+-- select relname, relrowsecurity from pg_class
+--  where relkind = 'r' and relnamespace = 'public'::regnamespace and relname like 'packaging\_%' order by relname;
+-- (b) 種子線：預期 A／B／C 三列、active = true：
+-- select id, code, name, sort_order, active from public.packaging_lines order by sort_order;
+-- (c) 回填：每個 daily 日期都有 A 線列（兩個數字應相等）：
+-- select (select count(*) from public.packaging_daily_capacity) as daily_rows,
+--        (select count(*) from public.packaging_line_capacity where line_id = 1) as line_a_rows;
+-- (d) 每一列都有線（含待排區，應為 0；舊版穩定站才能照常把待排區的卡排進日期）：
+-- select count(*) from public.packaging_placements where line_id is null;
+-- (e) constraint：daily 表應看到 weekend_overtime_only、open_only_weekend，且沒有 no_sunday：
+-- select conname, pg_get_constraintdef(oid) from pg_constraint
+--  where conrelid = 'public.packaging_daily_capacity'::regclass and contype = 'c' order by conname;

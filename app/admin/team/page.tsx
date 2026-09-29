@@ -90,6 +90,11 @@ export default function TeamPage() {
         { key: 'quote_user', label: '報價計算機 (Quote)' },
         { key: 'quote_admin', label: '報價系統後台 (Quote Admin)' },
         { key: 'engineering', label: '工程專區 (Engineering)' },
+        // 包裝專區(D30):兩級權限。勾「編輯排程」時會自動連帶勾「唯讀」(見 togglePermission)
+        { key: 'packaging', label: '包裝專區(唯讀)' },
+        { key: 'packaging_admin', label: '包裝專區(編輯排程)' },
+        // 包裝專區 AI 模擬排程(D89/D90):勾它會連帶勾「唯讀」與「編輯排程」(採用要寫正式排程),見 togglePermission
+        { key: 'packaging_ai', label: '包裝專區(AI 模擬排程)' },
       ]
     }
   ]
@@ -337,8 +342,26 @@ export default function TeamPage() {
     setFormData(prev => {
       const current = prev.permissions || []
       if (current.includes(key)) {
+        // 包裝專區:取消「唯讀」時一併取消「編輯排程」與「AI 模擬排程」,避免留下只有 packaging_admin／packaging_ai 的不一致狀態
+        if (key === 'packaging') {
+          return { ...prev, permissions: current.filter(p => p !== 'packaging' && p !== 'packaging_admin' && p !== 'packaging_ai') }
+        }
+        // 包裝專區:取消「編輯排程」時一併取消「AI 模擬排程」(AI 被授權人必須能編輯,D90;API 端 canUseAi 也這樣擋)
+        if (key === 'packaging_admin') {
+          return { ...prev, permissions: current.filter(p => p !== 'packaging_admin' && p !== 'packaging_ai') }
+        }
         return { ...prev, permissions: current.filter(p => p !== key) }
       } else {
+        // 包裝專區:能編輯一定要能看,勾「編輯排程」時連帶補上「唯讀」,
+        // 入口與 API 雖已接受任一鍵,仍保持「編輯⊂唯讀」讓勾選清單語意一致
+        if (key === 'packaging_admin' && !current.includes('packaging')) {
+          return { ...prev, permissions: [...current, 'packaging', key] }
+        }
+        // 包裝專區 AI 模擬排程:勾它時連帶補上「唯讀」與「編輯排程」(AI ⊂ 編輯 ⊂ 唯讀)
+        if (key === 'packaging_ai') {
+          const add = ['packaging', 'packaging_admin'].filter(p => !current.includes(p))
+          return { ...prev, permissions: [...current, ...add, key] }
+        }
         return { ...prev, permissions: [...current, key] }
       }
     })
@@ -528,6 +551,10 @@ export default function TeamPage() {
                     {member.permissions?.includes('changping_ship') && <span className="px-2 py-1 rounded bg-amber-900/30 text-amber-300 text-[10px] border border-amber-700">常平訂單資料區</span>}
                     {member.permissions?.includes('quote_user') && <span className="px-2 py-1 rounded bg-orange-900/30 text-orange-300 text-[10px] border border-orange-800">報價計算機</span>}
                     {member.permissions?.includes('quote_admin') && <span className="px-2 py-1 rounded bg-lime-900/30 text-lime-400 text-[10px] border border-lime-800">報價系統後台</span>}
+                    {member.permissions?.includes('packaging_admin')
+                      ? <span className="px-2 py-1 rounded bg-violet-900/30 text-violet-300 text-[10px] border border-violet-700">包裝專區(編輯)</span>
+                      : member.permissions?.includes('packaging') && <span className="px-2 py-1 rounded bg-violet-900/30 text-violet-400 text-[10px] border border-violet-800">包裝專區(唯讀)</span>}
+                    {member.permissions?.includes('packaging_ai') && <span className="px-2 py-1 rounded bg-fuchsia-900/30 text-fuchsia-300 text-[10px] border border-fuchsia-700">包裝 AI 模擬</span>}
                   </>
                 )}
               </div>

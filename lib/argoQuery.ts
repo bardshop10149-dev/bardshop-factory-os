@@ -5,7 +5,7 @@
  * （route 檔只能匯出 HTTP method，否則 `next build --webpack` 會擋）。
  * 這裡抽出一份最小可用版，供需要「即時向 ARGO 求證」的路由使用。
  *
- * 用途聚焦：目前只服務製令繳庫查詢（fetchMoReceipt）。
+ * 用途聚焦：製令繳庫查詢（fetchMoReceipt）、包裝專區 D73 銷貨同步（argoQueryStrict，lib/packaging/salesSync.ts）。
  * 不打算取代 argoerp/route.ts 裡的同步邏輯，避免動到既有行為。
  */
 
@@ -29,13 +29,15 @@ interface ApiKeys {
 let keyCache: { keys: ApiKeys; at: number } | null = null
 const KEY_TTL_MS = 10 * 60 * 1000
 
-async function getApiKeys(): Promise<ApiKeys> {
+/** timeoutMs：只有 argoQueryStrict 會帶（ARGO 常逾時；既有呼叫端維持原本不設逾時的行為） */
+async function getApiKeys(timeoutMs?: number): Promise<ApiKeys> {
   if (keyCache && Date.now() - keyCache.at < KEY_TTL_MS) return keyCache.keys
   const res = await fetch(`${API_BASE}/S_APIKEY`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ username: USERNAME, password: PASSWORD }),
     cache: 'no-store',
+    ...(timeoutMs ? { signal: AbortSignal.timeout(timeoutMs) } : {}),
   })
   if (!res.ok) throw new Error(`S_APIKEY failed: ${res.status}`)
   const data = (await res.json()) as { RESULT?: ApiKeys }
@@ -111,6 +113,97 @@ export async function argoQuery(
     throw new Error(`S_QUERY ${table} 回應非 JSON: ${text.slice(0, 120)}`)
   }
   return findObjectRows(parsed)
+}
+
+/** ARGO 查詢失敗（逾時、HTTP 錯誤、ARGO 回報錯誤、回應格式不對）；retryable＝網路／逾時／5xx，可以重試 */
+export class ArgoQueryError extends Error {
+  readonly retryable: boolean
+  readonly status: number | null
+  constructor(message: string, opts: { retryable: boolean; status?: number | null }) {
+    super(message)
+    this.name = 'ArgoQueryError'
+    this.retryable = opts.retryable
+    this.status = opts.status ?? null
+  }
+}
+
+/**
+ * 嚴格版 S_QUERY（只查詢、不寫入）：與 argoQuery 送一樣的 sparam，但
+ * - 金鑰與查詢都有逾時（timeoutMs，預設 60 秒；ARGO 常逾時，呼叫端自己決定要不要重試）
+ * - 「ARGO 回報錯誤」與「查無資料」分得開：回應必須有 RESULT 陣列（可為空）；有 ERROR、STATUS 為失敗、
+ *   或找不到 RESULT 一律丟 ArgoQueryError。
+ *   為什麼要分：argoQuery 對 ORA-00904 之類的錯誤會回空陣列（argo-tool 也記過「整個查詢靜默回空」），
+ *   用來做「整張 SO 重算覆蓋」的同步時，空陣列會被當成「沒有銷貨」而把鏡像清掉。
+ * - customColumn：CUSTOMCOLUMN（只取需要的欄，回應小很多）
+ * 失敗時清掉金鑰快取（可能是金鑰在 ARGO 端先過期），下一次重試會換一把。
+ */
+export async function argoQueryStrict(
+  table: string,
+  conditions: Record<string, string>,
+  opts?: { customColumn?: string; showNull?: 'Y' | 'N'; timeoutMs?: number },
+): Promise<Record<string, unknown>[]> {
+  if (!argoConfigured()) throw new ArgoQueryError('未設定 ARGO 連線環境變數', { retryable: false })
+  const timeoutMs = opts?.timeoutMs ?? 60_000
+  const isAbort = (e: unknown) => e instanceof Error && (e.name === 'TimeoutError' || e.name === 'AbortError')
+  let keys: ApiKeys
+  try {
+    keys = await getApiKeys(timeoutMs)
+  } catch (e) {
+    keyCache = null
+    throw new ArgoQueryError(isAbort(e) ? 'ARGO 取得金鑰逾時' : `ARGO 取得金鑰失敗：${e instanceof Error ? e.message : String(e)}`, { retryable: true })
+  }
+  const sparam = JSON.stringify({
+    APIKEY1: keys.APIKEY1,
+    APIKEY2: keys.APIKEY2,
+    APIKEY3: keys.APIKEY3,
+    SEGMENT,
+    TABLE: table,
+    SHOWNULLCOLUMN: opts?.showNull ?? 'N',
+    ...(opts?.customColumn ? { CUSTOMCOLUMN: opts.customColumn } : {}),
+    ...conditions,
+  })
+  let res: Response
+  let text: string
+  try {
+    res = await fetch(`${API_BASE}/S_QUERY`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sparam }),
+      cache: 'no-store',
+      signal: AbortSignal.timeout(timeoutMs),
+    })
+    text = await res.text()
+  } catch (e) {
+    throw new ArgoQueryError(isAbort(e) ? `S_QUERY ${table} 逾時（${Math.round(timeoutMs / 1000)} 秒）` : `S_QUERY ${table} 連線失敗`, { retryable: true })
+  }
+  if (!res.ok) {
+    if (res.status === 401 || res.status === 403) keyCache = null
+    throw new ArgoQueryError(`S_QUERY ${table} HTTP ${res.status}`, { retryable: res.status >= 500 || res.status === 401 || res.status === 403, status: res.status })
+  }
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text)
+  } catch {
+    throw new ArgoQueryError(`S_QUERY ${table} 回應不是 JSON`, { retryable: true, status: res.status })
+  }
+  const rec = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {}
+  const err = String(rec.ERROR ?? '').trim()
+  const status = String(rec.STATUS ?? '').trim().toUpperCase()
+  if (err || ['0', 'FALSE', 'N', 'ERROR'].includes(status)) {
+    // 錯誤內容只取前 120 字（可能含欄位名，不含金鑰）；金鑰相關錯誤 → 清快取讓重試換新金鑰；
+    // Oracle 端逾時（ORA-01013 使用者取消＝查詢逾時）也可以重試；其餘（ORA-00904 欄位錯等）重試也沒用
+    const keyErr = /KEY|TOKEN|驗證|登入|EXPIRE/i.test(err)
+    if (keyErr) keyCache = null
+    throw new ArgoQueryError(`S_QUERY ${table} ARGO 回報錯誤：${(err || status).slice(0, 120)}`, { retryable: keyErr || /ORA-01013|TIMEOUT|逾時/i.test(err), status: res.status })
+  }
+  const result = rec.RESULT
+  if (!Array.isArray(result)) {
+    // ARGO 成功回應是 {STATUS:"1", RESULT:[…]}（argo-tool 實測；查無資料＝RESULT:[]）。
+    // 只有「明確成功」的 STATUS 才把缺少／空字串的 RESULT 當成查無資料；其他一律當錯誤
+    if (['1', 'Y', 'TRUE', 'OK', 'SUCCESS'].includes(status) && (result == null || result === '')) return []
+    throw new ArgoQueryError(`S_QUERY ${table} 回應缺少 RESULT（無法分辨「查無資料」與錯誤）`, { retryable: true, status: res.status })
+  }
+  return result.filter((r): r is Record<string, unknown> => !!r && typeof r === 'object' && !Array.isArray(r))
 }
 
 /**
