@@ -79,6 +79,9 @@ export async function POST(request: NextRequest) {
     attrs = Object.fromEntries(Object.entries(r.attrs).filter(([, v]) => v !== '' && v != null))
     if (Object.keys(attrs).length === 0) attrs = null
   }
+  if (group === '特殊加工' && !(typeof attrs?.process === 'string' && attrs.process.trim() && typeof attrs?.label === 'string' && attrs.label.trim())) {
+    return badRequest('特殊加工必須填加工代碼與前台顯示名稱')
+  }
   if (group === '板材') {
     // 板材沒有套版尺寸引擎算不了拼板（BOARD_LAYOUT_MISSING），新增時就擋
     const lw = Number(attrs?.layout_w_cm)

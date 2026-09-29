@@ -63,7 +63,7 @@ export interface ResultPanelProps {
 function PerSheetValue({ value, flashTick }: { value: number; flashTick: number }) {
   return (
     <span key={flashTick} className={`q-num inline-block rounded-[2px] px-1 -mr-1 text-[15px] leading-[22px] ${flashTick ? 'q-flash' : ''}`}>
-      {fmtInt(value)}
+      {Number.isInteger(value) ? fmtInt(value) : value.toFixed(1)}
     </span>
   )
 }
@@ -126,7 +126,9 @@ export function ResultPanel(p: ResultPanelProps) {
     }
   }
 
-  const sheets = p.qty && used > 0 ? Math.ceil(p.qty / used) : null
+  // 盤數以引擎為準（多片品項是 Σ 各片盤數再進位，不能用「數量 ÷ 每盤」本地重算）；引擎還沒回來才本地估
+  const sheets = size?.plates && size.plates > 0 ? size.plates : p.qty && used > 0 ? Math.ceil(p.qty / used) : null
+  const pieceNests = size?.pieceNests ?? null
   const nest = size?.nest ?? null
   const isOverridden = p.override.state === 'overridden'
   const retiredRecent = !!p.override.retired?.recent
@@ -233,7 +235,12 @@ export function ResultPanel(p: ResultPanelProps) {
               {isOverridden && (
                 <span className="q-stamp rounded-[2px] border-[1.5px] border-(--q-seal) px-1.5 py-px text-[11px] leading-4 font-medium tracking-[0.1em] text-(--q-seal)">已覆寫</span>
               )}
-              {!isOverridden && !editing && nest && auto > 0 && (
+              {!isOverridden && !editing && pieceNests && auto > 0 && (
+                <span className="q-num text-[11px] leading-4 text-(--q-ink-3)">
+                  組／盤（{pieceNests.map((n, i) => `${String.fromCharCode(65 + i)} 片 ${n.count}`).join(' · ')}）
+                </span>
+              )}
+              {!isOverridden && !editing && !pieceNests && nest && auto > 0 && (
                 <span className="q-num text-[11px] leading-4 text-(--q-ink-3)">
                   （{nest.cols} × {nest.rows}，{nest.rotated ? '旋轉' : '橫向'}）
                 </span>
@@ -279,7 +286,7 @@ export function ResultPanel(p: ResultPanelProps) {
             <span className={`q-num text-[15px] leading-[22px] ${sheets ? 'text-(--q-ink)' : 'text-(--q-ink-3)'}`}>{sheets ? fmtInt(sheets) : '—'}</span>
             {sheets && p.qty && (
               <span className="q-num text-[11px] leading-4 text-(--q-ink-3)">
-                （{fmtInt(p.qty)} ÷ {fmtInt(used)}）
+                {pieceNests ? `（${pieceNests.map((n) => `${fmtInt(p.qty!)} ÷ ${n.count}`).join(' ＋ ')}，合計進位）` : `（${fmtInt(p.qty)} ÷ ${fmtInt(used)}）`}
               </span>
             )}
           </span>

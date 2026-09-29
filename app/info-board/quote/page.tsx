@@ -4,11 +4,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Link from 'next/link'
 import type { CalcRequest, CatalogCategory, CatalogResponse, LogRequest, LogResponse, QuoteMode } from '@/lib/quote/api'
 import type { PrintMethod, Sides } from '@/lib/quote/types'
-import { boardShortLabel, fmtDate, fmtDim, fmtInt, fmtMonthDay, fmtSize, fmtTime } from './_lib/format'
+import { boardShortLabel, fitsBoard, fmtDate, fmtDim, fmtInt, fmtMonthDay, fmtSize, fmtTime } from './_lib/format'
 import {
   buildSummaryText,
   displayNameOf,
   METHOD_LABEL,
+  pieceLabel,
   priceMap,
   readLocal,
   writeLocal,
@@ -31,6 +32,9 @@ import type { StatusInfo } from './_components/StatusLine'
 import type { CopyState } from './_components/QuoteSummary'
 import { NumberInput } from './_components/NumberInput'
 import { Banner, BTN_TEXT, Msg, SectionHeader } from './_components/ui'
+
+/** 價格表「特殊加工」分組（跟 lib/quote/data.ts SPECIAL_GROUP 同一個值；前台不能 import 伺服器端模組） */
+const SPECIAL_GROUP = '特殊加工'
 
 /**
  * 報價計算機前台（設計書 §4 MVP 左欄、§12 紙墨報價單）。
@@ -124,7 +128,9 @@ export default function QuoteCalculatorPage() {
   /* ---------------------------------------------------------------- 表單狀態 */
   const [category, setCategory] = useState<CatalogCategory['code']>('acrylic')
   const [productId, setProductId] = useState('')
-  const [size, setSize] = useState<SizeState>({ id: 's1', w: '', h: '', qty: '' })
+  const [size, setSize] = useState<SizeState>({ id: 's1', w: '', h: '', qty: '', extra: [] })
+  /** 特殊加工勾選：process → { on, 每組次數 } */
+  const [specials, setSpecials] = useState<Record<string, { on: boolean; times: number }>>({})
   const [boardItem, setBoardItem] = useState('')
   const [boardAutoPicked, setBoardAutoPicked] = useState(false)
   const [boardManual, setBoardManual] = useState(false)
@@ -193,6 +199,9 @@ export default function QuoteCalculatorPage() {
     setMarginPct(formatDimValue((1 - c.costRatio) * 100))
     setAcc(Object.fromEntries(c.accessories.map((a) => [a.item, { on: a.defaultOn, k: a.k, price: null }])))
     setPack(Object.fromEntries(c.packing.map((p) => [p.item, { on: p.defaultOn ?? true, n: p.n }])))
+    const extraCount = Math.max(0, Math.floor(c.pieces ?? 1) - 1)
+    setSize((sz) => ({ ...sz, extra: Array.from({ length: extraCount }, (_, i) => sz.extra[i] ?? { w: '', h: '' }) }))
+    setSpecials({})
     setOverride(null)
     setRetired(null)
     setLog(null)
@@ -211,6 +220,10 @@ export default function QuoteCalculatorPage() {
   const marginOverride = marginNum !== null && !marginErr && marginDefault !== null && Math.abs(marginNum - marginDefault) > 1e-9 ? marginNum : null
   const wOk = wNum !== null && wNum >= 0.1
   const hOk = hNum !== null && hNum >= 0.1
+  // 多片品項（串2／串3）第 2 片以後
+  const extraNums = useMemo(() => size.extra.map((p) => ({ w: parseDecimal(p.w), h: parseDecimal(p.h) })), [size.extra])
+  const extrasOk = extraNums.every((p) => p.w !== null && p.w >= 0.1 && p.h !== null && p.h >= 0.1)
+  const extraParts = useMemo(() => (extrasOk ? extraNums.map((p) => ({ w: p.w!, h: p.h! })) : []), [extraNums, extrasOk])
 
   const choices = useMemo(
     () => (product ? buildBoardChoices(product.config.boards.options, prices, wOk ? wNum : null, hOk ? hNum : null) : []),
@@ -237,18 +250,19 @@ export default function QuoteCalculatorPage() {
     if (!productId) list.push({ field: 'product', label: '品項', message: '請選擇品項' })
     if (!wOk) list.push({ field: 'w', label: '寬度', message: '請輸入 0.1 以上的數值' })
     if (!hOk) list.push({ field: 'h', label: '高度', message: '請輸入 0.1 以上的數值' })
+    if (!extrasOk) list.push({ field: 'w', label: '其他片尺寸', message: '每一片都要填 0.1 以上的尺寸' })
     if (qtyNum === null || qtyNum < 1) list.push({ field: 'qty', label: '數量', message: '請輸入 1 以上的整數' })
     if (productId && !boardItem) list.push({ field: 'board', label: '板材', message: '請選擇板材' })
     if (method === 'koshi' && (vNum === null || vNum < 1)) list.push({ field: 'versions', label: '版數', message: '請輸入 1 以上的整數' })
     return list
-  }, [productId, wOk, hOk, qtyNum, boardItem, method, vNum])
+  }, [productId, wOk, hOk, extrasOk, qtyNum, boardItem, method, vNum])
 
   const showErr = (f: FieldKey) => (submitted || touched.has(f) ? fieldErrors.find((e) => e.field === f)?.message ?? null : null)
-  const fitError = board?.fits === false
-  const sizeText = wOk && hOk ? fmtSize(wNum!, hNum!) : null
+  const fitError = board?.fits === false || extraParts.some((p) => fitsBoard(p.w, p.h, board?.layout ?? null) === false)
+  const sizeText = wOk && hOk ? [{ w: wNum!, h: hNum! }, ...extraParts].map((p) => fmtSize(p.w, p.h)).join(' ＋ ') : null
 
   /* ---------------------------------------------------------------- 覆寫生命週期：key = w|h|board */
-  const overrideKey = `${wOk ? wNum : ''}|${hOk ? hNum : ''}|${boardItem}`
+  const overrideKey = `${wOk ? wNum : ''}|${hOk ? hNum : ''}|${extraParts.map((p) => `${p.w}x${p.h}`).join(',')}|${boardItem}`
   useEffect(() => {
     if (override && override.key !== overrideKey) {
       setRetired({ value: override.value, recent: true })
@@ -264,6 +278,27 @@ export default function QuoteCalculatorPage() {
     const timer = setTimeout(() => setRetired((r) => (r ? { ...r, recent: false } : r)), 2000)
     return () => clearTimeout(timer)
   }, [retiredRecent])
+
+  /* ---------------------------------------------------------------- 特殊加工（全品項共用，價格表「特殊加工」分組） */
+  const specialDefs = useMemo(() => {
+    const map = new Map<string, { process: string; label: string; swapsPet: boolean }>()
+    for (const it of catalog?.priceItems ?? []) {
+      if (it.group !== SPECIAL_GROUP) continue
+      const process = String(it.attrs?.process ?? '')
+      if (!process) continue
+      const d = map.get(process) ?? { process, label: String(it.attrs?.label ?? process), swapsPet: false }
+      if (it.attrs?.kind === 'pet') d.swapsPet = true
+      map.set(process, d)
+    }
+    return [...map.values()]
+  }, [catalog])
+  const specialRows: CheckRow[] = specialDefs.map((d) => {
+    const st = specials[d.process] ?? { on: false, times: 1 }
+    const base = { item: d.process, name: d.label, on: st.on, price: null, unit: '次' }
+    return d.swapsPet
+      ? { ...base, qtyMode: 'fixed' as const, qtyValue: 1, fixedText: '換 PET' }
+      : { ...base, qtyMode: 'k' as const, qtyValue: st.times, qtyPrefix: '每組', qtySuffix: '次' }
+  })
 
   /* ---------------------------------------------------------------- 組 CalcRequest（缺項或無法拼板 → null） */
   const request = useMemo<CalcRequest | null>(() => {
@@ -293,6 +328,7 @@ export default function QuoteCalculatorPage() {
           w: wNum!,
           h: hNum!,
           qty: qtyNum,
+          ...(extraParts.length ? { extraParts } : {}),
           nOverride: override && override.key === overrideKey ? { value: override.value, autoValue: override.autoValue, key: override.key } : null,
         },
       ],
@@ -300,10 +336,11 @@ export default function QuoteCalculatorPage() {
       print: { method, sides: method === 'none' ? 1 : sides, ...(method === 'koshi' ? { versions: vNum ?? 1 } : {}) },
       accessories,
       packing,
+      specials: specialDefs.filter((d) => specials[d.process]?.on).map((d) => ({ process: d.process, times: specials[d.process].times })),
       ...(marginOverride !== null ? { overrides: { costRatio: 1 - marginOverride / 100 } } : {}),
     }
     return req
-  }, [product, fieldErrors.length, fitError, wOk, hOk, wNum, hNum, qtyNum, acc, pack, size.id, override, overrideKey, boardItem, method, sides, vNum, effectiveMode, marginOverride])
+  }, [product, fieldErrors.length, fitError, wOk, hOk, wNum, hNum, extraParts, qtyNum, acc, pack, specials, specialDefs, size.id, override, overrideKey, boardItem, method, sides, vNum, effectiveMode, marginOverride])
 
   const calc = useCalc(request)
   const sizeResult = calc.result?.sizes[0] ?? null
@@ -397,6 +434,8 @@ export default function QuoteCalculatorPage() {
         product,
         w: wNum!,
         h: hNum!,
+        extraSizes: extraParts,
+        specials: (request.specials ?? []).map((x) => ({ name: specialDefs.find((d) => d.process === x.process)?.label ?? x.process, times: x.times })),
         thicknessMm: board?.thickness ?? null,
         boardText: board?.pair ? `${board.label}，${fmtDim(board.thickness ?? 0)} + ${fmtDim(board.pair.thickness ?? 0)} mm` : undefined,
         qty: qtyNum!,
@@ -424,7 +463,7 @@ export default function QuoteCalculatorPage() {
       generateInFlight.current = false
       setGenerating(false)
     }
-  }, [fieldErrors, focusField, blockReason, request, calc.result, calc.resultFor, calc.stale, calc.pending, product, sizeResult, wNum, hNum, board, prices, qtyNum, method, sides, vNum, userName])
+  }, [fieldErrors, focusField, blockReason, request, calc.result, calc.resultFor, calc.stale, calc.pending, product, sizeResult, wNum, hNum, extraParts, specialDefs, board, prices, qtyNum, method, sides, vNum, userName])
 
   // Ctrl+Enter 任何位置產生報價（IME composing 不觸發）
   useEffect(() => {
@@ -660,7 +699,7 @@ export default function QuoteCalculatorPage() {
           if (dirty && !window.confirm('切換品類會清除目前輸入，確定切換？')) return
           setCategory(code)
           setProductId('')
-          setSize({ id: 's1', w: '', h: '', qty: '' })
+          setSize({ id: 's1', w: '', h: '', qty: '', extra: [] })
           setSubmitted(false)
           setTouched(new Set())
         }}
@@ -719,13 +758,36 @@ export default function QuoteCalculatorPage() {
               <SectionHeader
                 title="二、尺寸與數量"
                 caption="SIZE & QUANTITY"
-                summary={sizeText && boardLabel ? `1 款 · ${boardLabel} · ${sizeText}${qtyNum ? ` · 共 ${fmtInt(qtyNum)} pcs` : ''}` : null}
+                summary={sizeText && boardLabel ? `1 款 · ${boardLabel} · ${sizeText}${qtyNum ? ` · 共 ${fmtInt(qtyNum)} ${extraParts.length ? '組' : 'pcs'}` : ''}` : null}
                 hasError={fitError || !!showErr('w') || !!showErr('h') || !!showErr('qty')}
               />
               <div className="mt-4">
                 <SizeRow
                   size={size}
                   index={0}
+                  sizeLabel={size.extra.length ? `${pieceLabel(0)} 片 W × H` : undefined}
+                  extraPieces={size.extra.map((p, i) => (
+                    <div key={i}>
+                      <span className="mb-1.5 block text-[12px] leading-4 font-medium tracking-[0.04em] text-(--q-ink-2)">{pieceLabel(i + 1)} 片 W × H</span>
+                      <div className="flex items-start">
+                        {(['w', 'h'] as const).map((k, j) => (
+                          <div key={k} className="flex items-start">
+                            {j === 1 && <span className="px-2 pt-2 font-(family-name:--q-font-serif) text-[16px] leading-6 text-(--q-ink-2)" aria-hidden="true">×</span>}
+                            <NumberInput
+                              ariaLabel={`${pieceLabel(i + 1)} 片${k === 'w' ? '寬度' : '高度'} cm`}
+                              value={p[k]}
+                              onChange={(v) => setSize((sz) => ({ ...sz, extra: sz.extra.map((x, xi) => (xi === i ? { ...x, [k]: v } : x)) }))}
+                              normalize={normalizeDimText}
+                              unit="cm"
+                              placeholder={k === 'w' ? '寬' : '高'}
+                              hideMessage
+                              className="w-[108px]"
+                            />
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
                   onChange={(patch) => setSize((s) => ({ ...s, ...patch }))}
                   errors={{ w: showErr('w'), h: showErr('h'), qty: showErr('qty') }}
                   board={
@@ -826,12 +888,35 @@ export default function QuoteCalculatorPage() {
               </div>
             </section>
 
-            {/* 四、配件與包裝 */}
+            {/* 四、特殊加工（燙金／滴膠／珍珠白…）：全品項共用；業務只勾與填次數，看不到價 */}
+            {specialRows.length > 0 && (
+              <section
+                className={`border-t border-(--q-line) px-6 py-6 max-md:px-4 ${sectionsDisabled ? 'pointer-events-none opacity-60' : ''}`}
+              >
+                <SectionHeader
+                  title="四、特殊加工"
+                  caption="SPECIAL FINISHING"
+                  summary={product ? `已選 ${specialRows.filter((r) => r.on).length} 項` : null}
+                />
+                <div className="mt-4">
+                  <CheckList
+                    rows={specialRows}
+                    onToggle={(item, on) => setSpecials((prev) => ({ ...prev, [item]: { on, times: prev[item]?.times ?? 1 } }))}
+                    onQty={(item, n) => setSpecials((prev) => ({ ...prev, [item]: { on: true, times: n } }))}
+                    disabled={sectionsDisabled}
+                    emptyText="沒有特殊加工項目"
+                    showPrice={false}
+                  />
+                </div>
+              </section>
+            )}
+
+            {/* 五、配件與包裝 */}
             <section
               className={`border-t border-(--q-line) px-6 py-6 max-md:px-4 ${sectionsDisabled ? 'pointer-events-none opacity-60' : ''}`}
             >
               <SectionHeader
-                title="四、配件與包裝"
+                title="五、配件與包裝"
                 caption="ACCESSORIES & PACKING"
                 /* 只報「選了幾項」，不報金額：挑配件的畫面不擺成本，成本一律看右側明細 */
                 summary={product ? `已選 ${selectedCount} 項` : null}

@@ -16,7 +16,12 @@ export interface SizeState {
   w: string
   h: string
   qty: string
+  /** 多片品項（串2／串3）第 2 片以後的尺寸 */
+  extra: { w: string; h: string }[]
 }
+
+/** 片名：A、B、C…（串串第幾片） */
+export const pieceLabel = (i: number) => String.fromCharCode(65 + i)
 
 export interface OverrideState {
   value: number
@@ -69,6 +74,9 @@ export interface SummaryInput {
   method: PrintMethod
   versions: number
   accessories: { name: string; k: number }[]
+  /** 多片品項第 2 片以後的尺寸 */
+  extraSizes?: { w: number; h: number }[]
+  specials?: { name: string; times: number }[]
   packing: string[]
   /** 業務模式伺服器不回每盤資訊，摘要就不寫這行 */
   perSheetUsed?: number
@@ -89,7 +97,8 @@ export function buildSummaryText(s: SummaryInput): string {
   lines.push(`品項：${s.product.name}`)
   const thick = s.boardText ? `（${s.boardText}）` : s.thicknessMm !== null ? `（${s.thicknessMm} mm）` : ''
   const twd = s.twdUnit !== null ? `（≈ ${fmtNt(s.twdUnit)}）` : ''
-  lines.push(`款 1：${fmtSize(s.w, s.h)}${thick} ${fmtInt(s.qty)} pcs　單價 RMB ${s.quoteUnit.toFixed(2)}${twd}`)
+  const sizeText = [{ w: s.w, h: s.h }, ...(s.extraSizes ?? [])].map((p) => fmtSize(p.w, p.h)).join(' ＋ ')
+  lines.push(`款 1：${sizeText}${thick} ${fmtInt(s.qty)} ${s.extraSizes?.length ? '組' : 'pcs'}　單價 RMB ${s.quoteUnit.toFixed(2)}${twd}`)
   const sidesText = s.sides === 2 ? '雙面' : '單面'
   const methodText =
     s.method === 'none'
@@ -98,6 +107,7 @@ export function buildSummaryText(s: SummaryInput): string {
         ? `${sidesText} ${METHOD_LABEL.koshi} ${s.versions} 版`
         : `${sidesText} ${METHOD_LABEL[s.method]}`
   lines.push(`印刷：${methodText}`)
+  if (s.specials?.length) lines.push(`特殊加工：${s.specials.map((x) => `${x.name}${x.times > 1 ? ` ×${x.times}` : ''}`).join('、')}`)
   lines.push(`配件：${s.accessories.length ? s.accessories.map((a) => `${a.name} ×${a.k}`).join('、') : '無'}`)
   lines.push(`包裝：${s.packing.length ? s.packing.join('、') : '無'}`)
   if (s.perSheetUsed != null) {

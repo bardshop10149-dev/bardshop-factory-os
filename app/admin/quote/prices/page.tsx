@@ -21,7 +21,7 @@ type EditableKey = 'display_name' | 'price' | 'argo_part_code' | 'effective_from
 const EDITABLE: EditableKey[] = ['display_name', 'price', 'argo_part_code', 'effective_from', 'note']
 
 /** 分區排序：設計書 §6 的 group 順序；沒列到的排最後 */
-const GROUP_ORDER = ['板材', 'PET', '五金', '包材', '工序', '人工', '設備']
+const GROUP_ORDER = ['板材', 'PET', '五金', '包材', '工序', '特殊加工', '人工', '設備']
 const groupRank = (g: string) => {
   const i = GROUP_ORDER.indexOf(g)
   return i < 0 ? 999 : i
@@ -56,6 +56,8 @@ const BOARD_ATTR_FIELDS: { key: string; label: string; required?: boolean }[] = 
   { key: 'layout_w_cm', label: '套版寬 cm', required: true },
   { key: 'layout_h_cm', label: '套版高 cm', required: true },
 ]
+/** 特殊加工 attrs 裡是文字的欄位（其餘轉數字） */
+const SPECIAL_TEXT_ATTRS = new Set(['process', 'label', 'kind'])
 const DEFAULT_UNIT: Record<string, string> = { 板材: '片', PET: '張', 五金: '個', 包材: '個', 工序: '盤', 人工: '小時', 設備: '月' }
 
 /**
@@ -103,6 +105,8 @@ function AddRowForm({ group, fx, onDone, onCancel }: {
   onCancel: () => void
 }) {
   const isBoard = group === '板材'
+  // 特殊加工：同一個加工代碼的列會合成前台一個勾選項；kind＝unit 每次費（可用面積上限分級）／setup 每單版費／pet 換 PET
+  const isSpecial = group === '特殊加工'
   const [f, setF] = useState({ name: '', display_name: '', unit: DEFAULT_UNIT[group] ?? '個', price: '', currency: 'RMB', argo_part_code: '', note: '' })
   const [attrs, setAttrs] = useState<Record<string, string>>({})
   const [busy, setBusy] = useState(false)
@@ -110,14 +114,20 @@ function AddRowForm({ group, fx, onDone, onCancel }: {
   const priceNum = Number(f.price)
   const priceOk = f.price.trim() !== '' && /^\d*\.?\d*$/.test(f.price.trim()) && Number.isFinite(priceNum) && priceNum >= 0
   const boardOk = !isBoard || BOARD_ATTR_FIELDS.filter((x) => x.required).every((x) => Number(attrs[x.key]) > 0)
-  const canSubmit = f.name.trim() !== '' && priceOk && boardOk && !busy
+  const specialOk = !isSpecial || (!!attrs.process?.trim() && !!attrs.label?.trim())
+  const canSubmit = f.name.trim() !== '' && priceOk && boardOk && specialOk && !busy
   const set = (k: keyof typeof f) => (e: ChangeEvent<HTMLInputElement | HTMLSelectElement>) => setF((prev) => ({ ...prev, [k]: e.target.value }))
   const submit = async () => {
     if (!canSubmit) return
     setBusy(true)
     setErr(null)
-    const attrsOut: Record<string, number> = {}
-    for (const [k, v] of Object.entries(attrs)) { const n = Number(v); if (v.trim() !== '' && Number.isFinite(n)) attrsOut[k] = n }
+    const attrsOut: Record<string, number | string> = {}
+    for (const [k, v] of Object.entries(attrs)) {
+      if (v.trim() === '') continue
+      const n = Number(v)
+      attrsOut[k] = SPECIAL_TEXT_ATTRS.has(k) ? v.trim() : Number.isFinite(n) ? n : v.trim()
+    }
+    if (isSpecial && !attrsOut.kind) attrsOut.kind = 'unit'
     const r = await adminFetch<{ row: AdminPriceRow; devSeed?: boolean }>(API, {
       method: 'POST',
       body: { row: { group, name: f.name.trim(), display_name: f.display_name.trim() || null, unit: f.unit.trim() || '個', price: priceNum, currency: f.currency, argo_part_code: f.argo_part_code.trim() || null, note: f.note.trim() || null, attrs: Object.keys(attrsOut).length ? attrsOut : null } },
@@ -140,6 +150,14 @@ function AddRowForm({ group, fx, onDone, onCancel }: {
         <label className="text-[11px] text-slate-400">幣別<select className={cls} value={f.currency} onChange={set('currency')}><option value="RMB">RMB</option><option value="TWD">TWD{fx ? '' : '（未設匯率）'}</option></select></label>
         <label className="text-[11px] text-slate-400">ARGO 料號<input className={`${cls} ${MONO}`} value={f.argo_part_code} onChange={set('argo_part_code')} placeholder="例 WMTKEYB-S" /></label>
         <label className="text-[11px] text-slate-400">備註<input className={cls} value={f.note} onChange={set('note')} /></label>
+        {isSpecial && (
+          <>
+            <label className="text-[11px] text-slate-400">加工代碼 *（同一項共用）<input className={`${cls} ${MONO}`} value={attrs.process ?? ''} onChange={(e) => setAttrs((prev) => ({ ...prev, process: e.target.value }))} placeholder="例 hot_gold" /></label>
+            <label className="text-[11px] text-slate-400">前台顯示名稱 *<input className={cls} value={attrs.label ?? ''} onChange={(e) => setAttrs((prev) => ({ ...prev, label: e.target.value }))} placeholder="例 燙金" /></label>
+            <label className="text-[11px] text-slate-400">計價方式<select className={cls} value={attrs.kind ?? 'unit'} onChange={(e) => setAttrs((prev) => ({ ...prev, kind: e.target.value }))}><option value="unit">每次費（每組 × 次數）</option><option value="setup">版費（每單一次）</option><option value="pet">換 PET（每張）</option></select></label>
+            <label className="text-[11px] text-slate-400">面積上限 cm²（分級用，空白＝以上）<input type="text" inputMode="decimal" className={`${cls} ${MONO}`} value={attrs.area_max ?? ''} onChange={(e) => setAttrs((prev) => ({ ...prev, area_max: e.target.value }))} /></label>
+          </>
+        )}
         {isBoard && BOARD_ATTR_FIELDS.map((x) => (
           <label key={x.key} className="text-[11px] text-slate-400">{x.label}{x.required ? ' *' : ''}<input type="text" inputMode="decimal" className={`${cls} ${MONO}`} value={attrs[x.key] ?? ''} onChange={(e) => setAttrs((prev) => ({ ...prev, [x.key]: e.target.value }))} /></label>
         ))}

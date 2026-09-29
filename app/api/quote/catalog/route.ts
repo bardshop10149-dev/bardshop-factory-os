@@ -8,6 +8,7 @@ import {
   loadProducts,
   loadSettings,
   quoteErrorResponse,
+  SPECIAL_GROUP,
 } from '@/lib/quote/data'
 import type { CatalogCategory, CatalogPriceItem, CatalogProduct, CatalogResponse } from '@/lib/quote/api'
 
@@ -29,13 +30,18 @@ export async function GET() {
     const ctx = createQuoteCtx()
     const [settings, products] = await Promise.all([loadSettings(ctx), loadProducts(ctx, { publishedOnly: true })])
 
+    const canEngineer = guard.member.isAdmin || guard.member.permissions.includes('quote_admin')
     const needed = new Set<string>()
     const plants = new Set(products.map((p) => p.plant))
     for (const p of products) for (const n of collectPriceNames(p.config)) needed.add(n)
+    // 業務能自己改價的只有 tierPrices 配件（紙卡）：只有這些的單價會送到非工程模式的瀏覽器
+    const salesVisible = new Set(products.flatMap((p) => p.config.accessories.filter((a) => a.tierPrices).map((a) => a.item)))
 
     const priceItems: CatalogPriceItem[] = []
     for (const plant of plants) {
       const map = await loadPriceMap(ctx, plant)
+      // 特殊加工是全品項共用的一區，整組帶給前台
+      for (const it of map.values()) if (it.group === SPECIAL_GROUP) needed.add(it.name)
       for (const name of needed) {
         const it = map.get(name)
         if (!it) continue
@@ -44,7 +50,7 @@ export async function GET() {
           displayName: it.display_name ?? it.name,
           group: it.group,
           unit: it.unit,
-          price: it.price,
+          price: canEngineer || salesVisible.has(it.name) ? it.price : null,
           currency: it.currency,
           attrs: it.attrs,
         })
@@ -66,7 +72,7 @@ export async function GET() {
       rateVersion: settings.rate_version,
       fx: fxInfoOf(settings),
       validityDays: settings.quote_validity_days,
-      canEngineer: guard.member.isAdmin || guard.member.permissions.includes('quote_admin'),
+      canEngineer,
       devSeed: ctx.devSeed,
     }
     return NextResponse.json({ success: true, ...body })
