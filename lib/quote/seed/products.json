@@ -67,6 +67,17 @@
       },
       "accessories": [
         {
+          "item": "纸卡",
+          "k": 1,
+          "defaultOn": false,
+          "tierPrices": true
+        },
+        {
+          "item": "贴雷标（工钱）",
+          "k": 1,
+          "defaultOn": false
+        },
+        {
           "item": "银色D字吊环 [【L=27mm + 字扣L=18.3】]",
           "k": 1,
           "defaultOn": true
@@ -199,26 +210,17 @@
         {
           "item": "纸卡 4c",
           "k": 1,
-          "defaultOn": false,
-          "tierPrices": true
-        },
-        {
-          "item": "纸卡",
-          "k": 1,
-          "defaultOn": false,
-          "tierPrices": true
+          "defaultOn": false
         },
         {
           "item": "纸卡无印刷",
           "k": 1,
-          "defaultOn": false,
-          "tierPrices": true
+          "defaultOn": false
         },
         {
           "item": "标签贴纸",
           "k": 1,
-          "defaultOn": false,
-          "tierPrices": true
+          "defaultOn": false
         },
         {
           "item": "龍蝦扣 + C環 + 八字扣【淺金】 [自訂]",
@@ -573,6 +575,17 @@
       },
       "accessories": [
         {
+          "item": "纸卡",
+          "k": 1,
+          "defaultOn": false,
+          "tierPrices": true
+        },
+        {
+          "item": "贴雷标（工钱）",
+          "k": 1,
+          "defaultOn": false
+        },
+        {
           "item": "银色D字吊环 [【L=27mm + 字扣L=18.3】]",
           "k": 1,
           "defaultOn": true
@@ -705,26 +718,17 @@
         {
           "item": "纸卡 4c",
           "k": 1,
-          "defaultOn": false,
-          "tierPrices": true
-        },
-        {
-          "item": "纸卡",
-          "k": 1,
-          "defaultOn": false,
-          "tierPrices": true
+          "defaultOn": false
         },
         {
           "item": "纸卡无印刷",
           "k": 1,
-          "defaultOn": false,
-          "tierPrices": true
+          "defaultOn": false
         },
         {
           "item": "标签贴纸",
           "k": 1,
-          "defaultOn": false,
-          "tierPrices": true
+          "defaultOn": false
         },
         {
           "item": "龍蝦扣 + C環 + 八字扣【淺金】 [自訂]",
@@ -1073,6 +1077,17 @@
         "t3": 0
       },
       "accessories": [
+        {
+          "item": "纸卡",
+          "k": 1,
+          "defaultOn": false,
+          "tierPrices": true
+        },
+        {
+          "item": "贴雷标（工钱）",
+          "k": 1,
+          "defaultOn": false
+        },
         {
           "item": "登山沟",
           "k": 1,

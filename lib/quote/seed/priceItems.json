@@ -1918,7 +1918,7 @@
     "argo_part_code": null,
     "effective_from": "2026-07-02",
     "source_file": "_报价模板_v1.5.6.xlsx",
-    "note": "單價依尺寸與數量每次不同：報價時參考歷史（數量→單價）自行填，這裡的單價只是最近一次的參考值"
+    "note": null
   },
   {
     "group": "包材",
@@ -2979,7 +2979,7 @@
     "argo_part_code": null,
     "effective_from": "2026-07-02",
     "source_file": "常平報價表全掃描 2026-09-20",
-    "note": "單價依尺寸與數量每次不同：報價時參考歷史（數量→單價）自行填，這裡的單價只是最近一次的參考值",
+    "note": null,
     "erp_suggested_price": null,
     "erp_suggested_currency": null,
     "erp_suggested_at": null
@@ -3188,7 +3188,7 @@
     "argo_part_code": null,
     "effective_from": "2026-07-02",
     "source_file": "常平報價表全掃描 2026-09-20",
-    "note": "單價依尺寸與數量每次不同：報價時參考歷史（數量→單價）自行填，這裡的單價只是最近一次的參考值",
+    "note": null,
     "erp_suggested_price": null,
     "erp_suggested_currency": null,
     "erp_suggested_at": null
@@ -3291,6 +3291,23 @@
     "effective_from": "2026-07-02",
     "source_file": "常平報價表全掃描 2026-09-20",
     "note": "掃描新增；出現於 1 份表：史诺 冰箱贴3000组_报价模板_v1.5.0.xlsx",
+    "erp_suggested_price": null,
+    "erp_suggested_currency": null,
+    "erp_suggested_at": null
+  },
+  {
+    "group": "工序",
+    "name": "贴雷标（工钱）",
+    "display_name": "+貼雷標",
+    "unit": "張",
+    "price": 0.069,
+    "currency": "RMB",
+    "plant": "changping",
+    "attrs": null,
+    "argo_part_code": null,
+    "effective_from": "2026-07-02",
+    "source_file": "Snow 指定 2026-09-29",
+    "note": "雷標由客戶提供，這裡只收貼的工錢：NT$0.33／張 ÷ 4.787（2026-09-29 匯率）≈ RMB 0.069；工錢調整改這一格",
     "erp_suggested_price": null,
     "erp_suggested_currency": null,
     "erp_suggested_at": null
