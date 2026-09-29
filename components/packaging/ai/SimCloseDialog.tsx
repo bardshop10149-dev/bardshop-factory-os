@@ -2,55 +2,36 @@
 
 // D104／D107 在模擬區對一張卡「結案」（已完工卻漏銷貨／沒改交期、永遠排不掉的卡）。
 //
-// 結案是「正式區」的事實（packaging_closures，另一個 session 實作）：這一行（SO-項次）永久不再拉回待排池，
-// 伺服器會一併把正式區與所有人模擬區裡這一行的卡移除。所以這個對話框：
-//   - 不走模擬區的 version／undo（結案不是模擬區的一步，「退回上一步」退不回；復原只能到「已結案」清單手動復原，D104）；
-//   - 成功後由 SimLayout 重新載入模擬區（該行的卡已消失）並顯示回饋。
-// 這裡只做確認（單號-項次、品名、數量）＋備註輸入＋呼叫 API；錯誤顯示在對話框底部、輸入保留。
+// 結案是「正式區」的事實（packaging_closures）：這一行（SO-項次）永久不再拉回待排池，
+// 伺服器會一併把正式區與所有人模擬區裡這一行的卡移除。所以：
+//   - 不走模擬區的 undo（結案不是模擬區的一步，「退回上一步」退不回；復原到工具列的「結案池」，D104／D110）；
+//   - D110：這個對話框**不打 API、不等伺服器**——按「確定結案」就把備註交給 SimLayout（onConfirm）並關閉；
+//     SimLayout 交給 useSim.submitClosure：該行的卡立刻從畫面消失、排進模擬區的操作佇列背景送出，失敗才放回原位並提示。
+// 這裡只做確認（單號-項次、品名、數量）＋備註輸入。
 
 import { useState } from 'react'
 import type { BoardCard } from '@/lib/packaging/scheduleTypes'
 import { fmtQty } from '@/components/packaging/poolStyles'
 import Modal, { Btn } from '@/components/packaging/board/Modal'
 import { lineLabel } from '@/components/packaging/board/CardFace'
-import { postClosure, type ClosureCloseResponse } from './simApi'
 
-/** 備註上限（與 D104「備註（選填）」的常識長度；伺服器若另有上限會回錯誤訊息） */
+/** 備註上限（同伺服器 CLOSURE_NOTE_MAX；超過時伺服器會拒絕，這裡先擋） */
 export const CLOSURE_NOTE_MAX = 200
 
-export interface ClosureDone {
-  soLineKey: string
-  response: Extract<ClosureCloseResponse, { success: true }>
-}
-
-export default function SimCloseDialog({ bc, onClose, onDone }: {
+export default function SimCloseDialog({ bc, onClose, onConfirm }: {
   /** 未加工的原始卡 */
   bc: BoardCard
   onClose: () => void
-  /** 結案成功（呼叫端負責重新載入模擬區與 toast） */
-  onDone: (r: ClosureDone) => void
+  /** 主管按下「確定結案」（備註已去頭尾空白，空的＝null）；呼叫端負責關對話框、樂觀更新與送出 */
+  onConfirm: (note: string | null) => void
 }) {
   const [note, setNote] = useState('')
-  const [busy, setBusy] = useState(false)
-  const [error, setError] = useState<string | null>(null)
   const card = bc.card
   const tooLong = Array.from(note).length > CLOSURE_NOTE_MAX
 
-  const submit = async () => {
-    if (busy || tooLong) return
-    setBusy(true)
-    setError(null)
-    try {
-      const trimmed = note.trim()
-      const r = await postClosure({ action: 'close', soLineKey: bc.soLineKey, ...(trimmed ? { note: trimmed } : {}) })
-      if (r.json && r.json.success) {
-        onDone({ soLineKey: bc.soLineKey, response: r.json })
-        return
-      }
-      setError(r.error ?? '結案失敗')
-    } finally {
-      setBusy(false)
-    }
+  const submit = () => {
+    if (tooLong) return
+    onConfirm(note.trim() || null)
   }
 
   return (
@@ -58,14 +39,14 @@ export default function SimCloseDialog({ bc, onClose, onDone }: {
       title={<span>結案（不再拉回待排池）　<span className="font-mono">{lineLabel(card)}</span></span>}
       onClose={onClose}
       footer={<>
-        <Btn onClick={onClose} disabled={busy}>取消</Btn>
-        <Btn tone="danger" disabled={busy || tooLong} onClick={() => { void submit() }}>{busy ? '結案中…' : '確定結案'}</Btn>
+        <Btn onClick={onClose}>取消</Btn>
+        <Btn tone="danger" disabled={tooLong} onClick={submit}>確定結案</Btn>
       </>}
     >
       <div className="space-y-2 text-xs leading-relaxed">
         <div className="rounded-lg border border-rose-800/70 bg-rose-950/30 px-3 py-2 text-rose-100">
           結案後這一行<b>永久不再拉回待排池</b>，正式排程與所有人模擬區裡這一行的卡都會被移除；
-          「退回上一步」退不回，要復原只能到「已結案」清單手動復原（D104）。
+          「退回上一步」退不回，要復原請到工具列的「結案池」按復原。
         </div>
         <dl className="grid grid-cols-[6rem_1fr] gap-y-1 rounded-lg border border-slate-800 bg-slate-950/50 px-3 py-2">
           <dt className="text-slate-400">單號-項次</dt><dd className="font-mono text-slate-100">{bc.soLineKey}</dd>
@@ -79,14 +60,12 @@ export default function SimCloseDialog({ bc, onClose, onDone }: {
           <textarea
             value={note}
             onChange={e => setNote(e.target.value)}
-            disabled={busy}
             rows={2}
             maxLength={CLOSURE_NOTE_MAX * 2}
             className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-2 py-1 text-xs text-slate-100 focus:border-rose-500 focus:outline-none"
           />
           <span className={`block text-[11px] ${tooLong ? 'text-red-300' : 'text-slate-500'}`}>{Array.from(note).length}／{CLOSURE_NOTE_MAX} 字{tooLong ? '（超過上限）' : ''}</span>
         </label>
-        {error && <div role="alert" className="rounded border border-red-700 bg-red-950/60 px-3 py-2 text-red-100">{error}</div>}
       </div>
     </Modal>
   )

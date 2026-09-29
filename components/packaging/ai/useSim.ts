@@ -21,11 +21,19 @@
 //   建立／重設、退回上一步、載入歷史、AI 排程：佇列清空才能做（要帶最新 version），做完以回應為準。
 //   D101 產線時數（saveCapacity）也一樣：佇列要空、帶最新 version；但結果完整回給產能表（CapacityEditor 自己顯示錯誤、失敗不關視窗）。
 //
+// D110 結案（submitClosure）也走同一條佇列，而且是樂觀更新：
+//   - 按下確定 → 該 SO-項次記「結案記號」，這一行的卡立刻從畫面濾掉（closureLocal.hideClosedLines；底下的資料不動）
+//   - 為什麼要排進「同一條」佇列：伺服器結案時會順手把該行的模擬卡從模擬區拿掉 → 模擬區 version +1。
+//     結案若在佇列外面送，佇列裡下一個拖曳帶的還是舊 version → 撞 version_conflict → 整個佇列被丟掉、
+//     畫面回滾到「結案前」的伺服器畫面（已結案的卡又出現）。排在同一條佇列、成功後用回應的 simVersion 接下去就不會撞。
+//   - 成功（含 409 本來就結案了）→ 記號改 confirmed；失敗 → 拿掉記號（卡片回原位）＋錯誤提示，後面的操作照常送
+//   - 記號要到伺服器回來的畫面「本身已不含該行」才拿掉（輪詢／較早發出的回應晚到也不會把卡帶回來）
+//
 // 「過時回應」防護（同 useBoard）：GET 發出時記下 genRef，回來時若已有新寫入＝寫入前的快照 → 丟掉再抓。
 // AI 執行（§4.1）：POST run 只回 runId，實際在伺服器背景跑；這裡每 AI_POLL_MS（3 秒）GET runs/[id]，
 //   結束（done／failed）就重新載入模擬區並通知畫面打開結果面板。
 
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   AI_POLL_MS,
   SIM_MAX_OPS_PER_REQUEST,
@@ -48,9 +56,18 @@ import {
   postSimOps,
   postSimPullLive,
   postSimRun,
+  postClosure,
   postSimUndo,
   type AiApiResult,
 } from './simApi'
+import {
+  classifyCloseResult,
+  closeRequestOf,
+  hideClosedLines,
+  type CloseOutcome,
+  type ClosureIntent,
+} from '@/components/packaging/board/closureLocal'
+import { useClosedMarks } from '@/components/packaging/board/useClosures'
 import { mergeLabels } from '@/components/packaging/board/queueMerge'
 import { applyLocalToBody, applyLocalToSimCards, mergeQueuedReorderOps, withLocks } from './simBoard'
 import { RUN_ERROR_LABEL } from './simText'
@@ -71,6 +88,8 @@ export interface SimLoadError {
 type NewQueueItem =
   | { kind: 'ops'; ops: PlacementOp[]; label: string }
   | { kind: 'locks'; locks: SimLocks; label: string }
+  /** D110 結案（不帶模擬區 version；成功後用回應的 simVersion 更新） */
+  | { kind: 'closure'; intent: ClosureIntent; label: string }
 /** labels：D100 併進這一批的各次操作標籤（合併後的標籤由它重組，不會越併越長巢狀） */
 type QueueItem = NewQueueItem & { key: number; attempts: number; labels?: string[] }
 
@@ -81,6 +100,11 @@ const VIEW_POLL_MS = 60_000
 
 type ViewResp = Extract<SimViewResponse, { success: true }>
 
+/** D110 結案的結果（給畫面：更新結案池清單、提示） */
+export type SimClosureEvent =
+  | { ok: true; intent: ClosureIntent; outcome: Extract<CloseOutcome, { kind: 'closed' }> }
+  | { ok: false; intent: ClosureIntent; message: string }
+
 export function useSim(opts: {
   enabled: boolean
   /** 看誰的模擬區；null＝自己 */
@@ -89,6 +113,8 @@ export function useSim(opts: {
   onForbidden: () => void
   /** AI 執行結束（done／failed） */
   onRunFinished?: (run: AiRunDetail) => void
+  /** D110 結案送完（成功、本來就結案了、或失敗已把卡放回原位）；提示文字由這裡的 hook 負責，畫面只需更新結案池清單 */
+  onClosureSettled?: (ev: SimClosureEvent) => void
 }) {
   const { enabled, owner } = opts
   const [view, setView] = useState<SimView | null>(null)
@@ -132,6 +158,9 @@ export function useSim(opts: {
   const pollRunRef = useRef<number | null>(null)
   const cbRef = useRef(opts)
   useEffect(() => { cbRef.current = opts })
+  /** D110 結案記號（pending／confirmed）：畫面用它把已結案的行濾掉 */
+  const closedMarks = useClosedMarks()
+  const { has: hasClosedMark, mark: markClosed, clear: clearClosedMark, prune: pruneClosedMarks } = closedMarks
 
   const showToast = useCallback((kind: SimToast['kind'], text: string) => {
     setToast({ id: Date.now() + Math.random(), kind, text })
@@ -200,6 +229,11 @@ export function useSim(opts: {
     ownerRef.current = owner
     if (changed) {
       genRef.current++
+      // D110：還沒送出的結案一併取消——記號要拿掉，否則卡片被藏起來、卻從來沒有真的結案
+      //（已送出的那一個照常完成：pump 會認出它已不在佇列裡，不去動換人之後的 version）
+      for (const it of queueRef.current) {
+        if (it.kind === 'closure' && !(busyRef.current && it === queueRef.current[0])) clearClosedMark(it.intent.soLineKey)
+      }
       queueRef.current = []
       pausedRef.current = null
       serverViewRef.current = null
@@ -218,7 +252,7 @@ export function useSim(opts: {
       setSaveError(null)
     }, 0)
     return () => window.clearTimeout(id)
-  }, [enabled, owner, load])
+  }, [enabled, owner, load, clearClosedMark])
 
   // 平常 60 秒重抓；背景分頁暫停，回到前景若已超過就立刻補抓
   useEffect(() => {
@@ -259,6 +293,8 @@ export function useSim(opts: {
    */
   const dropAll = useCallback((msg: string | null, kind: SimToast['kind'], how: { rollback?: boolean; reload?: boolean }) => {
     const n = queueRef.current.length
+    // D110：被丟掉的結案（還沒送出）＝沒有結成 → 記號拿掉，卡片回原位
+    for (const it of queueRef.current) if (it.kind === 'closure') clearClosedMark(it.intent.soLineKey)
     queueRef.current = []
     pausedRef.current = null
     setSaveError(null)
@@ -267,7 +303,23 @@ export function useSim(opts: {
     if (how.rollback && serverViewRef.current) setViewBoth(serverViewRef.current)
     if (msg) showToast(kind, n > 1 ? `${msg}（另有 ${n - 1} 個後續操作已取消）` : msg)
     if (how.reload) void load()
-  }, [load, setViewBoth, showToast, syncPending])
+  }, [clearClosedMark, load, setViewBoth, showToast, syncPending])
+
+  /**
+   * D110：伺服器剛改過模擬區、但沒告訴我們新 version（409 本來就結案了、附帶清理沒做完、舊版伺服器）→ 自己讀一次。
+   * 只拿「回滾基準」與 version；畫面維持現在的（佇列裡還沒送出的操作已經樂觀套用在上面）。讀不到就算了——
+   * 下一個操作若撞 version_conflict，既有流程會重新載入。
+   */
+  const resyncVersion = useCallback(async (): Promise<void> => {
+    const who = ownerRef.current
+    const r = await fetchSim(who)
+    if (!(r.json && r.json.success) || who !== ownerRef.current || !r.json.isOwner) return
+    const v = r.json
+    serverViewRef.current = v
+    versionRef.current = v.session?.version ?? null
+    const cur = viewRef.current
+    if (cur && v.session) setViewBoth({ ...cur, session: { ...v.session, locks: cur.session?.locks ?? v.session.locks } })
+  }, [setViewBoth])
 
   const pump = useCallback(async (): Promise<void> => {
     if (busyRef.current || pausedRef.current) return
@@ -279,6 +331,63 @@ export function useSim(opts: {
       }
       return
     }
+
+    // ── D110 結案：不帶模擬區 version；成功後接上伺服器回的新 version ──
+    if (item.kind === 'closure') {
+      const who = ownerRef.current
+      busyRef.current = true
+      setSaving(true)
+      let out: CloseOutcome
+      try {
+        out = classifyCloseResult(await postClosure(closeRequestOf(item.intent)), item.attempts)
+        // 送出期間換了檢視對象＝viewRef／versionRef 已是別人那一份的，不可以動
+        const mine = who === ownerRef.current
+        if (out.kind === 'closed' && mine) {
+          genRef.current++
+          if (typeof out.simVersion === 'number') {
+            const ver = out.simVersion
+            versionRef.current = ver
+            const bump = (x: SimView | null): SimView | null => (x && x.session ? { ...x, session: { ...x.session, version: ver } } : x)
+            serverViewRef.current = bump(serverViewRef.current)
+            setViewBoth(bump(viewRef.current))
+          } else if (out.simVersion === undefined) {
+            await resyncVersion()
+          }
+        }
+      } finally {
+        busyRef.current = false
+        setSaving(false)
+      }
+      if (out.kind === 'retry') {
+        if (queueRef.current[0] !== item) { clearClosedMark(item.intent.soLineKey); return pump() }
+        item.attempts++
+        window.setTimeout(() => { void pump() }, out.delayMs)
+        return
+      }
+      if (queueRef.current[0] === item) {
+        queueRef.current.shift()
+        syncPending()
+      }
+      const label = item.intent.label
+      if (out.kind === 'closed') {
+        markClosed(item.intent.soLineKey, 'confirmed')
+        setLastSavedAt(Date.now())
+        // 佇列清空後重抓一次：校正伺服器才算得出的部分（產能負荷、待排池數量）。畫面上的卡不靠這次重抓拿掉
+        dirtyRef.current = true
+        if (out.warning) showToast('warn', `${label}：${out.warning}`)
+        else if (out.already) showToast('info', `${label} 本來就已經結案（可能是別人剛結的），已從畫面移除`)
+        else showToast('info', `已結案 ${label}${out.simRemoved > 0 ? `，模擬區移除 ${out.simRemoved} 張卡` : ''}${out.unplaced > 0 ? `，正式排程放回 ${out.unplaced} 張` : ''}（可在「結案池」復原）`)
+        cbRef.current.onClosureSettled?.({ ok: true, intent: item.intent, outcome: out })
+      } else {
+        // 失敗：拿掉記號＝卡片回到原位（底下的資料沒動過）；後面排隊的操作與這次結案無關，照常送
+        clearClosedMark(item.intent.soLineKey)
+        if (out.kind === 'unauthorized') { cbRef.current.onUnauthorized(); return }
+        showToast('error', `結案失敗：${label} 的卡片已放回原位（${out.message}）`)
+        cbRef.current.onClosureSettled?.({ ok: false, intent: item.intent, message: out.message })
+      }
+      return pump()
+    }
+
     const version = versionRef.current
     if (version == null) {
       dropAll('模擬區尚未建立或已不存在，操作未儲存', 'warn', { rollback: true, reload: true })
@@ -343,7 +452,7 @@ export function useSim(opts: {
     }
     // 驗證錯誤（鎖定、範圍外、守恆、D22…）：回滾並顯示伺服器的說明
     dropAll(r.error ?? '操作未通過驗證', 'error', { rollback: true, reload: code === 'pool_unavailable' })
-  }, [dropAll, load, setViewBoth, syncPending])
+  }, [clearClosedMark, dropAll, load, markClosed, resyncVersion, setViewBoth, showToast, syncPending])
 
   const enqueue = useCallback((item: NewQueueItem) => {
     genRef.current++
@@ -351,7 +460,7 @@ export function useSim(opts: {
     const last = q[q.length - 1]
     // D100：佇列第 2 個以後的項目一定還沒送出過（pump 一次只送第 1 個；第 1 個可能正在送、或送過正在等重試 → 絕不改它）。
     //   新的一批與最後一批都只有 reorder → 併成一批（同一張卡後者覆蓋；模擬列版本固定 1，不會衝突）
-    if (item.kind === 'ops' && q.length >= 2 && last.kind === 'ops') {
+    if (item.kind === 'ops' && q.length >= 2 && last && last.kind === 'ops') {
       const merged = mergeQueuedReorderOps(last.ops, item.ops, SIM_MAX_OPS_PER_REQUEST)
       if (merged) {
         const labels = [...(last.labels ?? [last.label]), item.label]
@@ -392,6 +501,20 @@ export function useSim(opts: {
     if (cur) setViewBoth(withLocks(cur, locks))
     enqueue({ kind: 'locks', locks, label })
   }, [canWrite, enqueue, setViewBoth])
+
+  /**
+   * D110 結案（樂觀更新）：立刻記 pending（這一行的卡從畫面消失）、排進佇列依序送出；可以連續結好幾張。
+   * 回 false＝沒排進去（別人的模擬區、其他動作進行中、這一行已在結案中）——原因已用 toast 說明。
+   */
+  const submitClosure = useCallback((intent: ClosureIntent): boolean => {
+    const v = viewRef.current
+    if (!v || !v.isOwner) { showToast('warn', '請回到自己的模擬區再結案（結案會動到正式區與所有人的模擬區）'); return false }
+    if (actionRef.current) { showToast('warn', '請等目前的動作完成'); return false }
+    if (hasClosedMark(intent.soLineKey)) { showToast('info', `${intent.label} 已在結案中`); return false }
+    markClosed(intent.soLineKey, 'pending')
+    enqueue({ kind: 'closure', intent, label: `結案 ${intent.label}` })
+    return true
+  }, [enqueue, hasClosedMark, markClosed, showToast])
 
   const retryNow = useCallback(() => {
     for (const it of queueRef.current) it.attempts = 0
@@ -563,6 +686,8 @@ export function useSim(opts: {
     } finally {
       actionRef.current = false
       setAction(null)
+      // D110：送出期間回來的重抓結果被擱置（load 看到 actionRef 就只標 dirty）→ 這裡補抓，同 runAction／saveCapacity
+      if (dirtyRef.current) { dirtyRef.current = false; void load() }
     }
   }, [load, setViewBoth, showToast, startPolling])
 
@@ -643,8 +768,21 @@ export function useSim(opts: {
     }
   }, [startPolling])
 
+  // D110：畫面用的 view＝濾掉有結案記號的行；viewRef／serverViewRef（樂觀更新與回滾的基準）不動
+  const shownView = useMemo<SimView | null>(() => {
+    if (!view || !view.board) return view
+    const board = hideClosedLines(view.board, closedMarks.marks)
+    return board === view.board ? view : { ...view, board }
+  }, [view, closedMarks.marks])
+  // 伺服器回來的畫面本身已不含該行 → 記號功成身退
+  useEffect(() => { if (view?.board) pruneClosedMarks(view.board) }, [view, pruneClosedMarks])
+
   return {
-    view,
+    view: shownView,
+    /** D110 結案（樂觀更新＋佇列）；見 submitClosure */
+    submitClosure,
+    /** D110 復原結案後：拿掉這一行的結案記號（卡片才回得來） */
+    unhideLine: clearClosedMark,
     loadError,
     loading,
     lastLoadedAt,

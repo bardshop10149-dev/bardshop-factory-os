@@ -1328,6 +1328,13 @@ export interface ClosureRequest {
   soLineKey: string
   /** close 時的備註（選填，≤ CLOSURE_NOTE_MAX 字） */
   note?: string | null
+  /**
+   * D110（選填，只有 close 用）：主管按下結案時畫面上的兩個值，讓伺服器不必為了快照重組整個待排池。
+   * block＝卡片所在區塊；qty＝整行在待排池的數量（各卡原始量合計，qty_at_close 的定義不變）。
+   * 伺服器只收這兩欄、逐欄驗證（closures.parseClosureHint）：block 必須是合法 PoolBlockId、qty 必須是合理的正數；
+   * 不合法的欄位當作沒給。其餘快照欄位（客戶、品名、交期、已銷貨量）一律由伺服器自己查。
+   */
+  hint?: { block?: PoolBlockId | null; qty?: number | null } | null
 }
 
 export type ClosureErrorCode =
@@ -1347,8 +1354,23 @@ export type ClosureResponse =
       unplaced: number
       /** close：從各人模擬區移除的模擬卡張數（AI 表未建＝0）；restore 恆 0 */
       simRemoved: number
+      /**
+       * D110（close 才有）：結案的人「自己的模擬區」被移除模擬卡之後的新 version；自己的模擬區沒被動到（或沒有模擬區）＝null。
+       * 模擬區的每個寫入都要帶目前的 version（CAS）；結案會讓它 +1，前端不更新的話下一個拖曳會撞 version_conflict。
+       * 舊版伺服器沒有這一欄（undefined）→ 前端自己重讀一次模擬區取得 version。
+       */
+      simVersion?: number | null
     }
-  | { success: false; error: string; code: ClosureErrorCode }
+  | {
+      success: false
+      error: string
+      code: ClosureErrorCode
+      /**
+       * D110：true＝結案紀錄「已經成立」，只是附帶清理（放回排定卡／清模擬區）沒做完。
+       * 前端據此不把卡片放回畫面（該行已不在待排池），只提示重新整理。
+       */
+      closed?: boolean
+    }
 
 /** GET /api/packaging/closures?from=&to=（packaging 讀權；台北日、含首尾；預設近 30 天）：含已復原的（restoredAt 有值） */
 export type ClosuresListResponse =

@@ -884,6 +884,12 @@ I/O（新 `lib/packaging/manualDb.ts` `loadManualLookupData(sb, so)`，全部唯
   - **收件人**：`app_settings` key `packaging_closure_email_recipients`（JSON 陣列或逗號分隔字串，唯讀查）；沒有或解析後為空 → `Snow@bardshoptw.com`。
   - **不重寄**：寄出後 `packaging_op_log` 記 kind `'closure'`、label `結案通知信已寄 <日期>`、ops `[{ action: 'email_sent', date, recipients, counts, resendId }]`；寄前以 kind＋label 查到就回 `skipped: 'already_sent'`。op_log 寫失敗只 log（信已寄出，同日再觸發會重寄一次）。
   - **前提（Vercel 正式站）**：環境變數 `RESEND_API_KEY`、`DAILY_MACHINE_OUTPUT_FROM`（沿用機台產出通知信的寄件人變數；專案沒有更通用的寄件人變數，不另設），未設 → 非 dry 觸發回 500「未設定寄信服務」不靜默；`CRON_SECRET` 已有。migration `sql/20260928d` 未套用 → 409 `migration_required`。只寫 `packaging_op_log`，其餘唯讀、不查 ARGO。
+- **D110 結案加速＋結案池（2026-09-30；不需要新 migration；取代上面「畫面」的「延後：已結案清單」）**——主管反映「結案很慢、結完卡片還在、不記得結過哪些」。正式庫 22 筆結案全部在模擬區按的，伺服器耗時（`closed_at` → op_log 寫入）實測 2.6～26.9 秒。
+  - **根因**：① `close` 為了取快照先 `getPool()`＋`getManualMergedPool()` 重組整個待排池；② 畫面是「等伺服器回來 → 再整張重抓」才把卡拿掉，這兩趟之間卡片還在、還能再按（→ 409 `already_closed`），對話框等待中還能被 Esc／點背景關掉；③ 模擬區：伺服器移除模擬卡會讓模擬區 version +1，前端沒接上 → 下一個拖曳撞 `version_conflict` → 佇列被丟、畫面回滾到「結案前」的伺服器畫面。伺服器端快取與輪詢指紋查證無誤（結案表每次讀都重查、`poolDigest` 與 op_log 都會因結案而變）。
+  - **API**：`ClosureRequest` 多選填 `hint: { block?, qty? }`（`closures.parseClosureHint` 逐欄驗證：block 必須是 `PoolBlockId`、qty 為正數且 ≤ 9,999,999；不合法的欄位當作沒給；其餘快照欄位一律伺服器自己查）。`close` 不再重組待排池：①並行讀（查重、該 SO 的 `erp_so_lines`／`erp_so_sales`、手動加入、該行排定卡、各人模擬區）→ ②insert → ③並行（放回排定卡、清模擬區）→ ④op_log，全部在回應**之前**做完（serverless 回應後可能被凍結）。查無的退路：ERP 行 → D66 手動加入 → 排程／模擬區認得這一行；都沒有才 404。回應多 `simVersion`（結案者自己模擬區的新 version）；附帶清理失敗回 500＋`closed: true`。預期 0.6～1 秒（冷啟動約 2 秒）。
+  - **`qty_at_close` 定義不變**（待排池該行各卡原始量合計）：改由前端從工作台資料的 `pool.cardMeta` 加總後放進 `hint.qty`（`closureLocal.linePoolQty`）；沒帶 hint 時＝ERP 訂單量。
+  - **畫面（正式工作台＋AI 模擬區）**：樂觀更新——按「確定結案」對話框立刻關、該行的卡（待排池卡、排定卡、模擬列）立刻消失，背景依序送出，可連續結案；失敗（非 409）卡片回原位＋錯誤提示；409 `already_closed` 視為成功；網路／5xx 重試 1s、3s、9s。做法是「結案記號」（`components/packaging/board/closureLocal.ts`：pending／confirmed）套在**每一份**伺服器回應上，直到回應本身已不含該行才拿掉 → 輪詢或舊回應晚到不會把卡帶回來。模擬區的結案排進模擬區自己的操作佇列（`useSim.submitClosure`），成功後以 `simVersion` 接續，不再要求「先等模擬區存完」。
+  - **結案池**：兩邊工具列「結案池（N）」（N＝今天結案、未復原的筆數）→ 抽屜 `ClosurePoolPanel`：今天／近 7 天／近 30 天，列單號-項次、客戶、品名、數量、交期、原區塊、誰、何時、備註、結案當下 ARGO 已銷量；每列「復原」（兩段式確認，需 packaging_admin）→ 該行回待排池、畫面重新載入。
 
 ## 附：本輪（規格輪）產出
 

@@ -387,7 +387,8 @@ function recomputeLane(lane: BoardLane, cards: BoardCard[]): BoardLane {
   }
 }
 
-function recomputeDay(day: BoardDay, cards: BoardCard[]): BoardDay {
+/** 當天的卡換成 cards 後重算欄頭彙總與各線負荷（D110 結案的本地隱藏 closureLocal.ts 也用） */
+export function recomputeDay(day: BoardDay, cards: BoardCard[]): BoardDay {
   let used = 0
   let open = 0
   let unknown = 0

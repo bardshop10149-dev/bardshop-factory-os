@@ -24,7 +24,8 @@ const num = (v: unknown): number => {
   const n = typeof v === 'number' ? v : Number(v)
   return Number.isFinite(n) ? n : 0
 }
-const isBlockId = (v: unknown): v is PoolBlockId => typeof v === 'string' && v in POOL_BLOCK_META
+// 用 hasOwn 而不是 in：'constructor'、'toString' 這類原型上的鍵不是區塊（D110 起 block 會由前端帶入，不能被矇過）
+const isBlockId = (v: unknown): v is PoolBlockId => typeof v === 'string' && Object.prototype.hasOwnProperty.call(POOL_BLOCK_META, v)
 
 /** DB 列 → API 形狀（email 不回、只回名字；數字欄 PostgREST 可能回字串） */
 export function rowToClosure(r: ClosureRow): Closure {
@@ -58,6 +59,118 @@ export function parseClosureNote(v: unknown): { ok: true; note: string | null } 
   const t = v.trim()
   if (t.length > CLOSURE_NOTE_MAX) return { ok: false, message: `備註最多 ${CLOSURE_NOTE_MAX} 字` }
   return { ok: true, note: t || null }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// D110 結案加速：快照不再從待排池取（冷實例重組 9 秒），改由「單張 SO 的 ERP 鏡像＋前端提示」組
+// ─────────────────────────────────────────────────────────────────────
+// 前端提示（hint）只收兩個欄位：主管按下結案時卡片所在的區塊、整行在待排池的數量（各卡原始量合計＝qty_at_close 一直以來的定義；前端從工作台資料的 pool.cardMeta 加總）。
+// 其餘快照欄位（客戶、品名、品號、交期、已銷貨量）一律由伺服器自己查，不信任前端。
+
+/** 前端提示數量的上限（packaging_closures.qty_at_close 是 numeric(14,3)；這裡取遠低於欄位上限的合理值） */
+export const CLOSURE_HINT_QTY_MAX = 9_999_999
+
+export interface ClosureHint {
+  block: PoolBlockId | null
+  qty: number | null
+}
+
+/**
+ * 解析 ClosureRequest.hint。**逐欄位容錯、不整包拒絕**：不合法的欄位當作沒給（退回伺服器自己查的值）。
+ * 為什麼不回 400：舊版前端不帶 hint；「已由待排池扣完」的排定卡數量是 0（不是正數）——這些都要能照常結案。
+ * qty：有限數、> 0、≤ CLOSURE_HINT_QTY_MAX，四捨五入到 3 位小數（同欄位精度）。
+ */
+export function parseClosureHint(v: unknown): ClosureHint {
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return { block: null, qty: null }
+  const o = v as { block?: unknown; qty?: unknown }
+  const block = isBlockId(o.block) ? o.block : null
+  let qty: number | null = null
+  if (typeof o.qty === 'number' && Number.isFinite(o.qty) && o.qty > 0 && o.qty <= CLOSURE_HINT_QTY_MAX) {
+    const r = Math.round(o.qty * 1000) / 1000
+    if (r > 0) qty = r
+  }
+  return { block, qty }
+}
+
+/** 'YYYY/MM/DD'（erp_so_lines.duedate）、'YYYY-MM-DD'、'YYYYMMDD' → 'YYYY-MM-DD'；不合法（含 2/30 這種）回 null */
+export function closureDueDate(v: unknown): YMD | null {
+  const s = typeof v === 'string' ? v.trim() : ''
+  if (!s) return null
+  const m = s.match(/^(\d{4})[/-](\d{1,2})[/-](\d{1,2})/) ?? s.match(/^(\d{4})(\d{2})(\d{2})$/)
+  if (!m) return null
+  const y = Number(m[1]), mo = Number(m[2]), d = Number(m[3])
+  const dt = new Date(Date.UTC(y, mo - 1, d))
+  if (dt.getUTCFullYear() !== y || dt.getUTCMonth() !== mo - 1 || dt.getUTCDate() !== d) return null
+  return dt.toISOString().slice(0, 10)
+}
+
+/** 結案快照（寫進 packaging_closures 的欄位；closuresDb.insertClosure 的輸入） */
+export interface ClosureSnapshot {
+  soLineKey: string
+  so: string
+  soLine: string
+  itemCode: string | null
+  itemName: string | null
+  customer: string | null
+  qtyAtClose: number
+  dueDate: YMD | null
+  blockAtClose: string | null
+  soldQtyAtClose: number | null
+  note: string | null
+}
+
+/** erp_so_lines 取用的欄位（classify.RawSoLine 的子集；這裡不 import classify——它用 '@/…' 別名且很大） */
+export interface ClosureSoLine {
+  mbp_part: string | null
+  description: string | null
+  partner_name: string | null
+  order_qty_oru: number | string | null
+  duedate: string | null
+}
+
+const trimOrNull = (v: unknown): string | null => {
+  const s = typeof v === 'string' ? v.trim() : ''
+  return s === '' ? null : s
+}
+const r3 = (x: number): number => Math.round(x * 1000) / 1000
+
+/**
+ * 組結案快照。回 null＝這一行哪裡都查不到（路由回 404 not_found）。
+ * 「查得到」的依序退路（任一成立即可）：
+ *   ① erp_so_lines 有這一行（SO＋項次）→ 客戶／品名／品號／交期取它，數量預設＝ERP 訂單量
+ *   ② D66 有效的手動加入紀錄 → 數量預設＝手動總量、區塊預設 'mn'
+ *   ③ 排程系統認得這一行（正式區有它的排定卡、或某人的模擬區有它的模擬卡）→ 只有單號與前端提示
+ * 數量：hint.qty（整行在待排池的數量，前端帶入）優先，其次上面的預設，都沒有＝0。
+ * 區塊：hint.block 優先；沒有時手動行＝'mn'，其餘 null。
+ * sold：D73 鏡像分配到本行的已銷貨量（鏡像未啟用／本行沒有銷貨＝null）。
+ */
+export function buildClosureSnapshot(input: {
+  soLineKey: string
+  so: string
+  soLine: string
+  erpLine: ClosureSoLine | null
+  manualQty: number | null
+  knownToSchedule: boolean
+  soldQty: number | null
+  hint: ClosureHint
+  note: string | null
+}): ClosureSnapshot | null {
+  const { erpLine: sl, manualQty, hint } = input
+  if (!sl && manualQty == null && !input.knownToSchedule) return null
+  const fallbackQty = sl ? Math.max(0, num(sl.order_qty_oru)) : Math.max(0, manualQty ?? 0)
+  return {
+    soLineKey: input.soLineKey,
+    so: input.so,
+    soLine: input.soLine,
+    itemCode: trimOrNull(sl?.mbp_part),
+    itemName: trimOrNull(sl?.description),
+    customer: trimOrNull(sl?.partner_name),
+    qtyAtClose: r3(hint.qty ?? fallbackQty),
+    dueDate: sl ? closureDueDate(sl.duedate) : null,
+    blockAtClose: hint.block ?? (!sl && manualQty != null ? 'mn' : null),
+    soldQtyAtClose: input.soldQty != null && Number.isFinite(input.soldQty) && input.soldQty >= 0 ? r3(input.soldQty) : null,
+    note: input.note,
+  }
 }
 
 /** 未復原的結案行集合（一律大寫；輸入可能是列或 key 字串） */
