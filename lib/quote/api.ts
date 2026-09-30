@@ -71,7 +71,8 @@ export interface CatalogPriceItem {
   displayName: string
   group: string
   unit: string
-  price: number
+  /** 非工程模式只回「業務可改價」的項目（紙卡）；其他一律 null——成本不出伺服器 */
+  price: number | null
   currency: string
   attrs: Record<string, unknown> | null
 }
@@ -98,6 +99,8 @@ export interface CalcSizeRequest {
   w: number
   h: number
   qty: number
+  /** 多片品項第 2 片以後的尺寸（cm） */
+  extraParts?: { w: number; h: number }[]
   /** 手動覆寫每盤數量（含稽核資訊） */
   nOverride?: { value: number; autoValue: number; key: string } | null
 }
@@ -114,6 +117,8 @@ export interface CalcRequest {
   accessories: { item: string; k: number; unitPrice?: number }[]
   /** 勾選的包裝項目（只送 item，mode/n/k 從品項設定取；n 可覆寫） */
   packing: { item: string; n?: number }[]
+  /** 特殊加工（價格表「特殊加工」分組的 attrs.process）；times＝每組做幾次 */
+  specials?: { process: string; times: number }[]
   overrides?: {
     t1?: number
     t2?: number

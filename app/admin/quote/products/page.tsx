@@ -431,6 +431,7 @@ function ProductEditor({ product, goldens, prices, post, setError, setOkMsg, set
             </select>
           </Field>
           <Field label="排序"><NumInput value={draft.sort_order} step={1} onChange={(v) => setRow({ sort_order: v })} /></Field>
+          <Field label="片數（串2＝2、串3＝3）" hint="一組由幾片壓克力組成；前台每片一組尺寸，盤數＝各片盤數合計再進位"><NumInput value={draft.config.pieces ?? 1} step={1} min={1} onChange={(v) => setCfg((c) => { c.pieces = v > 1 ? Math.floor(v) : undefined })} /></Field>
         </div>
       </Section>
 

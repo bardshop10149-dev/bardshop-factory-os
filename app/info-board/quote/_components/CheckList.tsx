@@ -32,6 +32,9 @@ export interface CheckRow {
   priceOverride?: number | null
   /** 階梯價的歷史參考（數量→單價，附案名）：紙卡這種每次尺寸數量都不同的，讓報價者看著填 */
   history?: { qty: number; price: number; order: string; date?: string }[] | null
+  /** qtyMode=k 時數量欄前後綴（預設「每件 … 個」；特殊加工用「每組 … 次」） */
+  qtyPrefix?: string
+  qtySuffix?: string
   /** 列下方補充（例如「約 250 箱（50,000 ÷ 200，無條件進位）」） */
   note?: string | null
 }
@@ -49,8 +52,8 @@ function QtyCell({
   const [text, setText] = useState<string | null>(null)
   const composing = useRef(false)
   // mode 'n' 是「每 n 件用 1 個」，不一定是箱（OPP 中袋也是這個模式），所以只寫「每 … 件」
-  const prefix = row.qtyMode === 'k' ? '每件' : '每'
-  const suffix = row.qtyMode === 'k' ? '個' : '件'
+  const prefix = row.qtyMode === 'k' ? (row.qtyPrefix ?? '每件') : '每'
+  const suffix = row.qtyMode === 'k' ? (row.qtySuffix ?? '個') : '件'
 
   if (row.qtyMode === 'fixed') {
     return <span className="q-num block text-right text-[12px] leading-4 text-(--q-ink-3)">{row.fixedText ?? `每件 ${fmtInt(row.qtyValue)}`}</span>

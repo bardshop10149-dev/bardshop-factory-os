@@ -31,6 +31,8 @@ export function SizeRow({
   board,
   afterBoard,
   boardNotice,
+  sizeLabel,
+  extraPieces,
 }: {
   size: SizeState
   /** 款序號（預留給多款；目前單款不顯示） */
@@ -48,6 +50,10 @@ export function SizeRow({
   afterBoard?: ReactNode
   /** 板材相關訊息，整列寬 */
   boardNotice?: ReactNode
+  /** 尺寸欄標籤（多片品項：「A 片 W × H」） */
+  sizeLabel?: string
+  /** 接在尺寸後面的其他片（多片品項的 B 片、C 片…） */
+  extraPieces?: ReactNode
 }) {
   const sizeError = errors.w ?? errors.h ?? null
 
@@ -58,7 +64,7 @@ export function SizeRow({
         {afterBoard}
 
         <div>
-          <span className={LABEL_CLASS}>尺寸 W × H</span>
+          <span className={LABEL_CLASS}>{sizeLabel ?? '尺寸 W × H'}</span>
           <div className="flex items-start">
             <NumberInput
               id="q-w"
@@ -116,6 +122,7 @@ export function SizeRow({
           onEnter={onQtyEnter}
           className={QTY_W}
         />
+        {extraPieces}
       </div>
 
       {/* 訊息一律走整列：錯誤與「無法拼板」都可能很長，放欄位下方會把格子撐歪 */}

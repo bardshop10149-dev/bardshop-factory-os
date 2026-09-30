@@ -515,6 +515,9 @@ export async function loadGoldenCases(ctx: QuoteCtx, productId?: string): Promis
 /* ---------------------------------------------------------------- 價格表名稱慣例 */
 
 /** 工序類價格在 quote_price_items 的自然鍵（Excel 价格表原名） */
+/** 價格表「特殊加工」分組：前台第四區（燙金／滴膠／珍珠白…），所有品項共用 */
+export const SPECIAL_GROUP = '特殊加工'
+
 export const PRICE_NAMES = {
   print7151: '印刷/7151/单面',
   printJingutian: '印刷/金谷田/单面',
@@ -807,11 +810,63 @@ export function buildAcrylicInput(
     packing.push(line)
   }
 
+  /* ---- 多片品項（串2／串3）：第 2 片以後的尺寸 ---- */
+  const pieces = cfg.pieces && cfg.pieces > 1 ? Math.floor(cfg.pieces) : 1
+  const extraParts = (size.extraParts ?? []).map((p) => ({ wCm: Number(p?.w), hCm: Number(p?.h) }))
+  if (pieces > 1 && (extraParts.length !== pieces - 1 || extraParts.some((p) => !(p.wCm > 0 && p.hCm > 0)))) {
+    errors.push({ code: 'PIECES_INVALID', field: 'sizes', message: `※ 此品項一組 ${pieces} 片，每一片都要填尺寸` })
+  }
+
+  /* ---- 特殊加工（價格表「特殊加工」分組）：attrs.process 分項、kind＝unit 每次費／setup 版費／pet 換 PET、area_max 分面積級 ---- */
+  const area = Math.max(size.w * size.h, ...extraParts.map((p) => p.wCm * p.hCm))
+  for (const sp of req.specials ?? []) {
+    const rows = [...priceMap.values()].filter((it) => it.group === SPECIAL_GROUP && it.attrs?.process === sp.process)
+    const label = String(rows[0]?.attrs?.label ?? sp.process)
+    if (!rows.length) {
+      errors.push({ code: 'SPECIAL_UNKNOWN', field: 'specials', message: `※ 價格表沒有特殊加工「${sp.process}」，請通知管理員` })
+      continue
+    }
+    const times = Math.floor(numOf(sp.times) ?? 1)
+    if (!(times >= 1)) {
+      errors.push({ code: 'SPECIAL_TIMES_INVALID', field: 'specials', message: `※ 特殊加工「${label}」每組次數須為 1 以上的整數` })
+      continue
+    }
+    const kindOf = (it: PriceItem) => String(it.attrs?.kind ?? 'unit')
+    const petRow = rows.find((it) => kindOf(it) === 'pet')
+    if (petRow) {
+      if (pet.mode === 'roundup_plates') {
+        pet = { ...pet, item: petRow.name, unitPrice: petRow.price }
+        snapshot[petRow.name] = petRow.price
+      } else {
+        warnings.push({ code: 'SPECIAL_PET_SKIPPED', sizeId: size.id, message: `※ 「${label}」只適用仿柯印刷，這張沒有換 PET` })
+      }
+    }
+    // 面積級：area_max 由小到大，第一個放得下的；沒填 area_max 的是「以上」那一級
+    const tiers = rows
+      .filter((it) => kindOf(it) === 'unit')
+      .sort((a, b) => (numOf(a.attrs?.area_max) ?? Infinity) - (numOf(b.attrs?.area_max) ?? Infinity))
+    if (tiers.length) {
+      const tier = tiers.find((it) => area <= (numOf(it.attrs?.area_max) ?? Infinity))
+      if (!tier) {
+        errors.push({ code: 'SPECIAL_AREA_OUT', field: 'specials', message: `※ 「${label}」沒有面積 ${Math.round(area)} cm² 的價格級距，請通知管理員補` })
+        continue
+      }
+      if (!(tier.price > 0)) warnings.push({ code: 'SPECIAL_PRICE_MISSING', sizeId: size.id, message: `※ 「${label}」這個面積級距單價待補，目前以 0 計` })
+      snapshot[tier.name] = tier.price
+      packing.push({ item: tier.name, unitPrice: tier.price, mode: 'per_unit', k: times, group: 'outsourced' })
+    }
+    for (const setup of rows.filter((it) => kindOf(it) === 'setup')) {
+      snapshot[setup.name] = setup.price
+      packing.push({ item: setup.name, unitPrice: setup.price, mode: 'fixed', n: 1, group: 'outsourced' })
+    }
+  }
+
   if (errors.length > 0) return { input: null, errors, warnings }
 
   const nOverrideRaw = numOf(size.nOverride?.value)
   const input: AcrylicInput = {
     qty: Math.floor(size.qty),
+    ...(pieces > 1 ? { extraParts } : {}),
     partWcm: size.w,
     partHcm: size.h,
     nOverride: nOverrideRaw && nOverrideRaw > 0 ? Math.floor(nOverrideRaw) : null,
@@ -943,10 +998,11 @@ export async function runCalc(
   const req: CalcRequest = {
     mode,
     productId,
-    sizes: mode === 'engineer' ? b.sizes : b.sizes.map((sz) => ({ id: sz.id, w: sz.w, h: sz.h, qty: sz.qty })),
+    sizes: mode === 'engineer' ? b.sizes : b.sizes.map((sz) => ({ id: sz.id, w: sz.w, h: sz.h, qty: sz.qty, ...(sz.extraParts ? { extraParts: sz.extraParts } : {}) })),
     boardItem: b.boardItem,
     print: { method: b.print.method, sides: b.print.sides, versions: b.print.versions },
     accessories: b.accessories ?? [],
+    specials: Array.isArray(b.specials) ? b.specials : [],
     packing: mode === 'engineer' ? (b.packing ?? []) : defaultPacking,
     overrides: mode === 'engineer' ? (b.overrides ?? {}) : salesOverrides,
   }
@@ -1158,6 +1214,7 @@ export function validateProductConfig(cfg: unknown): string | null {
   if (!c.boards.options.every((o) => o && typeof o.item === 'string' && o.item)) return 'config.boards.options 每項都要有 item'
   if (typeof c.boards.defaultItem !== 'string' || !c.boards.options.some((o) => o.item === c.boards!.defaultItem)) return 'config.boards.defaultItem 必須是 options 之一'
   if (c.boards.sides !== 1 && c.boards.sides !== 2) return 'config.boards.sides 必須是 1 或 2'
+  if (c.pieces != null && !(Number.isInteger(c.pieces) && c.pieces >= 1 && c.pieces <= 6)) return 'config.pieces（片數）必須是 1～6 的整數'
   if (!Array.isArray(c.printMethods) || c.printMethods.length === 0) return 'config.printMethods 至少要有一種印刷方式'
   if (!c.printMethods.every((m) => PRINT_METHODS.includes(m))) return `config.printMethods 只能是 ${PRINT_METHODS.join('/')}`
   if (!c.printMethods.includes(c.defaultPrintMethod as PrintMethod)) return 'config.defaultPrintMethod 必須在 printMethods 內'

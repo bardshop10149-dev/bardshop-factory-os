@@ -87,7 +87,9 @@ export interface AcrylicInput {
   qty: number
   partWcm: number
   partHcm: number
-  /** 手動覆寫主板每盤數 */
+  /** 多片品項（串2／串3）的第 2 片以後；每片各自拼板，盤數＝進位(Σ 組數 ÷ 各片每盤數) */
+  extraParts?: { wCm: number; hCm: number }[]
+  /** 手動覆寫主板每盤數（多片品項＝每盤幾組） */
   nOverride?: number | null
   boards: BoardLine[]
   pet: PetLine
@@ -163,9 +165,12 @@ export interface CalcSegment {
 }
 
 export interface AcrylicResult {
+  /** 每盤數；多片品項是「每盤幾組」，可能有小數（1 ÷ Σ 1／各片每盤數） */
   nPerSheetAuto: number
   nPerSheetUsed: number
   nest: { cols: number; rows: number; rotated: boolean }
+  /** 多片品項：每一片自己的每盤數 */
+  pieceNests?: { wCm: number; hCm: number; count: number }[]
   /** 主板盤數 C9 */
   plates: number
   petPlates: number
@@ -226,6 +231,8 @@ export interface ProductPacking {
 
 export interface ProductConfig {
   boards: { options: ProductBoardOption[]; defaultItem: string; sides: Sides }
+  /** 一個商品由幾片壓克力組成（串2＝2、串3＝3）；不填＝1 */
+  pieces?: number
   /** 前台「單雙面」預設值（貼合款預設雙面）；未設＝跟 boards.sides */
   defaultPrintSides?: Sides
   /**

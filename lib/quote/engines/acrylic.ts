@@ -113,11 +113,23 @@ export function calcAcrylic(input: AcrylicInput, settings: AcrylicSettings): Acr
   } else if (main.nPerSheet) {
     nest = { count: main.nPerSheet, cols: 0, rows: 0, rotated: false }
   }
-  const nAuto = nest.count
+  let nAuto = nest.count
+  // 多片品項（串2／串3）：每片各自排，每盤組數＝1 ÷ Σ(1／各片每盤數)。
+  // 盤數＝進位(組數 ÷ 每盤組數)＝進位(Σ 組數 ÷ 各片每盤數)，即 Snow 定的「各片盤數先加再進位」。
+  let pieceNests: AcrylicResult['pieceNests']
+  if (input.extraParts?.length && main.layoutWcm && main.layoutHcm) {
+    const parts = [{ wCm: input.partWcm, hCm: input.partHcm }, ...input.extraParts]
+    pieceNests = parts.map((p) => ({
+      ...p,
+      count: nestingCount(p.wCm, p.hCm, main.layoutWcm!, main.layoutHcm!, settings.nesting.gapCm, settings.nesting.marginCm).count,
+    }))
+    nAuto = pieceNests.every((p) => p.count > 0) ? 1 / pieceNests.reduce((sum, p) => sum + 1 / p.count, 0) : 0
+  }
   const nUsed = input.nOverride && input.nOverride > 0 ? input.nOverride : nAuto
   if (!(nUsed > 0) || !(Q > 0)) {
     return {
       nPerSheetAuto: nAuto,
+      pieceNests,
       nPerSheetUsed: 0,
       nest,
       plates: 0,
@@ -333,6 +345,7 @@ export function calcAcrylic(input: AcrylicInput, settings: AcrylicSettings): Acr
     nPerSheetAuto: nAuto,
     nPerSheetUsed: nUsed,
     nest,
+    pieceNests,
     plates: C9,
     petPlates,
     segments,
