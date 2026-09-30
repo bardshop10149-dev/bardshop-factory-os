@@ -258,10 +258,10 @@ export function classifyAiError(e: unknown): AiError {
   if (shape.status === 429) {
     return new AiError('ai_rate_limited', 'AI 用量達上限或呼叫太頻繁（HTTP 429），請過幾分鐘再試；額度由管理員在 Anthropic Console 控管', 429)
   }
-  if (/Timeout|Abort/i.test(shape.name) || shape.code === 'ETIMEDOUT' || shape.code === 'UND_ERR_HEADERS_TIMEOUT') {
+  if (/Timeout|Abort/i.test(shape.name) || shape.code === 'ETIMEDOUT' || shape.code === 'UND_ERR_HEADERS_TIMEOUT' || /timed out/i.test(shape.tag)) {
     return new AiError('ai_timeout', 'AI 思考太久、超過時間上限，這次沒有結果；請再試一次，或把模擬範圍改小（例如 2 天）')
   }
-  if (/ConnectionError|FetchError/i.test(shape.name) || /^(ECONNRESET|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|UND_ERR)/.test(shape.code)) {
+  if (/ConnectionError|FetchError/i.test(shape.name) || /^(ECONNRESET|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|UND_ERR)/.test(shape.code) || /Connection error|fetch failed|terminated|Could not resolve a `Response`/i.test(shape.tag)) {
     return new AiError('ai_network', `連不上 AI 服務（網路問題，${shape.tag}），請稍後再試`)
   }
   if (shape.status != null) {
@@ -277,15 +277,31 @@ export function classifyAiError(e: unknown): AiError {
 export function errorShape(e: unknown): { name: string; status: number | null; type: string | null; code: string; tag: string } {
   const o = (e && typeof e === 'object') ? (e as Record<string, unknown>) : {}
   const ctor = (o as { constructor?: { name?: unknown } }).constructor?.name
-  const name = typeof o.name === 'string' && o.name ? o.name : (typeof ctor === 'string' && ctor ? ctor : typeof e)
+  // SDK 0.128 的錯誤類別（AnthropicError／APIConnectionError…）都沒設 this.name，name 一律是 'Error'；
+  // 類別名稱才分得出來（打包後可能被縮短，所以下面另外用 SDK 固定句子輔助判斷）
+  const own = typeof o.name === 'string' && o.name && o.name !== 'Error' ? o.name : ''
+  const name = own || (typeof ctor === 'string' && ctor ? ctor : (typeof o.name === 'string' && o.name ? o.name : typeof e))
   const status = typeof o.status === 'number' ? o.status : null
   const err = (o.error && typeof o.error === 'object') ? (o.error as Record<string, unknown>) : null
   const inner = (err?.error && typeof err.error === 'object') ? (err.error as Record<string, unknown>) : null
   const type = typeof o.type === 'string' ? o.type : (typeof inner?.type === 'string' ? (inner.type as string) : null)
   const cause = (o.cause && typeof o.cause === 'object') ? (o.cause as Record<string, unknown>) : null
+  const causeCtor = (cause as { constructor?: { name?: unknown } } | null)?.constructor?.name
   const code = typeof o.code === 'string' ? o.code : (typeof cause?.code === 'string' ? (cause.code as string) : '')
-  const tag = [name, status != null ? String(status) : null, type, code].filter(Boolean).join('／')
+  const tag = [name, status != null ? String(status) : null, type, code, safeMsg(o.message), causeCtor && causeCtor !== 'Error' ? `cause:${String(causeCtor)}` : null, safeMsg(cause?.message)]
+    .filter(Boolean).join('／')
   return { name, status, type, code, tag }
+}
+
+/**
+ * 只放行「SDK／Node 自己的固定句子」（白名單），其他一律不外露——錯誤訊息原文可能含請求內容（規格 D95），
+ * 而 SDK 的連線／逾時／串流錯誤訊息是固定字串，對定位問題最有用（例：Connection error.、Request timed out.）。
+ */
+const SAFE_MSG_ALLOWLIST = /^(Connection error\.?|Request timed out\.?|Could not resolve a `Response` object|fetch failed|terminated|other side closed|socket hang up|read ECONNRESET|Stream ended without producing a Message with role=assistant|The operation was aborted\.?|This operation was aborted)$/i
+function safeMsg(m: unknown): string | null {
+  if (typeof m !== 'string') return null
+  const t = m.trim().split(/\r?\n/)[0]
+  return SAFE_MSG_ALLOWLIST.test(t) ? t : null
 }
 
 /** 非 SDK 包裝的中止（例：fetch 直接丟 DOMException AbortError） */
