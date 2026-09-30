@@ -2,6 +2,10 @@ import type { NextConfig } from "next";
 import path from "path";
 
 const nextConfig: NextConfig = {
+  // 包裝專區 AI（D112 H6 實驗，預設不設＝現狀）：PACKAGING_AI_SDK_EXTERNAL=1 時 @anthropic-ai/sdk 不打包、改執行期 require——
+  //   錯誤類別名稱不會被壓縮成單字母（標籤直接顯示 AnthropicError／APIConnectionError），也排除打包副作用。
+  //   ⚠ 這是 build 時決定的（不是執行期），要在 Vercel Preview 設旗標驗證 /api/packaging/ai/health 正常後再考慮正式。
+  ...(process.env.PACKAGING_AI_SDK_EXTERNAL === '1' ? { serverExternalPackages: ['@anthropic-ai/sdk'] } : {}),
   turbopack: {
     root: path.resolve(__dirname),
     resolveAlias: {

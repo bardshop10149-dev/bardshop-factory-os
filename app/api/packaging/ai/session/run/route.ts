@@ -11,7 +11,7 @@ import {
   markStaleAiRunFailed,
   updateAiRun,
 } from '@/lib/packaging/ai/db'
-import { isAiConfigured } from '@/lib/packaging/ai/claude'
+import { aiDiagFlags, aiNotConfiguredMessage, isAiConfigured } from '@/lib/packaging/ai/claude'
 import { executeRun, safeErrorTag } from '@/lib/packaging/ai/runner'
 import { AI_RUN_STALE_MS, AI_RUN_THROTTLE_MS, type SimRunResponse } from '@/lib/packaging/ai/types'
 import { actorOf, aiFail, aiServerError, loadOwnSession, logAi, parseVersion } from '../../_lib/aiRoute'
@@ -77,7 +77,7 @@ export async function POST(request: NextRequest) {
     }
 
     // 4. 金鑰（D95）：沒設定就不建 run
-    if (!isAiConfigured()) return aiFail('ai_not_configured', '尚未設定 AI 金鑰，請通知管理員設定 ANTHROPIC_API_KEY')
+    if (!isAiConfigured()) return aiFail('ai_not_configured', aiNotConfiguredMessage())
 
     // 5. 建 run 列 → 佔位（先建列才有 runId；佔位失敗就把剛建的列標失敗，LOG 仍留著）
     const run = await insertAiRun(sb, {
@@ -110,6 +110,12 @@ export async function POST(request: NextRequest) {
     }])
 
     // 6. 背景執行（executeRun 保證不丟例外；這裡的 catch 只是保險）
+    // PACKAGING_AI_SYNC_RUN=1（D112 H4 實驗，預設關）：改成同步等 executeRun 跑完才回 { runId }，完全不走 after()。
+    //   route 仍在 maxDuration 300 內（runner 預算 270）。⚠ 開啟期間瀏覽器要等 1～3 分鐘，前端可能先顯示逾時——以 run 列為準；只在 Preview 環境開。
+    if (aiDiagFlags().syncRun) {
+      await executeRun(run.id).catch((e: unknown) => console.error(`[packaging/ai/run] #${run.id} ${safeErrorTag(e)}`))
+      return noStore<SimRunResponse>({ success: true, runId: run.id })
+    }
     after(() => executeRun(run.id).catch((e: unknown) => console.error(`[packaging/ai/run] #${run.id} ${safeErrorTag(e)}`)))
     return noStore<SimRunResponse>({ success: true, runId: run.id })
   } catch (e) {
