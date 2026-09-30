@@ -26,16 +26,35 @@ if (typeof window !== 'undefined') {
   throw new Error('lib/packaging/ai/claude.ts 只能在伺服器端使用（AI 金鑰不得進入瀏覽器，D85）')
 }
 
-/** D85：Claude Opus 5 */
-export const AI_MODEL = 'claude-opus-5'
+export type AiEffort = 'low' | 'medium' | 'high'
 /**
- * output_config.effort。正式站函式上限 300 秒（route maxDuration），runner 內部預算 270 秒。
- * 2026-09-28 以正式資料實測（208 張候選、4 天、copy 模式，同一份 payload）：
- *   high   → 256 秒、輸出 23.3K token（約 17K 是思考）、約 NT$24；離 270 秒預算只剩 14 秒，太險
- *   medium → 189 秒、輸出 16.4K token、約 NT$19；排程品質相當（全部通過驗算、風險提醒更具體）
- * 所以用 medium。候選變多或改 6 天若又逼近預算，再評估 'low' 或提高 maxDuration（需 Vercel 方案支援）。
+ * 模型與 effort 可用環境變數覆寫（PACKAGING_AI_MODEL／PACKAGING_AI_EFFORT），換模型不必改程式重新部署；
+ * 值不合法（模型 ID 只接受英數、-、.；effort 只接受 low／medium／high）一律當沒設、用預設。
+ * 模組載入時讀一次（伺服器端常數）；正式站改了環境變數仍要 redeploy 才會載到新值（Vercel 的規則）。
+ * 目前生效的模型／effort 會顯示在 GET /api/packaging/ai/health 的 model／env.effort。
  */
-export const AI_EFFORT: 'low' | 'medium' | 'high' = 'medium'
+function modelFromEnv(key: string, fallback: string): string {
+  const v = process.env[key]?.trim()
+  return v && /^[A-Za-z0-9.\-]{3,64}$/.test(v) ? v : fallback
+}
+function effortFromEnv(key: string, fallback: AiEffort): AiEffort {
+  const v = process.env[key]?.trim()
+  return v === 'low' || v === 'medium' || v === 'high' ? v : fallback
+}
+/**
+ * D85（2026-10-01 Snow 指示改版）：Claude Opus 5.5（預設；PACKAGING_AI_MODEL 可覆寫，例 claude-opus-5 退回舊模型）。
+ * 2026-10-01 以正式資料實測（正式站 run #9 同一份 payload：214 張候選、4 天、copy）：
+ *   claude-opus-5-5 + high   → 174 秒、輸入 31.9K／輸出 19.8K token，結果通過 schema 解析
+ *   claude-opus-5   + medium → 178 秒、輸入 31.9K／輸出 15.1K token（2026-09-30 同一份 payload）
+ */
+export const AI_MODEL: string = modelFromEnv('PACKAGING_AI_MODEL', 'claude-opus-5-5')
+/**
+ * output_config.effort（預設 high；PACKAGING_AI_EFFORT 可覆寫）。正式站函式上限 300 秒（route maxDuration），runner 內部預算 270 秒。
+ * Opus 5.5 + high 實測 174 秒（見上），離 270 秒預算有 96 秒餘裕，所以用 high。
+ * 歷史（claude-opus-5，2026-09-28，208 張候選、4 天）：high 256 秒／輸出 23.3K（離預算只剩 14 秒）、medium 189 秒／輸出 16.4K → 當時用 medium。
+ * 候選變多或改 6 天若逼近預算，先把 PACKAGING_AI_EFFORT 降成 medium，再考慮提高 maxDuration（需 Vercel 方案支援）。
+ */
+export const AI_EFFORT: AiEffort = effortFromEnv('PACKAGING_AI_EFFORT', 'high')
 /** max_tokens（思考 token 也算在內） */
 export const AI_MAX_TOKENS = 48_000
 /** SDK timeout（毫秒；TypeScript SDK 單位是毫秒） */
@@ -142,10 +161,12 @@ export function nativeFetchOf(f: typeof globalThis.fetch): typeof globalThis.fet
 }
 
 /** 執行環境資訊（健康檢查回傳用；只有版本字串／布林，不含任何變數值） */
-export function aiRuntimeInfo(): { node: string; fetchPatched: boolean; hasNativeFetch: boolean; vercelRequestContext: boolean; region: string | null; flags: ReturnType<typeof aiDiagFlags> } {
+export function aiRuntimeInfo(): { node: string; model: string; effort: AiEffort; fetchPatched: boolean; hasNativeFetch: boolean; vercelRequestContext: boolean; region: string | null; flags: ReturnType<typeof aiDiagFlags> } {
   const f = globalThis.fetch as unknown as { __nextPatched?: unknown; _nextOriginalFetch?: unknown }
   return {
     node: process.version,
+    model: AI_MODEL,
+    effort: AI_EFFORT,
     fetchPatched: f.__nextPatched === true,
     hasNativeFetch: typeof f._nextOriginalFetch === 'function',
     vercelRequestContext: typeof (globalThis as unknown as Record<symbol, unknown>)[Symbol.for('@next/request-context')] !== 'undefined',

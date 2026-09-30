@@ -108,7 +108,7 @@
 ### 4.2 呼叫 Claude(`lib/packaging/ai/claude.ts`,首行 `import 'server-only'`,是全專案唯一讀 `ANTHROPIC_API_KEY` 的地方)
 - 套件 `@anthropic-ai/sdk`(npm install,寫進 package.json dependencies)。**SDK 的方法名、參數型別一律以安裝後 `node_modules/@anthropic-ai/sdk` 的型別定義為準,不要憑記憶。**
 - `new Anthropic({ timeout: 280_000, maxRetries: 1 })`(金鑰由 SDK 自環境變數讀)。
-- 請求:`model: 'claude-opus-5'`、`max_tokens: 48000`(思考 token 也算在內)、`thinking: { type: 'adaptive' }`、`output_config: { effort: AI_EFFORT, format: { type: 'json_schema', schema: AI_OUTPUT_SCHEMA } }`、串流 `.stream(...)` + `await stream.finalMessage()`。`AI_EFFORT` 為常數,預設 `'high'`,註解說明:正式站函式上限 300 秒,若實測常逾時改 `'medium'`(首次真實測試時量測)。
+- 請求:`model: AI_MODEL`(預設 `'claude-opus-5-5'`,2026-10-01 起;環境變數 `PACKAGING_AI_MODEL` 可覆寫)、`max_tokens: 48000`(思考 token 也算在內)、`thinking: { type: 'adaptive' }`、`output_config: { effort: AI_EFFORT, format: { type: 'json_schema', schema: AI_OUTPUT_SCHEMA } }`、串流 `.stream(...)` + `await stream.finalMessage()`。`AI_EFFORT` 預設 `'high'`(環境變數 `PACKAGING_AI_EFFORT` 可覆寫 low/medium/high);2026-10-01 以正式站 run #9 同一份 payload 實測 Opus 5.5 + high 174 秒(預算 270 秒),Opus 5 時期曾因 high 256 秒改用 medium。
 - 延遲控制:輸出以短欄位名、每筆 reason ≤ 20 字(可空字串)、summary ≤ 8 句,避免輸出過長拖垮時間。
 - 拒答備援:`client.beta.messages.stream({ ..., betas: ['server-side-fallback-2026-07-01'], fallbacks: 'default' })`。若安裝的 SDK 型別不接受 `fallbacks: 'default'`,改用陣列形式 `betas: ['server-side-fallback-2026-06-01'], fallbacks: [{ model: 'claude-opus-4-8' }]`;兩者都不被型別接受時,去掉備援並在程式註解說明(拒答在這個用途機率極低)。
 - system prompt 放 `system: [{ type:'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }]`(穩定前綴可快取);payload 放 user message(JSON 字串,外包 `<schedule_data>` 標籤)。
