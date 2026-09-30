@@ -248,7 +248,44 @@ export function classifyAiError(e: unknown): AiError {
     const status = typeof e.status === 'number' ? e.status : null
     return new AiError('ai_api', apiErrorMessage(status, e.type ?? null), status)
   }
-  return new AiError('internal', 'AI 執行時發生未預期的錯誤，請通知管理員')
+  // 2026-09-30 正式站兩次 AI 執行都只留下「未預期的錯誤」（D112）：instanceof 在打包後可能因 SDK 模組被載入兩份而失敗，
+  // 導致 401／429／529 全部掉進這裡、連原因都不留。→ instanceof 都不中時，改「看物件內容」再分類一次（duck typing），
+  // 最後才歸 internal，而且附上安全的技術資訊（只有錯誤類別／狀態碼／Node 錯誤代號，不含任何訊息原文）。
+  const shape = errorShape(e)
+  if (shape.status === 401 || shape.status === 403) {
+    return new AiError('ai_auth', `AI 金鑰無效或沒有權限（HTTP ${shape.status}），請通知管理員檢查金鑰`, shape.status)
+  }
+  if (shape.status === 429) {
+    return new AiError('ai_rate_limited', 'AI 用量達上限或呼叫太頻繁（HTTP 429），請過幾分鐘再試；額度由管理員在 Anthropic Console 控管', 429)
+  }
+  if (/Timeout|Abort/i.test(shape.name) || shape.code === 'ETIMEDOUT' || shape.code === 'UND_ERR_HEADERS_TIMEOUT') {
+    return new AiError('ai_timeout', 'AI 思考太久、超過時間上限，這次沒有結果；請再試一次，或把模擬範圍改小（例如 2 天）')
+  }
+  if (/ConnectionError|FetchError/i.test(shape.name) || /^(ECONNRESET|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|UND_ERR)/.test(shape.code)) {
+    return new AiError('ai_network', `連不上 AI 服務（網路問題，${shape.tag}），請稍後再試`)
+  }
+  if (shape.status != null) {
+    return new AiError('ai_api', apiErrorMessage(shape.status, shape.type), shape.status)
+  }
+  return new AiError('internal', `AI 執行時發生未預期的錯誤，請通知管理員（技術資訊：${shape.tag}）`)
+}
+
+/**
+ * 從未知例外取出「可安全外露」的形狀：類別名稱、HTTP 狀態碼、API 錯誤類型、Node 錯誤代號。
+ * 刻意不取 e.message（可能含請求內容）。tag 例：`APIError／529`、`TypeError／ECONNRESET`。
+ */
+export function errorShape(e: unknown): { name: string; status: number | null; type: string | null; code: string; tag: string } {
+  const o = (e && typeof e === 'object') ? (e as Record<string, unknown>) : {}
+  const ctor = (o as { constructor?: { name?: unknown } }).constructor?.name
+  const name = typeof o.name === 'string' && o.name ? o.name : (typeof ctor === 'string' && ctor ? ctor : typeof e)
+  const status = typeof o.status === 'number' ? o.status : null
+  const err = (o.error && typeof o.error === 'object') ? (o.error as Record<string, unknown>) : null
+  const inner = (err?.error && typeof err.error === 'object') ? (err.error as Record<string, unknown>) : null
+  const type = typeof o.type === 'string' ? o.type : (typeof inner?.type === 'string' ? (inner.type as string) : null)
+  const cause = (o.cause && typeof o.cause === 'object') ? (o.cause as Record<string, unknown>) : null
+  const code = typeof o.code === 'string' ? o.code : (typeof cause?.code === 'string' ? (cause.code as string) : '')
+  const tag = [name, status != null ? String(status) : null, type, code].filter(Boolean).join('／')
+  return { name, status, type, code, tag }
 }
 
 /** 非 SDK 包裝的中止（例：fetch 直接丟 DOMException AbortError） */

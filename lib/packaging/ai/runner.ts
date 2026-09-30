@@ -32,7 +32,7 @@ import { assembleSimBoard, isRowLocked, pushUndo, snapshotForUndo } from '@/lib/
 import { emptySimCapacity, withSimCapacity } from '@/lib/packaging/ai/simCapacity'
 import { buildAiPayload, decodeAiText, scanPayloadLeaks } from '@/lib/packaging/ai/payload'
 import { validateAiResult } from '@/lib/packaging/ai/validate'
-import { AiError, callClaude, isAiConfigured } from '@/lib/packaging/ai/claude'
+import { AiError, callClaude, isAiConfigured, errorShape } from '@/lib/packaging/ai/claude'
 import {
   AI_RUN_BUDGET_MS,
   SIM_MAX_PLACEMENTS,
@@ -82,7 +82,7 @@ export type RunnerDeps = typeof RUNNER_DEPS
 export function safeErrorTag(e: unknown): string {
   if (e instanceof ScheduleDbError) return `ScheduleDbError(${e.message.split('：')[0]}／${e.pgCode ?? '-'})`
   if (e instanceof AiError) return `AiError(${e.code}${e.status ? `／${e.status}` : ''})`
-  if (e instanceof Error) return e.name || 'Error'
+  if (e instanceof Error) return errorShape(e).tag || e.name || 'Error'
   return typeof e
 }
 
