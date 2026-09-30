@@ -32,7 +32,7 @@ import { assembleSimBoard, isRowLocked, pushUndo, snapshotForUndo } from '@/lib/
 import { emptySimCapacity, withSimCapacity } from '@/lib/packaging/ai/simCapacity'
 import { buildAiPayload, decodeAiText, scanPayloadLeaks } from '@/lib/packaging/ai/payload'
 import { validateAiResult } from '@/lib/packaging/ai/validate'
-import { AiError, callClaude, isAiConfigured, errorShape } from '@/lib/packaging/ai/claude'
+import { AiError, aiNotConfiguredMessage, callClaude, isAiConfigured, errorShape } from '@/lib/packaging/ai/claude'
 import {
   AI_RUN_BUDGET_MS,
   SIM_MAX_PLACEMENTS,
@@ -75,9 +75,12 @@ export const RUNNER_DEPS = {
 export type RunnerDeps = typeof RUNNER_DEPS
 
 /**
- * 可安全寫進伺服器 log 的錯誤描述：只有類別名稱、ScheduleDbError 的動作標籤與 Postgres 錯誤碼。
- * 為什麼不 log e.message：jsonb check 失敗的 details 是 'Failing row contains (…)'（會帶出 payload／AI 理由），
- *   JSON.parse 的錯誤訊息也會引用一段輸入原文——Vercel log 會留存，一律不印（規格 §4.1）。
+ * 可安全寫進伺服器 log 的錯誤描述：ScheduleDbError 的動作標籤與 Postgres 錯誤碼；AiError 的代號與狀態碼；
+ * 其他 Error 走 errorShape（類別／狀態碼／代號＋sanitizeMsg 脫敏後的訊息＋cause 鏈）。
+ * 為什麼不直接 log e.message：jsonb check 失敗的 details 是 'Failing row contains (…)'（會帶出 payload／AI 理由），
+ *   JSON.parse 的錯誤訊息也會引用一段輸入原文——Vercel log 會留存（規格 §4.1）。sanitizeMsg 會把括號／引號內的
+ *   非識別字內容換成佔位符、去數字與非 ASCII，所以 2026-09-30 起改成「脫敏後放行」，讓 TypeError 的落點看得到（D112）。
+ * ⚠ 這個函式被 aiRoute.ts 的 aiServerError 等所有 AI route 共用，log 內容的變更範圍是全部 AI route。
  */
 export function safeErrorTag(e: unknown): string {
   if (e instanceof ScheduleDbError) return `ScheduleDbError(${e.message.split('：')[0]}／${e.pgCode ?? '-'})`
@@ -97,6 +100,11 @@ function toRunFailure(e: unknown, runId: number): { code: AiErrorCode; message: 
     return { code: 'internal', message: `讀寫資料庫時發生錯誤${e.pgCode ? `（${e.pgCode}）` : ''}，這次沒有寫入模擬區；請稍後再試（AI 執行 #${runId}）` }
   }
   return { code: 'internal', message: `準備資料或驗算時發生未預期的錯誤，這次沒有寫入模擬區；請通知管理員（AI 執行 #${runId}）` }
+}
+
+/** run.error_message 欄位 check：char_length ≤ 500（sql/20260928b_packaging_ai.sql）；超過就截斷，寧可少幾個字也不能讓失敗狀態寫不進去 */
+export function clampMessage(m: string, max = 500): string {
+  return m.length <= max ? m : m.slice(0, max - 1) + '…'
 }
 
 /** 候選 0 張時不呼叫 AI，直接給一份「什麼都沒做」的驗算報告（欄位照填，畫面不必特判） */
@@ -176,6 +184,9 @@ export async function executeRun(runId: number, deps: Partial<RunnerDeps> = {}):
   let sessionId: number | null = null
   /** 已寫回模擬區（之後的步驟失敗時，錯誤訊息要講清楚「模擬區已更新」） */
   let wroteSession = false
+  /** 呼叫 AI 的起點與耗時（D112 診斷）：null＝還沒走到 callClaude */
+  let aiStartedMs: number | null = null
+  let aiMs: number | null = null
   try {
     sb = d.getClient()
     const run = await d.getAiRun(sb, runId)
@@ -235,8 +246,11 @@ export async function executeRun(runId: number, deps: Partial<RunnerDeps> = {}):
 
     // ── thinking ──
     // route 建 run 前已擋過；這裡再防一次（金鑰在執行中被移除）
-    if (!d.isAiConfigured()) throw new AiError('ai_not_configured', '尚未設定 AI 金鑰（ANTHROPIC_API_KEY），請通知管理員設定後再試')
+    if (!d.isAiConfigured()) throw new AiError('ai_not_configured', aiNotConfiguredMessage())
+    // 呼叫 AI 前的時間戳（D112 診斷）：冷實例組資料本身就 9～18 秒浮動，沒有這個戳記分不出「組資料慢」還是「AI 立刻失敗」
+    aiStartedMs = d.nowMs()
     const ai = await d.callClaude(built.payload, { signal: ac.signal })
+    aiMs = d.nowMs() - aiStartedMs
 
     // ── validating ──
     await d.updateAiRun(sb, runId, { phase: 'validating' })
@@ -277,13 +291,20 @@ export async function executeRun(runId: number, deps: Partial<RunnerDeps> = {}):
       durationMs: d.nowMs() - startedMs,
       finishedAt: new Date(d.nowMs()).toISOString(),
     })
+    // 成功也留一行耗時拆解（只有數字；D112）：prep＝組資料、ai＝Claude 呼叫
+    console.log(`[packaging/ai/run] #${runId} done prepMs=${(aiStartedMs ?? d.nowMs()) - startedMs} aiMs=${aiMs ?? -1} totalMs=${d.nowMs() - startedMs}`)
   } catch (e) {
     const f = toRunFailure(e, runId)
-    console.error(`[packaging/ai/run] #${runId} ${f.code} ${safeErrorTag(e)}`)
+    const failMs = d.nowMs()
+    // 耗時拆解（只有秒數，D112）：aiStartedMs 為 null＝失敗在呼叫 AI 之前（組資料／DB）
+    const timing = aiStartedMs == null
+      ? `準備 ${Math.round((failMs - startedMs) / 1000)} 秒，未呼叫 AI`
+      : `準備 ${Math.round((aiStartedMs - startedMs) / 1000)} 秒／AI ${Math.round(((aiMs != null ? aiStartedMs + aiMs : failMs) - aiStartedMs) / 1000)} 秒`
+    console.error(`[packaging/ai/run] #${runId} ${f.code} ${safeErrorTag(e)} (${timing})`)
     if (sb) {
-      const message = wroteSession
+      const message = clampMessage(wroteSession
         ? `AI 結果已寫入模擬區，但執行紀錄儲存失敗（${f.message}）；可在模擬區按「退回上一步」回到 AI 前`
-        : f.message
+        : `${f.message}（${timing}）`)
       try {
         await d.updateAiRun(sb, runId, {
           status: 'failed',
