@@ -17,6 +17,8 @@
 //   - manual（舊 prop）：@deprecated，只剩「傳了＝顯示手動標記」的作用，讓舊呼叫端能編譯、行為不出錯
 // D111：「已入庫」區塊（2、5b）可切換「依入庫日（舊→新）」排序；每一區各自記住選擇（localStorage，讀寫都包 try/catch）。
 //   排序在這裡做（viewCards），右鍵找卡、搜尋都沿用同一份清單；正式工作台與 AI 模擬區共用這個元件，所以兩邊都有。
+// D113 排程區單號搜尋：reveal＝工具列「找卡」要跳到的待排池卡；這裡負責讓它看得到（展開區塊、必要時清掉本欄關鍵字、多畫幾頁），
+//   捲動與發光由頁面（cardJump）處理。本欄的關鍵字框只過濾左欄，和工具列的「找卡」是兩回事。
 
 import { useCallback, useDeferredValue, useMemo, useState, type MouseEvent, type ReactNode } from 'react'
 import Link from 'next/link'
@@ -82,7 +84,7 @@ export interface PoolManualProps {
 
 export default function PoolSidebar({
   blocks, cardMeta, today, rollTarget, canDrag, editable, dragKind, onOpenOrder, onPoolAction, children, manual,
-  showManualTag, manualManageHref, onCloseLine,
+  showManualTag, manualManageHref, onCloseLine, reveal = null,
 }: {
   blocks: PoolBlockData[]
   cardMeta: Record<string, PoolCardMeta>
@@ -105,6 +107,8 @@ export default function PoolSidebar({
   manualManageHref?: string
   /** D104：右鍵「結案」（不需編輯鎖，只需 packaging_admin；工作台在 me.canEdit 時傳；AI 模擬區由該區自己決定） */
   onCloseLine?: (card: PackagingCard) => void
+  /** D113 排程區單號搜尋要跳到這張待排池卡：nonce 每次 +1（同一張卡再跳一次也要重新揭露） */
+  reveal?: { cardId: string; nonce: number } | null
 }) {
   const [keyword, setKeyword] = useState('')
   const deferred = useDeferredValue(keyword)
@@ -115,6 +119,26 @@ export default function PoolSidebar({
 
   const blockMap = useMemo(() => new Map(blocks.map(b => [b.id, b])), [blocks])
   const ordered = useMemo(() => SIDEBAR_ORDER.map(id => blockMap.get(id)).filter((b): b is PoolBlockData => !!b), [blockMap])
+
+  // D113 排程區單號搜尋跳到待排池卡：卡片所在區塊收合 → 展開；被左欄關鍵字濾掉 → 清掉關鍵字（只有真的被濾掉才清，保留使用者的篩選）。
+  // 只改畫面上的 state、不寫 localStorage（使用者的收合偏好不變）。「依 prop 變化調整 state」寫法：render 中比對前值（同 SimplePool）。
+  // 「顯示更多」後面的卡由 Section 自己多畫幾頁（revealCardId 往下傳）。
+  const [seenReveal, setSeenReveal] = useState<number | null>(null)
+  if (reveal && reveal.nonce !== seenReveal) {
+    setSeenReveal(reveal.nonce)
+    for (const b of ordered) {
+      const card = b.cards.find(c => c.cardId === reveal.cardId)
+      if (!card) continue
+      if (collapsed.has(b.id)) {
+        const next = new Set(collapsed)
+        next.delete(b.id)
+        setCollapsed(next)
+      }
+      const kw = keyword.trim().toLowerCase()
+      if (kw && !haystack(card).includes(kw)) setKeyword('')
+      break
+    }
+  }
 
   const q = deferred.trim().toLowerCase()
   const viewCards = useMemo(() => {
@@ -230,6 +254,8 @@ export default function PoolSidebar({
           canDrag={canDrag}
           dragging={dragKind != null}
           onOpenOrder={onOpenOrder}
+          revealCardId={reveal?.cardId ?? null}
+          revealNonce={reveal?.nonce ?? 0}
         />
       </div>
       </div>

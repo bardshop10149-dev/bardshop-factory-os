@@ -76,6 +76,8 @@ const PlacementCard = memo(function PlacementCard({ bc, today, size, editable, c
   const root = (
     <div
       ref={setNodeRef}
+      // D113 排程區單號搜尋：跳轉靠這個屬性找卡、發光樣式也用它選中（拖曳時的浮動卡 PlacementCardOverlay 不加，免得一張卡兩個元素）
+      data-placement-id={bc.placementId}
       {...listeners}
       role="group"
       tabIndex={0}

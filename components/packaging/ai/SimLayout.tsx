@@ -28,6 +28,9 @@
 //   - 產能對話框（線頭 ⚙＝單日、工具列「產線時數」＝表格）重用正式的 CapacityEditor，只換資料來源（source：讀 SimView.capacity、
 //     存 POST session/capacity）；本人、起始日未過、AI 沒在跑、佇列清空時可改，否則唯讀。
 //   - 工作台上方 SimCapacityBanner：列出調整過的格、正式在調整後被改過的格、鎖定線不會匯入的格。
+// D113 排程區單號搜尋：檢視列「找卡」（OrderSearch，與正式工作台共用）。搜尋範圍＝模擬範圍內的卡＋待排區＋待排池（都已在前端，
+//   searchBoardBody 直接在裝飾後的 board 上找）。跳轉（planSimJump）：日檢視切到那天、全部天數直接捲；待排區在預設收合的 <details>，
+//   由 cardJump 展開。發光沿用 SIM_CSS 的做法（根元素 <style>＋屬性選擇器）。拖曳、拉下緣開始時取消跳轉，進行中也不接受新的跳轉。
 
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { useRouter } from 'next/navigation'
@@ -100,6 +103,10 @@ import ThresholdsPanel from './ThresholdsPanel'
 import AdoptDialog from './AdoptDialog'
 import LockPanel from './LockPanel'
 import Drawer from './Drawer'
+// D113 排程區單號搜尋：與正式工作台同一個「找卡」元件與跳轉（D100 兩邊一致）；模擬區資料都在前端，不打伺服器
+import OrderSearch from '@/components/packaging/board/OrderSearch'
+import { useCardJump } from '@/components/packaging/board/cardJump'
+import { planSimJump, searchBoardBody, type SearchHit, type SearchQuery } from '@/lib/packaging/boardSearch'
 
 /** 記住上次選的檢視（日／全部） */
 const VIEW_KEY = 'packaging.ai.view.v1'
@@ -618,6 +625,8 @@ export default function SimLayout({ meEmail }: { meEmail: string | null }) {
     const d = e.active.data.current as { kind?: string; card?: PackagingCardData | null; bc?: BoardCard } | undefined
     if (d?.kind === 'pool' && d.card) setActiveDrag({ kind: 'pool', card: d.card, rule: ruleForPoolCard(d.card) })
     else if (d?.kind === 'placement' && d.bc) setActiveDrag({ kind: 'placement', bc: d.bc, rule: ruleForBoardCard(d.bc) })
+    // D113：拖曳中不能程式捲動（插入點會算錯）→ 取消等待中的跳轉
+    cancelJump()
     sim.setDragging(true)
   }
 
@@ -709,6 +718,37 @@ export default function SimLayout({ meEmail }: { meEmail: string | null }) {
   const onRulesDirty = useCallback((d: boolean) => { rulesDirtyRef.current.rules = d }, [])
   const onThresholdsDirty = useCallback((d: boolean) => { rulesDirtyRef.current.thresholds = d }, [])
 
+  // ── D113 排程區單號搜尋（與正式工作台同一套；這裡不必打伺服器：模擬天數＋待排區＋待排池都在前端） ──
+  const rootRef = useRef<HTMLDivElement>(null)
+  /** 要跳到的待排池卡（PoolSidebar 揭露用）；nonce 單調遞增，同一張卡再跳一次也會重新揭露 */
+  const [poolReveal, setPoolReveal] = useState<{ cardId: string; nonce: number } | null>(null)
+  const revealNonceRef = useRef(0)
+  const jumpLabelRef = useRef('')
+  /** 跳轉失敗 → 找卡框的報讀文字改成原因（與正式工作台一致） */
+  const [jumpFail, setJumpFail] = useState<{ n: number; text: string } | null>(null)
+  const jump = useCardJump({
+    rootRef,
+    onFail: () => {
+      setPoolReveal(null)
+      const label = jumpLabelRef.current || '這張卡'
+      const why = '已不在畫面上（可能剛被移動或放回待排池），請再搜尋一次'
+      showToast('warn', `${label} ${why}`)
+      setJumpFail(f => ({ n: (f?.n ?? 0) + 1, text: `沒有跳到 ${label}：${why}` }))
+    },
+    onDone: () => setPoolReveal(null),
+  })
+  const { cancel: cancelJump } = jump
+  const { setDragging: setSimDragging } = sim
+  /** 拉下緣改工時進行中（onResizing 記下）：這段期間不接受跳轉 */
+  const resizingRef = useRef(false)
+  /** 拉下緣改工時：開始時先取消等待中的跳轉，再照原本通知 useSim */
+  const onResizing = useCallback((on: boolean) => {
+    resizingRef.current = on
+    if (on) cancelJump()
+    setSimDragging(on)
+  }, [cancelJump, setSimDragging])
+  const searchLocal = useCallback((sq: SearchQuery): SearchHit[] => (board ? searchBoardBody(board, sq) : []), [board])
+
   const openRunPanel = (id?: number | null) => {
     setDrawer('run')
     const target = id ?? v?.runningRun?.id ?? v?.latestRun?.id ?? null
@@ -778,9 +818,35 @@ export default function SimLayout({ meEmail }: { meEmail: string | null }) {
           : sim.pending > 0 || sim.saving ? '還有操作儲存中'
             : busy ? '請等目前的動作完成' : null
 
+  /** D113：搜尋結果 → 跳過去（回 false＝跳不過去，已 toast 原因）。OrderSearch 呼叫時才讀這些值，不必 useCallback */
+  const onSearchJump = (hit: SearchHit): boolean => {
+    // 拖曳、拉下緣改工時進行中：換日會卸載正在拉的卡、程式捲動會讓插入點／工時換算算錯
+    if (activeDrag || resizingRef.current) {
+      showToast('info', `${hit.label}：拖曳或調整工時中，放開後再跳到卡片`)
+      return false
+    }
+    const plan = planSimJump({ hit, view, shownDate: dayData?.date ?? null, dates: days.map(d => d.date) })
+    if (!plan.ok) { showToast('warn', plan.reason); return false }
+    // 左欄收起時暫時打開（不寫 localStorage，使用者的偏好不變）
+    if (plan.revealPool && poolHidden && isDesktop) {
+      setPoolHidden(false)
+      showToast('info', `${hit.label}：已暫時打開待排池`)
+    }
+    if (plan.pickDate) setPickedDate(plan.pickDate)
+    if (plan.poolCardId) {
+      revealNonceRef.current += 1
+      setPoolReveal({ cardId: plan.poolCardId, nonce: revealNonceRef.current })
+    }
+    jumpLabelRef.current = `${hit.label}${plan.date ? `（${md(plan.date)}）` : plan.place === 'holding' ? '（待排區）' : '（待排池）'}`
+    jump.request(plan.target, null)
+    return true
+  }
+
   return (
-    <div className={`sim-board min-h-screen bg-[#050b14] text-white lg:flex lg:h-screen lg:flex-col lg:overflow-hidden ${lockModeOn ? 'sim-lock-mode' : ''}`}>
+    <div ref={rootRef} data-search-root="" className={`sim-board min-h-screen bg-[#050b14] text-white lg:flex lg:h-screen lg:flex-col lg:overflow-hidden ${lockModeOn ? 'sim-lock-mode' : ''}`}>
       <style>{SIM_CSS}</style>
+      {/* D113：找卡跳轉的 scroll-margin＋目前發光的那張卡 */}
+      <style>{jump.css}</style>
 
       {/* ─── 標題列 ─── */}
       <header className="shrink-0 space-y-2 px-4 pb-2 pt-3">
@@ -996,6 +1062,18 @@ export default function SimLayout({ meEmail }: { meEmail: string | null }) {
                 ))}
               </div>
             )}
+            {/* D113 排程區單號搜尋（與正式工作台同一個元件；手機上獨占一行） */}
+            <OrderSearch
+              local={searchLocal}
+              jumpFail={jumpFail}
+              onJump={onSearchJump}
+              hideCompleted={false}
+              scopeNote="模擬範圍內的卡＋待排區＋待排池"
+              disabled={dragging}
+              isDesktop={isDesktop}
+              pendingNote={jump.pending?.note ?? null}
+              onOpenClosures={() => setDrawer('closures')}
+            />
             <span className="text-[11px] text-slate-500">
               圖例：{LOCK_MARK} 鎖定（AI 不動）・{AI_MARK} AI 排入・{LIVE_MARK} 正式排程的卡（唯讀）・「（範圍外）」不在模擬範圍的線
             </span>
@@ -1056,6 +1134,7 @@ export default function SimLayout({ meEmail }: { meEmail: string | null }) {
                 dragKind={activeDrag?.kind ?? null}
                 onOpenOrder={openOrder}
                 onPoolAction={onPoolAction}
+                reveal={poolReveal}
               >
                 <details className="rounded-xl border border-slate-800 bg-slate-950/40">
                   <summary className="cursor-pointer px-3 py-2 text-xs text-slate-300">
@@ -1101,7 +1180,7 @@ export default function SimLayout({ meEmail }: { meEmail: string | null }) {
                     onEditCapacity={(date, lineId) => setDialog({ t: 'capacity', date, lineId })}
                     onGoDate={d => setPickedDate(d)}
                     onResize={resizeMinutes}
-                    onResizing={sim.setDragging}
+                    onResizing={onResizing}
                     reorderHint={reorderHint}
                     ownLaneKey={ownLaneKey}
                     capacityReadOnly={!capEditable}
