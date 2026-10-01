@@ -2,15 +2,18 @@
 
 // AI 執行的進度與結果（規格 §八 AiRunPanel；§4.1 輪詢、§五 驗算報告、D94 加班、D80 規則建議、D95 失敗原因）。
 //
-// 執行中：文字進度條＋三個階段（準備資料 → AI 思考中 → 程式驗算）＋經過秒數。
-//   AI 思考沒有真正的百分比可讀，進度是「依階段與經過時間」估的（simText.runProgressPct），只讓主管知道還在動、大概多久。
+// 執行中：文字進度條＋三個階段（準備資料 → AI 思考中 → 程式驗算）＋經過秒數＋預估時間（依卡片數，伺服器算好放在 run.estimate）
+//   ＋「取消排程」（Snow：取消按鈕在進度條後）。AI 思考沒有真正的百分比可讀，進度＝經過時間／預估時間（simText.runProgressPct）。
+//   預估接近或超過硬上限（run.estimate.capMs＝AI_RUN_BUDGET_MS，Vercel 函式上限減寫回）時以琥珀提示，仍讓它跑（擋不擋是業務決策）。
+// 已取消（failed＋ai_cancelled）：琥珀框、標題「已取消」，內文是伺服器的取消訊息（含取消者；毫秒級競態時會補註「結果已寫入」）。
 // 完成：AI 摘要（原文，客戶／卡代號伺服器已換回）→ 系統修正（驗算丟掉／修正了什麼）→ 風險 → 加班建議 → 規則建議 →
 //   未排入 → 工時未知 → 未設門檻品類。每張 AI 卡的理由另外在卡片詳情看（aiReason）。
 // 失敗：伺服器寫的原因（error_message，給主管看得懂）；模擬區保持原樣（D95）。
 // 結果沒寫回模擬區（applied=false：AI 跑的期間主管動過模擬區）→ 提示可從這裡載入這次結果。
 
 import type { ReactNode } from 'react'
-import type { AiRunDetail, AiRunStatusInfo, RunPhase, ValidationReport } from '@/lib/packaging/ai/types'
+import { AI_RUN_STALE_MS, type AiRunDetail, type AiRunEstimate, type AiRunStatusInfo, type RunPhase, type ValidationReport } from '@/lib/packaging/ai/types'
+import { estimateZone } from '@/lib/packaging/ai/estimate'
 import type { PackagingLine, YMD } from '@/lib/packaging/scheduleTypes'
 import { fmtQty } from '@/components/packaging/poolStyles'
 import { Btn } from '@/components/packaging/board/Modal'
@@ -20,13 +23,13 @@ import {
   ISSUE_LABEL,
   MODE_LABEL,
   RUN_ERROR_LABEL,
-  RUN_EXPECTED_SEC,
-  RUN_STATUS_LABEL,
   RUN_STEPS,
   durationText,
   horizonLabel,
   hoursOf,
+  isCancelledRun,
   runProgressPct,
+  runStatusView,
   textBar,
 } from './simText'
 
@@ -37,11 +40,20 @@ export function runElapsedMs(r: { startedAt: string; elapsedMs: number }, nowMs:
   return Math.max(r.elapsedMs, local, 0)
 }
 
-/** 執行中的進度（工具列下方的橫幅與面板共用） */
-export function RunProgress({ phase, elapsedMs, compact = false }: { phase: RunPhase; elapsedMs: number; compact?: boolean }) {
-  const pct = runProgressPct(phase, elapsedMs)
+/** 預估時間的一句話（橫幅／面板／取消確認框共用） */
+export function estimateLine(e: AiRunEstimate): string {
+  return `候選 ${e.sentCount} 張・預估約 ${durationText(e.estimateMs)}`
+}
+
+/**
+ * 執行中的進度（工具列下方的橫幅與面板共用）。estimate 為 null＝還在準備資料（候選張數未定）或舊紀錄。
+ * 文案分區：比預估久（琥珀）、預估接近上限 warn（琥珀）、預估超過上限 over（琥珀粗體；仍在跑，建議取消後縮小範圍）。
+ */
+export function RunProgress({ phase, elapsedMs, estimate, compact = false }: { phase: RunPhase; elapsedMs: number; estimate: AiRunEstimate | null; compact?: boolean }) {
+  const pct = runProgressPct(phase, elapsedMs, estimate)
   const at = RUN_STEPS.findIndex(s => s.phase === phase)
-  const long = elapsedMs / 1000 > RUN_EXPECTED_SEC.max
+  const zone = estimate ? estimateZone(estimate) : 'ok'
+  const overEstimate = !!estimate && elapsedMs > estimate.estimateMs
   return (
     <div className={compact ? 'min-w-0 space-y-0.5' : 'space-y-2'}>
       <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[11px]" aria-label="AI 執行階段">
@@ -63,9 +75,19 @@ export function RunProgress({ phase, elapsedMs, compact = false }: { phase: RunP
         className={`truncate font-mono tabular-nums text-violet-200 ${compact ? 'text-[11px]' : 'text-sm'}`}
       >{textBar(pct, compact ? 16 : 24)}</div>
       <div className="text-[11px] text-slate-400">
-        已經過 {durationText(elapsedMs)}（通常 {RUN_EXPECTED_SEC.min / 60}～{RUN_EXPECTED_SEC.max / 60} 分鐘）
-        {long && <span className="text-amber-300">・比平常久，仍在等 AI 回覆（約 4.5 分鐘會自動逾時並顯示原因；超過 6 分鐘仍沒結束代表背景執行可能已中斷，可以重新執行）</span>}
-        {!compact && <span className="block text-slate-500">可以先離開這一頁，結果會存起來；回來後在「歷史」或「AI 結果」查看。</span>}
+        {phase === 'preparing' || !estimate ? (
+          <>已經過 {durationText(elapsedMs)}・準備資料中（通常 10～20 秒），候選張數確認後會顯示預估時間{phase !== 'preparing' && <span>（這筆紀錄沒有預估）</span>}</>
+        ) : (
+          <>{estimateLine(estimate)}・已經過 {durationText(elapsedMs)}</>
+        )}
+        {estimate && overEstimate && (
+          <span className="text-amber-300">・比預估久，仍在等 AI（最多 {durationText(estimate.budgetMs)} 會自動逾時並顯示原因）</span>
+        )}
+        {zone === 'warn' && <span className="block text-amber-300">預估接近時間上限，可能逾時；不放心可取消後縮小範圍（天數或鎖定部分卡片）再試。</span>}
+        {zone === 'over' && estimate && (
+          <span className="block font-bold text-amber-300">候選 {estimate.sentCount} 張、預估約 {durationText(estimate.estimateMs)} 已超過上限 {durationText(estimate.capMs)}，這次很可能逾時；建議取消後縮小天數或鎖定部分卡片再試。</span>
+        )}
+        {!compact && <span className="block text-slate-500">可以先離開這一頁，結果會存起來；回來後在「歷史」或「AI 結果」查看。已消耗的 AI 用量取消後仍會計費。</span>}
       </div>
     </div>
   )
@@ -205,7 +227,7 @@ function ValidationSections({ v, lineName }: { v: ValidationReport; lineName: (c
 }
 
 export default function AiRunPanel({
-  run, running, loading, error, nowMs, serverOffsetMs, lines, currentWindow, isOwner, busy, onClose, onLoad,
+  run, running, loading, error, nowMs, serverOffsetMs, lines, currentWindow, isOwner, busy, onClose, onLoad, onCancel,
 }: {
   /** 詳情（輪詢中＝進度；結束＝結果）；還沒讀到 null */
   run: AiRunDetail | null
@@ -222,6 +244,8 @@ export default function AiRunPanel({
   busy: boolean
   onClose: () => void
   onLoad: (runId: number, which: 'result' | 'base') => void
+  /** 取消執行中的 AI 排程（開確認對話框；伺服器權限＝本人或包裝主管） */
+  onCancel: (runId: number) => void
 }) {
   const lineName = (code: string) => lines.find(l => l.code === code)?.name ?? `${code} 線`
   // 逾時（stale）的 run 不顯示進度條：背景執行多半已中斷，進度不會再動
@@ -256,13 +280,16 @@ export default function AiRunPanel({
         {showRunning && progressSrc && (
           <div className="rounded-lg border border-violet-700/60 bg-violet-950/30 px-3 py-3">
             <div className="mb-2 text-sm font-bold text-violet-100">AI 正在排程…</div>
-            <RunProgress phase={progressSrc.phase} elapsedMs={runElapsedMs(progressSrc, nowMs, serverOffsetMs)} />
+            <RunProgress phase={progressSrc.phase} elapsedMs={runElapsedMs(progressSrc, nowMs, serverOffsetMs)} estimate={progressSrc.estimate} />
+            <div className="mt-2 flex justify-end">
+              <Btn tone="danger" disabled={busy} onClick={() => onCancel(progressSrc.id)} title="停止這次 AI 排程（已消耗的 AI 用量仍會計費）">取消排程</Btn>
+            </div>
           </div>
         )}
 
         {staleSrc && (
           <div className="rounded-lg border border-amber-600/70 bg-amber-950/40 px-3 py-2 text-sm text-amber-100">
-            <div className="font-bold">這次 AI 排程超過 6 分鐘沒有結束，背景執行可能已中斷</div>
+            <div className="font-bold">這次 AI 排程超過 {durationText(AI_RUN_STALE_MS)} 沒有結束，背景執行可能已中斷</div>
             <div className="mt-1 text-xs leading-relaxed">
               已經過 {durationText(runElapsedMs(staleSrc, nowMs, serverOffsetMs))}。模擬區沒有被改動；可以關閉這裡、再按工具列的「AI 排程」重新執行（這一次會被標成失敗）。
             </div>
@@ -275,11 +302,7 @@ export default function AiRunPanel({
 
         {run && (
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-slate-400">
-            <span className={`rounded border px-1.5 py-px text-[10px] font-semibold ${
-              run.status === 'done' ? 'border-emerald-700 bg-emerald-950/50 text-emerald-200'
-                : run.status === 'failed' ? 'border-rose-700 bg-rose-950/50 text-rose-200'
-                  : 'border-violet-700 bg-violet-950/50 text-violet-200'
-            }`}>{RUN_STATUS_LABEL[run.status]}</span>
+            <span className={`rounded border px-1.5 py-px text-[10px] font-semibold ${runStatusView(run).cls}`}>{runStatusView(run).label}</span>
             <span>{run.ownerName ?? run.ownerEmail}・{clock(run.startedAt, nowMs)} 開始</span>
             {run.status !== 'running' && <span>耗時 {durationText(run.durationMs ?? run.elapsedMs)}</span>}
             <span>{horizonLabel(run.horizon)}・{MODE_LABEL[run.mode]}</span>
@@ -288,7 +311,17 @@ export default function AiRunPanel({
           </div>
         )}
 
-        {run?.status === 'failed' && (
+        {run && isCancelledRun(run) && (
+          <div className="rounded-lg border border-amber-600/70 bg-amber-950/40 px-3 py-2 text-sm text-amber-100">
+            <div className="font-bold">已取消 AI 排程，模擬區保持原樣</div>
+            <div className="mt-1 text-xs leading-relaxed">
+              {run.errorMessage || RUN_ERROR_LABEL.ai_cancelled}
+              {run.estimate && <span className="block text-amber-200/80">取消時的預估：{estimateLine(run.estimate)}</span>}
+            </div>
+          </div>
+        )}
+
+        {run?.status === 'failed' && !isCancelledRun(run) && (
           <div className="rounded-lg border border-rose-700 bg-rose-950/40 px-3 py-2 text-sm text-rose-100">
             <div className="font-bold">AI 排程失敗，模擬區保持原樣</div>
             <div className="mt-1 text-xs leading-relaxed">

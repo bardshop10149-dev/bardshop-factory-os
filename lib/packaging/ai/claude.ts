@@ -9,7 +9,7 @@
 // SDK 用法一律以 node_modules/@anthropic-ai/sdk（0.128.0）的型別為準（已確認的能力見 types.ts 檔頭「SDK 能力確認」）。
 // 測試（scratchpad/ai-impl/tests/claude.test.mjs，node:test）：傳入 mock 的 ClaudeClientLike，不連網路、不需要金鑰。
 //
-// 為什麼用串流（.stream + finalMessage）而不是 .create：AI 要思考 1～3 分鐘，非串流請求在這段時間連線上完全沒有資料，
+// 為什麼用串流（.stream + finalMessage）而不是 .create：AI 要思考數分鐘（依卡片數），非串流請求在這段時間連線上完全沒有資料，
 //   容易被中間的網路設備當成閒置連線切掉；串流一直有事件在流動比較穩（SDK 在沒設 timeout 時也會直接拒絕 max_tokens 這麼大的
 //   非串流請求，見 node_modules/@anthropic-ai/sdk/src/client.ts calculateNonstreamingTimeout）。
 //   串流只是傳輸方式，finalMessage() 拿到的仍是跟 create 一樣的完整 BetaMessage。
@@ -20,7 +20,7 @@ import type { BetaMessage, BetaMessageStreamParams } from '@anthropic-ai/sdk/res
 import type { BetaMessageStream } from '@anthropic-ai/sdk/lib/BetaMessageStream'
 import { AI_OUTPUT_SCHEMA, parseAiOutput } from './schema'
 import { SYSTEM_PROMPT, buildUserMessage } from './prompt'
-import type { AiErrorCode, AiPayload, AiUsage, ClaudeCallResult } from './types'
+import { AI_ROUTE_MAX_DURATION_MS, type AiErrorCode, type AiPayload, type AiUsage, type ClaudeCallResult } from './types'
 
 if (typeof window !== 'undefined') {
   throw new Error('lib/packaging/ai/claude.ts 只能在伺服器端使用（AI 金鑰不得進入瀏覽器，D85）')
@@ -49,16 +49,16 @@ function effortFromEnv(key: string, fallback: AiEffort): AiEffort {
  */
 export const AI_MODEL: string = modelFromEnv('PACKAGING_AI_MODEL', 'claude-opus-5-5')
 /**
- * output_config.effort（預設 high；PACKAGING_AI_EFFORT 可覆寫）。正式站函式上限 300 秒（route maxDuration），runner 內部預算 270 秒。
- * Opus 5.5 + high 實測 174 秒（見上），離 270 秒預算有 96 秒餘裕，所以用 high。
+ * output_config.effort（預設 high；PACKAGING_AI_EFFORT 可覆寫）。正式站函式上限 AI_ROUTE_MAX_DURATION_MS（route maxDuration；方案未確認前取 300 秒），
+ * runner 預算依卡片數（estimate.ts），硬上限 AI_RUN_BUDGET_MS。Opus 5.5 + high 實測 214 張 174 秒（見上），所以用 high。
  * 歷史（claude-opus-5，2026-09-28，208 張候選、4 天）：high 256 秒／輸出 23.3K（離預算只剩 14 秒）、medium 189 秒／輸出 16.4K → 當時用 medium。
- * 候選變多或改 6 天若逼近預算，先把 PACKAGING_AI_EFFORT 降成 medium，再考慮提高 maxDuration（需 Vercel 方案支援）。
+ * 候選變多或改 6 天若逼近預算（畫面會標「接近／超過上限」），先把 PACKAGING_AI_EFFORT 降成 medium，再考慮提高 maxDuration（需 Vercel 方案支援）。
  */
 export const AI_EFFORT: AiEffort = effortFromEnv('PACKAGING_AI_EFFORT', 'high')
 /** max_tokens（思考 token 也算在內） */
 export const AI_MAX_TOKENS = 48_000
-/** SDK timeout（毫秒；TypeScript SDK 單位是毫秒） */
-export const AI_TIMEOUT_MS = 280_000
+/** SDK 單次請求 timeout（毫秒；TypeScript SDK 單位是毫秒）＝route 上限 − 20 秒，由 AI_ROUTE_MAX_DURATION_MS 推導（runner 的預算通常更早 abort） */
+export const AI_TIMEOUT_MS = AI_ROUTE_MAX_DURATION_MS - 20_000
 /** SDK 自動重試次數（重試也吃時間預算，1 次就好） */
 export const AI_MAX_RETRIES = 1
 /** 拒答備援（server-side fallback）beta 旗標；搭配 fallbacks: 'default'（SDK 0.128.0 型別兩者皆接受） */
@@ -81,7 +81,7 @@ export class AiError extends Error {
  * 全部「未設＝關＝現狀」；只在正式站／Preview 明確設成 '1' 才生效，每個開關對應一個假設，用來 A/B 切分原因：
  *   PACKAGING_AI_NO_FALLBACK   H1：省略 betas／fallbacks（拒答備援），看是不是 fallback 事件形狀讓 SDK 串流累積器炸掉
  *   PACKAGING_AI_NATIVE_FETCH  H3／H4：SDK 改用 Next 包裝前的原生 fetch（patch-fetch.js 掛在 fetch._nextOriginalFetch）
- *   PACKAGING_AI_SYNC_RUN      H4：POST session/run 改成「同步等 executeRun 跑完才回應」，不走 after()（只做實驗，UI 會等 1～3 分鐘）
+ *   PACKAGING_AI_SYNC_RUN      H4：POST session/run 改成「同步等 executeRun 跑完才回應」，不走 after()（只做實驗，UI 會等 AI 跑完）
  *   PACKAGING_AI_SDK_EXTERNAL  H6：next.config.ts 把 SDK 列進 serverExternalPackages（build 時決定；見 next.config.ts）
  * 這裡只回布林，永遠不回變數的值。
  */
@@ -391,7 +391,8 @@ export function classifyAiError(e: unknown, trace?: AiCallTrace): AiError {
     return new AiError('ai_rate_limited', 'AI 用量達上限或呼叫太頻繁（HTTP 429），請過幾分鐘再試；額度由管理員在 Anthropic Console 控管', 429)
   }
   if (e instanceof Anthropic.APIConnectionTimeoutError || e instanceof Anthropic.APIUserAbortError || isAbortLike(e)) {
-    // SDK 單次請求逾時（AI_TIMEOUT_MS），或 runner 的總預算（AI_RUN_BUDGET_MS）用完而中止
+    // SDK 單次請求逾時（AI_TIMEOUT_MS），或 runner 依卡片數的預算（上限 AI_RUN_BUDGET_MS）用完而中止。
+    // 使用者取消也會走到這裡（同樣是 abort）：runner 以 abortReason 旗標分辨，取消時不會把這個 ai_timeout 寫進 run 列。
     return new AiError('ai_timeout', 'AI 思考太久、超過時間上限，這次沒有結果；請再試一次，或把模擬範圍改小（例如 2 天）')
   }
   if (e instanceof Anthropic.APIConnectionError) {

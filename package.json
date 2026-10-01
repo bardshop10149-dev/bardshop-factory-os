@@ -9,7 +9,8 @@
     "lint": "eslint",
     "quote:golden": "node --experimental-strip-types scripts/quote-golden.mjs",
     "quote:seed-sql": "node --experimental-strip-types scripts/quote-seed-sql.mjs",
-    "quote:import-test": "node --experimental-strip-types --import ./scripts/ts-resolve.mjs scripts/quote-import-test.mjs"
+    "quote:import-test": "node --experimental-strip-types --import ./scripts/ts-resolve.mjs scripts/quote-import-test.mjs",
+    "test:ai": "node --experimental-strip-types --no-warnings --import ./scripts/ai-test-resolve.mjs --test scripts/test-ai-estimate.ts scripts/test-ai-cancel.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.128.0",

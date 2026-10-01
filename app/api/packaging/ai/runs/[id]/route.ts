@@ -15,7 +15,7 @@ export const dynamic = 'force-dynamic'
 //   canLoad：done 且是自己的 run、且與自己目前模擬區的 horizon／window 相同（可從歷史載入）。只在 run 結束後才查模擬區摘要。
 //   D101：window 改比「工作日」（模擬開的週末會讓 window 不同；載入時一律連 window 與那次的模擬產能一起載回，
 //   沒存模擬產能的 run＝空覆寫，與 load-run 的 planLoadRunCapacity 同一個判斷 → canLoad 與實際能不能載一致）。
-//   執行中但超過 6 分鐘（AI_RUN_STALE_MS）：GET 不寫入，照回 running＋elapsedMs＋stale: true（db.toRunStatusInfo），
+//   執行中但超過 AI_RUN_STALE_MS（route 上限 + 60 秒）：GET 不寫入，照回 running＋elapsedMs＋stale: true（db.toRunStatusInfo），
 //   畫面據以停止輪詢、解除封鎖並提示「可能已中斷，可重新執行」（下一次按 AI 時 POST session/run 會把它標成 ai_stale）。
 
 type Ctx = { params: Promise<{ id: string }> }

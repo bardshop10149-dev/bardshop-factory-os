@@ -45,6 +45,7 @@ import {
   AI_RULES_HISTORY_LIMIT,
   AI_RUN_HISTORY_LIMIT,
   AI_RUN_STALE_MS,
+  aiDurationText,
   AI_SUMMARY_MAX,
   type AdoptionCounts,
   type AdoptionMeta,
@@ -60,6 +61,8 @@ import {
   type AiRulesRow,
   type AiRulesVersion,
   type AiRun,
+  type AiRunEstimate,
+  type AiRunInterim,
   type AiRunMeta,
   type AiRunPatch,
   type AiRunRow,
@@ -598,13 +601,31 @@ function rowToRunMeta(r: RunMetaRow): AiRunMeta {
   }
 }
 
+/** runner 在 thinking 前寫進 validation 欄的暫存預估（AiRunInterim）；done／failed 被完整報告覆蓋 */
+function isInterim(v: unknown): v is AiRunInterim {
+  return isObj(v) && v.interim === true && typeof v.estimateMs === 'number'
+}
+
+function interimToEstimate(v: AiRunInterim): AiRunEstimate {
+  return {
+    candidateCount: finite(v.candidateCount) ?? 0,
+    sentCount: finite(v.sentCount) ?? 0,
+    estimateMs: Math.max(0, finite(v.estimateMs) ?? 0),
+    budgetMs: Math.max(0, finite(v.budgetMs) ?? 0),
+    capMs: Math.max(0, finite(v.capMs) ?? 0),
+  }
+}
+
+/** 前端保證：validation 永遠是完整報告或 null（暫存預估另放 estimate，不會被當成報告讀） */
 function rowToRunSummary(r: RunMetaRow & Pick<AiRunRow, 'locks' | 'base_version' | 'thresholds' | 'validation'>): AiRunSummary {
+  const interim = isInterim(r.validation)
   return {
     ...rowToRunMeta(r),
     locks: parseSimLocks(r.locks),
     baseVersion: Number(r.base_version),
     thresholds: parseThresholdSnapshot(r.thresholds),
-    validation: isObj(r.validation) ? (r.validation as unknown as ValidationReport) : null,
+    validation: !interim && isObj(r.validation) ? (r.validation as unknown as ValidationReport) : null,
+    estimate: interim ? interimToEstimate(r.validation as AiRunInterim) : null,
   }
 }
 
@@ -625,14 +646,17 @@ function rowToRun(r: AiRunRow): AiRun {
  * stale：仍是 running 但超過 AI_RUN_STALE_MS（背景執行多半已中斷）。GET 不寫入（不在讀取時改 run 列），只把判斷交給畫面：
  *   畫面據此解除封鎖、提示「可能已中斷，可重新執行」；真正標成 ai_stale 由下一次 POST session/run 做（§4.1 步驟 1）。
  */
-export function toRunStatusInfo(run: Pick<AiRunMeta, 'id' | 'status' | 'phase' | 'startedAt' | 'finishedAt' | 'durationMs'>, nowMs: number): AiRunStatusInfo {
+export function toRunStatusInfo(
+  run: Pick<AiRunMeta, 'id' | 'status' | 'phase' | 'startedAt' | 'finishedAt' | 'durationMs'> & { estimate?: AiRunEstimate | null },
+  nowMs: number,
+): AiRunStatusInfo {
   const start = Date.parse(run.startedAt)
   const end = run.finishedAt ? Date.parse(run.finishedAt) : nowMs
   const elapsed = run.status !== 'running' && run.durationMs != null ? run.durationMs : end - start
   const elapsedMs = Number.isFinite(elapsed) ? Math.max(0, elapsed) : 0
   // startedAt 壞掉（NaN）也當逾時：否則永遠「執行中」、畫面永遠鎖住
   const stale = run.status === 'running' && (!Number.isFinite(start) || nowMs - start > AI_RUN_STALE_MS)
-  return { id: run.id, status: run.status, phase: run.phase, startedAt: run.startedAt, elapsedMs, stale }
+  return { id: run.id, status: run.status, phase: run.phase, startedAt: run.startedAt, elapsedMs, stale, estimate: run.estimate ?? null }
 }
 
 /** 建 run 列（status running、phase preparing）；回完整列（取 id 用） */
@@ -662,6 +686,85 @@ export async function insertAiRun(sb: SupabaseAdmin, v: NewAiRun, nowIso: string
  * summary／errorMessage 超過 DB 上限時截斷（不因字數讓整筆結果寫不進去）。
  */
 export async function updateAiRun(sb: SupabaseAdmin, id: number, patch: AiRunPatch): Promise<void> {
+  const row = patchToRow(patch)
+  if (Object.keys(row).length === 0) return
+  const { error } = await sb.from(AI_TBL.runs).update(row).eq('id', id)
+  if (error) throw new ScheduleDbError('更新 AI 執行紀錄', error)
+}
+
+/**
+ * runner 專用：同 updateAiRun，但只改「仍是 running」的列（協作式取消的核心）。
+ * 回 false＝這一列已不是 running（被 POST runs/[id]/cancel 標成取消，或已結束）→ 呼叫端應停止、不再寫任何東西。
+ * 為什麼是條件更新而不是先查再寫：取消 route 在另一個實例，查與寫之間仍可能被取消；單一 UPDATE … WHERE status='running' 是原子的。
+ */
+export async function updateAiRunIfRunning(sb: SupabaseAdmin, id: number, patch: AiRunPatch): Promise<boolean> {
+  const row = patchToRow(patch)
+  if (Object.keys(row).length === 0) return true
+  const { data, error } = await sb.from(AI_TBL.runs).update(row).eq('id', id).eq('status', 'running').select('id')
+  if (error) throw new ScheduleDbError('更新 AI 執行紀錄', error)
+  return (data ?? []).length === 1
+}
+
+/** runner 每 AI_CANCEL_POLL_MS 查一次用：只選三個小欄位（比 getAiRunSummary 便宜，不拉 validation／locks） */
+export async function getAiRunLite(sb: SupabaseAdmin, id: number): Promise<{ id: number; status: RunStatus; errorCode: AiErrorCode | null } | null> {
+  const { data, error } = await sb.from(AI_TBL.runs).select('id, status, error_code').eq('id', id).maybeSingle()
+  if (error) throw new ScheduleDbError('讀取 AI 執行紀錄', error)
+  if (!data) return null
+  const r = data as { id: number; status: string; error_code: string | null }
+  return { id: Number(r.id), status: asStatus(r.status), errorCode: (r.error_code as AiErrorCode | null) ?? null }
+}
+
+/**
+ * 取消（POST runs/[id]/cancel）：只改仍是 running 的列；回 true＝這次真的取消到（false＝剛好已結束，route 回 run_not_running）。
+ * 不需 migration：status／phase 用既有枚舉 'failed'，error_code 'ai_cancelled'（只有長度 check），finished_at 滿足 packaging_ai_runs_finished。
+ * validation 刻意不動（保留 runner 寫的暫存預估，歷史列看得到）。
+ */
+export async function cancelAiRun(
+  sb: SupabaseAdmin,
+  runId: number,
+  by: { name: string | null; email: string },
+  nowMs: number,
+  startedAt: string,
+): Promise<boolean> {
+  const started = Date.parse(startedAt)
+  const { data, error } = await sb.from(AI_TBL.runs).update({
+    status: 'failed',
+    phase: 'failed',
+    error_code: 'ai_cancelled' satisfies AiErrorCode,
+    error_message: cancelMessage(by),
+    finished_at: new Date(nowMs).toISOString(),
+    duration_ms: Number.isFinite(started) ? Math.max(0, nowMs - started) : null,
+  }).eq('id', runId).eq('status', 'running').select('id')
+  if (error) throw new ScheduleDbError('更新 AI 執行紀錄', error)
+  return (data ?? []).length === 1
+}
+
+/** 取消訊息（≤ AI_ERROR_MESSAGE_MAX；名字太長就截） */
+export function cancelMessage(by: { name: string | null; email: string }): string {
+  const who = (by.name && by.name.trim()) || by.email
+  return `已由 ${who} 取消（已消耗的 AI 用量仍會計費）`.slice(0, AI_ERROR_MESSAGE_MAX)
+}
+
+/** 補註後綴（noteCancelledButApplied） */
+export const CANCELLED_BUT_APPLIED_NOTE = '；注意：取消送出時 AI 剛好已完成，結果已寫入模擬區，可用「退回上一步」還原'
+
+/**
+ * 毫秒級競態補註：runner 在「寫模擬區前最後一次確認仍 running」與「CAS 寫回」之間被取消 → 模擬區已更新、run 卻是已取消。
+ * 只改 error_code='ai_cancelled' 的列，在取消訊息後補一句；讀不到或不是取消列就什麼都不做。
+ */
+export async function noteCancelledButApplied(sb: SupabaseAdmin, runId: number): Promise<void> {
+  const { data, error } = await sb.from(AI_TBL.runs).select('error_message').eq('id', runId).eq('error_code', 'ai_cancelled').maybeSingle()
+  if (error) throw new ScheduleDbError('讀取 AI 執行紀錄', error)
+  if (!data) return
+  const old = String((data as { error_message: string | null }).error_message ?? '')
+  if (old.includes(CANCELLED_BUT_APPLIED_NOTE)) return
+  const merged = (old + CANCELLED_BUT_APPLIED_NOTE).slice(0, AI_ERROR_MESSAGE_MAX)
+  const { error: e2 } = await sb.from(AI_TBL.runs).update({ error_message: merged }).eq('id', runId).eq('error_code', 'ai_cancelled')
+  if (e2) throw new ScheduleDbError('更新 AI 執行紀錄', e2)
+}
+
+/** AiRunPatch → DB 列（updateAiRun 與 updateAiRunIfRunning 共用，避免兩份欄位對照） */
+function patchToRow(patch: AiRunPatch): Record<string, unknown> {
   const row: Record<string, unknown> = {}
   if (patch.status !== undefined) row.status = patch.status
   if (patch.phase !== undefined) row.phase = patch.phase
@@ -678,9 +781,7 @@ export async function updateAiRun(sb: SupabaseAdmin, id: number, patch: AiRunPat
   if (patch.usage !== undefined) row.usage = patch.usage
   if (patch.durationMs !== undefined) row.duration_ms = patch.durationMs == null ? null : Math.max(0, Math.round(patch.durationMs))
   if (patch.finishedAt !== undefined) row.finished_at = patch.finishedAt
-  if (Object.keys(row).length === 0) return
-  const { error } = await sb.from(AI_TBL.runs).update(row).eq('id', id)
-  if (error) throw new ScheduleDbError('更新 AI 執行紀錄', error)
+  return row
 }
 
 /** 完整 run（runner、load-run 用；含 payload 與擺放本體） */
@@ -723,7 +824,7 @@ export async function markStaleAiRunFailed(sb: SupabaseAdmin, runId: number, now
     status: 'failed',
     phase: 'failed',
     error_code: 'ai_stale' satisfies AiErrorCode,
-    error_message: 'AI 執行超過 6 分鐘沒有結束（伺服器可能已中斷），已標記為失敗，可以重新執行',
+    error_message: `AI 執行超過 ${aiDurationText(AI_RUN_STALE_MS)} 沒有結束（伺服器可能已中斷），已標記為失敗，可以重新執行`,
     finished_at: nowIso,
   }).eq('id', runId).eq('status', 'running').select('id')
   if (error) throw new ScheduleDbError('更新 AI 執行紀錄', error)

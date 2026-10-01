@@ -9,7 +9,7 @@ import { getAiRunSummary, isSimSessionStale, loadSimWorld, updateSimSessionCas }
 import { pushUndo, simPlacementsTooLarge, snapshotForUndo } from '@/lib/packaging/ai/simState'
 import { planPullLive } from '@/lib/packaging/ai/simBulk'
 import { stateOf } from '@/lib/packaging/ai/runner'
-import { AI_RUN_STALE_MS, type SimViewResponse } from '@/lib/packaging/ai/types'
+import { AI_RUN_BUDGET_MAX_MINUTES, AI_RUN_STALE_MS, type SimViewResponse } from '@/lib/packaging/ai/types'
 import { actorOf, aiFail, aiServerError, buildSimView, loadOwnSession, logAi, parseVersion } from '../../_lib/aiRoute'
 
 export const dynamic = 'force-dynamic'
@@ -53,7 +53,7 @@ export async function POST(request: NextRequest) {
     if (session.runningRunId != null) {
       const cur = await getAiRunSummary(sb, session.runningRunId)
       if (cur && cur.status === 'running' && nowMs - Date.parse(cur.startedAt) <= AI_RUN_STALE_MS) {
-        return aiFail('run_in_progress', 'AI 正在排這個模擬區，排完再拉正式區（約 1～3 分鐘）')
+        return aiFail('run_in_progress', `AI 正在排這個模擬區，排完再拉正式區（依卡片數最多約 ${AI_RUN_BUDGET_MAX_MINUTES} 分鐘，或先按「取消排程」）`)
       }
     }
 

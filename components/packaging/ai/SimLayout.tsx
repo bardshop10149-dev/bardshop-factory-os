@@ -46,6 +46,8 @@ import {
 } from '@dnd-kit/core'
 import {
   AI_DEFAULT_HORIZON,
+  AI_RUN_BUDGET_MAX_MINUTES,
+  AI_RUN_STALE_MS,
   EMPTY_SIM_LOCKS,
   type SimLocks,
 } from '@/lib/packaging/ai/types'
@@ -86,12 +88,12 @@ import {
   AI_MARK, LIVE_MARK, LOCK_MARK, SIM_LANE_REASON, decorateSimBoard, locksCount, simAutoLane, simCardState, simLaneReorder, simLaneStep, simLaneStepInfo,
   soNumberOfKey, toggleCardLock, toggleLineLock, toggleOrderLock, type SimCardState, type SimOrderCtx,
 } from './simBoard'
-import { MODE_LABEL, UNDO_KIND_LABEL, capHoursText, capMinutesText, horizonLabel } from './simText'
+import { MODE_LABEL, UNDO_KIND_LABEL, capHoursText, capMinutesText, durationText, horizonLabel } from './simText'
 import SimCapacityBanner, { liveChangedSince, liveLineOf } from './SimCapacityBanner'
 import { SimCreateForm, type SimCreateValue } from './SimCreateDialog'
 import SimCreateDialog from './SimCreateDialog'
 import SimCardDetail from './SimCardDetail'
-import AiRunPanel, { RunProgress, runElapsedMs } from './AiRunPanel'
+import AiRunPanel, { RunProgress, estimateLine, runElapsedMs } from './AiRunPanel'
 import RunHistory from './RunHistory'
 import RulesPanel from './RulesPanel'
 import ThresholdsPanel from './ThresholdsPanel'
@@ -145,6 +147,8 @@ type CapFailCode = Extract<CapacityResponse, { success: false }>['code']
 type Dialog =
   | { t: 'reset' }
   | { t: 'run' }
+  /** 取消執行中的 AI 排程（確認框；橫幅與結果抽屜都會開它） */
+  | { t: 'cancelRun'; runId: number }
   | { t: 'adopt' }
   | { t: 'split'; bc: BoardCard }
   | { t: 'move'; bc: BoardCard }
@@ -225,7 +229,7 @@ export default function SimLayout({ meEmail }: { meEmail: string | null }) {
   const scopeLineIds = useMemo(() => session?.lineIds ?? [], [session?.lineIds])
   const simCards = useMemo(() => v?.simCards ?? {}, [v?.simCards])
   const windowSet = useMemo(() => new Set(session?.windowDates ?? []), [session?.windowDates])
-  // 執行中＝running 且沒逾時。逾時（stale：超過 6 分鐘沒結束，背景執行多半已中斷）不算執行中——
+  // 執行中＝running 且沒逾時。逾時（stale：超過 AI_RUN_STALE_MS 沒結束，背景執行多半已中斷）不算執行中——
   //   否則 AI 排程／採用／重設全部停用，而能把它標成失敗的 POST session/run 又按不到，模擬區就永遠卡住（審查發現）
   const running = v?.runningRun && v.runningRun.status === 'running' && !v.runningRun.stale ? v.runningRun : null
   const staleRun = v?.runningRun && v.runningRun.status === 'running' && v.runningRun.stale ? v.runningRun : null
@@ -890,7 +894,7 @@ export default function SimLayout({ meEmail }: { meEmail: string | null }) {
               type="button"
               onClick={() => setDialog({ t: 'run' })}
               disabled={runBlock != null}
-              title={runBlock ?? '讓 AI 排範圍內沒鎖定的卡（約 1～3 分鐘）'}
+              title={runBlock ?? `讓 AI 排範圍內沒鎖定的卡（依卡片數最多約 ${AI_RUN_BUDGET_MAX_MINUTES} 分鐘，開始後會顯示預估時間）`}
               className="rounded border border-violet-500 bg-violet-600 px-3 py-1 font-semibold text-white hover:bg-violet-500 disabled:cursor-not-allowed disabled:opacity-40"
             >✦ AI 排程</button>
             <button
@@ -924,9 +928,19 @@ export default function SimLayout({ meEmail }: { meEmail: string | null }) {
           <div className="flex flex-wrap items-center gap-3 rounded-lg border border-violet-700/60 bg-violet-950/30 px-3 py-2">
             <span className="text-xs font-bold text-violet-100">AI 排程中</span>
             <div className="min-w-0 flex-1">
-              <RunProgress phase={running.phase} elapsedMs={runElapsedMs(running, nowMs, sim.serverOffsetMs)} compact />
+              <RunProgress phase={running.phase} elapsedMs={runElapsedMs(running, nowMs, sim.serverOffsetMs)} estimate={running.estimate} compact />
             </div>
-            <button type="button" onClick={() => openRunPanel(running.id)} className="rounded border border-violet-600 px-2 py-0.5 text-xs text-violet-100 hover:bg-violet-900/50">查看</button>
+            {/* Snow：取消按鈕在進度條後（與「查看」同一組，換行時整組一起換） */}
+            <div className="flex shrink-0 items-center gap-2">
+              <button type="button" onClick={() => openRunPanel(running.id)} className="rounded border border-violet-600 px-2 py-0.5 text-xs text-violet-100 hover:bg-violet-900/50">查看</button>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => setDialog({ t: 'cancelRun', runId: running.id })}
+                title={isOwner ? '停止這次 AI 排程（已消耗的 AI 用量仍會計費）' : '取消對方的 AI 排程（會記錄你的名字；已消耗的 AI 用量仍會計費）'}
+                className="rounded border border-rose-800/70 bg-rose-950/30 px-2 py-0.5 text-xs text-rose-200 hover:bg-rose-900/40 disabled:cursor-not-allowed disabled:opacity-40"
+              >{sim.action === '取消 AI 排程' ? '取消中…' : '取消排程'}</button>
+            </div>
             {isOwner && (
               <span className="basis-full text-[11px] text-violet-200/70">執行期間也可以手動調整模擬區，但那樣 AI 的結果就不會自動放進來（之後可從「歷史」載入）。</span>
             )}
@@ -934,7 +948,7 @@ export default function SimLayout({ meEmail }: { meEmail: string | null }) {
         )}
         {staleRun && (
           <div className="flex flex-wrap items-center gap-2 rounded-lg border border-amber-600/70 bg-amber-950/40 px-3 py-2 text-xs text-amber-100">
-            <b>上次 AI 排程（#{staleRun.id}）超過 6 分鐘沒有結束，背景執行可能已中斷</b>
+            <b>上次 AI 排程（#{staleRun.id}）超過 {durationText(AI_RUN_STALE_MS)} 沒有結束，背景執行可能已中斷</b>
             <span className="text-amber-200/80">・模擬區沒有被改動；{isOwner ? '可以直接再按「AI 排程」重新執行（會把上次標成失敗）' : '只有本人能重新執行'}</span>
             <span className="flex-1" />
             <button type="button" onClick={() => openRunPanel(staleRun.id)} className="rounded border border-amber-600 px-2 py-0.5 hover:bg-amber-900/50">查看</button>
@@ -1194,10 +1208,38 @@ export default function SimLayout({ meEmail }: { meEmail: string | null }) {
             <li>待排區（主管擱置）、已完成、工時未知的卡不會交給 AI；工時未知的會列在結果裡請你手動排。</li>
             <li>AI 的排法會經過程式驗算：超產能、排在可包日之前、動到鎖定的部分會被修正或退回待排池，並寫在結果的「系統修正」。</li>
             <li>送給 AI 的資料已去識別化（客戶換成代號、不送備註／金額／地址，D84）；規則照「規則與門檻」最新版。</li>
-            <li>約 1～3 分鐘。目前的模擬區會先存進「退回上一步」，不滿意可以一鍵退回。</li>
+            <li>時間依卡片數而定（最多約 {AI_RUN_BUDGET_MAX_MINUTES} 分鐘），開始後進度條旁會顯示預估時間，也可以隨時按「取消排程」。目前的模擬區會先存進「退回上一步」，不滿意可以一鍵退回。</li>
           </ul>
         </Modal>
       )}
+      {dialog?.t === 'cancelRun' && (() => {
+        const target = running && running.id === dialog.runId ? running : null
+        const elapsed = target ? runElapsedMs(target, nowMs, sim.serverOffsetMs) : null
+        return (
+          <Modal
+            title="取消這次 AI 排程？"
+            onClose={() => setDialog(null)}
+            footer={<>
+              <Btn onClick={() => setDialog(null)}>繼續等</Btn>
+              <Btn tone="danger" disabled={busy} onClick={() => { void sim.cancelRun(dialog.runId).then(ok => { if (ok) setDialog(null) }) }}>
+                {busy ? '取消中…' : '確定取消'}
+              </Btn>
+            </>}
+          >
+            <ul className="list-disc space-y-1 pl-5 text-xs leading-relaxed text-slate-200">
+              <li>
+                AI 排程 #{dialog.runId}{elapsed != null && <>：目前已經過 {durationText(elapsed)}</>}
+                {target?.estimate && <>，{estimateLine(target.estimate)}</>}。
+              </li>
+              <li>取消後這次不會有結果，模擬區維持原樣。</li>
+              <li><b>已消耗的 AI 用量仍會計費</b>，不會退還（取消只是斷線，AI 已經算過的部分照算）。</li>
+              <li>若送出取消時 AI 剛好完成，結果可能已寫進模擬區——結果頁會註明，可用「退回上一步」還原。</li>
+              <li>取消後 60 秒內再按「AI 排程」會被節流，請稍等。</li>
+              {!isOwner && <li className="text-amber-200">這是 {ownerLabel} 的模擬區，取消紀錄會寫上你的名字。</li>}
+            </ul>
+          </Modal>
+        )
+      })()}
       {dialog?.t === 'adopt' && session && (
         <AdoptDialog
           meEmail={v.me.email}
@@ -1361,6 +1403,7 @@ export default function SimLayout({ meEmail }: { meEmail: string | null }) {
           busy={busy || sim.pending > 0}
           onClose={() => setDrawer(null)}
           onLoad={doLoadRun}
+          onCancel={id => setDialog({ t: 'cancelRun', runId: id })}
         />
       )}
       {drawer === 'history' && (

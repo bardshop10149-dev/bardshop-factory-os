@@ -1,17 +1,21 @@
 // AI 模擬排程畫面的文字與小計算（純函式；不讀時鐘——需要「現在」的由呼叫端傳入）。
 // 集中在這裡：AiRunPanel／AdoptDialog／AdoptionsDialog／SimLayout 用同一套說法，主管看到的名詞才一致（D95：訊息給主管看得懂）。
 
-import type {
-  AdoptionCounts,
-  AiErrorCode,
-  AiHorizon,
-  RunPhase,
-  RunStatus,
-  SimLockReason,
-  SimMode,
-  SimSource,
-  SimUndoKind,
-  ValidationIssueCode,
+import {
+  AI_RUN_BUDGET_MIN_MS,
+  AI_RUN_BUDGET_MS,
+  AI_RUN_STALE_MS,
+  type AdoptionCounts,
+  type AiErrorCode,
+  type AiHorizon,
+  type AiRunEstimate,
+  type RunPhase,
+  type RunStatus,
+  type SimLockReason,
+  type SimMode,
+  type SimSource,
+  type SimUndoKind,
+  type ValidationIssueCode,
 } from '@/lib/packaging/ai/types'
 
 export const MODE_LABEL: Record<SimMode, string> = {
@@ -62,15 +66,14 @@ export const RUN_STEPS: { phase: Extract<RunPhase, 'preparing' | 'thinking' | 'v
   { phase: 'validating', label: '程式驗算' },
 ]
 
-/** 預估總時間（規格 §八：60～180 秒）；只用來畫進度，不是承諾 */
-export const RUN_EXPECTED_SEC = { min: 60, max: 180 } as const
-
 /**
- * 進度百分比（依階段與經過秒數；AI 思考沒有真正的進度可讀，用「趨近但不到頂」的曲線，免得卡在 99% 很久）：
- *   準備資料 2%→8%、AI 思考中 10%→約 88%（90 秒過一半）、程式驗算 92%、完成／失敗 100%。
+ * 進度百分比。AI 思考沒有真正的進度可讀，改用「經過時間／預估時間」推進（預估依卡片數，伺服器算好放在 run.estimate），封頂 95%，
+ * 免得卡在 99% 很久：準備資料 2%→8%（此時還沒有預估）、AI 思考中 8%→95%（線性；沒有預估的舊紀錄退回指數曲線，同樣封頂 95）、
+ * 程式驗算 95%、完成／失敗 100%。
  */
-export function runProgressPct(phase: RunPhase, elapsedMs: number): number {
-  const s = Math.max(0, elapsedMs / 1000)
+export function runProgressPct(phase: RunPhase, elapsedMs: number, estimate: Pick<AiRunEstimate, 'estimateMs'> | null = null): number {
+  const ms = Math.max(0, elapsedMs)
+  const s = ms / 1000
   switch (phase) {
     case 'done':
     case 'failed':
@@ -78,11 +81,25 @@ export function runProgressPct(phase: RunPhase, elapsedMs: number): number {
     case 'preparing':
       return Math.min(8, 2 + s * 0.5)
     case 'validating':
-      return 92
+      return 95
     case 'thinking':
     default:
-      return Math.round(10 + 78 * (1 - Math.exp(-s / 90)))
+      if (estimate && estimate.estimateMs > 0) return Math.min(95, Math.round(8 + 87 * (ms / estimate.estimateMs)))
+      return Math.min(95, Math.round(10 + 78 * (1 - Math.exp(-s / 90))))
   }
+}
+
+/** 「已取消」＝failed＋error_code ai_cancelled（DB 沒有獨立的 cancelled 狀態；畫面用這個 helper 分辨） */
+export function isCancelledRun(r: { status: RunStatus; errorCode: AiErrorCode | null }): boolean {
+  return r.status === 'failed' && r.errorCode === 'ai_cancelled'
+}
+
+/** 狀態徽章（AiRunPanel／RunHistory 共用）：「已取消」用琥珀色，不是紅色失敗；其餘三色 */
+export function runStatusView(r: { status: RunStatus; errorCode: AiErrorCode | null }): { label: string; cls: string } {
+  if (isCancelledRun(r)) return { label: '已取消', cls: 'border-amber-700 bg-amber-950/50 text-amber-200' }
+  if (r.status === 'done') return { label: RUN_STATUS_LABEL.done, cls: 'border-emerald-700 bg-emerald-950/50 text-emerald-200' }
+  if (r.status === 'failed') return { label: RUN_STATUS_LABEL.failed, cls: 'border-rose-700 bg-rose-950/50 text-rose-200' }
+  return { label: RUN_STATUS_LABEL.running, cls: 'border-violet-700 bg-violet-950/50 text-violet-200' }
 }
 
 /** 文字進度條：████████░░░░ 42%（Snow 要求長任務要有文字進度條） */
@@ -106,13 +123,14 @@ export const RUN_ERROR_LABEL: Record<AiErrorCode, string> = {
   ai_not_configured: '尚未設定 AI 金鑰（ANTHROPIC_API_KEY），請 Snow 設定後再試',
   ai_auth: 'AI 金鑰無效或沒有權限',
   ai_rate_limited: 'AI 用量達上限或太頻繁，請稍後再試（額度由 Snow 在 Anthropic Console 控管）',
-  ai_timeout: 'AI 執行逾時（超過約 4.5 分鐘），可縮小範圍或稍後再試',
+  ai_timeout: `AI 執行超過時間預算（依卡片數 ${durationText(AI_RUN_BUDGET_MIN_MS)}～${durationText(AI_RUN_BUDGET_MS)}），可縮小範圍或稍後再試`,
   ai_network: '連不到 AI 服務（網路問題），請稍後再試',
   ai_api: 'AI 服務回傳錯誤（可能是服務忙碌或額度不足）',
   ai_refused: 'AI 拒絕回答這次的資料',
   ai_truncated: 'AI 的回答太長被截斷，可縮小範圍（例如 2 個工作日）再試',
   ai_bad_output: 'AI 回傳的格式不正確，請再試一次',
-  ai_stale: '這次執行超過 6 分鐘沒有結束（伺服器可能已中斷），已視為失敗',
+  ai_stale: `這次執行超過 ${durationText(AI_RUN_STALE_MS)} 沒有結束（伺服器可能已中斷），已視為失敗`,
+  ai_cancelled: '已取消（已消耗的 AI 用量仍會計費）',
   ai_pii_blocked: '送出前檢查發現資料含疑似個資（電話、email、單號或客戶名稱），已停止、沒有送給 AI；請修正品名／包裝方式或規則文字後再試',
   pool_unavailable: '待排池暫時無法取得，請稍後再試',
   session_gone: '模擬區已不存在',
