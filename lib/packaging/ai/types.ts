@@ -94,12 +94,46 @@ export const SIM_LABEL_MAX = 120
 
 /** 規格 §九 第 1 點：歷史保留最近 10 次 AI 結果可切換 */
 export const AI_RUN_HISTORY_LIMIT = 10
-/** §4.1：running 超過 6 分鐘未結束（實例被回收）→ 視為失敗、可重跑（畫面據此解除 AI／採用／重設的封鎖） */
-export const AI_RUN_STALE_MS = 6 * 60_000
 /** §4.1：同一人 60 秒節流（連按兩次＝雙倍費用） */
 export const AI_RUN_THROTTLE_MS = 60_000
-/** §4.1：runner 內部總預算（route maxDuration = 300 秒，留 30 秒給寫回） */
-export const AI_RUN_BUDGET_MS = 270_000
+/**
+ * route maxDuration（秒 × 1000）。⚠ 全專案只能有兩處寫這個數字：這裡，以及 app/api/packaging/ai/session/run/route.ts 的
+ * `export const maxDuration = 800` 字面值（Next 要求 segment config 是靜態字面值，無法 import；scripts/test-ai-estimate.ts 會讀 route 原始碼斷言兩者相等）。
+ * 800 秒＝Vercel Pro（Fluid Compute）上限；Snow 2026-10-01 確認專案是 Pro，並以 Preview 部署驗證 800 被接受。Hobby／未開 Fluid 的 Pro 上限是 300，
+ * 超過方案上限會在部署建置時直接失敗（不是功能降級）——若哪天建置失敗，把這兩處一起改回 300 即可，
+ * 其餘所有預算／逾時／stale／文案都由這個常數推導。候選再多也只能靠這個上限，預算公式在 AI_RUN_BUDGET_MS clamp。
+ */
+export const AI_ROUTE_MAX_DURATION_MS = 800_000
+/** §4.1：runner 硬上限（route 上限 − 30 秒給驗算與寫回）；既有名稱沿用 */
+export const AI_RUN_BUDGET_MS = AI_ROUTE_MAX_DURATION_MS - 30_000
+/**
+ * §4.1：running 超過這個時間未結束（實例被回收）→ 視為失敗、可重跑（畫面據此解除 AI／採用／重設的封鎖）。
+ * 必須 > AI_RUN_BUDGET_MS（否則預算內正常跑的 run 會被判成 stale）：取 route 上限 + 60 秒。
+ */
+export const AI_RUN_STALE_MS = AI_ROUTE_MAX_DURATION_MS + 60_000
+/** 訊息用：「最多約 N 分鐘」的 N（硬上限無條件進位到分鐘） */
+export const AI_RUN_BUDGET_MAX_MINUTES = Math.ceil(AI_RUN_BUDGET_MS / 60_000)
+/** 毫秒 → 「N 秒」／「M 分鐘」／「M 分 S 秒」（伺服器錯誤訊息與註解文案用；零依賴，前端另有 simText.durationText） */
+export function aiDurationText(ms: number): string {
+  const s = Math.max(0, Math.round(ms / 1000))
+  if (s < 60) return `${s} 秒`
+  const m = Math.floor(s / 60)
+  return s % 60 === 0 ? `${m} 分鐘` : `${m} 分 ${s % 60} 秒`
+}
+/** 預算下限：冷實例組資料 9～18 秒 + AI 首字延遲慢時，小批次也不能誤判逾時 */
+export const AI_RUN_BUDGET_MIN_MS = 120_000
+/** 預估固定項 30 秒（組資料 ~15 + AI 固定開銷 ~15） */
+export const AI_EST_FIXED_MS = 30_000
+/** 預估每張 0.9 秒（Opus 5.5 high 實測 214 張 174 秒 ≈ 0.74 秒/張，×1.2 保守） */
+export const AI_EST_PER_CARD_MS = 900
+/** 6 個工作日的範圍：AI 要考慮的日×線組合更多，預估 ×1.1 */
+export const AI_EST_LONG_HORIZON_FACTOR = 1.1
+/** 預算 = 預估 × 1.5，再 clamp 到 [AI_RUN_BUDGET_MIN_MS, AI_RUN_BUDGET_MS] */
+export const AI_BUDGET_FACTOR = 1.5
+/** 預算／預估 < 1.15 → 黃區（預估接近上限，可能逾時） */
+export const AI_EST_WARN_RATIO = 1.15
+/** runner 在 callClaude 期間每隔多久查一次 run 狀態（協作式取消：取消訊號來自另一個實例的 POST runs/[id]/cancel，只能經由 DB） */
+export const AI_CANCEL_POLL_MS = 5_000
 /** §4.1：前端輪詢間隔 */
 export const AI_POLL_MS = 3_000
 /** §4.3：候選超過這個數量時依（逾期 → due 升冪）取前 N 張，其餘記 notSent（不得默默截斷） */
@@ -773,6 +807,10 @@ export interface ValidationReport {
   lockedKept: number
   /** 結果模擬列總數 */
   resultCount: number
+  /** 實際送給 AI 的張數（累積校正預估用；舊 run 沒有） */
+  sentCount?: number
+  /** 這次用的 effort（累積校正預估用；舊 run 沒有） */
+  effort?: string
   aiUnplaced: { soLineKey: string | null; reason: string }[]
   aiWarnings: { soLineKey: string | null; message: string }[]
   aiOvertime: { day: number; date: YMD | null; line: string; hours: number; reason: string }[]
@@ -925,13 +963,14 @@ export type AiErrorCode =
   | 'ai_not_configured'  // 未設定 ANTHROPIC_API_KEY（D95）
   | 'ai_auth'            // 金鑰無效／沒有權限（401／403）
   | 'ai_rate_limited'    // 429：AI 用量達上限或太頻繁
-  | 'ai_timeout'         // 逾時（SDK timeout 或內部 270 秒預算用完）
+  | 'ai_timeout'         // 逾時（SDK timeout 或 runner 依卡片數的預算用完；上限 AI_RUN_BUDGET_MS）
   | 'ai_network'         // 連線失敗
   | 'ai_api'             // 其他 API 錯誤（含 529 overloaded、額度不足），訊息帶 status
   | 'ai_refused'         // stop_reason = 'refusal'
   | 'ai_truncated'       // stop_reason = 'max_tokens'
   | 'ai_bad_output'      // 沒有 text block／JSON 壞掉／結構不符
-  | 'ai_stale'           // 執行超過 6 分鐘未結束（實例被回收），下一次按 AI 時標記
+  | 'ai_stale'           // 執行超過 AI_RUN_STALE_MS 未結束（實例被回收），下一次按 AI 時標記
+  | 'ai_cancelled'       // 使用者按「取消排程」（POST runs/[id]/cancel）；status 仍是 failed（DB check 沒有 cancelled），已消耗的 AI 用量仍計費
   | 'ai_pii_blocked'     // 送出前檢查（payload.scanPayloadLeaks）發現疑似個資 → 不送出、payload 不存（fail-closed，D84）
   | 'pool_unavailable'   // 待排池組裝失敗
   | 'session_gone'       // 模擬區不存在（被刪除）
@@ -996,6 +1035,26 @@ export interface AiRunMeta {
   resultCount: number | null
 }
 
+/**
+ * runner 算出候選張數後暫存在 run 列 validation 欄的「預估」（不加欄位：validation 只有大小 check）。
+ * done／failed 時被完整 ValidationReport 覆蓋；取消時 route 不動 validation，所以歷史列仍看得到當時的預估。
+ * db.rowToRunSummary 會分辨它：前端的 run.validation 永遠是完整報告或 null，預估另放 estimate。
+ */
+export interface AiRunInterim {
+  interim: true
+  candidateCount: number
+  sentCount: number
+  /** 預估總耗時（estimate.estimateRunMs） */
+  estimateMs: number
+  /** 這次 runner 實際用的預算（estimate.budgetForEstimate；≤ capMs） */
+  budgetMs: number
+  /** 硬上限（AI_RUN_BUDGET_MS）；estimateMs > capMs＝超過上限、很可能逾時 */
+  capMs: number
+}
+
+/** 給前端的預估（AiRunInterim 去掉旗標） */
+export type AiRunEstimate = Omit<AiRunInterim, 'interim'>
+
 /** 伺服器端完整版（db.getRun） */
 export interface AiRun extends AiRunMeta {
   locks: SimLocks
@@ -1006,6 +1065,8 @@ export interface AiRun extends AiRunMeta {
   resultPlacements: SimPlacement[] | null
   aiOutput: AiOutput | null
   validation: ValidationReport | null
+  /** 執行中（thinking 起）的預估；done 後 validation 被報告覆蓋 → null（前端改用 durationMs） */
+  estimate: AiRunEstimate | null
   /**
    * D101：建 run 當下的模擬產能覆寫（AI 就是在這組時數下排的；載入歷史時一併載回）。
    * null＝當時沒有覆寫（只有非空才寫入），或 run 由舊程式建立（舊 runner 本來就只用正式產能）。
@@ -1045,7 +1106,8 @@ export interface AiRunPatch {
   payload?: AiPayload | null
   resultPlacements?: SimPlacement[] | null
   aiOutput?: AiOutput | null
-  validation?: ValidationReport | null
+  /** 完整報告（done／failed）或 runner 在 thinking 前寫的暫存預估（AiRunInterim） */
+  validation?: ValidationReport | AiRunInterim | null
   summary?: string | null
   model?: string | null
   usage?: AiUsage | null
@@ -1252,6 +1314,7 @@ export type AiApiErrorCode =
   | 'locked_line_diverged' // 鎖定的線（退回：採用範圍外的線）上的內容與正式排程不一致，採用／退回會造成卡片消失或重複 → 不寫入
   | 'revert_in_progress'   // 這筆採用正在被另一個請求退回（佔位中）
   | 'migration_required'   // sql/20260928b_packaging_ai.sql（或 D101 的 20260928c）尚未套用
+  | 'run_not_running'      // cancel：該次執行已經結束（done／failed），沒有東西可取消；extra.runStatus 帶最終狀態
   // ── D101 模擬產能（POST session/capacity；後兩個與正式產能表同一套驗證碼、同狀態碼 409／422）──
   | 'sim_weekend_live_open' // 正式產能表已開的週末加班不能在模擬區關閉
   | 'weekend_has_cards'     // 關閉週末加班前，那天還有卡
@@ -1274,6 +1337,9 @@ export interface AiFail {
   versionId?: number | null
   /** 採用／退回被 locked_line_diverged 擋下時：不一致的項目 */
   conflicts?: LockedLineConflict[]
+  /** cancel 回 run_not_running 時：該次執行的最終狀態與錯誤碼（前端據此改為顯示結果） */
+  runStatus?: RunStatus
+  runErrorCode?: AiErrorCode | null
 }
 
 // ── GET /api/packaging/ai/session?owner=<email> 與所有模擬區寫入的回應 ──
@@ -1321,6 +1387,8 @@ export interface AiRunStatusInfo {
    * （POST session/run 會把它標成 ai_stale 再接手執行位）。
    */
   stale: boolean
+  /** 依卡片數的預估（preparing 階段還沒有 → null；進度條依 elapsedMs／estimateMs 推進） */
+  estimate: AiRunEstimate | null
 }
 
 /** 其他被授權人的模擬區（唯讀檢視切換用） */
@@ -1426,7 +1494,7 @@ export interface SimPullLiveRequest {
   version: number
 }
 
-/** POST /api/packaging/ai/session/run（route：maxDuration 300、runtime nodejs、dynamic force-dynamic） */
+/** POST /api/packaging/ai/session/run（route：maxDuration = AI_ROUTE_MAX_DURATION_MS／1000、runtime nodejs、dynamic force-dynamic） */
 export interface SimRunRequest {
   version: number
 }
@@ -1492,11 +1560,20 @@ export interface AiRunDetail extends AiRunMeta {
   locks: SimLocks
   thresholds: BulkThreshold[]
   validation: ValidationReport | null
+  /** 依卡片數的預估（見 AiRunStatusInfo.estimate；done 後 null） */
+  estimate: AiRunEstimate | null
   /** 能否載入目前模擬區（done 且 horizon 與「工作日」和目前模擬區相同；D101：模擬開的週末不算，載入時連同當時的週末與時數一起載回） */
   canLoad: boolean
 }
 
 export type AiRunDetailResponse = { success: true; run: AiRunDetail } | AiFail
+
+/**
+ * POST /api/packaging/ai/runs/[id]/cancel（body 可為 {}）：取消執行中的 AI 排程。
+ * 成功＝run 列已被標成 failed＋error_code 'ai_cancelled'（route 直接寫終態；runner 之後的每一步寫入都是「僅當仍 running」的條件更新，
+ * 所以取消後不會寫模擬區）。已結束 → 409 run_not_running（extra.runStatus）。已消耗的 AI 用量仍會計費。
+ */
+export type AiRunCancelResponse = AiRunDetailResponse
 
 // ── 採用紀錄與退回（§6.2） ──
 

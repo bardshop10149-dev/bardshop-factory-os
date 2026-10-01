@@ -56,6 +56,7 @@ import {
   postSimOps,
   postSimPullLive,
   postSimRun,
+  postSimRunCancel,
   postClosure,
   postSimUndo,
   type AiApiResult,
@@ -184,7 +185,7 @@ export function useSim(opts: {
     setViewBoth(v)
     const st = Date.parse(v.serverTime)
     if (Number.isFinite(st)) setServerOffsetMs(st - Date.now())
-    // 逾時（stale：超過 6 分鐘仍 running，背景執行多半已中斷）不輪詢——否則會永遠輪詢下去、畫面永遠顯示執行中
+    // 逾時（stale：超過 AI_RUN_STALE_MS 仍 running，背景執行多半已中斷）不輪詢——否則會永遠輪詢下去、畫面永遠顯示執行中
     if (v.runningRun && v.runningRun.status === 'running' && !v.runningRun.stale) startPolling(v.runningRun.id)
   }, [setViewBoth, startPolling])
 
@@ -664,7 +665,7 @@ export function useSim(opts: {
         const runId = r.json.runId
         const nowIso = new Date().toISOString()
         const cur = viewRef.current
-        if (cur) setViewBoth({ ...cur, runningRun: { id: runId, status: 'running', phase: 'preparing', startedAt: nowIso, elapsedMs: 0, stale: false } })
+        if (cur) setViewBoth({ ...cur, runningRun: { id: runId, status: 'running', phase: 'preparing', startedAt: nowIso, elapsedMs: 0, stale: false, estimate: null } })
         setRun(null)
         setRunError(null)
         startPolling(runId)
@@ -713,14 +714,14 @@ export function useSim(opts: {
           return
         }
         if (detail.stale) {
-          // 超過 6 分鐘仍 running：背景執行多半已中斷 → 停止輪詢、不再當「執行中」（畫面解除封鎖，可重新按 AI 排程）
+          // 超過 AI_RUN_STALE_MS 仍 running：背景執行多半已中斷 → 停止輪詢、不再當「執行中」（畫面解除封鎖，可重新按 AI 排程）
           pollRunRef.current = null
           setPollRunId(null)
           const cur = viewRef.current
           if (cur) {
             setViewBoth({
               ...cur,
-              runningRun: { id: detail.id, status: detail.status, phase: detail.phase, startedAt: detail.startedAt, elapsedMs: detail.elapsedMs, stale: true },
+              runningRun: { id: detail.id, status: detail.status, phase: detail.phase, startedAt: detail.startedAt, elapsedMs: detail.elapsedMs, stale: true, estimate: detail.estimate },
             })
           }
           return
@@ -729,7 +730,7 @@ export function useSim(opts: {
         if (cur) {
           setViewBoth({
             ...cur,
-            runningRun: { id: detail.id, status: detail.status, phase: detail.phase, startedAt: detail.startedAt, elapsedMs: detail.elapsedMs, stale: false },
+            runningRun: { id: detail.id, status: detail.status, phase: detail.phase, startedAt: detail.startedAt, elapsedMs: detail.elapsedMs, stale: false, estimate: detail.estimate },
           })
         }
       } else if (r.status === 401) {
@@ -768,6 +769,48 @@ export function useSim(opts: {
     }
   }, [startPolling])
 
+  /**
+   * 取消執行中的 AI 排程（POST runs/[id]/cancel）。成功＝伺服器已把 run 標成「已取消」：先停輪詢（避免 3 秒空窗）、清 runningRun、
+   * 把回應的 run 當結果（onRunFinished 自動開結果抽屜，沿用既有路徑）。已消耗的 AI 用量仍會計費；60 秒節流照舊（取消不退費）。
+   * run_not_running＝送出時 AI 剛好結束 → 改為顯示它的結果。
+   */
+  const cancelRun = useCallback(async (runId: number): Promise<boolean> => {
+    if (actionRef.current) { showToast('warn', '請等目前的動作完成'); return false }
+    actionRef.current = true
+    setAction('取消 AI 排程')
+    try {
+      const r = await postSimRunCancel(runId)
+      if (r.status === 401) { cbRef.current.onUnauthorized(); return false }
+      if (r.json && r.json.success) {
+        const detail = r.json.run
+        pollRunRef.current = null
+        setPollRunId(null)
+        const cur = viewRef.current
+        if (cur) setViewBoth({ ...cur, runningRun: null })
+        setRun(detail)
+        setRunError(null)
+        void load()
+        showToast('info', `已取消 AI 排程 #${runId}（已消耗的 AI 用量仍會計費；60 秒內再按「AI 排程」會被節流）`)
+        cbRef.current.onRunFinished?.(detail)
+        return true
+      }
+      if (r.code === 'run_not_running') {
+        showToast('warn', 'AI 剛好已經結束，改為顯示結果')
+        pollRunRef.current = null
+        setPollRunId(null)
+        void load()
+        void openRun(runId)
+        return true
+      }
+      showToast('error', r.error ?? '取消 AI 排程失敗')
+      return false
+    } finally {
+      actionRef.current = false
+      setAction(null)
+      if (dirtyRef.current) { dirtyRef.current = false; void load() }
+    }
+  }, [load, openRun, setViewBoth, showToast])
+
   // D110：畫面用的 view＝濾掉有結案記號的行；viewRef／serverViewRef（樂觀更新與回滾的基準）不動
   const shownView = useMemo<SimView | null>(() => {
     if (!view || !view.board) return view
@@ -803,6 +846,7 @@ export function useSim(opts: {
     undoStep,
     loadRun,
     startRun,
+    cancelRun,
     run,
     runLoading,
     runError,

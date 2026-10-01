@@ -13,20 +13,24 @@ import {
 } from '@/lib/packaging/ai/db'
 import { aiDiagFlags, aiNotConfiguredMessage, isAiConfigured } from '@/lib/packaging/ai/claude'
 import { executeRun, safeErrorTag } from '@/lib/packaging/ai/runner'
-import { AI_RUN_STALE_MS, AI_RUN_THROTTLE_MS, type SimRunResponse } from '@/lib/packaging/ai/types'
+import { AI_RUN_BUDGET_MAX_MINUTES, AI_RUN_STALE_MS, AI_RUN_THROTTLE_MS, type SimRunResponse } from '@/lib/packaging/ai/types'
 import { actorOf, aiFail, aiServerError, loadOwnSession, logAi, parseVersion } from '../../_lib/aiRoute'
 
-// AI 思考 1～3 分鐘：本 route 的函式上限拉到 300 秒（after() 裡的背景工作也算在這次呼叫的時間內），
-// runner 內部預算 270 秒（AI_RUN_BUDGET_MS），留 30 秒寫回。runtime 明寫 nodejs：SDK 與 crypto.randomUUID 都在 Node 端。
+// AI 思考依卡片數數分鐘：本 route 的函式上限用 Vercel Pro（Fluid Compute）的 800 秒（Snow 2026-10-01 確認 Pro；after() 裡的背景工作也算在這次呼叫的時間內），
+// runner 硬上限 AI_RUN_BUDGET_MS（= AI_ROUTE_MAX_DURATION_MS − 30 秒寫回；實際預算依卡片數，estimate.ts）。
+// ⚠ 下面的 maxDuration 字面值必須與 types.ts 的 AI_ROUTE_MAX_DURATION_MS（÷1000）相同：Next 要求 segment config 是靜態字面值，無法 import；
+//   scripts/test-ai-estimate.ts 會讀本檔原始碼斷言兩者相等。超過方案上限會在部署建置時直接失敗（不是功能降級）；
+//   Hobby／未開 Fluid 的 Pro 上限是 300：若部署建置失敗，兩處一起改回 300。
+// runtime 明寫 nodejs：SDK 與 crypto.randomUUID 都在 Node 端。
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
-export const maxDuration = 300
+export const maxDuration = 800
 
 // 包裝專區 P3：AI 排程（規格 §4.1；D85／D91／D95）
 //
 // POST SimRunRequest { version } → SimRunResponse { runId }（立即回應；AI 在背景跑，前端每 3 秒 GET /api/packaging/ai/runs/[id]）
 //   1. 自己的模擬區、version 相符、起始日未過（session_stale → 先重設）
-//   2. 同時只允許一個執行中：running_run_id 指到仍在跑的 run → run_in_progress；超過 6 分鐘沒結束（實例被回收）→ 標 ai_stale、可重跑
+//   2. 同時只允許一個執行中：running_run_id 指到仍在跑的 run → run_in_progress；超過 AI_RUN_STALE_MS 沒結束（實例被回收）→ 標 ai_stale、可重跑
 //   3. 同一人 60 秒節流（連按兩次＝雙倍費用）
 //   4. 未設定 ANTHROPIC_API_KEY → 400 ai_not_configured（D95），不建 run
 //   5. 建 run 列（base_placements＝目前模擬列、base_version＝目前 version）→ 佔用執行位（CAS，不改 version）→ op_log ai_run
@@ -62,7 +66,7 @@ export async function POST(request: NextRequest) {
       const cur = await getAiRunSummary(sb, session.runningRunId)
       const age = cur ? nowMs - Date.parse(cur.startedAt) : Infinity
       if (cur && cur.status === 'running' && age <= AI_RUN_STALE_MS) {
-        return aiFail('run_in_progress', 'AI 正在排這個模擬區，請等它完成（約 1～3 分鐘）')
+        return aiFail('run_in_progress', `AI 正在排這個模擬區，請等它完成（依卡片數最多約 ${AI_RUN_BUDGET_MAX_MINUTES} 分鐘），或在進度條旁按「取消排程」`)
       }
       if (cur && cur.status === 'running') await markStaleAiRunFailed(sb, cur.id, nowIso)
       // 逾時標失敗後、或指到已結束／不存在的 run（上次釋放失敗）→ 這個位子可以接手
@@ -111,7 +115,7 @@ export async function POST(request: NextRequest) {
 
     // 6. 背景執行（executeRun 保證不丟例外；這裡的 catch 只是保險）
     // PACKAGING_AI_SYNC_RUN=1（D112 H4 實驗，預設關）：改成同步等 executeRun 跑完才回 { runId }，完全不走 after()。
-    //   route 仍在 maxDuration 300 內（runner 預算 270）。⚠ 開啟期間瀏覽器要等 1～3 分鐘，前端可能先顯示逾時——以 run 列為準；只在 Preview 環境開。
+    //   route 仍在 maxDuration 內（runner 預算 AI_RUN_BUDGET_MS）。⚠ 開啟期間瀏覽器要等 AI 跑完，前端可能先顯示逾時——以 run 列為準；只在 Preview 環境開。
     if (aiDiagFlags().syncRun) {
       await executeRun(run.id).catch((e: unknown) => console.error(`[packaging/ai/run] #${run.id} ${safeErrorTag(e)}`))
       return noStore<SimRunResponse>({ success: true, runId: run.id })

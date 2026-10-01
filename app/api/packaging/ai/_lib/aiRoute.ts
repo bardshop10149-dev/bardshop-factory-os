@@ -60,6 +60,8 @@ const AI_ONLY_STATUS: Partial<Record<AiApiErrorCode, number>> = {
   date_not_workday: 422,
   revert_in_progress: 409,
   migration_required: 409,
+  // cancel：該次執行已經結束（done／failed），沒有東西可取消
+  run_not_running: 409,
   locked: 422,
   out_of_window: 422,
   not_sim_row: 422,
@@ -163,7 +165,7 @@ export async function buildSimView(
     board: p.session && world ? assembleSimBoard(withSimCapacity(world, p.session), p.session) : null,
     simCards: p.session ? simCardMetaOf(p.session) : {},
     // running_run_id 指到已結束的 run（runner 釋放執行位失敗）→ 不算執行中；
-    // 仍是 running 但超過 6 分鐘 → 照回但 stale: true（畫面不再封鎖 AI／採用／重設，提示可重新執行；GET 不寫入）
+    // 仍是 running 但超過 AI_RUN_STALE_MS → 照回但 stale: true（畫面不再封鎖 AI／採用／重設，提示可重新執行；GET 不寫入）
     runningRun: running && running.status === 'running' ? toRunStatusInfo(running, p.nowMs) : null,
     latestRun: runs[0] ?? null,
     owners,

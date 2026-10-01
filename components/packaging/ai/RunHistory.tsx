@@ -17,7 +17,7 @@ import { sameDates } from './simBoard'
 
 /** D101：兩組模擬日期的工作日是否相同（同伺服器 simCapacity.sameWorkdays；這裡不 import 伺服器端的大檔） */
 const sameWorkdays = (a: readonly YMD[], b: readonly YMD[]) => sameDates(a.filter(d => !isWeekend(d)), b.filter(d => !isWeekend(d)))
-import { MODE_LABEL, RUN_ERROR_LABEL, RUN_STATUS_LABEL, durationText, horizonLabel } from './simText'
+import { MODE_LABEL, RUN_ERROR_LABEL, durationText, horizonLabel, isCancelledRun, runStatusView } from './simText'
 
 export default function RunHistory({ owner, isOwner, currentWindow, busy, nowMs, onClose, onShow, onLoad }: {
   /** 看誰的歷史；null＝自己 */
@@ -68,11 +68,7 @@ export default function RunHistory({ owner, isOwner, currentWindow, busy, nowMs,
             return (
               <li key={r.id} className="rounded-lg border border-slate-800 bg-slate-950/50 px-3 py-2 text-xs">
                 <div className="flex items-center gap-2">
-                  <span className={`rounded border px-1.5 py-px text-[10px] ${
-                    r.status === 'done' ? 'border-emerald-700 bg-emerald-950/50 text-emerald-200'
-                      : r.status === 'failed' ? 'border-rose-700 bg-rose-950/50 text-rose-200'
-                        : 'border-violet-700 bg-violet-950/50 text-violet-200'
-                  }`}>{RUN_STATUS_LABEL[r.status]}</span>
+                  <span className={`rounded border px-1.5 py-px text-[10px] ${runStatusView(r).cls}`}>{runStatusView(r).label}</span>
                   <span className="min-w-0 flex-1 truncate font-semibold text-slate-100">
                     {clock(r.startedAt, nowMs)}・{horizonLabel(r.horizon)}・{MODE_LABEL[r.mode]}
                   </span>
@@ -86,7 +82,7 @@ export default function RunHistory({ owner, isOwner, currentWindow, busy, nowMs,
                   {r.applied === false && <span className="text-amber-300">未放進模擬區</span>}
                 </div>
                 {r.status === 'failed' && (
-                  <div className="mt-1 text-[11px] text-rose-300">{r.errorMessage || (r.errorCode ? RUN_ERROR_LABEL[r.errorCode] : '失敗')}</div>
+                  <div className={`mt-1 text-[11px] ${isCancelledRun(r) ? 'text-amber-300' : 'text-rose-300'}`}>{r.errorMessage || (r.errorCode ? RUN_ERROR_LABEL[r.errorCode] : '失敗')}</div>
                 )}
                 {r.summary && <p className="mt-1 line-clamp-2 text-[11px] text-slate-300">{r.summary}</p>}
                 <div className="mt-1.5 flex flex-wrap gap-1.5">

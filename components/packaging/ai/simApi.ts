@@ -17,6 +17,7 @@ import type {
   AiRulesSaveRequest,
   AiRulesSaveResponse,
   AiRulesVersionResponse,
+  AiRunCancelResponse,
   AiRunDetailResponse,
   AiRunsListResponse,
   RevertPreviewResponse,
@@ -228,6 +229,11 @@ export function fetchRuns(owner: string | null) {
 
 export function fetchRun(id: number) {
   return call<AiRunDetailResponse>(`${BASE}/runs/${idPath(id)}`)
+}
+
+/** 取消執行中的 AI 排程（body {} 只為了帶 Content-Type 過 requireJson）；已結束 → 409 run_not_running */
+export function postSimRunCancel(id: number) {
+  return call<AiRunCancelResponse>(`${BASE}/runs/${idPath(id)}/cancel`, { method: 'POST', json: {} })
 }
 
 // ── 採用紀錄與退回（§6.2） ───────────────────────────────────────────────
