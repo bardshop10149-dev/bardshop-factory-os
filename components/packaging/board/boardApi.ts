@@ -33,6 +33,7 @@ import type {
   VersionCreateResponse,
   VersionsListResponse,
 } from '@/lib/packaging/scheduleTypes'
+import type { BoardSearchResponse } from '@/lib/packaging/boardSearch'
 
 /** 呼叫結果：HTTP 狀態＋解析後的 JSON；網路錯誤時 status = 0 */
 export interface ApiResult<T> {
@@ -119,6 +120,14 @@ export function fetchBoard(opts: { from?: string | null; workdays: number; rev?:
   return call<BoardResponse>(`/api/packaging/board?${q.toString()}`, {
     headers: opts.lockToken ? { 'x-packaging-lock': opts.lockToken } : undefined,
   })
+}
+
+/**
+ * D113 排程區單號搜尋（唯讀）：全部已排的卡（不限畫面日期）＋待排區＋待排池＋隱藏／結案原因。
+ * q 由呼叫端先過 parseSearchQuery（伺服器會再驗一次）；signal：使用者繼續打字時取消舊請求（此時回 network 錯誤，呼叫端看 signal.aborted 略過）。
+ */
+export function fetchSearch(q: string, signal?: AbortSignal) {
+  return call<BoardSearchResponse>(`/api/packaging/search?q=${encodeURIComponent(q)}`, { signal })
 }
 
 // ── 擺放／完成（寫入＋鎖） ────────────────────────────────────────────────

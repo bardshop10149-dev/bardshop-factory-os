@@ -10,6 +10,7 @@
 // D66：「手動加入」區塊（'mn'）的卡在卡片上方加「手動・誰・何時」標記（showManualTag；資料來自 cardMeta[*].manual）。
 // D111：「已入庫」區塊（2 常平已入庫、5b 委外已入庫）展開後多一列排序切換「預設／依入庫日（舊→新）」；
 //   選擇由 PoolSidebar 管（存 localStorage、排序也在那裡做），這裡只畫按鈕。滑過提示多一行入庫批次（CardInfo）。
+// D113 排程區單號搜尋：revealCardId＝要跳到的卡；在「顯示更多」後面時該區自動多畫幾頁（捲動與發光由頁面處理）。
 
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
@@ -24,8 +25,11 @@ import CardDetailDialog, { CardInfo } from './CardDetailDialog'
 /** 一段先畫這麼多張，其餘按「顯示更多」 */
 const PAGE = 60
 
-function Section({ block, cards, cardMeta, showManualTag, filtered, collapsed, onToggle, today, canDrag, descId, onOpenOrder, onOpenDetail, onHover, receiptSorted, onReceiptSort }: {
+function Section({ block, cards, cardMeta, showManualTag, filtered, collapsed, onToggle, today, canDrag, descId, onOpenOrder, onOpenDetail, onHover, receiptSorted, onReceiptSort, revealCardId, revealNonce }: {
   block: PoolBlockData
+  /** D113 排程區單號搜尋要跳到的卡（在這一區的話，要畫到它為止） */
+  revealCardId: string | null
+  revealNonce: number
   /** D111：這一區目前是否「依入庫日（舊→新）」排序；onReceiptSort 沒傳＝不顯示排序切換 */
   receiptSorted: boolean
   onReceiptSort?: (on: boolean) => void
@@ -43,6 +47,16 @@ function Section({ block, cards, cardMeta, showManualTag, filtered, collapsed, o
   onHover: (card: PackagingCard | null, el: HTMLElement | null) => void
 }) {
   const [limit, setLimit] = useState(PAGE)
+  // D113：搜尋要跳的卡在「顯示更多」後面 → 一次多畫幾頁到它為止（render 中比對前值）。
+  // 找到才記下 nonce：左欄關鍵字剛被清掉時（useDeferredValue 慢一拍）這一輪還找不到，下一輪再找。
+  const [revealDone, setRevealDone] = useState(0)
+  if (revealCardId && revealNonce !== revealDone) {
+    const idx = cards.findIndex(c => c.cardId === revealCardId)
+    if (idx >= 0) {
+      setRevealDone(revealNonce)
+      if (idx >= limit) setLimit(Math.ceil((idx + 1) / PAGE) * PAGE)
+    }
+  }
   const tone = TONE_STYLES[BLOCK_TONE[block.id]]
   const placeable = isPlaceableBlock(block.id)
   // 搜尋中：張數與工時都只算符合的卡（全區數字放到 title，避免把全區工時誤認成符合卡的工時）
@@ -159,8 +173,11 @@ function PoolHoverTip({ card, meta, rect, today }: { card: PackagingCard; meta: 
   )
 }
 
-export default function SimplePool({ blocks, viewCards, cardMeta, filtered, collapsed, onToggle, today, canDrag, dragging, onOpenOrder, showManualTag = false, receiptSorted, onReceiptSort }: {
+export default function SimplePool({ blocks, viewCards, cardMeta, filtered, collapsed, onToggle, today, canDrag, dragging, onOpenOrder, showManualTag = false, receiptSorted, onReceiptSort, revealCardId = null, revealNonce = 0 }: {
   blocks: PoolBlockData[]
+  /** D113 排程區單號搜尋要跳到的待排池卡（PoolSidebar 傳下來；nonce 每次跳轉 +1） */
+  revealCardId?: string | null
+  revealNonce?: number
   /** D111：哪些「已入庫」區塊目前依入庫日排序（排序本身由 PoolSidebar 做好放在 viewCards） */
   receiptSorted?: ReadonlySet<PoolBlockId>
   /** D111：切換某一區的排序；不傳＝不顯示排序切換 */
@@ -237,6 +254,8 @@ export default function SimplePool({ blocks, viewCards, cardMeta, filtered, coll
           onHover={onHover}
           receiptSorted={receiptSorted?.has(b.id) ?? false}
           onReceiptSort={onReceiptSort && RECEIVED_BLOCKS.includes(b.id) ? (on => onReceiptSort(b.id, on)) : undefined}
+          revealCardId={revealCardId}
+          revealNonce={revealNonce}
         />
       ))}
       {hover && !dragging && !detail && <PoolHoverTip card={hover.card} meta={cardMeta[hover.card.cardId]} rect={hover.rect} today={today} />}

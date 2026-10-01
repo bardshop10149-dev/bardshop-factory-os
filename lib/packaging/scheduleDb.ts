@@ -205,6 +205,42 @@ export async function loadPlacementsByLines(sb: SupabaseAdmin, lineKeys: readonl
   return out
 }
 
+/** D113 排程區單號搜尋：命中的擺放（只取定位要用的欄位） */
+export interface PlacementKeyHit {
+  id: string
+  soLineKey: string
+  qty: number
+  planDate: string | null
+  completedAt: string | null
+  lineId: number | null
+}
+
+/**
+ * D113 排程區單號搜尋（唯讀）：so_line_key 模糊比對，最近排定的在前、最多 limit 筆。
+ * 用途是找出「已不在工作台上」的擺放（行已不在待排池、已完成的過去日期…）告訴使用者原因；工作台上看得到的卡由組裝結果負責。
+ * ⚠ fragment 必須先過 boardSearch.parseSearchQuery 的白名單（只剩 [A-Z0-9-]）：% 與 _ 在 ilike 是萬用字元，不能讓使用者帶進來。
+ *   這裡再擋一次（縱深防禦），不合格直接回空。
+ */
+export async function searchPlacementsByKey(sb: SupabaseAdmin, fragment: string, limit = 300): Promise<PlacementKeyHit[]> {
+  if (!/^[A-Z0-9-]{3,40}$/.test(fragment)) return []
+  const { data, error } = await sb.from(TBL.placements)
+    .select('id, so_line_key, qty, plan_date, completed_at, line_id')
+    .ilike('so_line_key', `%${fragment}%`)
+    .order('plan_date', { ascending: false, nullsFirst: true })
+    .order('id', { ascending: true })
+    .limit(limit)
+  if (error) throw new ScheduleDbError('搜尋擺放', error)
+  type Row = Pick<PlacementRow, 'id' | 'so_line_key' | 'qty' | 'plan_date' | 'completed_at' | 'line_id'>
+  return ((data ?? []) as unknown as Row[]).map((r) => ({
+    id: String(r.id),
+    soLineKey: String(r.so_line_key),
+    qty: Number(r.qty),
+    planDate: r.plan_date ?? null,
+    completedAt: r.completed_at ?? null,
+    lineId: r.line_id ?? null,
+  }))
+}
+
 export async function loadPlacementsByIds(sb: SupabaseAdmin, ids: readonly string[]): Promise<Placement[]> {
   const valid = [...new Set(ids)].filter(isUuid) // 非 uuid 字串丟進 uuid 欄位的 in() 會讓整個查詢報錯
   const out: Placement[] = []

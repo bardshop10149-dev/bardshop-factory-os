@@ -35,6 +35,14 @@
 //
 // 資料一律經 /api/packaging/*（瀏覽器端 Supabase 是 anon，不直接查表）。
 // 每次操作立即送出（自動儲存）；唯讀者與沒有編輯鎖的人看得到但不能拖、不能勾。
+// D113 排程區單號搜尋（Snow：從待排池拉出來之後，右邊訂單太多找不到）：工具列「找卡」（OrderSearch）。
+//   搜尋範圍＝全部已排的卡（伺服器 GET /api/packaging/search，不限畫面日期）＋畫面上的資料（含還沒存完的樂觀更新，同一張卡以畫面為準）。
+//   跳轉（planBoardJump）：保留目前的檢視模式，只在目標日不在畫面上時換起點（go，和按 ◀ ▶ 一樣——D98 會放行等合併的批）；
+//   被「隱藏已完成」「收起待排池」藏起來的卡只暫時打開畫面狀態、不寫 localStorage，並用 toast 說明。
+//   捲動與發光由 cardJump（等卡片出現在 DOM → 捲過去 → 根元素輸出 <style> 讓那張卡發光）處理，卡片元件只多一個 data-placement-id。
+//   換日期的跳轉帶 gate：新視窗的資料「真的套用」才找卡（舊視窗的 DOM 可能也有這張卡，不能在舊畫面上就捲）；
+//   存檔佇列（D98）卡住時繼續等並說明原因，使用者自己按 ◀ ▶／換檢視＝放棄；新資料裡沒有這張＝立刻說找不到並重搜。
+//   拖曳、拉下緣改工時開始時取消跳轉，進行中也不接受新的跳轉（程式捲動會讓插入點／工時換算算錯）；搜尋本身唯讀，不碰存檔佇列與 Undo。
 
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { useRouter } from 'next/navigation'
@@ -110,6 +118,12 @@ import ClosurePoolPanel, { type RestoreResult } from './ClosurePoolPanel'
 import { hideClosedLines, linePoolQty } from './closureLocal'
 import { restoreClosureCall, useClosedMarks, useClosureList, useClosureQueue } from './useClosures'
 import PaneResizer, { MIN_POOL_WIDTH } from './PaneResizer'
+// D113 排程區單號搜尋：工具列「找卡」→ 跳到卡片（換日期、捲動、邊框發光）
+import OrderSearch, { type RemoteSearchResult } from './OrderSearch'
+import { useCardJump } from './cardJump'
+import { fetchSearch } from './boardApi'
+import { boardJumpGateState, mergeBoardHits, planBoardJump, searchBoardBody, type JumpGateState, type SearchHit, type SearchQuery } from '@/lib/packaging/boardSearch'
+import { closureKey } from './closureLocal'
 // P3 AI 模擬排程（規格 §八）：正式工作台只新增「AI 採用紀錄」按鈕與對話框（退回採用），不動既有拖曳／儲存／鎖邏輯
 import AdoptionsDialog from '@/components/packaging/ai/AdoptionsDialog'
 import { useAiAccess } from '@/components/packaging/ai/aiAccess'
@@ -543,13 +557,86 @@ export default function BoardLayout() {
 
   // ── 檢視切換（D56）────────────────────────────────────────────────────
   const { setWindow } = board
+  /**
+   * D113：最後一次要求的視窗（go 裡同步寫入）。找卡跳轉等新視窗時用它判斷「使用者是不是已經換到別段」——
+   * board.windowReq 是 state，go() 之後同一個事件裡還讀不到新值，所以另外記一份。
+   */
+  const navReqRef = useRef(board.windowReq)
   /** 換檢視／起點：同時告訴 useBoard 要抓哪一段（在事件裡直接呼叫，不靠 effect 同步） */
   const go = useCallback((nextView: BoardViewMode, nextAnchor: YMD | null) => {
     setView(nextView)
     setAnchor(nextAnchor)
     writeLS(VIEW_KEY, nextView)
-    setWindow(windowRequest(nextView, nextAnchor))
+    const w = windowRequest(nextView, nextAnchor)
+    navReqRef.current = w
+    setWindow(w)
   }, [setWindow])
+
+  // ── D113 排程區單號搜尋 ─────────────────────────────────────────────────
+  /** 根元素：跳轉只在這底下找卡（data-search-root） */
+  const rootRef = useRef<HTMLDivElement>(null)
+  /** 要跳到的待排池卡：PoolSidebar 展開區塊／清掉左欄過濾／多畫幾頁。nonce 單調遞增（ref），同一張卡再跳一次也會重新揭露 */
+  const [poolReveal, setPoolReveal] = useState<{ cardId: string; nonce: number } | null>(null)
+  const revealNonceRef = useRef(0)
+  /** +1＝找卡框略過快取重搜（跳轉 15 秒找不到卡：多半是剛被移動、合併或放回） */
+  const [searchRefresh, setSearchRefresh] = useState(0)
+  /** 等待中的跳轉目標（找不到時 toast 用） */
+  const jumpLabelRef = useRef('')
+  /** 跳轉失敗 → 找卡框的報讀文字改成原因（n 每次 +1） */
+  const [jumpFail, setJumpFail] = useState<{ n: number; text: string } | null>(null)
+  /** 最新畫面資料（跳轉的 gate 在計時器／DOM 變動回呼裡讀；畫面 commit 後才更新，所以它說「新視窗」時 DOM 一定已是新的） */
+  const dataRef = useRef(data)
+  useEffect(() => { dataRef.current = data })
+  const jump = useCardJump({
+    rootRef,
+    onFail: () => {
+      setPoolReveal(null)
+      const label = jumpLabelRef.current || '這張卡'
+      const why = '已不在畫面上（可能剛被移動、合併或放回待排池），已重新搜尋'
+      showToast('warn', `${label} ${why}`)
+      setJumpFail(f => ({ n: (f?.n ?? 0) + 1, text: `沒有跳到 ${label}：${why}` }))
+      setSearchRefresh(n => n + 1)
+    },
+    // 換日期等了 15 秒新資料還沒套用：D98 佇列沒清空前不套用新視窗 → 說清楚原因，繼續等（存好就會自動跳過去）
+    onSlow: () => {
+      const label = jumpLabelRef.current || '這張卡'
+      const why = board.saveError ? `有 ${board.saveError.count} 個操作未儲存`
+        : board.pending > 0 || board.saving ? '工作台還在儲存' : '新日期的資料還在載入'
+      showToast(board.saveError ? 'warn' : 'info', `${label}：${why}，畫面還沒切過去；完成後會自動跳過去（按 ◀ ▶ 或換檢視則取消）`)
+    },
+    onDone: () => setPoolReveal(null),
+  })
+  const { cancel: cancelJump } = jump
+  const { setDragging } = board
+  /** 拉下緣改工時進行中（onResizing 記下）：這段期間不接受跳轉 */
+  const resizingRef = useRef(false)
+  /** 日檢視拉下緣改工時：開始時先取消等待中的跳轉（程式捲動會讓工時換算算錯），再照原本通知 useBoard */
+  const onResizing = useCallback((v: boolean) => {
+    resizingRef.current = v
+    if (v) cancelJump()
+    setDragging(v)
+  }, [cancelJump, setDragging])
+  /** 畫面上的資料（目前日期窗＋待排區＋待排池，含還沒存完的樂觀更新） */
+  const searchLocal = useCallback((sq: SearchQuery): SearchHit[] => (data ? searchBoardBody(data, sq) : []), [data])
+  /** 伺服器：全部已排的卡（不限畫面日期）＋隱藏／結案原因 */
+  const searchRemote = useCallback(async (sq: SearchQuery, signal: AbortSignal): Promise<RemoteSearchResult> => {
+    const r = await fetchSearch(sq.q, signal)
+    if (r.json?.success) return { ok: true, hits: r.json.hits, truncated: r.json.truncated }
+    return { ok: false, error: r.error ?? '搜尋失敗' }
+  }, [])
+  const closedMarkMap = closedMarks.marks
+  /** 合併：同一張卡以畫面為準；畫面已載入那天卻沒有這張＝剛被移走，丟掉；本機結案處理中的行合併成一列（mergeBoardHits） */
+  const searchMerge = useCallback((remote: SearchHit[], local: SearchHit[]): SearchHit[] => {
+    if (!data) return local
+    const ids = new Set<string>()
+    for (const c of data.holding) ids.add(c.placementId)
+    for (const d of data.days) for (const c of d.cards) ids.add(c.placementId)
+    return mergeBoardHits(remote, local, {
+      localPlacementIds: ids,
+      localDates: new Set(data.days.map(d => d.date)),
+      isClosing: k => closedMarkMap.has(closureKey(k)),
+    })
+  }, [data, closedMarkMap])
 
   // ── 拖曳 ────────────────────────────────────────────────────────────────
   const sensors = useSensors(
@@ -562,6 +649,8 @@ export default function BoardLayout() {
     const d = e.active.data.current as { kind?: string; card?: PackagingCardData | null; bc?: BoardCard } | undefined
     if (d?.kind === 'pool' && d.card) setActiveDrag({ kind: 'pool', card: d.card, rule: ruleForPoolCard(d.card) })
     else if (d?.kind === 'placement' && d.bc) setActiveDrag({ kind: 'placement', bc: d.bc, rule: ruleForBoardCard(d.bc) })
+    // D113：拖曳中不能程式捲動（dnd-kit 的插入點會算錯）→ 取消等待中的跳轉
+    cancelJump()
     board.setDragging(true)
   }
 
@@ -752,8 +841,68 @@ export default function BoardLayout() {
     </div>
   )
 
+  /**
+   * D113：搜尋結果 → 跳過去（回 false＝跳不過去，已 toast 原因）。
+   * 以畫面上的同一張卡為準（依 placementId 找；剛拖過、還沒存完的卡伺服器還是舊日期）。
+   * 只在目標日不在畫面上時才 go()：保留目前的檢視模式（日／週／兩週），只換起點；延誤卡的目標日＝顯示日（D50）。
+   * OrderSearch 呼叫時才讀這些值（propsRef），不必 useCallback。
+   */
+  const onSearchJump = (hit: SearchHit): boolean => {
+    // 拖曳、拉下緣改工時進行中：換日會卸載正在拉的卡、程式捲動會讓插入點／工時換算算錯（還在等伺服器結果的 Enter 也會走到這裡）
+    if (activeDrag || resizingRef.current) {
+      showToast('info', `${hit.label}：拖曳或調整工時中，放開後再跳到卡片`)
+      return false
+    }
+    if (closedMarks.has(hit.soLineKey)) {
+      showToast('info', `${hit.label} 結案處理中，已從畫面移除（可在「結案池」查看）`)
+      return false
+    }
+    const local = hit.placementId
+      ? ([...data.holding, ...data.days.flatMap(d => d.cards)].find(c => c.placementId === hit.placementId) ?? null)
+      : null
+    const plan = planBoardJump({
+      hit,
+      local: local ? { displayDate: local.displayDate, completed: local.completed != null } : null,
+      view,
+      rollTarget: data.rollTarget,
+      windowMatches,
+      loadedDates: data.days.map(d => d.date),
+      shownDay: dayData?.date ?? null,
+      hideDone,
+    })
+    if (!plan.ok) { showToast('warn', plan.reason); return false }
+    // 揭露被藏起來的卡：只改畫面上的狀態、不寫 localStorage（使用者的偏好不變），並告訴使用者
+    const notes: string[] = []
+    if (plan.revealPool && poolHidden && isDesktop) { setPoolHidden(false); notes.push('已暫時打開待排池') }
+    if (plan.showDone) { setHideDone(false); notes.push('已暫時顯示已完成的卡（要再隱藏請勾回「隱藏已完成」）') }
+    if (notes.length > 0) showToast('info', `${hit.label}：${notes.join('；')}`)
+    if (plan.poolCardId) {
+      revealNonceRef.current += 1
+      setPoolReveal({ cardId: plan.poolCardId, nonce: revealNonceRef.current })
+    }
+    let note: string | null = null
+    if (plan.navigate && plan.date) {
+      // 和按 ◀ ▶ 一樣：D98 會放行還在等合併的批；新日期的資料要等存檔佇列清空才會套用（等待中顯示「前往 M/D…」）
+      go(view, plan.navigate.anchor)
+      note = `前往 ${md(plan.date)}…`
+    }
+    jumpLabelRef.current = `${hit.label}${plan.date ? `（${md(plan.date)}）` : plan.place === 'holding' ? '（待排區）' : '（待排池）'}`
+    // gate（排定卡、待排區卡）：等「要的那一段」的資料真的套用才找卡；資料裡沒有這張＝立刻說找不到。待排池卡不分日期，不必等
+    let gate: (() => JumpGateState) | undefined
+    if (plan.place !== 'pool') {
+      const placementId = plan.target.id
+      // 換日期＝剛 go() 的那一段；不換＝目前要求的那一段（windowMatches 已是 true）。待排區卡不看日期（換到哪一段都在）
+      const want = plan.place === 'day' ? navReqRef.current : null
+      gate = () => boardJumpGateState({ want, nav: navReqRef.current, data: dataRef.current, placementId })
+    }
+    jump.request(plan.target, note, gate)
+    return true
+  }
+
   return (
-    <div className="min-h-screen bg-[#050b14] text-white lg:flex lg:h-screen lg:flex-col lg:overflow-hidden">
+    <div ref={rootRef} data-search-root="" className="min-h-screen bg-[#050b14] text-white lg:flex lg:h-screen lg:flex-col lg:overflow-hidden">
+      {/* D113：找卡跳轉的 scroll-margin＋目前發光的那張卡（屬性選擇器，卡片元件不必知道自己在發光） */}
+      <style>{jump.css}</style>
       {/* ─── 標題列＋鎖橫幅＋工具列 ─── */}
       <header className="shrink-0 space-y-2 px-4 pb-2 pt-3">
         <div className="flex flex-wrap items-end gap-x-4 gap-y-1">
@@ -809,6 +958,22 @@ export default function BoardLayout() {
           <label className="flex cursor-pointer items-center gap-1.5 rounded px-1.5 py-1 text-slate-300 hover:bg-slate-900">
             <input type="checkbox" checked={hideDone} onChange={toggleHideDone} className="accent-sky-500" />隱藏已完成
           </label>
+          {/* D113 排程區單號搜尋（手機上獨占一行） */}
+          <OrderSearch
+            local={searchLocal}
+            remote={searchRemote}
+            merge={searchMerge}
+            refreshToken={searchRefresh}
+            epoch={board.lastSavedAt}
+            jumpFail={jumpFail}
+            onJump={onSearchJump}
+            hideCompleted={hideDone}
+            scopeNote="全部已排的卡（不限畫面日期）＋待排區＋待排池"
+            disabled={dragging}
+            isDesktop={isDesktop}
+            pendingNote={jump.pending?.note ?? null}
+            onOpenClosures={() => setDialog({ t: 'closures' })}
+          />
           <span className="flex-1" />
           {/* 自動儲存狀態 */}
           {board.saveError ? (
@@ -899,6 +1064,7 @@ export default function BoardLayout() {
               showManualTag
               manualManageHref="/packaging/pool"
               onCloseLine={canClose ? c => openCloseDialog(c, data.pool.cardMeta[c.cardId]?.remainingQty ?? c.qtyCard) : undefined}
+              reveal={poolReveal}
             >
               <ParkingArea
                 cards={holdingCards}
@@ -950,7 +1116,7 @@ export default function BoardLayout() {
                   onEditCapacity={editCapacity}
                   onGoDate={d => go('day', d <= data.rollTarget ? null : d)}
                   onResize={resizeMinutes}
-                  onResizing={board.setDragging}
+                  onResizing={onResizing}
                   loadingOverlay={loadingOverlay}
                   reorderHint={reorderHint}
                   ownLaneKey={ownLaneKey}
