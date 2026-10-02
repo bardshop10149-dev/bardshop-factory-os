@@ -3,6 +3,7 @@ import { getSupabaseAdminClient, formatSupabaseAdminError } from '@/lib/supabase
 import { guardPermission } from '@/lib/requireAuth'
 import { rowMatchesKeyword } from '@/lib/argoerp/dailyOrderSheetShared'
 import { addWorkingDays } from '@/lib/argoerp/moExportShared'
+import { loadPlateRuleMeta, plateCountIssue, type PlateRuleMeta } from '@/lib/sara/routeResolve'
 
 export const dynamic = 'force-dynamic'
 
@@ -79,6 +80,10 @@ interface SummaryRow extends Record<string, unknown> {
   idle?: boolean
   /** 數量（已去掉千分位），供大量單篩選用 */
   qty_num?: number
+  /** 盤數異常：途程設定要用盤數算工時，但出單表沒填盤數 */
+  plate_missing?: boolean
+  /** 盤數異常的說明（哪條途程、哪幾道工序要盤數） */
+  plate_missing_note?: string
   /** 狀態的判斷依據，滑鼠移上去看得到為什麼是這個狀態 */
   status_note: string
 }
@@ -134,6 +139,10 @@ export async function GET(request: NextRequest) {
       .order('created_at', { ascending: true }).limit(1)
     const firstSyncDate = str(firstSync?.[0]?.created_at).slice(0, 10) || '2026-08-31'
 
+    // 盤數異常判定用的途程主檔。用途程設定判而不是看品號像不像壓克力，
+    // 這樣標出來的列才等於產生工序時真正會被擋下的列（見 lib/sara/routeResolve.ts）。
+    const plateMeta: PlateRuleMeta = await loadPlateRuleMeta(supabase)
+
     // ① 攤平所有日期的出單表
     const { data: sheets, error: sheetErr } = await supabase
       .from(SHEET_TABLE)
@@ -148,6 +157,27 @@ export async function GET(request: NextRequest) {
         if (!str(r.order_number) && !str(r.item_code)) continue
         flat.push({ ...r, sheet_date: s.sheet_date, row_status: '未開始', status_note: '' })
       }
+    }
+
+    // 盤數異常：途程設定要用盤數算工時，但這一列沒填盤數。
+    // 跟 overdue/idle 不同，這個在這裡算而不是在 respond()——它只跟出單表內容和
+    // 途程設定有關，不隨「今天是哪一天」改變，所以算一次進快取就夠。
+    // 也刻意不排除「無資料」的舊列：缺盤數是資料不完整，與做到哪一站無關。
+    for (const r of flat) {
+      const issue = plateCountIssue(
+        {
+          item_code: str(r.item_code),
+          item_spec: str(r.item_name) || str(r.item_spec),
+          factory: str(r.factory),
+          plate_count: r.plate_count,
+          quantity: r.quantity,
+        },
+        plateMeta,
+      )
+      r.plate_missing = !!issue
+      r.plate_missing_note = issue
+        ? `途程「${issue.routeId}」的 ${issue.ops.join('、')} 以盤數計算工時，但這一列沒填盤數`
+        : ''
     }
 
     // ② 撈這些工單號的報工紀錄（含裸號，供舊資料比對）
@@ -302,6 +332,7 @@ function respond(
     for (const r of flat) {
       // 數量：出單表存的是字串，可能帶千分位
       r.qty_num = parseFloat(str(r.quantity).replace(/,/g, '')) || 0
+
       if (r.row_status === '無資料') { r.overdue = false; r.idle = false; continue }
       const due = normDate(r.delivery_date)
       r.overdue = !!due && due < todayStr && r.row_status !== '已完成'
@@ -331,6 +362,9 @@ function respond(
       // 大量單：500 以上那組本來就涵蓋 1000 以上，兩個獨立不互斥
       '量>500': r => (r.qty_num ?? 0) > 500,
       '量>1000': r => (r.qty_num ?? 0) > 1000,
+      // 盤數異常：途程要用盤數算工時卻沒填盤數。這種列產生工序時會被整列擋下，
+      // 所以是「補了才送得出去」的待辦，不只是提醒。
+      盤數異常: r => !!r.plate_missing,
     }
     const activeAlerts = alertFilters.filter(a => a in ALERT_PREDS)
     const passAlerts = (r: SummaryRow) => activeAlerts.every(a => ALERT_PREDS[a](r))

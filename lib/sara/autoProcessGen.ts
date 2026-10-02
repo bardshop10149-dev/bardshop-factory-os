@@ -29,13 +29,12 @@ import {
   estTimeFrom, isPrintStation2F6F, loadEstBasisMode, normalizeQtyMode, resolveEffQty,
   type EstBasisMode, type QtyMode,
 } from './estTime'
+import { resolveRoute } from './routeResolve'
 
 const BUFFER_KEY = 'sara_csv_buffer'
 const SENT_LEDGER_KEY = 'sara_auto_gen_sent'
 const PENDING_KEY = 'sara_process_gen_pending'
 
-const CP_ROUTE = '常平一般壓克力製程'
-const FAKE_KO_ROUTE = '2mm+1mm壓克力貼合/V90單面印刷'
 const LEDGER_RETENTION_DAYS = 30
 
 // 工時計算基準改由 lib/sara/estTime.ts 統一提供（原本這裡有一份複製，與另外三處
@@ -218,26 +217,9 @@ export async function runAutoProcessGen(sheetDate: string, opts: AutoGenOptions 
     ((irData ?? []) as { item_code: string; route_id: string }[]).map(r => [r.item_code, r.route_id])
   )
 
-  // 每列實際採用的途程：先做異常判定（廠區與途程不符者視同無途程），
-  // 再對無途程/異常列套用三種自動情境
-  const O_ROUTES = new Set(['委外/7天回', '委外/9天回', '委外/11天回'])
-  const routeForRow = (p: ParsedRow): { routeId: string | null; autoRule: 'cp' | 'ko' | null; anomaly: string | null } => {
-    const existing = irMap.get(p.item_code)
-    // 異常判定（同 process-gen 頁面的規則 4/5/6）
-    const anomaly =
-      (p.factory === 'C' && existing && existing !== CP_ROUTE) ? `廠區常平但途程非「${CP_ROUTE}」（原：${existing}）`
-      : (p.factory === 'T' && p.item_spec.includes('仿柯')) ? '廠區台北但品名含「仿柯」'
-      : (p.factory === 'O' && existing && !O_ROUTES.has(existing)) ? `廠區委外但途程非標準委外途程（原：${existing}）`
-      : null
-    // 有途程且無異常 → 直接用原途程
-    if (existing && !anomaly) return { routeId: existing, autoRule: null, anomaly: null }
-    // 無途程或異常 → 套三種情境
-    if (p.factory === 'C') return { routeId: CP_ROUTE, autoRule: 'cp', anomaly }
-    if (p.factory === 'T' && (p.item_spec.includes('仿柯') || p.item_spec.includes('貼合'))) {
-      return { routeId: FAKE_KO_ROUTE, autoRule: 'ko', anomaly }
-    }
-    return { routeId: null, autoRule: null, anomaly }
-  }
+  // 每列實際採用的途程。規則抽到 lib/sara/routeResolve.ts 共用，因為出單總表的
+  // 「盤數異常」必須用同一套解析——否則那張清單標出來的列會跟實際被擋下的列不一致。
+  const routeForRow = (p: ParsedRow) => resolveRoute(p, irMap)
 
   const routesNeeded = [...new Set(parsed.map(p => routeForRow(p).routeId).filter((v): v is string => !!v))]
   // 工時基準模式（legacy＝盤數優先；route-qty-mode＝依途程設定）。
