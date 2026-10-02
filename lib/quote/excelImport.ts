@@ -891,7 +891,10 @@ export function buildImportPreview(
       for (const p of parsed.priceItems) if (p.price != null && !known.has(p.name)) known.set(p.name, { group: p.group, attrs: null })
       const input = base.input as AcrylicInput
       const productName = base.name.split('｜')[0].replace(/^BA\d+\s*/i, '').trim()
-      const derived = deriveProductFromInput(input, known, { productName, fileName })
+      // 標準配件清單：鑰匙圈那份（沒有就拿配件最多的既有品項）
+      const refs = ctx.referenceProducts ?? []
+      const catalogSource = refs.find((p) => p.id === 'keyring') ?? [...refs].sort((a, b) => (b.config.accessories?.length ?? 0) - (a.config.accessories?.length ?? 0))[0]
+      const derived = deriveProductFromInput(input, known, { productName, fileName }, catalogSource?.config.accessories ?? [])
       const knownPrices = new Map<string, number>(currentPrices)
       for (const p of parsed.priceItems) if (p.price != null && !knownPrices.has(p.name)) knownPrices.set(p.name, p.price)
       const { checks, similar } = checkDerivedProduct(derived, input, base.warnings, ctx.referenceProducts ?? [], knownPrices)

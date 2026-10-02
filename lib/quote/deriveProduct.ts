@@ -8,7 +8,7 @@
  * 純函式、不碰資料庫：價格表裡有沒有這些品名由呼叫端給（knownItems），這裡只負責列出「引用到哪些價格名稱」，
  * 缺的由匯入流程一併新增，否則前台一算就 PRICE_MISSING。
  */
-import type { AcrylicInput, PackingMode, ProductConfig, ProductExtraBoard, Sides } from './types'
+import type { AcrylicInput, PackingMode, ProductAccessory, ProductConfig, ProductExtraBoard, Sides } from './types'
 
 export interface ReferencedPrice {
   name: string
@@ -82,6 +82,8 @@ export function deriveProductFromInput(
   input: AcrylicInput,
   known: Map<string, KnownItem>,
   hint: { productName?: string; fileName?: string } = {},
+  /** 標準配件清單（鑰匙圈那份）：新品項一律列出全部配件，這張表用到的預設勾 */
+  catalogAccessories: ProductAccessory[] = [],
 ): DerivedProduct {
   const notes: string[] = []
   const refs = new Map<string, ReferencedPrice>()
@@ -176,6 +178,21 @@ export function deriveProductFromInput(
       packing.push(entry)
     }
   }
+  // Snow 2026-10-02：匯入的品項都要能選全部配件——照標準清單的順序列出，這張表有用到的預設勾、用量照表；
+  // 表上有、標準清單沒有的接在最後。
+  // 表上用「固定數量／每 N 個」計的同名品項已經進了包裝（業務模式自動計入），不能再出現在配件清單，否則業務再勾一次會算兩次。
+  const used = new Map(accessories.map((a) => [a.item, a]))
+  const inPacking = new Set(packing.map((p) => p.item))
+  const allAccessories: ProductConfig['accessories'] = [
+    ...catalogAccessories
+      .filter((a) => !inPacking.has(a.item))
+      .map((a) => {
+        const u = used.get(a.item)
+        return u ? { ...a, k: u.k, defaultOn: true } : { ...a, defaultOn: false }
+      }),
+    ...accessories.filter((a) => !catalogAccessories.some((c) => c.item === a.item)),
+  ]
+  if (catalogAccessories.length) notes.push(`配件列出標準清單全部 ${allAccessories.length} 項，這張表用到的 ${accessories.length} 項預設勾起`)
 
   const config: ProductConfig = {
     boards: {
@@ -193,7 +210,7 @@ export function deriveProductFromInput(
     laminate,
     wash,
     cut: { t1: input.cut.t1, t2: input.cut.t2, t3: input.cut.t3 },
-    accessories,
+    accessories: allAccessories,
     packing,
     scrapPct: CHANGPING_POLICY.scrapPct,
     costRatio: CHANGPING_POLICY.costRatio,

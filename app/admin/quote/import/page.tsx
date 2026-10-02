@@ -320,7 +320,12 @@ export default function QuoteImportPage() {
                     <dt className="text-slate-500">切割時間</dt><dd className="text-slate-200 font-mono">t1 {proposal.config.cut.t1}・t2 {proposal.config.cut.t2}・t3 {proposal.config.cut.t3} 分／板</dd>
                     <dt className="text-slate-500">耗損／成本率</dt><dd className="text-slate-200 font-mono">{proposal.config.scrapPct}%・{proposal.config.costRatio}（毛利 {Math.round((1 - proposal.config.costRatio) * 100)}%）</dd>
                     <dt className="text-slate-500">包裝產能</dt><dd className="text-slate-200 font-mono">{proposal.config.packCapacityPerHour} 個／人時</dd>
-                    <dt className="text-slate-500">配件</dt><dd className="text-slate-200">{proposal.config.accessories.length ? proposal.config.accessories.map((a) => `${a.item} ×${a.k}`).join('、') : '無'}</dd>
+                    <dt className="text-slate-500">配件</dt><dd className="text-slate-200">{(() => {
+                      // 清單會帶入全部標準配件；這裡只列這張表用到、建好後預設勾起的，其餘只報數量
+                      const on = proposal.config.accessories.filter((a) => a.defaultOn)
+                      const off = proposal.config.accessories.length - on.length
+                      return `${on.length ? `預設勾：${on.map((a) => `${a.item} ×${a.k}`).join('、')}` : '這張表沒用到配件'}${off ? `（另有 ${off} 項可選）` : ''}`
+                    })()}</dd>
                     <dt className="text-slate-500">包裝</dt><dd className="text-slate-200">{proposal.config.packing.length ? proposal.config.packing.map((k) => `${k.item}（${k.mode}${k.n ? ` n=${k.n}` : ''}${k.k && k.k !== 1 ? ` ×${k.k}` : ''}）`).join('、') : '無'}</dd>
                   </dl>
                   {missingPrices.length > 0 && (
