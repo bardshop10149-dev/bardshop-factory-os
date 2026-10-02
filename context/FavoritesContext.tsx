@@ -1,7 +1,6 @@
 'use client'
 
 import React, { createContext, useContext, useEffect, useState } from 'react'
-import { supabase } from '../lib/supabaseClient'
 
 interface FavoritesContextType {
   favorites: string[]
@@ -11,87 +10,55 @@ interface FavoritesContextType {
 
 const FavoritesContext = createContext<FavoritesContextType | undefined>(undefined)
 
+/**
+ * 側欄「我的最愛」。
+ * 讀寫一律走 /api/profile/favorites（伺服器端以登入 cookie 認定是誰，只能動自己那一列）；
+ * 以前用 anon key 直讀／直改 members，等於任何人都能改任何成員的任何欄位。
+ */
 export function FavoritesProvider({ children }: { children: React.ReactNode }) {
   const [favorites, setFavorites] = useState<string[]>([])
   const [loading, setLoading] = useState(true)
-  const [userId, setUserId] = useState<number | null>(null)
+  // 伺服器成功認出身分後才允許切換收藏（未登入頁面如 /login 也會掛這個 Provider）
+  const [identified, setIdentified] = useState(false)
 
   useEffect(() => {
-    const fetchUser = async () => {
-      const { data: authData } = await supabase.auth.getUser()
-      const authUserId = authData.user?.id || ''
-
-      // 1. 🔥 從瀏覽器取出登入者的 Email
-      // (這個值是在 Login 頁面登入成功時存進去的)
-      const currentUserEmail = localStorage.getItem('bardshop_user_email')
-
-      if (!currentUserEmail && !authUserId) {
-        console.warn('尚未登入，無法讀取個人設定')
-        setLoading(false)
-        return
-      }
-
-      console.log('正在讀取使用者設定:', authUserId || currentUserEmail)
-
-      let data: { id: number; favorites: string[] | null } | null = null
-      let error: { message?: string } | null = null
-
-      if (authUserId) {
-        const result = await supabase
-          .from('members')
-          .select('id, favorites')
-          .eq('auth_user_id', authUserId)
-          .maybeSingle()
-        data = result.data
-        error = result.error
-      }
-
-      if (!data && currentUserEmail) {
-        const result = await supabase
-          .from('members')
-          .select('id, favorites')
-          .eq('email', currentUserEmail)
-          .maybeSingle()
-        data = result.data
-        error = result.error
-      }
-      
-      if (error) {
-        console.error('讀取失敗:', error.message)
-      }
-
-      if (data) {
-        setUserId(data.id)
-        setFavorites(Array.isArray(data.favorites) ? data.favorites : [])
-      }
-      setLoading(false)
-    }
-
-    fetchUser()
+    let cancelled = false
+    fetch('/api/profile/favorites')
+      .then(async r => (r.ok ? (await r.json()) as { favorites?: string[] } : null))
+      .then(d => {
+        if (cancelled || !d) return
+        setFavorites(Array.isArray(d.favorites) ? d.favorites : [])
+        setIdentified(true)
+      })
+      .catch(e => console.error('讀取我的最愛失敗:', e))
+      .finally(() => { if (!cancelled) setLoading(false) })
+    return () => { cancelled = true }
   }, [])
 
   const toggleFavorite = async (path: string) => {
-    if (!userId) {
+    if (!identified) {
       alert('無法確認您的身份，請嘗試重新登入。')
       return
     }
 
-    let newFavs
-    if (favorites.includes(path)) {
-      newFavs = favorites.filter(p => p !== path)
-    } else {
-      newFavs = [...favorites, path]
-    }
+    const newFavs = favorites.includes(path)
+      ? favorites.filter(p => p !== path)
+      : [...favorites, path]
 
     setFavorites(newFavs)
 
-    const { error } = await supabase
-      .from('members')
-      .update({ favorites: newFavs })
-      .eq('id', userId)
-    
-    if (error) {
-      console.error('更新失敗:', error)
+    try {
+      const r = await fetch('/api/profile/favorites', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ favorites: newFavs }),
+      })
+      if (!r.ok) {
+        const j = await r.json().catch(() => ({})) as { error?: string }
+        throw new Error(j.error || `HTTP ${r.status}`)
+      }
+    } catch (e) {
+      console.error('更新失敗:', e)
       alert('更新失敗')
       setFavorites(favorites) // 失敗則還原
     }

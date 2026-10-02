@@ -5,6 +5,9 @@ import { useRouter } from 'next/navigation'
 import { useState, useEffect, useCallback } from 'react' // 引入 useCallback
 import { supabase } from '../../lib/supabaseClient'
 
+// 任務列表／訊息輪詢間隔（取代即時訂閱，見下方 useEffect 說明）
+const TASKS_POLL_INTERVAL_MS = 15000
+
 // --- 定義資料介面 ---
 interface Member {
   id: number
@@ -185,27 +188,18 @@ export default function TaskBoardPage() {
       void fetchTasks('')
     }, 0)
 
-    // 訂閱任務更新 (當有人新增任務時自動更新列表)
-    const taskChannel = supabase.channel('tasks-page')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'tasks' }, () => {
-         // 只有在「沒有搜尋」的時候才自動更新，避免搜尋到一半列表亂跳
-        if (!searchTerm) void fetchTasks('')
-      })
-      .subscribe()
+    // 任務列表／訊息改用輪詢刷新，取代原本的 postgres_changes 即時訂閱：
+    // tasks / task_messages 鎖上 RLS 後，瀏覽器的 anon 連線收不到任何變更事件
+    // （Realtime 也遵守 RLS），做法比照 app/admin/production/notice/page.tsx。
+    const pollId = setInterval(() => {
+      // 只有在「沒有搜尋」的時候才自動更新，避免搜尋到一半列表亂跳
+      if (!searchTerm) void fetchTasks('')
+      if (selectedTask) void fetchMessages(selectedTask.id)
+    }, TASKS_POLL_INTERVAL_MS)
 
-    // 訂閱訊息更新
-    const msgChannel = supabase.channel('messages-live')
-      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'task_messages' }, (payload) => {
-        if (selectedTask && payload.new.task_id === selectedTask.id) {
-           void fetchMessages(selectedTask.id)
-        }
-      })
-      .subscribe()
-
-    return () => { 
+    return () => {
       clearTimeout(initFetchTimer)
-      supabase.removeChannel(taskChannel) 
-      supabase.removeChannel(msgChannel)
+      clearInterval(pollId)
     }
   }, [router, selectedTask, searchTerm, fetchTasks, fetchMessages]) // 注意依賴項
 

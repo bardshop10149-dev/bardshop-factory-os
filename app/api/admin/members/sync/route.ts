@@ -2,10 +2,16 @@ import { NextResponse } from 'next/server'
 import { formatSupabaseAdminError, getSupabaseAdminClient } from '../../../../../lib/supabaseAdmin'
 import { guardAdmin } from '../../../../../lib/requireAuth'
 
+/**
+ * 把「還沒綁 auth_user_id」的成員，對應到既有的 Supabase Auth 帳號。
+ *
+ * 2026-09-27 起 members.password 欄位已刪除（sql/20260927_lockdown_anon.sql；該欄早已全空），
+ * 所以這支不再「用明文密碼替成員建 Auth 帳號」——找不到 Auth 帳號的成員會列在 failed，
+ * 請管理員到「組織成員管理 → 設定登入密碼」替他建立。
+ */
 type MemberRow = {
   id: number
   email: string | null
-  password: string | null
   auth_user_id: string | null
 }
 
@@ -37,7 +43,7 @@ export async function POST() {
     const supabaseAdmin = getSupabaseAdminClient()
     const { data: members, error: membersError } = await supabaseAdmin
       .from('members')
-      .select('id, email, password, auth_user_id')
+      .select('id, email, auth_user_id')
       .is('auth_user_id', null)
       .order('id', { ascending: true })
 
@@ -50,7 +56,6 @@ export async function POST() {
 
     const rows = (members || []) as MemberRow[]
     let updated = 0
-    let createdAuthUsers = 0
     let skipped = 0
     const failed: Array<{ memberId: number; email: string; reason: string }> = []
 
@@ -62,31 +67,11 @@ export async function POST() {
       }
 
       try {
-        let authUser = await findAuthUserByEmail(email)
+        const authUser = await findAuthUserByEmail(email)
 
         if (!authUser) {
-          if (!member.password) {
-            failed.push({ memberId: member.id, email, reason: '缺少密碼，無法建立 auth user' })
-            continue
-          }
-
-          const { data: createdUserData, error: createError } = await supabaseAdmin.auth.admin.createUser({
-            email,
-            password: String(member.password),
-            email_confirm: true,
-          })
-
-          if (createError || !createdUserData.user?.id) {
-            failed.push({
-              memberId: member.id,
-              email,
-              reason: formatSupabaseAdminError(createError?.message || '建立 auth user 失敗'),
-            })
-            continue
-          }
-
-          authUser = createdUserData.user
-          createdAuthUsers += 1
+          failed.push({ memberId: member.id, email, reason: '尚無 Auth 帳號，請用「設定登入密碼」替此成員建立' })
+          continue
         }
 
         const { error: updateError } = await supabaseAdmin
@@ -110,7 +95,7 @@ export async function POST() {
       ok: true,
       totalCandidates: rows.length,
       updated,
-      createdAuthUsers,
+      createdAuthUsers: 0, // 保留欄位讓前端相容；本路由不再建立 Auth 帳號
       skipped,
       failed,
     })
