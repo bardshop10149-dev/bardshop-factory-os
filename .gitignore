@@ -49,3 +49,6 @@ _tmp_*
 # 本機開發工具設定（launch.json 等為個人環境，不入版控）
 .claude/
 .tmp_*
+
+# 交換區修正前的快照（scripts/sara-recalc-buffer-est.mjs 產生，內含營運資料，不進版控）
+sara_csv_buffer_backup_*.json
