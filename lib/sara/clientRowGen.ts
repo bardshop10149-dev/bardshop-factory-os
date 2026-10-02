@@ -11,6 +11,7 @@ import { supabase } from '../supabaseClient'
 import { type SaraRow } from './buildSaraRow'
 import { computePriorityFromDue, type PriorityRule } from './priorityRules'
 import { estTimeFrom, isPrintStation2F6F, loadEstBasisMode, normalizeQtyMode, resolveEffQty, type EstBasisMode, type QtyMode } from './estTime'
+import { isGroupOrderDocType } from './routeResolve'
 
 export interface SheetHitRow {
   sheet_date: string
@@ -20,6 +21,8 @@ export interface SheetHitRow {
   quantity: number
   due: string
   pan_count: number
+  /** 單據別；含「集單」者免填盤數，沒填就當 1 盤算 */
+  doc_type?: string
   /** 依廠區選擇的製令/採購/請購單號（＝ SARA 的 Manufacturing Order Number） */
   ref_number?: string
   line_seq?: string
@@ -178,17 +181,20 @@ export async function generateSaraRows(
     // 一條缺工序的製程排，而且看不出少了什麼。
     const rowsForItem: SaraRow[] = []
     let blocked: string | null = null
+    let assumedPan = false
     for (const op of ops) {
       const ot = otMap.get(op.op_name)
       const station = ot?.station ?? ''
       const std = ot?.std_time_min ?? 0
       const eff = resolveEffQty({
         station, qtyMode: op.qty_mode, quantity: row.quantity, panCount: row.pan_count, mode: estMode,
+        isGroupOrder: isGroupOrderDocType(row.doc_type),
       })
       if (!eff.ok) {
         blocked = `${op.op_name}（${station || '未知站點'}）：${eff.reason}`
         break
       }
+      if (eff.assumedPan) assumedPan = true
       rowsForItem.push({
         order_number: row.order_number,
         mfg_order_number: row.ref_number || row.order_number,
@@ -217,6 +223,9 @@ export async function generateSaraRows(
     if (blocked) {
       warns.push(`${row.order_number} ${row.item_code} 已跳過：請先在出單表補上盤數 — ${blocked}`)
       return
+    }
+    if (assumedPan) {
+      warns.push(`${row.order_number} ${row.item_code} 是集單且沒填盤數，工時以 1 盤計算`)
     }
     out.push(...rowsForItem)
   })

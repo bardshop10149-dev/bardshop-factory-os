@@ -29,7 +29,7 @@ import {
   estTimeFrom, isPrintStation2F6F, loadEstBasisMode, normalizeQtyMode, resolveEffQty,
   type EstBasisMode, type QtyMode,
 } from './estTime'
-import { resolveRoute } from './routeResolve'
+import { isGroupOrderDocType, resolveRoute } from './routeResolve'
 
 const BUFFER_KEY = 'sara_csv_buffer'
 const SENT_LEDGER_KEY = 'sara_auto_gen_sent'
@@ -58,6 +58,8 @@ interface ParsedRow {
   quantity: number
   due: string
   pan_count: number
+  /** 集單免填盤數，沒填就當 1 盤算 */
+  is_group_order: boolean
   mo_number?: string
   line_seq?: string
   customer?: string
@@ -184,6 +186,7 @@ export async function runAutoProcessGen(sheetDate: string, opts: AutoGenOptions 
       item_spec: String(r.item_name ?? r.note ?? '').trim(),
       quantity: qty, due: String(r.delivery_date ?? '').trim(),
       pan_count: parseQtyNum(r.plate_count),
+      is_group_order: isGroupOrderDocType(r.doc_type),
       mo_number: refNumber, line_seq: lineSeq,
       customer: String(r.customer ?? '').trim() || undefined,
       factory,
@@ -301,6 +304,7 @@ export async function runAutoProcessGen(sheetDate: string, opts: AutoGenOptions 
       const std = ot?.std_time_min ?? 0
       const eff = resolveEffQty({
         station, qtyMode: op.qty_mode, quantity: p.quantity, panCount: p.pan_count, mode: estMode,
+        isGroupOrder: p.is_group_order,
       })
       if (!eff.ok) {
         blocked = `${op.op_name}（${station || '未知站點'}）：${eff.reason}`

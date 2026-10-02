@@ -33,6 +33,7 @@ interface SummaryRow {
   quantity?: string
   plate_count?: string
   plate_missing?: boolean
+  plate_assumed?: boolean
   plate_missing_note?: string
   delivery_date?: string
   factory?: string
@@ -340,6 +341,9 @@ export default function OrderSummaryPage() {
                       {r.plate_missing ? (
                         <span className="px-1.5 py-0.5 rounded border border-red-700/60 bg-red-950/50 text-red-300"
                           title={r.plate_missing_note}>⛔ 未填</span>
+                      ) : r.plate_assumed ? (
+                        <span className="px-1.5 py-0.5 rounded border border-sky-700/60 bg-sky-950/40 text-sky-300"
+                          title={r.plate_missing_note}>1 盤·集單</span>
                       ) : (
                         <span className="text-yellow-400/80">{r.plate_count || '—'}</span>
                       )}

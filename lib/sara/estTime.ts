@@ -90,6 +90,9 @@ export const isPackagingStation = (s: string) => s.includes('包裝站')
 export const isTransitStation = (s: string) => s.includes('轉運')
 export const isPrintStation2F6F = (s: string) => s === '印刷站2F' || s === '印刷站6F'
 
+/** 集單沒填盤數時代入的盤數（2026-10-02 生管指定） */
+export const GROUP_ORDER_DEFAULT_PAN = 1
+
 export interface EffQtyInput {
   station: string
   /** 該途程該道工序的設定基準（route_operations.qty_mode） */
@@ -100,11 +103,21 @@ export interface EffQtyInput {
   panCount: number
   /** 省略時用 legacy，維持 2026-10-02 之前的行為 */
   mode?: EstBasisMode
+  /**
+   * 這一列是不是集單（doc_type 含「集單」）。
+   *
+   * 集單可以不填盤數：生管說明集單本來就是把多張小單併成一盤下去跑，沒填就當 1 盤。
+   * 所以集單不會因為缺盤數被擋下，而是代入 GROUP_ORDER_DEFAULT_PAN。
+   */
+  isGroupOrder?: boolean
 }
 
 export type EffQtyResult =
-  /** 算得出來：effQty 要乘上單位時間，basis 說明用的是哪個基準 */
-  | { ok: true; effQty: number; basis: '固定1' | '個數' | '盤數' }
+  /**
+   * 算得出來：effQty 要乘上單位時間，basis 說明用的是哪個基準。
+   * assumedPan=true 代表盤數沒填、是按集單規則代入的，不是出單表上真的有這個數字。
+   */
+  | { ok: true; effQty: number; basis: '固定1' | '個數' | '盤數'; assumedPan?: true }
   /** 算不出來（設定要用盤數但盤數沒填）——呼叫端要擋下該列，不要硬算 */
   | { ok: false; reason: string }
 
@@ -115,7 +128,7 @@ export type EffQtyResult =
  * legacy 模式永遠不會回 ok:false。
  */
 export function resolveEffQty(input: EffQtyInput): EffQtyResult {
-  const { station, qtyMode, quantity, panCount, mode = DEFAULT_EST_BASIS_MODE } = input
+  const { station, qtyMode, quantity, panCount, mode = DEFAULT_EST_BASIS_MODE, isGroupOrder = false } = input
   if (isTransitStation(station)) return { ok: true, effQty: 1, basis: '固定1' }
   if (isPackagingStation(station)) return { ok: true, effQty: quantity, basis: '個數' }
 
@@ -127,6 +140,11 @@ export function resolveEffQty(input: EffQtyInput): EffQtyResult {
 
   if (qtyMode === '盤數') {
     if (!(panCount > 0)) {
+      // 集單免填盤數，當 1 盤算。集單本來就是把多張小單併成一盤下去跑，
+      // 用個數算會變成一盤印好幾十次，所以這裡代 1 而不是退回個數。
+      if (isGroupOrder) {
+        return { ok: true, effQty: GROUP_ORDER_DEFAULT_PAN, basis: '盤數', assumedPan: true }
+      }
       return { ok: false, reason: '途程設定以盤數計算工時，但出單表沒有填盤數' }
     }
     return { ok: true, effQty: panCount, basis: '盤數' }

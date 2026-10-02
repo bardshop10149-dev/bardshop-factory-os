@@ -14,6 +14,17 @@ export const CP_ROUTE = '常平一般壓克力製程'
 export const FAKE_KO_ROUTE = '2mm+1mm壓克力貼合/V90單面印刷'
 export const O_ROUTES = new Set(['委外/7天回', '委外/9天回', '委外/11天回'])
 
+/**
+ * 這一列是不是集單。
+ *
+ * 判斷依據是出單表的 doc_type 含「集單」——實際資料裡有「壓克力集單」216 列與
+ * 「集單」3 列兩種寫法（2026-10-02 查），用 includes 兩者都涵蓋。
+ * 出單總表的單據別篩選用的也是同一條規則，兩邊要一致。
+ */
+export function isGroupOrderDocType(docType: unknown): boolean {
+  return String(docType ?? '').includes('集單')
+}
+
 export interface RouteRowInput {
   item_code: string
   item_spec: string
@@ -105,29 +116,51 @@ export interface PlateIssue {
   ops: string[]
 }
 
+export type PlateCountStatus =
+  /** 不需要盤數，或盤數已填 */
+  | { kind: 'ok' }
+  /** 該填盤數卻沒填——產生工序時會被整列擋下 */
+  | { kind: 'missing'; routeId: string; ops: string[] }
+  /** 集單沒填盤數，會代入 1 盤。不是錯誤，但要讓人看得到這個數字是假設來的 */
+  | { kind: 'assumed'; routeId: string; ops: string[] }
+
 /**
- * 判定這一列是不是「該填盤數卻沒填」。回傳 null 代表沒問題。
+ * 判定這一列的盤數狀態。
  *
- * 數量為 0 或空白的列不判：那是「改單/示意圖」之類的註記列，本來就不會產生工序。
+ * 數量為 0 或空白的列一律回 ok：那是「改單/示意圖」之類的註記列，不會產生工序。
  */
-export function plateCountIssue(
-  row: RouteRowInput & { plate_count?: unknown; quantity?: unknown },
+export function plateCountStatus(
+  row: RouteRowInput & { plate_count?: unknown; quantity?: unknown; doc_type?: unknown },
   meta: PlateRuleMeta,
-): PlateIssue | null {
+): PlateCountStatus {
   const qty = Number(String(row.quantity ?? '').replace(/,/g, ''))
-  if (!Number.isFinite(qty) || qty <= 0) return null
+  if (!Number.isFinite(qty) || qty <= 0) return { kind: 'ok' }
   const plate = Number(String(row.plate_count ?? '').replace(/,/g, ''))
-  if (Number.isFinite(plate) && plate > 0) return null
+  if (Number.isFinite(plate) && plate > 0) return { kind: 'ok' }
 
   const { routeId } = resolveRoute(row, meta.irMap)
-  if (!routeId) return null
-  const ops = meta.panOpsByRoute.get(routeId)
-  if (!ops || ops.length === 0) return null
-  return {
-    routeId,
-    ops: ops.map(op => {
-      const st = meta.stationOf.get(op) ?? ''
-      return st ? `${op}（${st}）` : op
-    }),
-  }
+  if (!routeId) return { kind: 'ok' }
+  const opNames = meta.panOpsByRoute.get(routeId)
+  if (!opNames || opNames.length === 0) return { kind: 'ok' }
+
+  const ops = opNames.map(op => {
+    const st = meta.stationOf.get(op) ?? ''
+    return st ? `${op}（${st}）` : op
+  })
+  // 集單免填盤數，沒填就當 1 盤算（見 estTime.ts 的 GROUP_ORDER_DEFAULT_PAN），
+  // 不會被擋下，所以不算異常——但仍然回報成 assumed，讓畫面標得出來。
+  if (isGroupOrderDocType(row.doc_type)) return { kind: 'assumed', routeId, ops }
+  return { kind: 'missing', routeId, ops }
+}
+
+/**
+ * 只取「該填卻沒填」的情況（＝產生工序時會被擋下的列）。回傳 null 代表沒問題。
+ * 集單不算，它會代入 1 盤。
+ */
+export function plateCountIssue(
+  row: RouteRowInput & { plate_count?: unknown; quantity?: unknown; doc_type?: unknown },
+  meta: PlateRuleMeta,
+): PlateIssue | null {
+  const st = plateCountStatus(row, meta)
+  return st.kind === 'missing' ? { routeId: st.routeId, ops: st.ops } : null
 }

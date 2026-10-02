@@ -13,6 +13,7 @@ export interface InputRow {
   quantity: number
   due: string
   pan_count: number
+  doc_type?: string             // 單據別；含「集單」者免填盤數，沒填當 1 盤算
   mo_number?: string            // 製令單號（MOT...）/ 採購單號（POC...）/ 請購單號（POO...）
   line_seq?: string             // 銷售訂單序號（match_line_no）；C/O 廠 fallback 為採購單行號
   customer?: string             // 客戶名稱
@@ -29,6 +30,7 @@ export {
   loadEstBasisMode, normalizeQtyMode, resolveEffQty,
   type EstBasisMode, type QtyMode,
 } from '@/lib/sara/estTime'
+export { isGroupOrderDocType } from '@/lib/sara/routeResolve'
 
 export function fmtToday(): string {
   const d = new Date()
@@ -75,6 +77,7 @@ export async function loadSheetInputRows(sheetDate: string): Promise<InputRow[]>
       quantity:     qty,
       due:          String(r.delivery_date ?? '').trim(),
       pan_count:    pan,
+      doc_type:     String(r.doc_type ?? '').trim() || undefined,
       mo_number:    refNumber,
       // 銷售訂單序號（match_line_no = SO 項次，所有廠別通用）
       line_seq:     String(r.match_line_no ?? '').trim() || undefined,

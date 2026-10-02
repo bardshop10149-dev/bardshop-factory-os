@@ -11,7 +11,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { supabase } from '../../../../lib/supabaseClient'
 import { buildSaraRow, type SaraRow } from '../../../../lib/sara/buildSaraRow'
-import { estTimeFrom, fmtToday, isPrintStation2F6F, loadEstBasisMode, loadSheetInputRows, normalizeQtyMode, resolveEffQty, type EstBasisMode, type InputRow, type QtyMode } from './sheetRows'
+import { estTimeFrom, fmtToday, isGroupOrderDocType, isPrintStation2F6F, loadEstBasisMode, loadSheetInputRows, normalizeQtyMode, resolveEffQty, type EstBasisMode, type InputRow, type QtyMode } from './sheetRows'
 
 export interface PendingItemLike {
   sheet_date: string
@@ -160,6 +160,7 @@ export default function PendingPastePanel({
       const eff = resolveEffQty({
         station: op.station, qtyMode: op.qtyMode,
         quantity: base.quantity, panCount: base.pan_count, mode: estMode,
+        isGroupOrder: isGroupOrderDocType(base.doc_type),
       })
       if (!eff.ok) {
         return { rows: [], blocked: `${op.op_name}（${op.station || '未知站點'}）：${eff.reason}` }

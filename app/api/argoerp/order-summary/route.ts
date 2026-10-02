@@ -3,7 +3,7 @@ import { getSupabaseAdminClient, formatSupabaseAdminError } from '@/lib/supabase
 import { guardPermission } from '@/lib/requireAuth'
 import { rowMatchesKeyword } from '@/lib/argoerp/dailyOrderSheetShared'
 import { addWorkingDays } from '@/lib/argoerp/moExportShared'
-import { loadPlateRuleMeta, plateCountIssue, type PlateRuleMeta } from '@/lib/sara/routeResolve'
+import { loadPlateRuleMeta, plateCountStatus, type PlateRuleMeta } from '@/lib/sara/routeResolve'
 
 export const dynamic = 'force-dynamic'
 
@@ -84,6 +84,8 @@ interface SummaryRow extends Record<string, unknown> {
   plate_missing?: boolean
   /** 盤數異常的說明（哪條途程、哪幾道工序要盤數） */
   plate_missing_note?: string
+  /** 集單沒填盤數、以 1 盤代入計算——不是錯誤，但這個數字是假設來的 */
+  plate_assumed?: boolean
   /** 狀態的判斷依據，滑鼠移上去看得到為什麼是這個狀態 */
   status_note: string
 }
@@ -164,20 +166,26 @@ export async function GET(request: NextRequest) {
     // 途程設定有關，不隨「今天是哪一天」改變，所以算一次進快取就夠。
     // 也刻意不排除「無資料」的舊列：缺盤數是資料不完整，與做到哪一站無關。
     for (const r of flat) {
-      const issue = plateCountIssue(
+      const st = plateCountStatus(
         {
           item_code: str(r.item_code),
           item_spec: str(r.item_name) || str(r.item_spec),
           factory: str(r.factory),
           plate_count: r.plate_count,
           quantity: r.quantity,
+          // 集單免填盤數（沒填當 1 盤），所以不算異常，但會標成「以 1 盤計」
+          doc_type: r.doc_type,
         },
         plateMeta,
       )
-      r.plate_missing = !!issue
-      r.plate_missing_note = issue
-        ? `途程「${issue.routeId}」的 ${issue.ops.join('、')} 以盤數計算工時，但這一列沒填盤數`
-        : ''
+      r.plate_missing = st.kind === 'missing'
+      r.plate_assumed = st.kind === 'assumed'
+      r.plate_missing_note =
+        st.kind === 'missing'
+          ? `途程「${st.routeId}」的 ${st.ops.join('、')} 以盤數計算工時，但這一列沒填盤數`
+          : st.kind === 'assumed'
+            ? `集單免填盤數，以 1 盤代入計算（途程「${st.routeId}」的 ${st.ops.join('、')} 以盤數計算工時）`
+            : ''
     }
 
     // ② 撈這些工單號的報工紀錄（含裸號，供舊資料比對）

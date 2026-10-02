@@ -4,7 +4,7 @@ import { Fragment, useState, useCallback, useEffect, useRef } from 'react'
 import { supabase } from '../../../../lib/supabaseClient'
 import { buildSaraRow, type SaraRow } from '../../../../lib/sara/buildSaraRow'
 import { DEFAULT_PRIORITY_RULES, computePriorityFromDue, type PriorityRule } from '../../../../lib/sara/priorityRules'
-import { estTimeFrom, fmtToday, isPrintStation2F6F, isTransitStation, loadEstBasisMode, loadSheetInputRows, normalizeQtyMode, resolveEffQty, type EstBasisMode, type InputRow, type QtyMode } from './sheetRows'
+import { estTimeFrom, fmtToday, isGroupOrderDocType, isPrintStation2F6F, isTransitStation, loadEstBasisMode, loadSheetInputRows, normalizeQtyMode, resolveEffQty, type EstBasisMode, type InputRow, type QtyMode } from './sheetRows'
 import PendingPastePanel from './PendingPastePanel'
 
 // ── 型別 ─────────────────────────────────────────────────────────
@@ -349,6 +349,8 @@ export default function ProcessGenPage() {
       // 途程設定要用盤數算工時、但出單表沒填盤數的列。這些列不送出去——退回用個數
       // 會把工時放大一個量級（實測平均 18.4 倍），而且塔台看不出有問題。
       const missingPlateCount: Array<{ row: InputRow; detail: string }> = []
+      // 集單沒填盤數、以 1 盤代入的列。不是錯誤，但要讓人看得到這個數字是假設來的。
+      const assumedPanRows: InputRow[] = []
       for (const row of inputRows) {
         const routeId = irMap.get(row.item_code)
         if (!routeId) {
@@ -388,6 +390,7 @@ export default function ProcessGenPage() {
         // 整條途程都算得出工時才送；缺一道就整列擋下（見 lib/sara/estTime.ts 檔頭）
         const rowsForItem: SaraRow[] = []
         let blocked: string | null = null
+        let assumedPan = false
         for (const op of ops) {
           const ot      = otMap.get(op.op_name)
           const station = ot?.station ?? ''
@@ -395,11 +398,13 @@ export default function ProcessGenPage() {
           // 工時基準：包裝站→個數；轉運站→固定1；其餘依途程設定的 qty_mode
           const eff = resolveEffQty({
             station, qtyMode: op.qty_mode, quantity: row.quantity, panCount: row.pan_count, mode: estMode,
+            isGroupOrder: isGroupOrderDocType(row.doc_type),
           })
           if (!eff.ok) {
             blocked = `${op.op_name}（${station || '未知站點'}）：${eff.reason}`
             break
           }
+          if (eff.assumedPan) assumedPan = true
           rowsForItem.push({
             order_number: row.order_number, mfg_order_number: row.mo_number || row.order_number,
             product_name: row.item_code, product_desc: row.item_spec,
@@ -422,6 +427,7 @@ export default function ProcessGenPage() {
           missingPlateCount.push({ row, detail: blocked })
           continue
         }
+        if (assumedPan) assumedPanRows.push(row)
         out.push(...rowsForItem)
       }
       // 有途程但 route_operations 無工序的品號 → 顯示警告
@@ -430,6 +436,14 @@ export default function ProcessGenPage() {
         .map(r => `${r.item_code}（途程：${irMap.get(r.item_code)}）`))]
       if (missingOpsItems.length) {
         warns.push(`${missingOpsItems.length} 個品號有途程但 route_operations 無工序資料（需重新上傳工序總表）：${missingOpsItems.slice(0, 4).join('、')}${missingOpsItems.length > 4 ? '…' : ''}`)
+      }
+
+      if (assumedPanRows.length > 0) {
+        const items = [...new Set(assumedPanRows.map(r => `${r.order_number} ${r.item_code}`))]
+        warns.push(
+          `ℹ ${assumedPanRows.length} 列是集單且沒填盤數，工時以 1 盤計算：`
+          + `${items.slice(0, 6).join('、')}${items.length > 6 ? '…' : ''}`
+        )
       }
 
       if (missingPlateCount.length > 0) {
@@ -586,6 +600,7 @@ export default function ProcessGenPage() {
         const eff = resolveEffQty({
           station, qtyMode: normalizeQtyMode(op.qty_mode),
           quantity: row.quantity, panCount: row.pan_count, mode: estMode,
+          isGroupOrder: isGroupOrderDocType(row.doc_type),
         })
         // 這裡直接丟錯讓上層顯示：缺盤數就算不出工時，寧可讓人先回出單表補，
         // 也不要退回用個數算出一個放大十幾倍的工時（見 lib/sara/estTime.ts 檔頭）
