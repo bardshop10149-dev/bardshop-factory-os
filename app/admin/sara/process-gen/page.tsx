@@ -4,7 +4,7 @@ import { Fragment, useState, useCallback, useEffect, useRef } from 'react'
 import { supabase } from '../../../../lib/supabaseClient'
 import { buildSaraRow, type SaraRow } from '../../../../lib/sara/buildSaraRow'
 import { DEFAULT_PRIORITY_RULES, computePriorityFromDue, type PriorityRule } from '../../../../lib/sara/priorityRules'
-import { calcEst, fmtToday, isPackagingStation, isPrintStation2F6F, loadSheetInputRows, type InputRow } from './sheetRows'
+import { estTimeFrom, fmtToday, isPrintStation2F6F, isTransitStation, loadEstBasisMode, loadSheetInputRows, normalizeQtyMode, resolveEffQty, type EstBasisMode, type InputRow, type QtyMode } from './sheetRows'
 import PendingPastePanel from './PendingPastePanel'
 
 // ── 型別 ─────────────────────────────────────────────────────────
@@ -316,14 +316,17 @@ export default function ProcessGenPage() {
 
       // 2. route_operations
       const uniqueRoutes = [...new Set([...irMap.values()])]
-      type RoRow = { route_id: string; sequence: number; op_name: string }
+      // 工時基準開關（預設 legacy＝盤數優先）——見 lib/sara/estTime.ts 檔頭
+      const estMode: EstBasisMode = await loadEstBasisMode(supabase)
+
+      type RoRow = { route_id: string; sequence: number; op_name: string; qty_mode: string | null }
       const { data: roData } = uniqueRoutes.length
-        ? await supabase.from('route_operations').select('route_id,sequence,op_name').in('route_id', uniqueRoutes).order('sequence')
+        ? await supabase.from('route_operations').select('route_id,sequence,op_name,qty_mode').in('route_id', uniqueRoutes).order('sequence')
         : { data: [] as RoRow[] }
-      const roMap = new Map<string, { sequence: number; op_name: string }[]>()
+      const roMap = new Map<string, { sequence: number; op_name: string; qty_mode: QtyMode }[]>()
       for (const r of (roData ?? []) as RoRow[]) {
         const arr = roMap.get(r.route_id) ?? []
-        arr.push({ sequence: r.sequence, op_name: r.op_name })
+        arr.push({ sequence: r.sequence, op_name: r.op_name, qty_mode: normalizeQtyMode(r.qty_mode) })
         roMap.set(r.route_id, arr)
       }
 
@@ -343,6 +346,9 @@ export default function ProcessGenPage() {
       // 4. 產生輸出列
       const out: SaraRow[] = []
       const noRoute: InputRow[] = []
+      // 途程設定要用盤數算工時、但出單表沒填盤數的列。這些列不送出去——退回用個數
+      // 會把工時放大一個量級（實測平均 18.4 倍），而且塔台看不出有問題。
+      const missingPlateCount: Array<{ row: InputRow; detail: string }> = []
       for (const row of inputRows) {
         const routeId = irMap.get(row.item_code)
         if (!routeId) {
@@ -379,21 +385,30 @@ export default function ProcessGenPage() {
           })
           continue
         }
+        // 整條途程都算得出工時才送；缺一道就整列擋下（見 lib/sara/estTime.ts 檔頭）
+        const rowsForItem: SaraRow[] = []
+        let blocked: string | null = null
         for (const op of ops) {
           const ot      = otMap.get(op.op_name)
           const station = ot?.station ?? ''
           const std     = ot?.std_time_min ?? 0
-          // 包裝站→生產數量；轉運站→固定1；其他站點→盤數（盤數為0時用生產數量）；最低10分鐘
-          const jobQty  = (row.pan_count > 0 && !isPackagingStation(station)) ? row.pan_count : row.quantity
-          const est     = calcEst(std, row.quantity, row.pan_count, station)
-          out.push({
+          // 工時基準：包裝站→個數；轉運站→固定1；其餘依途程設定的 qty_mode
+          const eff = resolveEffQty({
+            station, qtyMode: op.qty_mode, quantity: row.quantity, panCount: row.pan_count, mode: estMode,
+          })
+          if (!eff.ok) {
+            blocked = `${op.op_name}（${station || '未知站點'}）：${eff.reason}`
+            break
+          }
+          rowsForItem.push({
             order_number: row.order_number, mfg_order_number: row.mo_number || row.order_number,
             product_name: row.item_code, product_desc: row.item_spec,
             lot_number: row.line_seq || row.order_number,
             prod_qty: row.quantity, due: row.due,
             priority: prioFor(row.due), earliest_start: today,
             job_seq: op.sequence, workcenter: station, job_name: op.op_name,
-            job_qty: jobQty, outsourcing: '', est_time: est, time_unit: '分鐘',
+            // 製程數量與預估工時用同一個基準，否則塔台看到的兩個數字互相矛盾
+            job_qty: eff.effQty, outsourcing: '', est_time: estTimeFrom(std, eff.effQty), time_unit: '分鐘',
             bom: '', mat_req_qty: '',
             customer: row.customer,
             // 台北廠且為印刷站2F/6F 才填入分配機台，其他廠區及站點留空
@@ -403,6 +418,11 @@ export default function ProcessGenPage() {
             factory: row.factory,
           })
         }
+        if (blocked) {
+          missingPlateCount.push({ row, detail: blocked })
+          continue
+        }
+        out.push(...rowsForItem)
       }
       // 有途程但 route_operations 無工序的品號 → 顯示警告
       const missingOpsItems = [...new Set(noRoute
@@ -410,6 +430,15 @@ export default function ProcessGenPage() {
         .map(r => `${r.item_code}（途程：${irMap.get(r.item_code)}）`))]
       if (missingOpsItems.length) {
         warns.push(`${missingOpsItems.length} 個品號有途程但 route_operations 無工序資料（需重新上傳工序總表）：${missingOpsItems.slice(0, 4).join('、')}${missingOpsItems.length > 4 ? '…' : ''}`)
+      }
+
+      if (missingPlateCount.length > 0) {
+        const items = [...new Set(missingPlateCount.map(m => `${m.row.order_number} ${m.row.item_code}`))]
+        warns.push(
+          `⛔ ${missingPlateCount.length} 列因為沒填盤數而無法計算工時，已排除不送：`
+          + `${items.slice(0, 6).join('、')}${items.length > 6 ? '…' : ''}。`
+          + `請回出單表補上盤數後重新產生（例：${missingPlateCount[0].detail}）`
+        )
       }
       setSaraRows(out)
       setNoRouteRows(noRoute)
@@ -533,10 +562,11 @@ export default function ProcessGenPage() {
     const today = fmtToday()
     try {
       const routeId: string = code   // 直接指定途程名稱（route_id）
+      const estMode: EstBasisMode = await loadEstBasisMode(supabase)
 
-      type SOp = { sequence: number; op_name: string }
+      type SOp = { sequence: number; op_name: string; qty_mode: string | null }
       const { data: roData } = await supabase
-        .from('route_operations').select('sequence,op_name')
+        .from('route_operations').select('sequence,op_name,qty_mode')
         .eq('route_id', routeId).order('sequence')
       const ops = (roData ?? []) as SOp[]
       if (!ops.length) throw new Error(`途程「${routeId}」無工序資料`)
@@ -553,8 +583,13 @@ export default function ProcessGenPage() {
         const ot      = otMap.get(op.op_name)
         const station = ot?.station ?? ''
         const std     = ot?.std_time_min ?? 0
-        const jobQty  = (row.pan_count > 0 && !isPackagingStation(station)) ? row.pan_count : row.quantity
-        const est     = calcEst(std, row.quantity, row.pan_count, station)
+        const eff = resolveEffQty({
+          station, qtyMode: normalizeQtyMode(op.qty_mode),
+          quantity: row.quantity, panCount: row.pan_count, mode: estMode,
+        })
+        // 這裡直接丟錯讓上層顯示：缺盤數就算不出工時，寧可讓人先回出單表補，
+        // 也不要退回用個數算出一個放大十幾倍的工時（見 lib/sara/estTime.ts 檔頭）
+        if (!eff.ok) throw new Error(`${op.op_name}（${station || '未知站點'}）：${eff.reason}，請先回出單表補上盤數`)
         return {
           order_number: row.order_number, mfg_order_number: row.mo_number || row.order_number,
           product_name: row.item_code, product_desc: row.item_spec,
@@ -562,7 +597,8 @@ export default function ProcessGenPage() {
           prod_qty: row.quantity, due: row.due,
           priority: prioFor(row.due), earliest_start: today,
           job_seq: op.sequence, workcenter: station, job_name: op.op_name,
-          job_qty: jobQty, outsourcing: '', est_time: est, time_unit: '分鐘',
+          // 製程數量與預估工時用同一個基準
+          job_qty: eff.effQty, outsourcing: '', est_time: estTimeFrom(std, eff.effQty), time_unit: '分鐘',
           bom: '', mat_req_qty: '',
           customer: row.customer,
           assigned_machine: (row.factory === 'T' && isPrintStation2F6F(station) && row.assigned_machine)
@@ -656,9 +692,9 @@ export default function ProcessGenPage() {
       if (irErr || !irData) throw new Error(`找不到品項 ${code} 的途程（item_routes 無資料）`)
       setSingleRoute(irData.route_id as string)
 
-      type SOp = { sequence: number; op_name: string }
+      type SOp = { sequence: number; op_name: string; qty_mode: string | null }
       const { data: roData } = await supabase
-        .from('route_operations').select('sequence,op_name').eq('route_id', irData.route_id).order('sequence')
+        .from('route_operations').select('sequence,op_name,qty_mode').eq('route_id', irData.route_id).order('sequence')
       if (!(roData as unknown[])?.length) throw new Error(`途程 ${irData.route_id} 無工序資料`)
 
       type OtRow = { op_name: string; station: string; std_time_min: number }
@@ -670,11 +706,27 @@ export default function ProcessGenPage() {
       )
 
       const warns: string[] = []
+      // 這個試算工具只收品號＋數量，沒有盤數欄位，所以一律以個數估算。
+      // 但途程設定成盤數的工序，實際工時會差一個量級（實測個數約為盤數的 18 倍），
+      // 所以要明講這個數字只是個數基準的粗估，不能當成真的工時。
+      const panModeOps = (roData as SOp[])
+        .filter(op => normalizeQtyMode(op.qty_mode) === '盤數')
+        .map(op => op.op_name)
+      if (panModeOps.length > 0) {
+        warns.push(
+          `⚠ ${panModeOps.length} 道工序（${panModeOps.slice(0, 3).join('、')}${panModeOps.length > 3 ? '…' : ''}）`
+          + `的途程設定是以「盤數」計算工時，但這裡只能用個數估算，數字會明顯偏高。`
+          + `要準確工時請走出單表流程（有盤數）。`
+        )
+      }
       const result: SingleRow[] = (roData as SOp[]).map(op => {
         const ot  = otM.get(op.op_name)
         if (!ot) warns.push(`工序「${op.op_name}」無生產時間`)
         const std = ot?.std_time_min ?? 0
-        return { job_sequence: op.sequence, workcenter: ot?.station ?? '', job_name: op.op_name, job_quantity: qty, est_time: calcEst(std, qty, 0, ot?.station ?? '') }
+        const station = ot?.station ?? ''
+        // 這裡刻意固定用個數（panCount 不存在），不走 resolveEffQty 的擋下邏輯
+        const eff = isTransitStation(station) ? 1 : qty
+        return { job_sequence: op.sequence, workcenter: station, job_name: op.op_name, job_quantity: eff, est_time: estTimeFrom(std, eff) }
       })
       setSingleRows(result); setSingleWarns(warns)
     } catch (e) {

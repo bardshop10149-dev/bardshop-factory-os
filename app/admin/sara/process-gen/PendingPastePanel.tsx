@@ -11,7 +11,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { supabase } from '../../../../lib/supabaseClient'
 import { buildSaraRow, type SaraRow } from '../../../../lib/sara/buildSaraRow'
-import { calcEst, fmtToday, isPackagingStation, isPrintStation2F6F, loadSheetInputRows, type InputRow } from './sheetRows'
+import { estTimeFrom, fmtToday, isPrintStation2F6F, loadEstBasisMode, loadSheetInputRows, normalizeQtyMode, resolveEffQty, type EstBasisMode, type InputRow, type QtyMode } from './sheetRows'
 
 export interface PendingItemLike {
   sheet_date: string
@@ -25,7 +25,7 @@ export interface PendingItemLike {
 }
 
 interface RouteOption { route_id: string; op_count: number }
-interface RouteOp { seq: number; op_name: string; station: string; std: number; hasTime: boolean }
+interface RouteOp { seq: number; op_name: string; station: string; std: number; hasTime: boolean; qtyMode: QtyMode }
 
 const FACTORY_LABEL: Record<string, string> = { T: '台北', C: '常平', O: '委外' }
 
@@ -48,6 +48,8 @@ export default function PendingPastePanel({
   const [moNumber, setMoNumber] = useState('')
 
   const [ops, setOps] = useState<RouteOp[]>([])
+  // 工時基準開關。useMemo 不能 await，所以跟 ops 一起在 effect 裡取好放進 state。
+  const [estMode, setEstMode] = useState<EstBasisMode>('legacy-pan-first')
   const [opsLoading, setOpsLoading] = useState(false)
   const [opsError, setOpsError] = useState('')
   const [appending, setAppending] = useState(false)
@@ -104,9 +106,10 @@ export default function PendingPastePanel({
       setOpsLoading(true)
       setOpsError('')
       try {
-        type RoRow = { sequence: number; op_name: string }
+        setEstMode(await loadEstBasisMode(supabase))
+        type RoRow = { sequence: number; op_name: string; qty_mode: string | null }
         const { data: roData } = await supabase
-          .from('route_operations').select('sequence,op_name').eq('route_id', routeId).order('sequence')
+          .from('route_operations').select('sequence,op_name,qty_mode').eq('route_id', routeId).order('sequence')
         const rows = (roData ?? []) as RoRow[]
         if (cancelled) return
         if (rows.length === 0) {
@@ -123,7 +126,10 @@ export default function PendingPastePanel({
         )
         setOps(rows.map(r => {
           const ot = otMap.get(r.op_name)
-          return { seq: r.sequence, op_name: r.op_name, station: ot?.station ?? '', std: ot?.std ?? 0, hasTime: !!ot }
+          return {
+            seq: r.sequence, op_name: r.op_name, station: ot?.station ?? '',
+            std: ot?.std ?? 0, hasTime: !!ot, qtyMode: normalizeQtyMode(r.qty_mode),
+          }
         }))
       } catch (e) {
         if (!cancelled) { setOps([]); setOpsError(e instanceof Error ? e.message : String(e)) }
@@ -137,8 +143,11 @@ export default function PendingPastePanel({
   const missingTimes = ops.filter(o => !o.hasTime).map(o => o.op_name)
 
   // 產生 SARA 工序列（與 process-gen 手動套用途程同一套規則）
-  const saraRows: SaraRow[] = useMemo(() => {
-    if (ops.length === 0) return []
+  // 回傳 blocked 的理由：途程設定要用盤數算工時、但這一列沒有盤數時，整列不產生。
+  // 退回用個數會把工時放大一個量級（實測平均 18.4 倍），而且塔台看不出有問題，
+  // 所以寧可讓人先回出單表補盤數——見 lib/sara/estTime.ts 檔頭。
+  const { rows: saraRows, blocked } = useMemo<{ rows: SaraRow[]; blocked: string }>(() => {
+    if (ops.length === 0) return { rows: [], blocked: '' }
     const base: InputRow = sheetRow ?? {
       order_number: item.order_number, item_code: item.item_code, item_spec: item.item_spec,
       quantity: item.quantity, due: '', pan_count: 0, line_seq: item.line_seq || undefined,
@@ -146,24 +155,33 @@ export default function PendingPastePanel({
     }
     const mo = moNumber.trim() || base.order_number
     const today = fmtToday()
-    return ops.map(op => {
-      const jobQty = (base.pan_count > 0 && !isPackagingStation(op.station)) ? base.pan_count : base.quantity
-      return {
+    const out: SaraRow[] = []
+    for (const op of ops) {
+      const eff = resolveEffQty({
+        station: op.station, qtyMode: op.qtyMode,
+        quantity: base.quantity, panCount: base.pan_count, mode: estMode,
+      })
+      if (!eff.ok) {
+        return { rows: [], blocked: `${op.op_name}（${op.station || '未知站點'}）：${eff.reason}` }
+      }
+      out.push({
         order_number: base.order_number, mfg_order_number: mo,
         product_name: base.item_code, product_desc: base.item_spec,
         lot_number: base.line_seq || base.order_number,
         prod_qty: base.quantity, due: base.due,
         priority: prioFor(base.due), earliest_start: today,
         job_seq: op.seq, workcenter: op.station, job_name: op.op_name,
-        job_qty: jobQty, outsourcing: '', est_time: calcEst(op.std, base.quantity, base.pan_count, op.station),
+        // 製程數量與預估工時用同一個基準
+        job_qty: eff.effQty, outsourcing: '', est_time: estTimeFrom(op.std, eff.effQty),
         time_unit: '分鐘', bom: '', mat_req_qty: '',
         customer: base.customer,
         assigned_machine: (base.factory === 'T' && isPrintStation2F6F(op.station) && base.assigned_machine)
           ? base.assigned_machine : '',
         factory: base.factory,
-      }
-    })
-  }, [ops, sheetRow, item, moNumber, prioFor])
+      })
+    }
+    return { rows: out, blocked: '' }
+  }, [ops, sheetRow, item, moNumber, prioFor, estMode])
 
   const handleAppend = useCallback(async () => {
     if (saraRows.length === 0) return
@@ -285,6 +303,13 @@ export default function PendingPastePanel({
               ))}
             </tbody>
           </table>
+        </div>
+      )}
+
+      {blocked && (
+        <div className="text-[11px] text-red-300 bg-red-950/40 border border-red-800 rounded px-2 py-1.5">
+          ⛔ 無法產生工序：{blocked}
+          <div className="text-slate-400 mt-0.5">請先回出單表把這一列的盤數填上，再回來處理。</div>
         </div>
       )}
 

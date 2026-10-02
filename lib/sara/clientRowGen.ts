@@ -10,6 +10,7 @@
 import { supabase } from '../supabaseClient'
 import { type SaraRow } from './buildSaraRow'
 import { computePriorityFromDue, type PriorityRule } from './priorityRules'
+import { estTimeFrom, isPrintStation2F6F, loadEstBasisMode, normalizeQtyMode, resolveEffQty, type EstBasisMode, type QtyMode } from './estTime'
 
 export interface SheetHitRow {
   sheet_date: string
@@ -27,19 +28,9 @@ export interface SheetHitRow {
   assigned_machine?: string
 }
 
-// 工時計算規則——與 process-gen / autoProcessGen 一致：
-// 轉運站固定 qty=1；包裝站用生產數量；其他站點盤數優先；不足 10 分鐘補至 10 分鐘
-export const isPackagingStation = (s: string) => s.includes('包裝站')
-export const isTransitStation = (s: string) => s.includes('轉運')
-export const isPrintStation2F6F = (s: string) => s === '印刷站2F' || s === '印刷站6F'
-
-export function calcEst(std: number, qty: number, panCount: number, station: string): number {
-  if (std === 0) return 0
-  const isPacking = isPackagingStation(station)
-  const isTransit = isTransitStation(station)
-  const effQty = isTransit ? 1 : (panCount > 0 && !isPacking) ? panCount : qty
-  return Math.max(10, Math.round(std * effQty * 10) / 10)
-}
+// 工時計算規則統一由 lib/sara/estTime.ts 提供（原本這裡、autoProcessGen 與
+// process-gen 頁面各有一份複製）。這幾個 re-export 是為了不動既有呼叫端。
+export { isPackagingStation, isTransitStation, isPrintStation2F6F } from './estTime'
 
 export function fmtToday(): string {
   const d = new Date()
@@ -145,6 +136,8 @@ export async function generateSaraRows(
 ): Promise<{ rows: SaraRow[]; warns: string[] }> {
   const warns: string[] = []
   const today = fmtToday()
+  // 與排程版用同一個開關，兩邊的工時才會一致
+  const estMode: EstBasisMode = await loadEstBasisMode(supabase)
 
   const routeIds = [...new Set(rows.map((r, i) => routeOf(r, i)).filter(Boolean))]
   const missing = rows.filter((r, i) => !routeOf(r, i))
@@ -152,14 +145,14 @@ export async function generateSaraRows(
     warns.push(`${missing.length} 列沒有途程（item_routes 無對應且未手動指定），已跳過：${[...new Set(missing.map(r => r.item_code))].slice(0, 4).join('、')}`)
   }
 
-  type RoRow = { route_id: string; sequence: number; op_name: string }
+  type RoRow = { route_id: string; sequence: number; op_name: string; qty_mode: string | null }
   const { data: roData } = routeIds.length
-    ? await supabase.from('route_operations').select('route_id,sequence,op_name').in('route_id', routeIds).order('sequence')
+    ? await supabase.from('route_operations').select('route_id,sequence,op_name,qty_mode').in('route_id', routeIds).order('sequence')
     : { data: [] as RoRow[] }
-  const roMap = new Map<string, { sequence: number; op_name: string }[]>()
+  const roMap = new Map<string, { sequence: number; op_name: string; qty_mode: QtyMode }[]>()
   for (const r of (roData ?? []) as RoRow[]) {
     const arr = roMap.get(r.route_id) ?? []
-    arr.push({ sequence: r.sequence, op_name: r.op_name })
+    arr.push({ sequence: r.sequence, op_name: r.op_name, qty_mode: normalizeQtyMode(r.qty_mode) })
     roMap.set(r.route_id, arr)
   }
 
@@ -181,12 +174,22 @@ export async function generateSaraRows(
       warns.push(`途程「${routeId}」在 route_operations 沒有工序資料（${row.item_code}），已跳過`)
       return
     }
+    // 整條途程都算得出工時才送。缺一道就整列不送——送半條途程，塔台會照著
+    // 一條缺工序的製程排，而且看不出少了什麼。
+    const rowsForItem: SaraRow[] = []
+    let blocked: string | null = null
     for (const op of ops) {
       const ot = otMap.get(op.op_name)
       const station = ot?.station ?? ''
       const std = ot?.std_time_min ?? 0
-      const jobQty = (row.pan_count > 0 && !isPackagingStation(station)) ? row.pan_count : row.quantity
-      out.push({
+      const eff = resolveEffQty({
+        station, qtyMode: op.qty_mode, quantity: row.quantity, panCount: row.pan_count, mode: estMode,
+      })
+      if (!eff.ok) {
+        blocked = `${op.op_name}（${station || '未知站點'}）：${eff.reason}`
+        break
+      }
+      rowsForItem.push({
         order_number: row.order_number,
         mfg_order_number: row.ref_number || row.order_number,
         product_name: row.item_code,
@@ -199,9 +202,10 @@ export async function generateSaraRows(
         job_seq: op.sequence,
         workcenter: station,
         job_name: op.op_name,
-        job_qty: jobQty,
+        // 製程數量與預估工時用同一個基準，否則塔台看到的兩個數字互相矛盾
+        job_qty: eff.effQty,
         outsourcing: '',
-        est_time: calcEst(std, row.quantity, row.pan_count, station),
+        est_time: estTimeFrom(std, eff.effQty),
         time_unit: '分鐘',
         bom: '',
         mat_req_qty: '',
@@ -210,6 +214,11 @@ export async function generateSaraRows(
         factory: row.factory,
       })
     }
+    if (blocked) {
+      warns.push(`${row.order_number} ${row.item_code} 已跳過：請先在出單表補上盤數 — ${blocked}`)
+      return
+    }
+    out.push(...rowsForItem)
   })
   return { rows: out, warns }
 }

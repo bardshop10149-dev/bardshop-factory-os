@@ -25,6 +25,10 @@
 import { getSupabaseAdminClient } from '../supabaseAdmin'
 import { buildSaraRow, type SaraRow } from './buildSaraRow'
 import { DEFAULT_PRIORITY_RULES, PRIORITY_RULES_SETTINGS_KEY, computePriorityFromDue, normalizePriorityRules, taipeiTodayMs } from './priorityRules'
+import {
+  estTimeFrom, isPrintStation2F6F, loadEstBasisMode, normalizeQtyMode, resolveEffQty,
+  type EstBasisMode, type QtyMode,
+} from './estTime'
 
 const BUFFER_KEY = 'sara_csv_buffer'
 const SENT_LEDGER_KEY = 'sara_auto_gen_sent'
@@ -34,18 +38,9 @@ const CP_ROUTE = '常平一般壓克力製程'
 const FAKE_KO_ROUTE = '2mm+1mm壓克力貼合/V90單面印刷'
 const LEDGER_RETENTION_DAYS = 30
 
-// ── 與 process-gen 頁面一致的計算規則 ──────────────────────────────
-const isPackagingStation = (s: string) => s.includes('包裝站')
-const isTransitStation = (s: string) => s.includes('轉運')
-const isPrintStation2F6F = (s: string) => s === '印刷站2F' || s === '印刷站6F'
-
-function calcEst(std: number, qty: number, panCount: number, station: string): number {
-  if (std === 0) return 0
-  const isPacking = isPackagingStation(station)
-  const isTransit = isTransitStation(station)
-  const effQty = isTransit ? 1 : (panCount > 0 && !isPacking) ? panCount : qty
-  return Math.max(10, Math.round(std * effQty * 10) / 10)
-}
+// 工時計算基準改由 lib/sara/estTime.ts 統一提供（原本這裡有一份複製，與另外三處
+// 各自維護同一套規則）。那份複製用的是「盤數有填就用盤數」的猜測，現在改讀
+// route_operations.qty_mode——見 estTime.ts 檔頭。
 
 function fmtTodayTaipei(): string {
   const d = new Date(Date.now() + 8 * 3600 * 1000)
@@ -245,13 +240,17 @@ export async function runAutoProcessGen(sheetDate: string, opts: AutoGenOptions 
   }
 
   const routesNeeded = [...new Set(parsed.map(p => routeForRow(p).routeId).filter((v): v is string => !!v))]
+  // 工時基準模式（legacy＝盤數優先；route-qty-mode＝依途程設定）。
+  // 目前預設 legacy，因為 3mm 的 qty_mode 還沒補完——見 lib/sara/estTime.ts 檔頭。
+  const estMode: EstBasisMode = await loadEstBasisMode(sb)
+
   const { data: roData } = routesNeeded.length
-    ? await sb.from('route_operations').select('route_id,sequence,op_name').in('route_id', routesNeeded).order('sequence')
+    ? await sb.from('route_operations').select('route_id,sequence,op_name,qty_mode').in('route_id', routesNeeded).order('sequence')
     : { data: [] }
-  const roMap = new Map<string, { sequence: number; op_name: string }[]>()
-  for (const r of (roData ?? []) as { route_id: string; sequence: number; op_name: string }[]) {
+  const roMap = new Map<string, { sequence: number; op_name: string; qty_mode: QtyMode }[]>()
+  for (const r of (roData ?? []) as { route_id: string; sequence: number; op_name: string; qty_mode: string | null }[]) {
     const arr = roMap.get(r.route_id) ?? []
-    arr.push({ sequence: r.sequence, op_name: r.op_name })
+    arr.push({ sequence: r.sequence, op_name: r.op_name, qty_mode: normalizeQtyMode(r.qty_mode) })
     roMap.set(r.route_id, arr)
   }
 
@@ -308,11 +307,23 @@ export async function runAutoProcessGen(sheetDate: string, opts: AutoGenOptions 
       continue
     }
 
+    // 先把整條途程的工序都算出來，全部算得出來才送。
+    // 不逐道直接寫進 outRows 的原因：只要有一道算不出工時（設定要用盤數卻沒填盤數），
+    // 這一列就整列不送。送半條途程比不送更糟——塔台會照著一條缺工序的製程去排，
+    // 而且缺的那道不會有任何跡象。
+    const rowsForItem: string[][] = []
+    let blocked: string | null = null
     for (const op of ops) {
       const ot = otMap.get(op.op_name)
       const station = ot?.station ?? ''
       const std = ot?.std_time_min ?? 0
-      const jobQty = (p.pan_count > 0 && !isPackagingStation(station)) ? p.pan_count : p.quantity
+      const eff = resolveEffQty({
+        station, qtyMode: op.qty_mode, quantity: p.quantity, panCount: p.pan_count, mode: estMode,
+      })
+      if (!eff.ok) {
+        blocked = `${op.op_name}（${station || '未知站點'}）：${eff.reason}`
+        break
+      }
       const saraRow: SaraRow = {
         order_number: p.order_number, mfg_order_number: p.mo_number || p.order_number,
         product_name: p.item_code, product_desc: p.item_spec,
@@ -320,14 +331,24 @@ export async function runAutoProcessGen(sheetDate: string, opts: AutoGenOptions 
         prod_qty: p.quantity, due: p.due,
         priority: computePriorityFromDue(p.due, priorityRules, todayMs), earliest_start: today,
         job_seq: op.sequence, workcenter: station, job_name: op.op_name,
-        job_qty: jobQty, outsourcing: '', est_time: calcEst(std, p.quantity, p.pan_count, station),
+        // 製程數量與預估工時用同一個基準，否則塔台看到的兩個數字會互相矛盾
+        job_qty: eff.effQty, outsourcing: '', est_time: estTimeFrom(std, eff.effQty),
         time_unit: '分鐘', bom: '', mat_req_qty: '',
         customer: p.customer,
         assigned_machine: (p.factory === 'T' && isPrintStation2F6F(station) && p.assigned_machine)
           ? p.assigned_machine : '',
       }
-      outRows.push(buildSaraRow(saraRow))
+      rowsForItem.push(buildSaraRow(saraRow))
     }
+    if (blocked) {
+      pendingNoRoute.push({
+        sheet_date: sheetDate, order_number: p.order_number, item_code: p.item_code,
+        item_spec: p.item_spec, factory: p.factory ?? '-', quantity: p.quantity,
+        line_seq: p.line_seq ?? '', reason: `缺盤數無法計算工時 — ${blocked}`, created_at: nowIso,
+      })
+      continue
+    }
+    outRows.push(...rowsForItem)
     ledger[sentKey] = nowIso
     result.convertedItems++
     if (autoRule === 'cp') result.autoRoutedChangping++

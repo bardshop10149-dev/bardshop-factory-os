@@ -15,6 +15,16 @@ interface RouteOperationInsert {
   route_id: string
   sequence: number
   op_name: string
+  /**
+   * 工時計算基準（個數/盤數）。CSV 裡沒有這一欄——它是生管在「工序母資料庫 →
+   * 途程表」頁面逐筆切換的設定，欄位本身有 NOT NULL DEFAULT '個數'。
+   *
+   * 這裡必須帶上，因為下面的更新流程是「整表刪掉重建」：若不帶，每次上傳都會把
+   * 生管設過的盤數全部洗回個數。2026-10-02 查出來就是這樣洗掉的——route_operations
+   * 只有 631 列但 id 已經跑到 4400~5030，代表整表重建過至少 6 輪，每一輪都清空一次。
+   * 所以更新前要先把現有設定讀出來（見 existingQtyModes），重建後按 (途程, 工序) 還原。
+   */
+  qty_mode?: string
 }
 
 interface OperationTimeInsert {
@@ -107,6 +117,31 @@ export default function UploadPage() {
       // 記錄「途程對工序」CSV 中每個工序對應的站點，供自動補建工時使用
       const routeOpStations = new Map<string, string>()
 
+      // 先把現有的「工時計算基準」設定抄下來，等重建完再還原。
+      // CSV 不含這一欄，而更新流程會整表刪除重建，不抄的話生管的設定會被清光。
+      // 鍵用 (途程 | 工序) 而不含 sequence：CSV 改版時工序順序可能挪動，但「這條途程的
+      // 這道工序要用盤數算」這件事不會因為它排第幾而改變。
+      const existingQtyModes = new Map<string, string>()
+      if (files.routeOps || files.opTimes) {
+        addLog('📋 備份現有的工時計算基準設定（個數/盤數）...')
+        const PAGE = 1000
+        for (let from = 0; ; from += PAGE) {
+          const { data, error } = await supabase
+            .from('route_operations')
+            .select('route_id, op_name, qty_mode')
+            .range(from, from + PAGE - 1)
+          if (error) throw new Error(error.message ?? error.details ?? JSON.stringify(error))
+          for (const r of (data ?? []) as { route_id: string; op_name: string; qty_mode: string | null }[]) {
+            // 只記非預設值；預設「個數」不必還原，省下大量無意義的比對
+            if ((r.qty_mode ?? '個數') !== '個數') {
+              existingQtyModes.set(`${r.route_id}|${r.op_name}`, r.qty_mode as string)
+            }
+          }
+          if (!data || data.length < PAGE) break
+        }
+        addLog(`   已備份 ${existingQtyModes.size} 筆非預設設定`)
+      }
+
       // A. 解析：品項對途程
       if (files.itemRoutes) {
         addLog('📖 讀取檔案：品項對途程...')
@@ -143,7 +178,9 @@ export default function UploadPage() {
               dataRouteOps.push({
                 route_id: routeId,
                 sequence: i,
-                op_name: trimmedOp
+                op_name: trimmedOp,
+                // 沿用重建前的設定；沒有備份到的就讓資料庫套預設值「個數」
+                qty_mode: existingQtyModes.get(`${routeId}|${trimmedOp}`) ?? '個數'
               })
               // 若同列有對應站點，記錄下來（供缺漏工時自動補建）
               const station = row[`站點${i}`]
@@ -243,6 +280,24 @@ export default function UploadPage() {
         }
 
         await batchInsert('route_operations', dataRouteOps, addLog)
+
+        // 回報還原結果。沒還原到的要講出來——那代表這條途程或這道工序在新的 CSV 裡
+        // 不見了（改名或刪除），生管設過的基準就跟著消失，必須讓人知道要重新設定，
+        // 否則那些工序會悄悄用預設的「個數」算工時。
+        if (existingQtyModes.size > 0) {
+          const restoredKeys = new Set(
+            dataRouteOps
+              .filter((r) => (r.qty_mode ?? '個數') !== '個數')
+              .map((r) => `${r.route_id}|${r.op_name}`)
+          )
+          addLog(`✅ 已還原 ${restoredKeys.size} / ${existingQtyModes.size} 筆工時計算基準設定`)
+          const lost = [...existingQtyModes.keys()].filter((k) => !restoredKeys.has(k))
+          if (lost.length > 0) {
+            addLog(`⚠️ 有 ${lost.length} 筆設定無法還原（新檔案裡沒有這個途程/工序，請重新設定）：`)
+            lost.slice(0, 10).forEach((k) => addLog(`     ${k.replace('|', ' → ')}`))
+            if (lost.length > 10) addLog(`     …另外還有 ${lost.length - 10} 筆`)
+          }
+        }
       }
 
       // 2-3. 最後寫入 品項關聯 (下游，依賴途程)

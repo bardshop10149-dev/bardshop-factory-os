@@ -20,19 +20,15 @@ export interface InputRow {
   assigned_machine?: string    // 分配機台（台北廠印刷站2F/6F 才填入）
 }
 
-export const isPackagingStation  = (s: string) => s.includes('包裝站')
-export const isTransitStation    = (s: string) => s.includes('轉運')
-// 只有這兩個站點需要填入分配機台（台北廠才有）
-export const isPrintStation2F6F  = (s: string) => s === '印刷站2F' || s === '印刷站6F'
-
-// 工時計算：轉運站固定qty=1；計算結果不足10分鐘時補至10分鐘（std_time有值時）
-export function calcEst(std: number, qty: number, panCount: number, station: string): number {
-  if (std === 0) return 0
-  const isPacking = isPackagingStation(station)
-  const isTransit = isTransitStation(station)
-  const effQty    = isTransit ? 1 : (panCount > 0 && !isPacking) ? panCount : qty
-  return Math.max(10, Math.round(std * effQty * 10) / 10)
-}
+// 站別判斷與工時計算規則統一由 lib/sara/estTime.ts 提供。
+// 原本這裡有一份複製（另外三份在 lib/sara/autoProcessGen.ts、lib/sara/clientRowGen.ts
+// 與本頁），四份都用「盤數有填就用盤數」的猜測，完全沒讀 route_operations.qty_mode。
+// re-export 是為了不動本頁與 PendingPastePanel 既有的 import。
+export {
+  estTimeFrom, isPackagingStation, isPrintStation2F6F, isTransitStation,
+  loadEstBasisMode, normalizeQtyMode, resolveEffQty,
+  type EstBasisMode, type QtyMode,
+} from '@/lib/sara/estTime'
 
 export function fmtToday(): string {
   const d = new Date()
