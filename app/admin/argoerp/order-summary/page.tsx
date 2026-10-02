@@ -70,7 +70,7 @@ const ALERTS = [
   { key: '閒置', label: '💤 閒置', hint: '發單後超過 5 個工作天，狀態還停在未開始' },
   { key: '量>500', label: '📦 量 > 500', hint: '單列數量超過 500（含超過 1000 的）' },
   { key: '量>1000', label: '📦 量 > 1000', hint: '單列數量超過 1000' },
-  { key: '盤數異常', label: '⛔ 盤數異常', hint: '途程要用盤數算工時卻沒填盤數——這種列產生 SARA 工序時會被整列擋下，補了才送得出去' },
+  { key: '盤數異常', label: '⛔ 盤數異常', hint: '途程要用盤數算工時卻沒填盤數。工序仍會送出（工時暫以 1 盤計算），但 1 盤是低估值、排程會偏緊，需補上正確盤數。集單免填不算異常' },
 ] as const
 
 const FACTORIES = [
@@ -340,7 +340,7 @@ export default function OrderSummaryPage() {
                     <td className="px-2 py-2 text-right font-mono text-xs whitespace-nowrap">
                       {r.plate_missing ? (
                         <span className="px-1.5 py-0.5 rounded border border-red-700/60 bg-red-950/50 text-red-300"
-                          title={r.plate_missing_note}>⛔ 未填</span>
+                          title={r.plate_missing_note}>⛔ 1 盤·未填</span>
                       ) : r.plate_assumed ? (
                         <span className="px-1.5 py-0.5 rounded border border-sky-700/60 bg-sky-950/40 text-sky-300"
                           title={r.plate_missing_note}>1 盤·集單</span>

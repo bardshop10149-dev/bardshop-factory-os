@@ -2,6 +2,7 @@
 //  交換區工時重算（就地修正，預設只試跑）
 // ----------------------------------------------------------------------------
 //  用途：交換區裡有些印刷／雷切工序的預估工時是用「個數」算的，應該用「盤數」。
+//  沒填盤數的一律以 1 盤計算（集單是正常情況，非集單會另外列出來請生管補）。
 //  原因是 2026-10-02 之前產生邏輯沒讀 route_operations.qty_mode（見 lib/sara/estTime.ts）。
 //  這支把那些列的「製程數量」與「預估工時」改成正確值。
 //
@@ -25,6 +26,7 @@
 //      scripts/sara-recalc-buffer-est.mjs                 試跑，只印出差異
 //    ... scripts/sara-recalc-buffer-est.mjs --apply        真的寫入（會先拍快照）
 //    ... scripts/sara-recalc-buffer-est.mjs --include-done 連已完成的工單一起修
+//    ... scripts/sara-recalc-buffer-est.mjs --force-window  明知在 17:25–18:05 窗口內仍要寫
 //
 //  預設只修「還沒完成」的工單（包裝站尚無報工）。已完成的單改工時不影響排程，
 //  風險卻一樣，所以要改得另外指定。
@@ -37,6 +39,8 @@ import { resolveEffQty, normalizeQtyMode, loadEstBasisMode, estTimeFrom } from '
 
 const APPLY = process.argv.includes('--apply')
 const INCLUDE_DONE = process.argv.includes('--include-done')
+// 明知在排程窗口內仍要寫入時才加（例如要搶在今天的塔台拉取之前修好）
+const FORCE_WINDOW = process.argv.includes('--force-window')
 
 const env = {}
 for (const line of readFileSync('.env.local', 'utf8').split(/\r?\n/)) {
@@ -134,10 +138,9 @@ for (let idx = 0; idx < original.length; idx++) {
     panCount: info.plate, mode: estMode, isGroupOrder: isGroupOrderDocType(info.docType),
   })
   const cur = { jobQty: num(row[COL['Job Quantity']]), est: num(row[COL['Est. Time']]) }
-  if (!eff.ok) {
-    needPlate.push({ idx, order, part, op, station, date: info.date, done: isPacked(mo), ...cur })
-    continue
-  }
+  // 缺盤數不再「算不出來」——一律以 1 盤計算（見 lib/sara/estTime.ts）。
+  // 非集單的另外記下來，提醒生管補正確盤數後再跑一次這支。
+  if (eff.anomaly) needPlate.push({ idx, order, part, op, station, date: info.date, done: isPacked(mo), ...cur })
   const newEst = estTimeFrom(stdOf.get(op) ?? 0, eff.effQty)
   if (eff.effQty === cur.jobQty && newEst === cur.est) continue   // 已經正確
 
@@ -162,7 +165,7 @@ if (!INCLUDE_DONE) {
   console.log(`\n略過（工單已完成，改工時不影響排程；要一起改請加 --include-done）：${skippedDone.length} 道`)
   console.log(`  那些列目前合計 ${hrs(sumOld(skippedDone))} 小時`)
 }
-console.log(`\n無法計算（該填盤數卻沒填，要生管先補）：${needPlate.length} 道`)
+console.log(`\n沒填盤數、工時暫以 1 盤計算的（非集單，請生管補正確盤數後再跑一次）：${needPlate.length} 道`)
 needPlate.filter(r => !r.done).slice(0, 15).forEach(r =>
   console.log(`   ${s(r.date).padEnd(11)} ${r.order.padEnd(14)} ${r.part.padEnd(22)} ${r.op.slice(0, 16).padEnd(17)} 目前 ${r.est} 分`))
 
@@ -204,6 +207,24 @@ console.log(`\n✅ 驗證通過：列數不變（${original.length}），只有 
 if (!APPLY) {
   console.log('\n這是試跑，沒有寫入。確認上面的差異沒問題後，加 --apply 執行。')
   process.exit(0)
+}
+
+// ── 排程窗口保護（硬性拒絕，不靠人記得）──
+// sara-process-gen 在台北 17:30 與 17:40 寫交換區，17:45 做檢查，塔台 18:00 來拉。
+// 在這段時間寫入會跟排程搶同一份資料（讀取—修改—寫回之間被插入就會互相覆蓋），
+// 而且留給塔台的餘裕太少。
+//
+// 這道保護是補上來的：2026-10-02 我自己就在 17:39 誤跑了一次 --apply，當時只在註解與
+// 說明文字裡寫「請在 17:30 前執行」，而說明文字擋不住任何人。能用程式擋的就不要只寫在文件裡。
+const tpeNow = new Date(Date.now() + 8 * 3600 * 1000)
+const minuteOfDay = tpeNow.getUTCHours() * 60 + tpeNow.getUTCMinutes()
+if (!FORCE_WINDOW && minuteOfDay >= 17 * 60 + 25 && minuteOfDay <= 18 * 60 + 5) {
+  const hhmm = `${String(tpeNow.getUTCHours()).padStart(2, '0')}:${String(tpeNow.getUTCMinutes()).padStart(2, '0')}`
+  console.error(`\n✗ 現在是台北時間 ${hhmm}，落在排程寫入與塔台拉取的窗口內（17:25–18:05），拒絕寫入。`)
+  console.error('  sara-process-gen 於 17:30／17:40 寫交換區，17:45 檢查，塔台 18:00 來拉。')
+  console.error('  請改在 18:05 之後，或隔天 17:25 之前執行。')
+  console.error('  真的必須現在寫（例如要搶在今天這次拉取之前修好），加 --force-window。')
+  process.exit(1)
 }
 
 // ── 寫入前拍快照 ──

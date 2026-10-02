@@ -143,11 +143,10 @@ export default function PendingPastePanel({
   const missingTimes = ops.filter(o => !o.hasTime).map(o => o.op_name)
 
   // 產生 SARA 工序列（與 process-gen 手動套用途程同一套規則）
-  // 回傳 blocked 的理由：途程設定要用盤數算工時、但這一列沒有盤數時，整列不產生。
-  // 退回用個數會把工時放大一個量級（實測平均 18.4 倍），而且塔台看不出有問題，
-  // 所以寧可讓人先回出單表補盤數——見 lib/sara/estTime.ts 檔頭。
-  const { rows: saraRows, blocked } = useMemo<{ rows: SaraRow[]; blocked: string }>(() => {
-    if (ops.length === 0) return { rows: [], blocked: '' }
+  // 缺盤數不再擋下：以 1 盤計算照樣產生，非集單則回傳 panWarn 提醒補正確盤數
+  // （見 lib/sara/estTime.ts 檔頭：不送比送偏小的數字更糟）。
+  const { rows: saraRows, panWarn } = useMemo<{ rows: SaraRow[]; panWarn: string }>(() => {
+    if (ops.length === 0) return { rows: [], panWarn: '' }
     const base: InputRow = sheetRow ?? {
       order_number: item.order_number, item_code: item.item_code, item_spec: item.item_spec,
       quantity: item.quantity, due: '', pan_count: 0, line_seq: item.line_seq || undefined,
@@ -156,15 +155,14 @@ export default function PendingPastePanel({
     const mo = moNumber.trim() || base.order_number
     const today = fmtToday()
     const out: SaraRow[] = []
+    const panAnomalies: string[] = []
     for (const op of ops) {
       const eff = resolveEffQty({
         station: op.station, qtyMode: op.qtyMode,
         quantity: base.quantity, panCount: base.pan_count, mode: estMode,
         isGroupOrder: isGroupOrderDocType(base.doc_type),
       })
-      if (!eff.ok) {
-        return { rows: [], blocked: `${op.op_name}（${op.station || '未知站點'}）：${eff.reason}` }
-      }
+      if (eff.anomaly) panAnomalies.push(`${op.op_name}（${op.station || '未知站點'}）`)
       out.push({
         order_number: base.order_number, mfg_order_number: mo,
         product_name: base.item_code, product_desc: base.item_spec,
@@ -181,7 +179,7 @@ export default function PendingPastePanel({
         factory: base.factory,
       })
     }
-    return { rows: out, blocked: '' }
+    return { rows: out, panWarn: panAnomalies.join('、') }
   }, [ops, sheetRow, item, moNumber, prioFor, estMode])
 
   const handleAppend = useCallback(async () => {
@@ -307,10 +305,10 @@ export default function PendingPastePanel({
         </div>
       )}
 
-      {blocked && (
-        <div className="text-[11px] text-red-300 bg-red-950/40 border border-red-800 rounded px-2 py-1.5">
-          ⛔ 無法產生工序：{blocked}
-          <div className="text-slate-400 mt-0.5">請先回出單表把這一列的盤數填上，再回來處理。</div>
+      {panWarn && (
+        <div className="text-[11px] text-amber-300 bg-amber-950/30 border border-amber-800/60 rounded px-2 py-1.5">
+          ⚠ 這一列沒填盤數，工時已暫以 1 盤計算：{panWarn}
+          <div className="text-slate-400 mt-0.5">工序照樣會加入交換區，但請回出單表補上正確盤數後重新產生。</div>
         </div>
       )}
 

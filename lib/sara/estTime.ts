@@ -32,15 +32,21 @@
 // 開關放在 app_settings（見 EST_BASIS_MODE_KEY），不必改程式就能切換與回復。
 //
 // ─────────────────────────────────────────────────────────────────────────────
-// 盤數該填卻沒填時，為什麼不要退回個數（route-qty-mode 下的行為）
+// 盤數該填卻沒填時：一律以 1 盤計算，但非集單要標成異常
 // ─────────────────────────────────────────────────────────────────────────────
-// 舊規則會在盤數空白時默默改用個數。這個退路看起來安全，實際上很危險：印刷是整盤
-// 上機的，個數通常是盤數的十幾倍（實測平均 18.4 倍），退回個數等於把工時放大一個
-// 量級。2026-09-30 稽核交換區時就有一道 UV 印刷因此被排成 95 小時，沒有人發現——
-// 塔台只會看到一個很大的數字，照著排下去。
+// 2026-10-02 生管決定的處理方式：
+//   集單   —— 本來就免填盤數，以 1 盤計算，正常情況，不標異常
+//   非集單 —— 也以 1 盤計算（還是要送出去），但標成異常，請生管補正確盤數
 //
-// 寧可讓這一列轉不出去、進待處理清單等生管補盤數，也不要送一個錯十幾倍的工時。
-// 缺資料就停下來，比帶著錯誤資料繼續跑安全。
+// 為什麼不是「算不出來就整列不送」：不送的話塔台根本不知道有這張單，比送一個偏小的
+// 數字更糟。以 1 盤計算會低估工時，但低估只是排得緊，高估（退回用個數）則會把一條線
+// 整天塞滿——2026-09-30 稽核時就有一道 UV 印刷因為退回個數被排成 95 小時。
+// 低估＋標異常是兩害相權的選擇：單子照樣進得去塔台，而且有明確的待辦把它改對。
+//
+// 關鍵是異常一定要看得見。上一版「缺盤數默默退回個數」真正的問題不是算錯，
+// 而是算錯了沒有任何痕跡。所以代入 1 盤時一律回報 assumedPan，非集單再加 anomaly，
+// 讓出單總表標得出來、產生工序的頁面講得出來。
+// ─────────────────────────────────────────────────────────────────────────────
 
 import type { SupabaseClient } from '@supabase/supabase-js'
 
@@ -90,8 +96,8 @@ export const isPackagingStation = (s: string) => s.includes('包裝站')
 export const isTransitStation = (s: string) => s.includes('轉運')
 export const isPrintStation2F6F = (s: string) => s === '印刷站2F' || s === '印刷站6F'
 
-/** 集單沒填盤數時代入的盤數（2026-10-02 生管指定） */
-export const GROUP_ORDER_DEFAULT_PAN = 1
+/** 盤數沒填時代入的盤數（2026-10-02 生管指定；集單與非集單都一樣，差別只在要不要標異常） */
+export const DEFAULT_PAN_WHEN_BLANK = 1
 
 export interface EffQtyInput {
   station: string
@@ -106,50 +112,55 @@ export interface EffQtyInput {
   /**
    * 這一列是不是集單（doc_type 含「集單」）。
    *
-   * 集單可以不填盤數：生管說明集單本來就是把多張小單併成一盤下去跑，沒填就當 1 盤。
-   * 所以集單不會因為缺盤數被擋下，而是代入 GROUP_ORDER_DEFAULT_PAN。
+   * 只影響「缺盤數算不算異常」，不影響代入的數字——兩者都代入 1 盤。
+   * 集單本來就免填（多張小單併成一盤下去跑），非集單缺盤數則是該補的資料。
    */
   isGroupOrder?: boolean
 }
 
-export type EffQtyResult =
-  /**
-   * 算得出來：effQty 要乘上單位時間，basis 說明用的是哪個基準。
-   * assumedPan=true 代表盤數沒填、是按集單規則代入的，不是出單表上真的有這個數字。
-   */
-  | { ok: true; effQty: number; basis: '固定1' | '個數' | '盤數'; assumedPan?: true }
-  /** 算不出來（設定要用盤數但盤數沒填）——呼叫端要擋下該列，不要硬算 */
-  | { ok: false; reason: string }
+/**
+ * 工時基準的計算結果。一定算得出來——缺盤數不再擋下整列，而是代入 1 盤並標記。
+ */
+export interface EffQtyResult {
+  /** 要乘上單位時間的數量 */
+  effQty: number
+  /** 用的是哪個基準 */
+  basis: '固定1' | '個數' | '盤數'
+  /** true＝盤數沒填，effQty 是代入的 1 盤，不是出單表上真的有這個數字 */
+  assumedPan?: true
+  /** true＝代入了 1 盤而且這不是集單，屬於該補的資料，要標成異常 */
+  anomaly?: true
+}
 
 /**
  * 決定這道工序要用哪個數量當計算基準。
  *
- * 回傳 ok:false 時務必把該列排除並回報，不要自行退回個數——見檔頭說明。
- * legacy 模式永遠不會回 ok:false。
+ * 回傳的 assumedPan / anomaly 一定要往上傳到畫面——代入預設值本身沒問題，
+ * 沒留痕跡才是問題（見檔頭）。
  */
 export function resolveEffQty(input: EffQtyInput): EffQtyResult {
   const { station, qtyMode, quantity, panCount, mode = DEFAULT_EST_BASIS_MODE, isGroupOrder = false } = input
-  if (isTransitStation(station)) return { ok: true, effQty: 1, basis: '固定1' }
-  if (isPackagingStation(station)) return { ok: true, effQty: quantity, basis: '個數' }
+  if (isTransitStation(station)) return { effQty: 1, basis: '固定1' }
+  if (isPackagingStation(station)) return { effQty: quantity, basis: '個數' }
 
   if (mode === 'legacy-pan-first') {
     return panCount > 0
-      ? { ok: true, effQty: panCount, basis: '盤數' }
-      : { ok: true, effQty: quantity, basis: '個數' }
+      ? { effQty: panCount, basis: '盤數' }
+      : { effQty: quantity, basis: '個數' }
   }
 
   if (qtyMode === '盤數') {
     if (!(panCount > 0)) {
-      // 集單免填盤數，當 1 盤算。集單本來就是把多張小單併成一盤下去跑，
-      // 用個數算會變成一盤印好幾十次，所以這裡代 1 而不是退回個數。
-      if (isGroupOrder) {
-        return { ok: true, effQty: GROUP_ORDER_DEFAULT_PAN, basis: '盤數', assumedPan: true }
-      }
-      return { ok: false, reason: '途程設定以盤數計算工時，但出單表沒有填盤數' }
+      // 缺盤數一律代 1 盤，不退回個數（個數會把工時放大一個量級），也不擋下整列
+      // （不送比送偏小的數字更糟，塔台會完全不知道有這張單）。
+      // 集單是正常情況；非集單則是該補的資料，加上 anomaly 讓它進異常清單。
+      return isGroupOrder
+        ? { effQty: DEFAULT_PAN_WHEN_BLANK, basis: '盤數', assumedPan: true }
+        : { effQty: DEFAULT_PAN_WHEN_BLANK, basis: '盤數', assumedPan: true, anomaly: true }
     }
-    return { ok: true, effQty: panCount, basis: '盤數' }
+    return { effQty: panCount, basis: '盤數' }
   }
-  return { ok: true, effQty: quantity, basis: '個數' }
+  return { effQty: quantity, basis: '個數' }
 }
 
 /**

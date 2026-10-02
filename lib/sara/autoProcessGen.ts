@@ -292,12 +292,10 @@ export async function runAutoProcessGen(sheetDate: string, opts: AutoGenOptions 
       continue
     }
 
-    // 先把整條途程的工序都算出來，全部算得出來才送。
-    // 不逐道直接寫進 outRows 的原因：只要有一道算不出工時（設定要用盤數卻沒填盤數），
-    // 這一列就整列不送。送半條途程比不送更糟——塔台會照著一條缺工序的製程去排，
-    // 而且缺的那道不會有任何跡象。
+    // 缺盤數不再擋下整列：一律以 1 盤計算照樣送出，非集單再記進待處理請生管補
+    // （見 lib/sara/estTime.ts 檔頭）。不送的話塔台根本不知道有這張單，更糟。
     const rowsForItem: string[][] = []
-    let blocked: string | null = null
+    const panAnomalies: string[] = []
     for (const op of ops) {
       const ot = otMap.get(op.op_name)
       const station = ot?.station ?? ''
@@ -306,10 +304,7 @@ export async function runAutoProcessGen(sheetDate: string, opts: AutoGenOptions 
         station, qtyMode: op.qty_mode, quantity: p.quantity, panCount: p.pan_count, mode: estMode,
         isGroupOrder: p.is_group_order,
       })
-      if (!eff.ok) {
-        blocked = `${op.op_name}（${station || '未知站點'}）：${eff.reason}`
-        break
-      }
+      if (eff.anomaly) panAnomalies.push(`${op.op_name}（${station || '未知站點'}）`)
       const saraRow: SaraRow = {
         order_number: p.order_number, mfg_order_number: p.mo_number || p.order_number,
         product_name: p.item_code, product_desc: p.item_spec,
@@ -326,15 +321,17 @@ export async function runAutoProcessGen(sheetDate: string, opts: AutoGenOptions 
       }
       rowsForItem.push(buildSaraRow(saraRow))
     }
-    if (blocked) {
+    // 工序照樣送出；缺盤數的另外記進待處理清單，讓生管補正確盤數後重新產生
+    outRows.push(...rowsForItem)
+    if (panAnomalies.length > 0) {
       pendingNoRoute.push({
         sheet_date: sheetDate, order_number: p.order_number, item_code: p.item_code,
         item_spec: p.item_spec, factory: p.factory ?? '-', quantity: p.quantity,
-        line_seq: p.line_seq ?? '', reason: `缺盤數無法計算工時 — ${blocked}`, created_at: nowIso,
+        line_seq: p.line_seq ?? '',
+        reason: `缺盤數，工時已暫以 1 盤計算，請補正確盤數 — ${panAnomalies.join('、')}`,
+        created_at: nowIso,
       })
-      continue
     }
-    outRows.push(...rowsForItem)
     ledger[sentKey] = nowIso
     result.convertedItems++
     if (autoRule === 'cp') result.autoRoutedChangping++

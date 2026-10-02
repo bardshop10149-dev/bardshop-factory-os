@@ -348,8 +348,9 @@ export default function ProcessGenPage() {
       const noRoute: InputRow[] = []
       // 途程設定要用盤數算工時、但出單表沒填盤數的列。這些列不送出去——退回用個數
       // 會把工時放大一個量級（實測平均 18.4 倍），而且塔台看不出有問題。
+      // 沒填盤數、工時暫以 1 盤計算的列。照樣產生工序（不送反而更糟），但要標出來請生管補。
       const missingPlateCount: Array<{ row: InputRow; detail: string }> = []
-      // 集單沒填盤數、以 1 盤代入的列。不是錯誤，但要讓人看得到這個數字是假設來的。
+      // 集單沒填盤數、以 1 盤代入的列。正常情況，但要讓人看得到這個數字是假設來的。
       const assumedPanRows: InputRow[] = []
       for (const row of inputRows) {
         const routeId = irMap.get(row.item_code)
@@ -389,7 +390,7 @@ export default function ProcessGenPage() {
         }
         // 整條途程都算得出工時才送；缺一道就整列擋下（見 lib/sara/estTime.ts 檔頭）
         const rowsForItem: SaraRow[] = []
-        let blocked: string | null = null
+        const panAnomalies: string[] = []
         let assumedPan = false
         for (const op of ops) {
           const ot      = otMap.get(op.op_name)
@@ -400,11 +401,8 @@ export default function ProcessGenPage() {
             station, qtyMode: op.qty_mode, quantity: row.quantity, panCount: row.pan_count, mode: estMode,
             isGroupOrder: isGroupOrderDocType(row.doc_type),
           })
-          if (!eff.ok) {
-            blocked = `${op.op_name}（${station || '未知站點'}）：${eff.reason}`
-            break
-          }
           if (eff.assumedPan) assumedPan = true
+          if (eff.anomaly) panAnomalies.push(`${op.op_name}（${station || '未知站點'}）`)
           rowsForItem.push({
             order_number: row.order_number, mfg_order_number: row.mo_number || row.order_number,
             product_name: row.item_code, product_desc: row.item_spec,
@@ -423,11 +421,8 @@ export default function ProcessGenPage() {
             factory: row.factory,
           })
         }
-        if (blocked) {
-          missingPlateCount.push({ row, detail: blocked })
-          continue
-        }
-        if (assumedPan) assumedPanRows.push(row)
+        if (panAnomalies.length > 0) missingPlateCount.push({ row, detail: panAnomalies.join('、') })
+        else if (assumedPan) assumedPanRows.push(row)
         out.push(...rowsForItem)
       }
       // 有途程但 route_operations 無工序的品號 → 顯示警告
@@ -449,7 +444,7 @@ export default function ProcessGenPage() {
       if (missingPlateCount.length > 0) {
         const items = [...new Set(missingPlateCount.map(m => `${m.row.order_number} ${m.row.item_code}`))]
         warns.push(
-          `⛔ ${missingPlateCount.length} 列因為沒填盤數而無法計算工時，已排除不送：`
+          `⚠ ${missingPlateCount.length} 列沒填盤數，工時已暫以 1 盤計算（仍會送出）：`
           + `${items.slice(0, 6).join('、')}${items.length > 6 ? '…' : ''}。`
           + `請回出單表補上盤數後重新產生（例：${missingPlateCount[0].detail}）`
         )
@@ -577,6 +572,8 @@ export default function ProcessGenPage() {
     try {
       const routeId: string = code   // 直接指定途程名稱（route_id）
       const estMode: EstBasisMode = await loadEstBasisMode(supabase)
+      // 這一列若沒填盤數，工時會暫以 1 盤計算，收集起來提醒生管補正確盤數
+      const applyPanAnomalies: string[] = []
 
       type SOp = { sequence: number; op_name: string; qty_mode: string | null }
       const { data: roData } = await supabase
@@ -602,9 +599,8 @@ export default function ProcessGenPage() {
           quantity: row.quantity, panCount: row.pan_count, mode: estMode,
           isGroupOrder: isGroupOrderDocType(row.doc_type),
         })
-        // 這裡直接丟錯讓上層顯示：缺盤數就算不出工時，寧可讓人先回出單表補，
-        // 也不要退回用個數算出一個放大十幾倍的工時（見 lib/sara/estTime.ts 檔頭）
-        if (!eff.ok) throw new Error(`${op.op_name}（${station || '未知站點'}）：${eff.reason}，請先回出單表補上盤數`)
+        // 缺盤數不再丟錯：以 1 盤計算照樣產生，另外收集起來提醒補盤數
+        if (eff.anomaly) applyPanAnomalies.push(`${op.op_name}（${station || '未知站點'}）`)
         return {
           order_number: row.order_number, mfg_order_number: row.mo_number || row.order_number,
           product_name: row.item_code, product_desc: row.item_spec,
@@ -631,6 +627,13 @@ export default function ProcessGenPage() {
         applyConfirms.push(`【${row.item_code}】廠區常平但途程非「常平一般壓克力製程」（套用：${routeId}），請確認`)
       if (row.factory === 'O' && !new Set(['委外/7天回', '委外/9天回', '委外/11天回']).has(routeId))
         applyConfirms.push(`【${row.item_code}】廠區委外但途程非標準委外途程（套用：${routeId}），請確認`)
+      // 缺盤數：工序照樣產生了，但要讓操作的人看到工時是暫代的
+      if (applyPanAnomalies.length > 0) {
+        setNoRouteApplyWarns(prev => ({
+          ...prev,
+          [key]: `⚠ 沒填盤數，工時已暫以 1 盤計算（${applyPanAnomalies.join('、')}），請回出單表補上正確盤數`,
+        }))
+      }
       if (applyConfirms.length) {
         setConfirmWarns(prev => [...prev, ...applyConfirms])
         setFlaggedItems(prev => new Set([...prev, `${row.order_number}||${row.item_code}||${row.mo_number || row.order_number}||${row.quantity}||${row.line_seq || row.order_number}`]))

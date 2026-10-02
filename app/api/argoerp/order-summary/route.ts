@@ -182,7 +182,8 @@ export async function GET(request: NextRequest) {
       r.plate_assumed = st.kind === 'assumed'
       r.plate_missing_note =
         st.kind === 'missing'
-          ? `途程「${st.routeId}」的 ${st.ops.join('、')} 以盤數計算工時，但這一列沒填盤數`
+          ? `途程「${st.routeId}」的 ${st.ops.join('、')} 以盤數計算工時，但這一列沒填盤數——`
+            + `工時已暫以 1 盤計算，請補上正確盤數`
           : st.kind === 'assumed'
             ? `集單免填盤數，以 1 盤代入計算（途程「${st.routeId}」的 ${st.ops.join('、')} 以盤數計算工時）`
             : ''
@@ -370,8 +371,8 @@ function respond(
       // 大量單：500 以上那組本來就涵蓋 1000 以上，兩個獨立不互斥
       '量>500': r => (r.qty_num ?? 0) > 500,
       '量>1000': r => (r.qty_num ?? 0) > 1000,
-      // 盤數異常：途程要用盤數算工時卻沒填盤數。這種列產生工序時會被整列擋下，
-      // 所以是「補了才送得出去」的待辦，不只是提醒。
+      // 盤數異常：途程要用盤數算工時卻沒填盤數。工序照樣會送出（暫以 1 盤計算），
+      // 但 1 盤是低估值，排程會偏緊，所以這是要補正確盤數的待辦。集單不算（免填）。
       盤數異常: r => !!r.plate_missing,
     }
     const activeAlerts = alertFilters.filter(a => a in ALERT_PREDS)

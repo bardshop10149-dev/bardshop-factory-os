@@ -177,10 +177,9 @@ export async function generateSaraRows(
       warns.push(`途程「${routeId}」在 route_operations 沒有工序資料（${row.item_code}），已跳過`)
       return
     }
-    // 整條途程都算得出工時才送。缺一道就整列不送——送半條途程，塔台會照著
-    // 一條缺工序的製程排，而且看不出少了什麼。
+    // 缺盤數不再擋下整列：以 1 盤計算照樣產生，非集單則加警示請生管補
     const rowsForItem: SaraRow[] = []
-    let blocked: string | null = null
+    const panAnomalies: string[] = []
     let assumedPan = false
     for (const op of ops) {
       const ot = otMap.get(op.op_name)
@@ -190,11 +189,8 @@ export async function generateSaraRows(
         station, qtyMode: op.qty_mode, quantity: row.quantity, panCount: row.pan_count, mode: estMode,
         isGroupOrder: isGroupOrderDocType(row.doc_type),
       })
-      if (!eff.ok) {
-        blocked = `${op.op_name}（${station || '未知站點'}）：${eff.reason}`
-        break
-      }
       if (eff.assumedPan) assumedPan = true
+      if (eff.anomaly) panAnomalies.push(`${op.op_name}（${station || '未知站點'}）`)
       rowsForItem.push({
         order_number: row.order_number,
         mfg_order_number: row.ref_number || row.order_number,
@@ -220,12 +216,10 @@ export async function generateSaraRows(
         factory: row.factory,
       })
     }
-    if (blocked) {
-      warns.push(`${row.order_number} ${row.item_code} 已跳過：請先在出單表補上盤數 — ${blocked}`)
-      return
-    }
-    if (assumedPan) {
-      warns.push(`${row.order_number} ${row.item_code} 是集單且沒填盤數，工時以 1 盤計算`)
+    if (panAnomalies.length > 0) {
+      warns.push(`⚠ ${row.order_number} ${row.item_code} 沒填盤數，工時暫以 1 盤計算，請補正確盤數 — ${panAnomalies.join('、')}`)
+    } else if (assumedPan) {
+      warns.push(`ℹ ${row.order_number} ${row.item_code} 是集單且沒填盤數，工時以 1 盤計算`)
     }
     out.push(...rowsForItem)
   })

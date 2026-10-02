@@ -119,7 +119,7 @@ export interface PlateIssue {
 export type PlateCountStatus =
   /** 不需要盤數，或盤數已填 */
   | { kind: 'ok' }
-  /** 該填盤數卻沒填——產生工序時會被整列擋下 */
+  /** 該填盤數卻沒填——工時會暫以 1 盤計算（仍會送出），需補上正確盤數 */
   | { kind: 'missing'; routeId: string; ops: string[] }
   /** 集單沒填盤數，會代入 1 盤。不是錯誤，但要讓人看得到這個數字是假設來的 */
   | { kind: 'assumed'; routeId: string; ops: string[] }
@@ -147,15 +147,15 @@ export function plateCountStatus(
     const st = meta.stationOf.get(op) ?? ''
     return st ? `${op}（${st}）` : op
   })
-  // 集單免填盤數，沒填就當 1 盤算（見 estTime.ts 的 GROUP_ORDER_DEFAULT_PAN），
-  // 不會被擋下，所以不算異常——但仍然回報成 assumed，讓畫面標得出來。
+  // 集單與非集單缺盤數都會以 1 盤計算（見 estTime.ts 的 DEFAULT_PAN_WHEN_BLANK），
+  // 差別只在集單是正常情況（assumed）、非集單是該補的資料（missing＝異常）。
   if (isGroupOrderDocType(row.doc_type)) return { kind: 'assumed', routeId, ops }
   return { kind: 'missing', routeId, ops }
 }
 
 /**
- * 只取「該填卻沒填」的情況（＝產生工序時會被擋下的列）。回傳 null 代表沒問題。
- * 集單不算，它會代入 1 盤。
+ * 只取「該填卻沒填」的情況（＝要補正確盤數的列）。回傳 null 代表沒問題。
+ * 集單不算，它本來就免填。
  */
 export function plateCountIssue(
   row: RouteRowInput & { plate_count?: unknown; quantity?: unknown; doc_type?: unknown },
